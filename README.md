@@ -17,6 +17,19 @@ To build it, you just need to change to the EYN-OS directory and type 'make buil
 It's not much, but consider what it takes to do this. A kernel, custom print statement, many, many lines of assembly and C integration.
 It's quite impressive for a kid's weekend project, if you ask me.
 
+### Some of the source code:
+
+![A snippet from the 'print.c' file.](image-1.png)
+
+![A snippet from the 'main.asm' file.](image-2.png)
+
+![Another snippet from the 'main.asm' file.](image-3.png)
+
+Basically, it's a lot of assembly and C code.
+We're currently working on a keyboard input system/driver for the OS, and a way to execute commands, just like an old DOS from the 80's.
+
+I hope you enjoy it so far, even if it's not much!
+
 ---
 
 EYN-OS, by Kian Gentry, with assistance from Finley Martin.
