@@ -1,7 +1,10 @@
 #include "print.h"
+#include "idt.h"
 
 void kernel_main()
 {
-    print_set_color(P_LB, P_B);
-    print_str("\nTHIS IS EYN-OS!!!!!");
+	print_str("\nEYN-OS> ");
+    kb_init();
+    idt_init(); // CAUSES BOOTLOOP, SEE LINE 89 IN 'idt.c'
+    while(1);
 }
