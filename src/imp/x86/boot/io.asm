@@ -1,12 +1,12 @@
-; code from Arjun Sreedharan, under the GNU General Public license
+; File path: src/io.asm
 
 bits 64
 section .text
-        ;multiboot spec
-        align 4
-        dd 0x1BADB002              ;magic
-        dd 0x00                    ;flags
-        dd - (0x1BADB002 + 0x00)   ;checksum. m+f+c should be zero
+
+align 4
+dd 0x1BADB002              ; magic
+dd 0x00                    ; flags
+dd - (0x1BADB002 + 0x00)   ; checksum. m+f+c should be zero
 
 global start1
 global keyboard_handler
@@ -14,37 +14,77 @@ global read_port
 global write_port
 global load_idt
 
-extern kernel_main 		;this is defined in the c file
+extern kernel_main         ; this is defined in the C file
 extern keyboard_handler_main
 
 read_port:
-	mov edx, [esp + 4]
-			;al is the lower 8 bits of eax
-	in al, dx	;dx is the lower 16 bits of edx
-	ret
+    mov edx, [esp + 4]
+    in al, dx
+    ret
 
 write_port:
-	mov   edx, [esp + 4]    
-	mov   al, [esp + 4 + 4]  
-	out   dx, al  
-	ret
+    mov edx, [esp + 4]
+    mov al, [esp + 4 + 4]
+    out dx, al
+    ret
 
 load_idt:
-	mov edx, [esp + 4]
-	lidt [edx]
-	sti 				;turn on interrupts
-	ret
+    mov edx, [esp + 4]
+    lidt [edx]
+    ret
 
-keyboard_handler:                 
-	call    keyboard_handler_main
-	iretd
+keyboard_handler:
+    call keyboard_handler_main
+    iretd
 
 start1:
-	cli 				;block interrupts
-	mov esp, stack_space
-	call kernel_main
-	hlt 				;halt the CPU
+    cli                     ; block interrupts
+    mov esp, stack_space
+    call setup_idt          ; setup the IDT before enabling interrupts
+    call load_idt_wrapper   ; load IDT and enable interrupts if ready
+    call kernel_main
+    hlt                     ; halt the CPU
+
+load_idt_wrapper:
+    call load_idt           ; load the IDT
+    call check_idt_setup    ; add a function to check IDT setup (for debugging)
+    sti                     ; enable interrupts
+    ret
+
+setup_idt:
+    ; IDT entry for keyboard interrupt (0x21)
+    ; IDT entry format: [offset_low, selector, zero, type_attr, offset_mid, offset_high, zero]
+    mov rax, keyboard_handler
+    mov word [idt + 0x21*16 + 0], ax                     ; offset low
+    mov word [idt + 0x21*16 + 4], 0x08                    ; selector (code segment)
+    mov byte [idt + 0x21*16 + 6], 0                       ; zero
+    mov byte [idt + 0x21*16 + 7], 0x8E                    ; type_attr (present, DPL=0, 32-bit interrupt gate)
+    shr rax, 16
+    mov word [idt + 0x21*16 + 8], ax                      ; offset mid
+    shr rax, 16
+    mov dword [idt + 0x21*16 + 10], eax                   ; offset high
+    mov dword [idt + 0x21*16 + 14], 0                     ; zero
+
+    ; Load IDT pointer
+    mov qword [idtr + 2], idt      ; base address of IDT
+    mov word [idtr], 256*16-1      ; limit (size of IDT)
+    ret
+
+check_idt_setup:
+    ; Debugging: output IDT base address and limit
+    mov edx, 0xE9       ; port for debug output (example, Bochs VGA display)
+    mov rax, [idtr + 2] ; base address of IDT
+    out dx, eax         ; send lower 32 bits of rax
+    shr rax, 32
+    out dx, eax         ; send upper 32 bits of rax
+    mov ax, [idtr]      ; limit (size of IDT)
+    out dx, ax
+    ret
 
 section .bss
-resb 4096*2; 8KB for stack
+resb 256*16 ; IDT size
+idt:
+resb 10 ; IDTR size
+idtr:
+resb 4096*2 ; 8KB for stack
 stack_space:
