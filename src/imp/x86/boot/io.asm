@@ -1,5 +1,3 @@
-; File path: src/io.asm
-
 bits 64
 section .text
 
@@ -31,7 +29,12 @@ write_port:
 load_idt:
     mov edx, [esp + 4]
     lidt [edx]
+
     ret
+
+load_idt_fail:
+    mov al, "F"
+    jmp error
 
 keyboard_handler:
     call keyboard_handler_main
@@ -52,8 +55,6 @@ load_idt_wrapper:
     ret
 
 setup_idt:
-    ; IDT entry for keyboard interrupt (0x21)
-    ; IDT entry format: [offset_low, selector, zero, type_attr, offset_mid, offset_high, zero]
     mov rax, keyboard_handler
     mov word [idt + 0x21*16 + 0], ax                     ; offset low
     mov word [idt + 0x21*16 + 4], 0x08                    ; selector (code segment)
@@ -65,13 +66,13 @@ setup_idt:
     mov dword [idt + 0x21*16 + 10], eax                   ; offset high
     mov dword [idt + 0x21*16 + 14], 0                     ; zero
 
-    ; Load IDT pointer
+    ; loads idt pointer (below)
     mov qword [idtr + 2], idt      ; base address of IDT
     mov word [idtr], 256*16-1      ; limit (size of IDT)
     ret
 
 check_idt_setup:
-    ; Debugging: output IDT base address and limit
+    ; debugging shit (i hate assembly)
     mov edx, 0xE9       ; port for debug output (example, Bochs VGA display)
     mov rax, [idtr + 2] ; base address of IDT
     out dx, eax         ; send lower 32 bits of rax
@@ -80,6 +81,12 @@ check_idt_setup:
     mov ax, [idtr]      ; limit (size of IDT)
     out dx, ax
     ret
+error:
+    mov dword [0xb8000], 0x4f524f45
+    mov dword [0xb8004], 0x4f3a4f52
+    mov dword [0xb8008], 0x4f204f20
+    mov byte [0xb800a], al
+    hlt
 
 section .bss
 resb 256*16 ; IDT size
