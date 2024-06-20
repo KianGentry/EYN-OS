@@ -31,6 +31,7 @@ We're currently working on a keyboard input system/driver for the OS, and a way 
 I hope you enjoy it so far, even if it's not much!
 
 P.S; There's this chunk of code in "io.asm" that's causing issues with the keyboard driver, preventing typing. No clue what's wrong with it, take a look and tell me.
+
 ![The breaky function in 'io.asm'](image-4.png)
 
 ---
