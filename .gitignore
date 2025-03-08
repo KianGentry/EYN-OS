@@ -1,2 +1,2 @@
-/build/
-/dist/
+obj/
+tmp/boot/kernel.bin

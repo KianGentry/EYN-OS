@@ -1,30 +1,55 @@
-kernel_src := $(shell find src/imp/kernel -name *.c)
-kernel_obj := $(patsubst src/imp/kernel/%.c, build/kernel/%.o, $(kernel_src))
+COMPILER = gcc
+LINKER = ld
+ASSEMBLER = nasm
+CFLAGS = -m32 -c -ffreestanding -w -fcommon
+ASFLAGS = -f elf32
+LDFLAGS = -m elf_i386 -T src/link.ld
+EMULATOR = qemu-system-i386
+EMULATOR_FLAGS = -kernel
 
-x86_c_src := $(shell find src/imp/x86 -name *.c)
-x86_c_obj := $(patsubst src/imp/x86/%.c, build/x86/%.o, $(x86_c_src))
+OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/kb.o obj/screen.o obj/string.o obj/system.o obj/util.o obj/shell.o
+OUTPUT = tmp/boot/kernel.bin
 
-x86_asm_src := $(shell find src/imp/x86 -name *.asm)
-x86_asm_obj := $(patsubst src/imp/x86/%.asm, build/x86/%.o, $(x86_asm_src))
+all:$(OBJS)
+	mkdir tmp/ -p
+	mkdir tmp/boot/ -p
+	$(LINKER) $(LDFLAGS) -o $(OUTPUT) $(OBJS)
 
-x86_obj := $(x86_c_obj) $(x86_asm_obj)
+obj/kasm.o:src/kernel.asm
+	mkdir obj/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o obj/kasm.o src/kernel.asm
+	
+obj/kc.o:src/kernel.c
+	$(COMPILER) $(CFLAGS) src/kernel.c -o obj/kc.o 
+	
+obj/idt.o:src/idt.c
+	$(COMPILER) $(CFLAGS) src/idt.c -o obj/idt.o 
 
-$(kernel_obj): build/kernel/%.o : src/imp/kernel/%.c
-	mkdir -p $(dir $@) && \
-	gcc -c -I src/int -ffreestanding $(patsubst build/kernel/%.o, src/imp/kernel/%.c, $@) -o $@
+obj/kb.o:src/kb.c
+	$(COMPILER) $(CFLAGS) src/kb.c -o obj/kb.o
 
-$(x86_c_obj): build/x86/%.o : src/imp/x86/%.c
-	mkdir -p $(dir $@) && \
-	gcc -c -I src/int -ffreestanding $(patsubst build/x86/%.o, src/imp/x86/%.c, $@) -o $@
+obj/isr.o:src/isr.c
+	$(COMPILER) $(CFLAGS) src/isr.c -o obj/isr.o
 
-$(x86_asm_obj): build/x86/%.o : src/imp/x86/%.asm
-	mkdir -p $(dir $@) && \
-	nasm -f elf64 $< -o $@
+obj/screen.o:src/screen.c
+	$(COMPILER) $(CFLAGS) src/screen.c -o obj/screen.o
 
-.PHONY: build-x86_64
-build-x86_64: $(kernel_obj) $(x86_obj)
-	mkdir -p dist/x86 && \
-	ld -o dist/x86/kernel.bin -T targets/x86/linker.ld $(kernel_obj) $(x86_obj) && \
-	cp dist/x86/kernel.bin targets/x86/iso/boot/kernel.bin && \
-	grub-mkrescue /usr/lib/grub/i386-pc -o dist/x86/kernel.iso targets/x86/iso
+obj/string.o:src/string.c
+	$(COMPILER) $(CFLAGS) src/string.c -o obj/string.o
 
+obj/system.o:src/system.c
+	$(COMPILER) $(CFLAGS) src/system.c -o obj/system.o
+
+obj/util.o:src/util.c
+	$(COMPILER) $(CFLAGS) src/util.c -o obj/util.o
+	
+obj/shell.o:src/shell.c
+	$(COMPILER) $(CFLAGS) src/shell.c -o obj/shell.o
+
+build:all 
+	grub-mkrescue -o EYNOS.iso tmp/
+	
+clear:
+	rm -f obj/*.o
+	rm -r -f tmp/kernel.bin
+	
