@@ -70,7 +70,7 @@ void help()
 	printf("\n echo      : Reprints a given text");
 	printf("\n exit      : Quits the current shell");
 	printf("\n color     : Changes the colors of the terminal");
-	printf("\n fetch     : Brings you some system information");
+	printf("\n ver       : Shows the current system version");
 	printf("\n spam      : Spam NEVERGOON to the shell\n\n");
 }
 
