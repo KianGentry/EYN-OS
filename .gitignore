@@ -1,9 +1,4 @@
-<<<<<<< Updated upstream
-/build/
-/dist/
-=======
 tmp/obj/*
 tmp/boot/*
 disk.img
 ./EYNOS.iso
->>>>>>> Stashed changes
