@@ -1,0 +1,93 @@
+#include "../../include/isr.h"
+#include "../../include/timer.h"
+
+string format = "Kernel panic: %s!\n";
+
+string exceptions[] = {"Division By Zero",
+                       "Debug",
+                       "Non Maskable Interrupt",
+                       "Breakpoint",
+                       "Into Detected Overflow",
+                       "Out of Bounds",
+                       "Invalid Opcode",
+                       "No Coprocessor",
+
+                       "Double Fault",
+                       "Coprocessor Segment Overrun",
+                       "Bad TSS",
+                       "Segment Not Present",
+                       "Stack Fault",
+                       "General Protection Fault",
+                       "Page Fault",
+                       "Unknown Interrupt",
+
+                       "Coprocessor Fault",
+                       "Alignment Check",
+                       "Machine Check",
+                       "Reserved",
+                       "Reserved",
+                       "Reserved",
+                       "Reserved",
+                       "Reserved",
+
+                       "Reserved",
+                       "Reserved",
+                       "Reserved",
+                       "Reserved",
+                       "Reserved",
+                       "Reserved",
+                       "Reserved",
+                       "Reserved"};
+
+void remap_pic() {
+  outportb(0x20, 0x11);
+  outportb(0xA0, 0x11);
+  outportb(0x21, 0x20);
+  outportb(0xA1, 0x28);
+  outportb(0x21, 0x04);
+  outportb(0xA1, 0x02);
+  outportb(0x21, 0x01);
+  outportb(0xA1, 0x01);
+  outportb(0x21, 0x00);
+  outportb(0xA1, 0x00);
+}
+
+void isr_install() {
+  // IRQs 0 - 15 -> 32 - 48
+  remap_pic();
+
+  // ISR exceptions 0 - 31
+  //for (int i = 0; i < 48; i++) {
+  //  set_idt_gate(i,asm_isr_redirect_table[i], 0x8E);
+  //}
+
+  // Syscalls having DPL 3
+  //set_idt_gate(0x80, isr128, 0xEE);
+
+  // Finalize
+  set_idt();
+  asm("sti");
+}
+
+void handle_interrupt(AsmPassedInterrupt regs) {
+  if (regs.interrupt >= 32 && regs.interrupt <= 47) { // IRQ
+    if (regs.interrupt >= 40) {
+      outportb(0xA0, 0x20);
+    }
+    outportb(0x20, 0x20);
+
+    switch (regs.interrupt) {
+    case 32:
+      timerTick();
+      break;
+
+    default:
+      break;
+    }
+  } else if (regs.interrupt >= 0 && regs.interrupt <= 31) { // ISR
+    printf(format, exceptions[regs.interrupt]);
+    asm("hlt");
+  } else if (regs.interrupt == 0x80) {
+    // reserved for syscall
+  }
+}
