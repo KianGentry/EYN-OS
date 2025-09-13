@@ -21,6 +21,7 @@ static int write_editor_num_lines = 1;
 static int write_editor_cursor_x = 0;
 static int write_editor_cursor_y = 0;
 static int write_editor_scroll_y = 0;
+static int write_editor_scroll_x = 0;
 static int write_editor_modified = 0;
 
 // Helper: get last path component (filename) from a path
@@ -286,12 +287,17 @@ void write_editor_draw(const char* filename) {
         if (line_idx < write_editor_num_lines) {
             int line_len = strlength(write_editor_buffer[line_idx]);
             int x = editor_win.x + 1;
-            for (int j = 0; j <= line_len; j++) {
+            // only draw characters that fit within the window width, accounting for horizontal scroll
+            int max_chars = editor_win.width - 2; // account for borders
+            int start_char = write_editor_scroll_x;
+            int end_char = start_char + max_chars;
+            
+            for (int j = start_char; j <= line_len && (x - editor_win.x - 1) < max_chars; j++) {
                 if (line_idx == write_editor_cursor_y && j == write_editor_cursor_x) {
                     tui_draw_text(x, y, "!", cursor_style);
                     x++;
                 }
-                if (j < line_len) {
+                if (j < line_len && (x - editor_win.x - 1) < max_chars) {
                     char ch[2] = {write_editor_buffer[line_idx][j], '\0'};
                     tui_draw_text(x, y, ch, text_style);
                     x++;
@@ -302,9 +308,9 @@ void write_editor_draw(const char* filename) {
 
     // Status bar just below the window
     char status[160];
-    snprintf(status, sizeof(status), "Line %d/%d, Col %d | Scroll: %d-%d | Ctrl+O: Save | Ctrl+X: Exit", 
+    snprintf(status, sizeof(status), "Line %d/%d, Col %d | V-Scroll: %d-%d | H-Scroll: %d | Ctrl+O: Save | Ctrl+X: Exit", 
         write_editor_cursor_y + 1, write_editor_num_lines, write_editor_cursor_x + 1, 
-        write_editor_scroll_y + 1, write_editor_scroll_y + EDITOR_HEIGHT);
+        write_editor_scroll_y + 1, write_editor_scroll_y + EDITOR_HEIGHT, write_editor_scroll_x);
     tui_style_t status_style = {TUI_COLOR_WHITE, TUI_COLOR_BLACK, 0};
     tui_draw_status_bar(&editor_win, status, status_style);
 
@@ -321,6 +327,7 @@ void write_editor(const char* filename, uint8 disk) {
     write_editor_cursor_x = 0;
     write_editor_cursor_y = 0;
     write_editor_scroll_y = 0;
+    write_editor_scroll_x = 0;
     write_editor_modified = 0;
     if (load_file_to_write_editor(filename, disk) < 0) {
         printf("%cFailed to load file.\n", 255, 0, 0);
@@ -342,6 +349,8 @@ void write_editor(const char* filename, uint8 disk) {
                     if (write_editor_cursor_x > target_line_len) {
                         write_editor_cursor_x = target_line_len;
                     }
+                    // reset horizontal scroll when changing lines
+                    write_editor_scroll_x = 0;
                 }
                 break;
             case 0x1002:
@@ -354,16 +363,45 @@ void write_editor(const char* filename, uint8 disk) {
                     if (write_editor_cursor_x > target_line_len) {
                         write_editor_cursor_x = target_line_len;
                     }
+                    // reset horizontal scroll when changing lines
+                    write_editor_scroll_x = 0;
                 }
                 break;
             case 0x1003:
                 if (write_editor_cursor_x > 0) {
                     write_editor_cursor_x--;
+                    // adjust horizontal scroll if cursor moves out of view
+                    if (write_editor_cursor_x < write_editor_scroll_x) {
+                        write_editor_scroll_x = write_editor_cursor_x;
+                    }
+                } else if (write_editor_cursor_y > 0) {
+                    // if at beginning of line and not on first line, move to end of previous line
+                    write_editor_cursor_y--;
+                    write_editor_cursor_x = strlength(write_editor_buffer[write_editor_cursor_y]);
+                    write_editor_scroll_x = 0; // reset horizontal scroll
+                    // adjust vertical scroll if needed
+                    if (write_editor_cursor_y < write_editor_scroll_y) {
+                        write_editor_scroll_y = write_editor_cursor_y;
+                    }
                 }
                 break;
             case 0x1004:
                 if (write_editor_cursor_x < strlength(write_editor_buffer[write_editor_cursor_y])) {
                     write_editor_cursor_x++;
+                    // adjust horizontal scroll if cursor moves out of view
+                    int max_visible_x = write_editor_scroll_x + (78 - 2); // window width - borders
+                    if (write_editor_cursor_x > max_visible_x) {
+                        write_editor_scroll_x = write_editor_cursor_x - (78 - 2);
+                    }
+                } else if (write_editor_cursor_y < write_editor_num_lines - 1) {
+                    // if at end of line and not on last line, move to start of next line
+                    write_editor_cursor_y++;
+                    write_editor_cursor_x = 0;
+                    write_editor_scroll_x = 0; // reset horizontal scroll
+                    // adjust vertical scroll if needed
+                    if (write_editor_cursor_y >= write_editor_scroll_y + EDITOR_HEIGHT) {
+                        write_editor_scroll_y = write_editor_cursor_y - EDITOR_HEIGHT + 1;
+                    }
                 }
                 break;
             case 0x1008:

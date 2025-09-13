@@ -37,4 +37,10 @@ int validate_file_path(const char* path);
 char* sanitize_input(char* input, int max_length);
 int get_input_validation_errors(void);
 
+// Safe string functions with bounds checking
+char *strcpy_safe(char *dest, const char *src, size_t dest_size);
+char *strncpy_safe(char *dest, const char *src, size_t n, size_t dest_size);
+char *strcat_safe(char *dest, const char *src, size_t dest_size);
+char *strncat_safe(char *dest, const char *src, size_t n, size_t dest_size);
+
 #endif

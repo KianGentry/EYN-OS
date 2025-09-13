@@ -55,5 +55,5 @@ Utility Commands:
 Development Commands:
 --------------------
   assemble        - Converts assembly code into machine code.
-  run             - Run a .eyn executable with process isolation.
+  run             - Run a .eyn executable or .shell script.
 

@@ -80,15 +80,6 @@ When you press **Enter** on a command with an asterisk (*), the sub-commands app
 - `search_empty` - Find empty files/directories
 - `search_depth` - Search with depth limitation
 
-### Help Commands (*)
-- `help_write` - Text editor help
-- `help_search` - Search commands help
-- `help_fs` - Filesystem commands help
-- `help_edit` - Editing commands help
-- `help_system` - System commands help
-- `help_game` - Game commands help
-- `help_dev` - Development tools help
-
 ### LS Commands (*)
 - `ls_tree` - Tree view listing
 - `ls_size` - Size-based listing

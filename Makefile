@@ -1,13 +1,23 @@
 COMPILER = gcc
 LINKER = ld
 ASSEMBLER = nasm
-CFLAGS = -m32 -c -ffreestanding -w -fcommon -Oz -fno-stack-protector -I include/
+CFLAGS = -m32 -c -ffreestanding -fcommon -Oz -fno-stack-protector -I include/ \
+         -Wall -Wextra -Werror=implicit-function-declaration \
+         -Wno-unused-parameter -Wno-unused-variable \
+         -fno-strict-overflow -fwrapv \
+         -D_FORTIFY_SOURCE=0 -fno-builtin \
+		 -fstack-protector-strong -D_FORTIFY_SOURCE=1
+		
+
+# Debug flags for development
+DEBUG_CFLAGS = $(CFLAGS) -g -O0 -DDEBUG -D_DEBUG
+RELEASE_CFLAGS = $(CFLAGS) -O2 -DNDEBUG
 ASFLAGS = -f elf32
 LDFLAGS = -m elf_i386 -T src/boot/link.ld
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/history.o obj/game_engine.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o
+OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/game_engine.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o
 OUTPUT = tmp/boot/kernel.bin
 
 # Source files to object files
@@ -27,6 +37,10 @@ obj/kasm.o:src/boot/kernel.asm
 obj/syscall.o:src/cpu/syscall.asm
 	mkdir obj/ -p
 	$(ASSEMBLER) $(ASFLAGS) -o obj/syscall.o src/cpu/syscall.asm
+
+obj/irq_stubs.o:src/cpu/irq.asm
+	mkdir obj/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o obj/irq_stubs.o src/cpu/irq.asm
 	
 obj/kc.o:src/entry/kernel.c
 	$(COMPILER) $(CFLAGS) src/entry/kernel.c -o obj/kc.o 
@@ -88,6 +102,9 @@ obj/write_editor.o:src/utilities/shell/write_editor.c
 obj/run_command.o:src/utilities/shell/run_command.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/run_command.c -o obj/run_command.o
 
+obj/shell_script.o:src/utilities/shell/shell_script.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/shell_script.c -o obj/shell_script.o
+
 obj/history.o:src/utilities/shell/history.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/history.c -o obj/history.o
 
@@ -122,20 +139,44 @@ obj/zero_copy.o:src/utilities/zero_copy.c
 obj/zero_copy_commands.o:src/utilities/shell/zero_copy_commands.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/zero_copy_commands.c -o obj/zero_copy_commands.o
 
+obj/paging.o:src/cpu/paging.c
+	$(COMPILER) $(CFLAGS) src/cpu/paging.c -o obj/paging.o
+
+obj/pipeline.o:src/utilities/shell/pipeline.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/pipeline.c -o obj/pipeline.o
+
+obj/kernel_api.o:src/cpu/kernel_api.c
+	$(COMPILER) $(CFLAGS) src/cpu/kernel_api.c -o obj/kernel_api.o
+
+obj/native_exec.o:src/cpu/native_exec.c
+	$(COMPILER) $(CFLAGS) src/cpu/native_exec.c -o obj/native_exec.o
+
+obj/native_run.o:src/utilities/shell/native_run.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/native_run.c -o obj/native_run.o
+
+obj/sched.o:src/cpu/sched.c include/sched.h
+	$(COMPILER) $(CFLAGS) src/cpu/sched.c -o obj/sched.o
+
+obj/irq.o:src/cpu/irq.c include/irq.h
+	$(COMPILER) $(CFLAGS) src/cpu/irq.c -o obj/irq.o
+
 # Actually building the OS (The stuff you should actually run, i.e. make run, make build, etc.)
 
-build: all eynfsimg docs
+build: all eynfsimg sourceimg docs
 	mkdir -p tmp/grub_ultra_minimal/boot/grub
 	cp tmp/boot/kernel.bin tmp/grub_ultra_minimal/boot/
 	@echo 'set default=0' > tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo 'set timeout=0' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo 'set gfxmode=text' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
+	@echo 'set gfxpayload=text' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
+	@echo 'set color_normal=white/black' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
+	@echo 'set color_highlight=black/white' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo '' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo 'menuentry "EYN-OS" {' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo '    multiboot /boot/kernel.bin' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo '    boot' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo '}' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	grub-mkrescue --modules="multiboot multiboot2 part_msdos ext2 iso9660" --locales="" --themes="" --fonts="" --compress=xz -o EYNOS.iso tmp/grub_ultra_minimal/
+	grub-mkrescue --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o EYNOS.iso tmp/grub_ultra_minimal/
 	@echo "Ultra-minimal ISO created: EYNOS.iso"
 	@ls -lh EYNOS.iso
 	@echo "Removing EFI files from ISO..."
@@ -153,7 +194,7 @@ build: all eynfsimg docs
 	@ls -lh EYNOS.iso
 
 clean:
-	rm -rf obj/*.o tmp/boot/kernel.bin eynfs.img eynfs_format EYNOS.iso
+	rm -rf obj/*.o tmp/boot/kernel.bin eynfs.img source.img eynfs_format EYNOS.iso
 	rm -rf tmp/grub_minimal tmp/grub_ultra_minimal
 	rm -f userland/*.o userland/*.bin
 
@@ -169,7 +210,20 @@ eynfsimg: eynfs_format
 	dd if=/dev/zero of=eynfs.img bs=1M count=10
 	$(COMPILER) -o eynfs_format eynfs_format.c
 	./eynfs_format eynfs.img
-	python3 devtools/copy_testdir_to_eynfs.py
+	python3 devtools/copy_testdir_to_eynfs.py testdir/
+
+# Create source code drive for testing
+sourceimg: eynfs_format
+	rm -f source.img
+	dd if=/dev/zero of=source.img bs=1M count=20
+	$(COMPILER) -o eynfs_format eynfs_format.c
+	./eynfs_format source.img
+	mkdir -p temp_source_structure
+	cp -r src temp_source_structure/
+	cp -r include temp_source_structure/
+	cp -r docs temp_source_structure/
+	python3 devtools/copy_testdir_to_eynfs.py temp_source_structure/ source.img
+	rm -rf temp_source_structure
 
 # Rebuilds and runs the OS
 
@@ -177,12 +231,12 @@ run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
 	-boot d \
-	-m 12M
-
+	-m 3M
 # Just runs the OS, no rebuilding.
 
-test:
+test: sourceimg
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
+	-hdb source.img \
 	-boot d \
 	-m 64M

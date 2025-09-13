@@ -23,7 +23,7 @@ EYN-OS is a complete operating system built from scratch with the philosophy of 
 - **Adaptive Heap Sizing**: Conservative memory allocation for low-end systems
 - **Streaming Command System**: On-demand command loading to reduce memory footprint
 - **Optimized File I/O**: Dynamic buffering with up to 64KB support
-- **Target Systems**: 16MB RAM minimum, optimized for 128KB+ systems
+- **Target Systems**: 3MB RAM minimum (with GRUB), 1MB RAM (with direct boot), optimized for 128KB+ systems
 
 ### User Interface
 - **Text User Interface (TUI)**: Consistent interface across all applications
@@ -36,6 +36,7 @@ EYN-OS is a complete operating system built from scratch with the philosophy of 
 - **Built-in Assembler**: NASM-compatible assembler for x86 code
 - **Custom Executable Format**: EYN format for user programs
 - **Program Loader**: Safe execution of user programs with process isolation
+- **Shell Scripts**: Execute `.shell` files with EYN-OS commands for automation
 - **Calculator**: Basic mathematical operations
 - **Hex Dump**: Binary file inspection tool
 
@@ -62,7 +63,7 @@ EYN-OS is a complete operating system built from scratch with the philosophy of 
 #### Streaming Commands (Loaded on Demand)
 - **Filesystem**: `format`, `fdisk`, `fscheck`, `copy`, `move`, `del`, `cd`, `makedir`, `deldir`
 - **File Operations**: `read`, `write`, `read_raw`, `read_md`, `read_image`
-- **Basic Commands**: `echo`, `ver`, `calc`, `search`, `drive`, `run`
+- **Basic Commands**: `echo`, `ver`, `calc`, `search`, `drive`, `run` (supports .eyn and .shell files)
 - **Advanced**: `random`, `history`, `sort`, `game`, `draw`, `spam`
 - **Development**: `assemble`, `hexdump`, `log`
 - **Error & Debug**: `error`, `validate`, `process`
@@ -77,13 +78,24 @@ make
 ```
 
 ### Running in QEMU
+
+#### Standard Boot (3MB+ RAM)
 ```bash
 make run
 ```
 
-Or manually:
+#### Direct Boot (1-2MB RAM)
 ```bash
-qemu-system-i386 -cdrom EYNOS.iso -hda tmp/boot/disk.img -hdb tmp/boot/eynfs.img -boot d
+make test_direct
+```
+
+#### Manual QEMU Commands
+```bash
+# Standard GRUB boot
+qemu-system-i386 -cdrom EYNOS.iso -hda eynfs.img -boot d -m 4M
+
+# Direct kernel boot (ultra-low memory)
+qemu-system-i386 -kernel tmp/boot/kernel.bin -hda eynfs.img -m 1M
 ```
 
 ### Running on Real Hardware
@@ -193,26 +205,6 @@ EYN-OS welcomes contributions! Whether you want to add new commands, improve exi
     └── readme.txt
 ```
 
-## Release 12 Highlights
-
-### Stability Improvements
-- **Intelligent Exception Handling**: System attempts recovery instead of halting
-- **Memory Corruption Detection**: Advanced heap validation and error reporting
-- **Command Safety**: Input validation and argument sanitization
-- **Process Isolation**: Memory separation for user programs
-
-### Portability Enhancements
-- **Dynamic Memory Detection**: Automatic RAM detection using multiboot info
-- **Adaptive Heap Sizing**: Conservative memory allocation for low-end systems
-- **Streaming Command System**: On-demand command loading to reduce memory footprint
-- **Optimized File I/O**: Dynamic buffering with efficient memory usage
-
-### User Experience
-- **Professional Help System**: Interactive TUI with dual-pane layout
-- **File Format Support**: REI image rendering and Markdown formatting
-- **Clean Output**: Removed debug messages for professional appearance
-- **Command Consistency**: All registered commands properly included in streaming system
-
 ## Development Philosophy
 
 ### Why "Reinvent the Wheel"?
@@ -232,10 +224,10 @@ EYN-OS welcomes contributions! Whether you want to add new commands, improve exi
 
 Comprehensive documentation is available in the `docs/` directory:
 
-- **[System Overview](docs/system-overview.md)**: High-level architecture and Release 12 features
+- **[System Overview](docs/system-overview.md)**: High-level architecture and latest release features
 - **[EYNFS Specification](docs/filesystems/eynfs.md)**: Native filesystem details
 - **[Shell System](docs/ui/shell.md)**: Command-line interface with streaming architecture
-- **[Quick Reference](docs/quick-reference.md)**: Command cheat sheet with Release 12 updates
+- **[Quick Reference](docs/quick-reference.md)**: Command cheat sheet with latest release updates
 - **[API Reference](docs/api/headers.md)**: Complete header documentation
 
 ## Contributing
@@ -267,7 +259,7 @@ EYN-OS is designed to be educational and extensible. When adding features:
 ## Screenshots
 
 ![EYN-OS Shell](image.png)
-*The EYN-OS shell showing the help command and version information*
+*The EYN-OS shell showing the ls command and version information*
 
 ## License
 

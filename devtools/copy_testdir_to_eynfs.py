@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import struct
+import sys
 
 EYNFS_BLOCK_SIZE = 512
 EYNFS_NAME_MAX = 32
@@ -14,8 +15,9 @@ SUPERBLOCK_STRUCT = '<IIIIIII8s'
 DIR_ENTRY_STRUCT = f'<{EYNFS_NAME_MAX}sBBHIIII'
 DIR_ENTRY_SIZE = struct.calcsize(DIR_ENTRY_STRUCT)
 
-TESTDIR = 'testdir/'
-IMG = 'eynfs.img'
+# Default values
+DEFAULT_TESTDIR = 'testdir/'
+DEFAULT_IMG = 'eynfs.img'
 
 
 def read_superblock(f):
@@ -224,11 +226,34 @@ def clear_root_directory(f, sb):
         block = next_block
 
 def main():
-    with open(IMG, 'r+b') as f:
+    # parse command line arguments
+    if len(sys.argv) < 2:
+        print("Usage: python3 copy_testdir_to_eynfs.py <source_directory> [image_file]")
+        print(f"Default image: {DEFAULT_IMG}")
+        print(f"Example: python3 copy_testdir_to_eynfs.py {DEFAULT_TESTDIR}")
+        print(f"Example: python3 copy_testdir_to_eynfs.py src/ source.img")
+        sys.exit(1)
+    
+    source_dir = sys.argv[1]
+    img_file = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_IMG
+    
+    # validate source directory
+    if not os.path.isdir(source_dir):
+        print(f"Error: Source directory '{source_dir}' does not exist")
+        sys.exit(1)
+    
+    # validate image file
+    if not os.path.exists(img_file):
+        print(f"Error: Image file '{img_file}' does not exist")
+        sys.exit(1)
+    
+    print(f"Copying '{source_dir}' to EYNFS image '{img_file}'...")
+    
+    with open(img_file, 'r+b') as f:
         sb = read_superblock(f)
         clear_root_directory(f, sb)
-        for root, dirs, files in os.walk(TESTDIR):
-            rel_dir = os.path.relpath(root, TESTDIR)
+        for root, dirs, files in os.walk(source_dir):
+            rel_dir = os.path.relpath(root, source_dir)
             eynfs_path = '' if rel_dir == '.' else rel_dir.replace('\\', '/')
             parent_path = os.path.dirname(eynfs_path)
             parent_block = find_dir_block(f, sb, parent_path)
@@ -240,6 +265,8 @@ def main():
                 with open(src_file, 'rb') as infile:
                     data = infile.read()
                 add_file(f, sb, dir_block, file, data)
+    
+    print(f"Successfully copied '{source_dir}' to '{img_file}'")
 
 if __name__ == '__main__':
     main() 

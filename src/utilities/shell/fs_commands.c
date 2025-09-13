@@ -687,6 +687,61 @@ int write_output_to_file(const char* buf, int len, const char* filename, uint8_t
     return 0;
 }
 
+// Append output to file using EYNFS append mode
+int append_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(disk, EYNFS_SUPERBLOCK_LBA, &sb) != 0 || sb.magic != EYNFS_MAGIC) {
+        printf("No supported filesystem found.\n");
+        return -1;
+    }
+    
+    // Check if file exists
+    eynfs_dir_entry_t entry;
+    uint32_t entry_idx;
+    if (eynfs_find_in_dir(disk, &sb, sb.root_dir_block, filename, &entry, &entry_idx) == 0) {
+        // File exists, read existing content and append
+        char* existing_content = malloc(entry.size + 1);
+        if (existing_content) {
+            int bytes_read = eynfs_read_file(disk, &sb, &entry, existing_content, entry.size, 0);
+            if (bytes_read > 0) {
+                existing_content[bytes_read] = '\0';
+                
+                // Combine existing content with new content
+                char* combined = malloc(bytes_read + len + 1);
+                if (combined) {
+                    strcpy(combined, existing_content);
+                    strcat(combined, buf);
+                    
+                    // Write combined content back to file
+                    int written = eynfs_write_file(disk, &sb, &entry, combined, bytes_read + len, sb.root_dir_block, entry_idx);
+                    free(combined);
+                    
+                    if (written == bytes_read + len) {
+                        printf("Successfully appended %d bytes to %s\n", len, filename);
+                        free(existing_content);
+                        eynfs_cache_clear();
+                        return 0;
+                    } else {
+                        printf("Failed to append to file '%s'.\n", filename);
+                    }
+                }
+            }
+            free(existing_content);
+        }
+    } else {
+        // File doesn't exist, create it (same as overwrite)
+        int result = write_output_to_file(buf, len, filename, disk);
+        if (result == 0) {
+            printf("Successfully created and wrote %d bytes to %s\n", len, filename);
+            return 0;
+        } else {
+            printf("Failed to create file '%s'.\n", filename);
+        }
+    }
+    
+    return -1;
+}
+
 // Filesystem integrity check
 int check_filesystem_integrity(uint8_t disk) {
     eynfs_superblock_t sb;

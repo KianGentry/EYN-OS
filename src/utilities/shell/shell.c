@@ -21,13 +21,14 @@
 #include <game_engine.h>
 #include <tui.h>
 #include <shell_command_info.h>
+#include <pipeline.h>
 
 // Circular buffer variables for logging
 extern int shell_log_current_line_start;
 extern int shell_log_line_count;
 extern int shell_log_line_starts[1001];
 
-#define LOG_BUF_SIZE 1024
+// LOG_BUF_SIZE is already defined in vga.h
 
 extern int shell_log_active;
 
@@ -41,6 +42,16 @@ void __stack_chk_fail_local() {
 }
 
 uint8_t g_current_drive = 0;
+
+// get current physical drive from logical drive
+uint8_t get_current_physical_drive(void) {
+    return g_current_drive;  // g_current_drive is now physical drive
+}
+
+// get current logical drive number
+uint8_t get_current_logical_drive(void) {
+    return ata_physical_to_logical(g_current_drive);
+}
 
 // Add a global variable for the current directory path (for now, always root)
 char shell_current_path[128] = "/";
@@ -142,12 +153,6 @@ void blockmap_cmd(string arg);
 void debug_superblock_cmd(string arg);
 void debug_directory_cmd(string arg);
 void help_write_cmd(string arg);
-void help_search_cmd(string arg);
-void help_fs_cmd(string arg);
-void help_edit_cmd(string arg);
-void help_system_cmd(string arg);
-void help_game_cmd(string arg);
-void help_dev_cmd(string arg);
 void read_raw_cmd(string arg);
 void read_md_cmd(string arg);
 void read_image_cmd(string arg);
@@ -224,7 +229,7 @@ static void init_command_hash_table() {
 }
 
 // Unified command lookup from linker section with O(1) hash optimization
-static shell_cmd_handler_t find_command(const char* name) {
+shell_cmd_handler_t find_command(const char* name) {
     // Initialize hash table on first use
     init_command_hash_table();
     
@@ -258,37 +263,34 @@ static shell_cmd_handler_t find_command(const char* name) {
     return NULL;
 }
 
-// Get command info by name (for help system)
-static const shell_command_info_t* get_command_info(const char* name) {
-    size_t num_commands = (__stop_shellcmds - __start_shellcmds);
-    
-    for (size_t i = 0; i < num_commands; i++) {
-        const shell_command_info_t* cmd = &__start_shellcmds[i];
-        if (strcmp(cmd->name, name) == 0) {
-            return cmd;
-        }
-    }
-    return NULL;
-}
-
-// Command validation and safety functions
+// Remove unused functions to fix compilation warnings
+/*
+// Command validation function
 static int validate_command_name(const char* name) {
-    if (!name || strlen(name) == 0) return 0;
+    if (!name) return 0;
     
-    // Check for dangerous characters
-    for (int i = 0; name[i]; i++) {
-        if (name[i] < 32 || name[i] > 126) {
-            return 0; // Invalid character
+    // Basic validation - command names should be alphanumeric with underscores
+    for (size_t i = 0; name[i]; i++) {
+        if (!((name[i] >= 'a' && name[i] <= 'z') ||
+              (name[i] >= 'A' && name[i] <= 'Z') ||
+              (name[i] >= '0' && name[i] <= '9') ||
+              name[i] == '_')) {
+            return 0;
         }
-    }
-    
-    // Check for command injection attempts
-    if (strstr(name, "..") || strstr(name, "//") || strstr(name, "\\")) {
-        return 0; // Potential path traversal
     }
     
     return 1;
 }
+
+// Get command information
+static const shell_command_info_t* get_command_info(const char* name) {
+    if (!name) return NULL;
+    
+    // This would normally look up command metadata
+    // For now, return NULL since we don't have a command registry
+    return NULL;
+}
+*/
 
 static int validate_command_arguments(const char* cmd) {
     if (!cmd) return 0;
@@ -424,12 +426,18 @@ void status_cmd(string arg) {
 }
 
 void launch_shell(int n) {
+    // Initialize pipeline system
+    init_pipeline_system();
+    
     while (1) {
         if (shell_log_active) {
             printf("%c[LOG] ", 0, 255, 0);
         }
         // Print prompt: <drive>:<path>! 
-        printf("%c%d:%s", 200, 200, 200, g_current_drive, shell_current_path); // white for drive:path
+        // convert physical drive to logical drive for display
+        uint8 logical_drive = ata_physical_to_logical(g_current_drive);
+        if (logical_drive == 0xFF) logical_drive = 0;  // fallback to 0 if mapping fails
+        printf("%c%d:%s", 200, 200, 200, logical_drive, shell_current_path); // white for drive:path
         printf("%c! ", 255, 255, 0); // yellow for !
         string ch = readStr_with_history(&g_command_history);
         
@@ -485,40 +493,56 @@ void launch_shell(int n) {
         }
         printf("\n");
 
-        // Check if this is a sub-command that might contain operators like '>'
-        int is_subcommand = 0;
-        if (strncmp(ch, "search_size", 11) == 0 || 
-            strncmp(ch, "search_type", 11) == 0 ||
-            strncmp(ch, "search_empty", 12) == 0 ||
-            strncmp(ch, "search_depth", 12) == 0 ||
-            strncmp(ch, "read_raw", 8) == 0 ||
-            strncmp(ch, "read_md", 7) == 0) {
-            is_subcommand = 1;
-        }
-        
-        char cmd[200], filename[64];
-        int is_redirect = 0;
-        
-        // Only parse redirection if it's not a sub-command
-        if (!is_subcommand) {
-            is_redirect = parse_redirection(ch, cmd, filename);
-        }
-
-        if (is_redirect) {
-            start_shell_redirect();
-            handle_shell_command(cmd);
-            int res = write_output_to_file(shell_redirect_buf, strlen(shell_redirect_buf), filename, g_current_drive);
-            if (res == 0)
-                printf("%cOutput redirected to '%s' successfully.\n", 0, 255, 0, filename);
-            else
-                printf("%cFailed to write file '%s' (error code: %d).\n", 255, 0, 0, filename, res);
-            stop_shell_redirect();
-        } else {
-            // Add command to history (only if not empty)
-            if (ch && strlen(ch) > 0) {
-                add_to_history(&g_command_history, ch);
+        // Check if this is a pipeline command
+        if (is_pipeline_command(ch)) {
+            // Parse and execute pipeline
+            pipeline_t* pipeline = parse_pipeline(ch);
+            if (pipeline) {
+                // Add command to history (only if not empty)
+                if (ch && strlen(ch) > 0) {
+                    add_to_history(&g_command_history, ch);
+                }
+                execute_pipeline(pipeline);
+                free_pipeline(pipeline);
+            } else {
+                printf("Failed to parse pipeline command\n");
             }
-            handle_shell_command(ch);
+        } else {
+            // Check if this is a sub-command that might contain operators like '>'
+            int is_subcommand = 0;
+            if (strncmp(ch, "search_size", 11) == 0 || 
+                strncmp(ch, "search_type", 11) == 0 ||
+                strncmp(ch, "search_empty", 12) == 0 ||
+                strncmp(ch, "search_depth", 12) == 0 ||
+                strncmp(ch, "read_raw", 8) == 0 ||
+                strncmp(ch, "read_md", 7) == 0) {
+                is_subcommand = 1;
+            }
+            
+            char cmd[200], filename[64];
+            int is_redirect = 0;
+            
+            // Only parse redirection if it's not a sub-command
+            if (!is_subcommand) {
+                is_redirect = parse_redirection(ch, cmd, filename);
+            }
+
+            if (is_redirect) {
+                start_shell_redirect();
+                handle_shell_command(cmd);
+                int res = write_output_to_file(shell_redirect_buf, strlen(shell_redirect_buf), filename, g_current_drive);
+                if (res == 0)
+                    printf("%cOutput redirected to '%s' successfully.\n", 0, 255, 0, filename);
+                else
+                    printf("%cFailed to write file '%s' (error code: %d).\n", 255, 0, 0, filename, res);
+                stop_shell_redirect();
+            } else {
+                // Add command to history (only if not empty)
+                if (ch && strlen(ch) > 0) {
+                    add_to_history(&g_command_history, ch);
+                }
+                handle_shell_command(ch);
+            }
         }
 
         if (cmdEql(ch, "exit"))

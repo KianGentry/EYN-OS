@@ -139,9 +139,9 @@ string int_to_ascii(int n, char str[]) {
 // String validation functions moved to string.c for standardization
 
 // --- Robust Memory Manager with Enhanced Error Handling ---
-#define HEAP_START 0x800000   // 8MB - safer area for heap (reduced from 16MB)
-#define HEAP_SIZE_DEFAULT 0x20000     // 128KB default heap size (reduced from 256KB)
-#define HEAP_SIZE_MIN 0x10000         // 64KB minimum heap size
+#define HEAP_START 0x200000   // 2MB - start after kernel and initial data
+#define HEAP_SIZE_DEFAULT 0x100000    // 1MB default heap size (increased for assembler)
+#define HEAP_SIZE_MIN 0x40000         // 256KB minimum heap size
 #define HEAP_SIZE_MAX 0x1000000       // 16MB maximum heap size
 #define BLOCK_HEADER_SIZE 12  // Reduced from 24 for memory savings
 #define MIN_BLOCK_SIZE 16     // Reduced from 32
@@ -233,13 +233,13 @@ uint32 detect_available_memory() {
 static void calculate_optimal_heap_size() {
     uint32 available_ram = detect_available_memory();
     
-    // Use more generous heap sizing for zero-copy operations
+    // Use more generous heap sizing for assembler and zero-copy operations
     if (available_ram <= 4 * 1024 * 1024) {        // 4MB or less
-        heap_size = 0x40000;                         // 256KB (doubled)
+        heap_size = 0x100000;                        // 1MB (increased for assembler)
     } else if (available_ram <= 16 * 1024 * 1024) { // 16MB or less
-        heap_size = 0x80000;                         // 512KB (doubled)
+        heap_size = 0x200000;                        // 2MB (increased for assembler)
     } else if (available_ram <= 64 * 1024 * 1024) { // 64MB or less
-        heap_size = 0x200000;                        // 2MB (doubled)
+        heap_size = 0x400000;                        // 4MB (increased for assembler)
     } else if (available_ram <= 256 * 1024 * 1024) { // 256MB or less
         heap_size = 0x800000;                        // 8MB (doubled)
     } else {                                         // 256MB+
@@ -317,7 +317,7 @@ void init_memory_manager() {
     calculate_optimal_heap_size();
     
     // Verify heap start address is accessible
-    if ((uint32)heap_start < 0x800000) {
+    if ((uint32)heap_start < 0x200000) {
         return;
     }
     
@@ -449,8 +449,8 @@ void* malloc(size_t nbytes) {
         return NULL;
     }
     
-    // Increased limit for larger files like .rei images and zero-copy operations
-    uint32 max_allocation = heap_size * 3 / 4; // 75% of heap for larger files (increased from 50%)
+    // Increased limit for larger files like .rei images, assembler, and zero-copy operations
+    uint32 max_allocation = heap_size * 4 / 5; // 80% of heap for larger files (increased from 75%)
     if (nbytes > max_allocation) {
         printf("%c[MEMORY] Request too large: %d bytes (heap: %d KB, max: %d bytes)\n", 255, 0, 0, nbytes, heap_size / 1024, max_allocation);
         return NULL;
@@ -505,7 +505,7 @@ void free(void* ptr) {
     uint32 block_offset = data_ptr - heap_start - BLOCK_HEADER_SIZE;
     
     // Validate pointer bounds
-    if (block_offset >= heap_size || block_offset < 0) {
+    if (block_offset >= heap_size) {
         printf("%c[MEMORY] Invalid pointer: 0x%X (heap_start: 0x%X, offset: %d)\n", 255, 0, 0, (uint32)ptr, (uint32)heap_start, block_offset);
         memory_errors++;
         return;
@@ -546,7 +546,7 @@ void* realloc(void* ptr, size_t new_size) {
     uint32 block_offset = data_ptr - heap_start - BLOCK_HEADER_SIZE;
     
     // Validate pointer bounds
-    if (block_offset >= heap_size || block_offset < 0) {
+    if (block_offset >= heap_size) {
         printf("%c[MEMORY] Invalid pointer in realloc: 0x%X\n", 255, 0, 0, (uint32)ptr);
         memory_errors++;
         return NULL;

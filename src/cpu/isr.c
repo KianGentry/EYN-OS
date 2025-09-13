@@ -210,7 +210,16 @@ void isr10() { generic_isr_handler(10); }
 void isr11() { generic_isr_handler(11); }
 void isr12() { generic_isr_handler(12); }
 void isr13() { generic_isr_handler(13); }
-void isr14() { generic_isr_handler(14); }
+void isr14() { 
+    // Call our custom page fault handler
+    extern void page_fault_handler(regs_t* r);
+    regs_t r;
+    // Extract registers from stack (simplified)
+    asm volatile("mov %%esp, %0" : "=r" (r.esp));
+    r.err_code = 0; // Page fault error code
+    r.cs = 0x08; // Kernel code segment
+    page_fault_handler(&r);
+}
 void isr15() { generic_isr_handler(15); }
 void isr16() { generic_isr_handler(16); }
 void isr17() { generic_isr_handler(17); }

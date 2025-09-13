@@ -13,6 +13,10 @@ int ata_identify(uint8 drive, uint16* identify_data);
 void ata_init_drives(void);
 int ata_detect_drive(uint8 drive);
 int ata_drive_present(uint8 drive);
+uint8 ata_logical_to_physical(uint8 logical_drive);
+uint8 ata_physical_to_logical(uint8 physical_drive);
+uint8 ata_get_num_logical_drives(void);
+int ata_logical_drive_present(uint8 logical_drive);
 uint16 inw(uint16 _port);
 void outw(uint16 _port, uint16 _data);
 

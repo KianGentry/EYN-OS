@@ -1,5 +1,6 @@
 #include <shell_commands.h>
 #include <shell_command_info.h>
+#include <pipeline.h>
 #include <fs_commands.h>
 #include <run_command.h>
 #include <types.h>
@@ -44,6 +45,8 @@ extern uint8_t g_current_drive;
 
 // Random number generator command
 void random_cmd(string ch) {
+    if (!ch) return; // Prevent null pointer dereference
+    
     uint8 i = 0;
     while (ch[i] && ch[i] != ' ') i++;
     while (ch[i] && ch[i] == ' ') i++;
@@ -59,6 +62,11 @@ void random_cmd(string ch) {
     if (ch[i] >= '0' && ch[i] <= '9') {
         uint32_t arg1 = 0;
         while (ch[i] >= '0' && ch[i] <= '9') {
+            // Check for integer overflow
+            if (arg1 > UINT32_MAX / 10) {
+                printf("%cError: Number too large\n", 255, 0, 0);
+                return;
+            }
             arg1 = arg1 * 10 + (ch[i] - '0');
             i++;
         }
@@ -69,7 +77,12 @@ void random_cmd(string ch) {
         // Check if there's a second argument
         if (ch[i] && ch[i] >= '0' && ch[i] <= '9') {
             uint32_t arg2 = 0;
-            while (ch[i] >= '0' && ch[i] <= '9') {
+            while (ch[i] && ch[i] >= '0' && ch[i] <= '9') {
+                // Check for integer overflow
+                if (arg2 > UINT32_MAX / 10) {
+                    printf("%cError: Number too large\n", 255, 0, 0);
+                    return;
+                }
                 arg2 = arg2 * 10 + (ch[i] - '0');
                 i++;
             }
@@ -80,9 +93,21 @@ void random_cmd(string ch) {
                 return;
             }
             
+            // Limit the range to prevent excessive output
+            if (arg2 - arg1 > 1000) {
+                printf("%cError: Range too large (max 1000)\n", 255, 0, 0);
+                return;
+            }
+            
             uint32_t num = rand_range(arg1, arg2);
             printf("%cRandom number in range [%d, %d]: %d\n", 255, 255, 255, (int)arg1, (int)arg2, (int)num);
         } else {
+            // Limit count to prevent excessive output
+            if (arg1 > 1000) {
+                printf("%cError: Count too large (max 1000)\n", 255, 0, 0);
+                return;
+            }
+            
             printf("%cGenerating %d random numbers:\n", 255, 255, 255, (int)arg1);
             for (uint32_t k = 0; k < arg1; k++) {
                 uint32_t num = rand_next();
@@ -227,9 +252,12 @@ void search_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_bl
         // Build full path for this entry
         char full_path[256];
         if (strcmp(current_path, "/") == 0) {
-            snprintf(full_path, sizeof(full_path), "/%s", entry->name);
+            strcpy(full_path, "/");
+            strcat(full_path, entry->name);
         } else {
-            snprintf(full_path, sizeof(full_path), "%s/%s", current_path, entry->name);
+            strcpy(full_path, current_path);
+            strcat(full_path, "/");
+            strcat(full_path, entry->name);
         }
         
         int match_found = 0;
@@ -281,19 +309,34 @@ void search_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_bl
     }
 }
 
-// search command implementation
+// search command implementation - universal search
 void search_cmd(string ch) {
     uint8 i = 0;
     while (ch[i] && ch[i] != ' ') i++;
     while (ch[i] && ch[i] == ' ') i++;
     
+    // Check if this is filter mode (from pipeline)
+    int is_filter_mode = 0;
+    if (strstr(ch, "--filter") != NULL) {
+        is_filter_mode = 1;
+        // Remove --filter from the command string
+        char* filter_pos = strstr(ch, "--filter");
+        if (filter_pos) {
+            *filter_pos = '\0';
+        }
+    }
+    
     if (!ch[i]) {
-        printf("%cUsage: search <pattern> [options]\n", 255, 255, 255);
-        printf("%cOptions:\n", 255, 255, 255);
-        printf("%c  -f    Search in filenames and directory names only\n", 255, 255, 255);
-        printf("%c  -c    Search in file contents only (default)\n", 255, 255, 255);
-        printf("%c  -a    Search in both names and contents\n", 255, 255, 255);
-        printf("%cExample: search hello -a\n", 255, 255, 255);
+        printf("%cUsage: search <pattern> [source]\n", 255, 255, 255);
+        printf("%cSources:\n", 255, 255, 255);
+        printf("%c  (none)     - Search filesystem (default)\n", 255, 255, 255);
+        printf("%c  <command>  - Search command output\n", 255, 255, 255);
+        printf("%c  <drive:path> - Search specific location\n", 255, 255, 255);
+        printf("%cExamples:\n", 255, 255, 255);
+        printf("%c  search test.txt          (search filesystem)\n", 255, 255, 255);
+        printf("%c  search test.txt ls       (search ls output)\n", 255, 255, 255);
+        printf("%c  search test.txt 0:/      (search drive 0 from /)\n", 255, 255, 255);
+        printf("%c  ls | search test.txt     (pipeline mode)\n", 255, 255, 255);
         return;
     }
     
@@ -310,38 +353,154 @@ void search_cmd(string ch) {
         return;
     }
     
-    // Parse options
-    int search_filenames = 1; // Default to searching names too
-    int search_contents = 1; // Default to content search
-    
+    // Skip spaces after pattern
     while (ch[i] && ch[i] == ' ') i++;
-    if (ch[i] == '-') {
-        i++;
-        if (ch[i] == 'f') {
-            search_filenames = 1;
-            search_contents = 0;
-        } else if (ch[i] == 'c') {
-            search_filenames = 0;
-            search_contents = 1;
-        } else if (ch[i] == 'a') {
-            search_filenames = 1;
-            search_contents = 1;
+    
+    // Check for source (command or path)
+    char source[128] = {0};
+    if (ch[i]) {
+        uint8 k = 0;
+        while (ch[i] && ch[i] != ' ' && k < 127) {
+            source[k++] = ch[i++];
         }
+        source[k] = '\0';
     }
     
-    printf("%cSearching for '%s' in entire filesystem...\n", 255, 255, 255, pattern);
-    
-    // Get filesystem info
-    eynfs_superblock_t sb;
-    if (eynfs_read_superblock(g_current_drive, EYNFS_SUPERBLOCK_LBA, &sb) != 0 || sb.magic != EYNFS_MAGIC) {
-        printf("%cError: No supported filesystem found.\n", 255, 0, 0);
+    if (is_filter_mode) {
+        // Pipeline mode: search in piped input data
+        extern char* g_pipeline_input_data;
+        if (g_pipeline_input_data && strlen(g_pipeline_input_data) > 0) {
+            // Split input into lines and search each line
+            char* input_copy = malloc(strlen(g_pipeline_input_data) + 1);
+            strcpy(input_copy, g_pipeline_input_data);
+            
+            char* line = simple_strtok(input_copy, "\n");
+            int found_count = 0;
+            
+            while (line) {
+                char* trimmed_line = trim_whitespace(line);
+                if (strlen(trimmed_line) > 0) {
+                    // Search for pattern in this line
+                    if (boyer_moore_search(trimmed_line, pattern) != -1) {
+                        printf("%c%s\n", 0, 255, 0, trimmed_line);
+                        found_count++;
+                    }
+                }
+                line = simple_strtok(NULL, "\n");
+            }
+            
+            free(input_copy);
+            
+            if (found_count == 0) {
+                // No output for no matches in filter mode (like grep)
+            }
+        } else {
+            printf("%cError: No input data for filtering.\n", 255, 0, 0);
+        }
         return;
     }
     
-    // Start recursive search from root
+    // Check if source is a command
+    if (strlen(source) > 0 && !strchr(source, ':')) {
+        // Command mode: execute command and search its output
+        printf("%cSearching for '%s' in '%s' output...\n", 255, 255, 255, pattern, source);
+        
+        // Capture command output
+        start_shell_redirect();
+        
+        // Execute the command
+        shell_cmd_handler_t handler = find_command(source);
+        if (handler) {
+            handler(source);
+        } else {
+            printf("Command not found: %s\n", source);
+            stop_shell_redirect();
+            return;
+        }
+        
+        // Get the output
+        stop_shell_redirect();
+        char* output = shell_redirect_buf;
+        
+        if (output && strlen(output) > 0) {
+            // Search in command output
+            char* output_copy = malloc(strlen(output) + 1);
+            strcpy(output_copy, output);
+            
+            char* line = simple_strtok(output_copy, "\n");
+            int found_count = 0;
+            
+            while (line) {
+                char* trimmed_line = trim_whitespace(line);
+                if (strlen(trimmed_line) > 0) {
+                    // Search for pattern in this line
+                    if (boyer_moore_search(trimmed_line, pattern) != -1) {
+                        printf("%c%s\n", 0, 255, 0, trimmed_line);
+                        found_count++;
+                    }
+                }
+                line = simple_strtok(NULL, "\n");
+            }
+            
+            free(output_copy);
+            
+            if (found_count == 0) {
+                printf("%cNo matches found for '%s' in '%s' output.\n", 255, 0, 0, pattern, source);
+            }
+        } else {
+            printf("%cNo output from command '%s'.\n", 255, 0, 0, source);
+        }
+        return;
+    }
+    
+    // Filesystem search mode
+    uint8_t drive = g_current_drive;
+    char* search_path = "/";
+    
+    // Parse drive:path if provided
+    if (strlen(source) > 0 && strchr(source, ':')) {
+        char* colon_pos = strchr(source, ':');
+        if (colon_pos) {
+            *colon_pos = '\0';
+            drive = atoi(source);
+            search_path = colon_pos + 1;
+            if (strlen(search_path) == 0) {
+                search_path = "/";
+            }
+        }
+    }
+    
+    printf("%cSearching for '%s' in filesystem (drive %d, path '%s')...\n", 255, 255, 255, pattern, drive, search_path);
+    
+    // Get filesystem info
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) != 0 || sb.magic != EYNFS_MAGIC) {
+        printf("%cError: No supported filesystem found on drive %d.\n", 255, 0, 0, drive);
+        return;
+    }
+    
+    // Find starting directory
+    eynfs_dir_entry_t start_entry;
+    uint32_t start_block = sb.root_dir_block;
+    
+    if (strcmp(search_path, "/") != 0) {
+        uint32_t parent_block, entry_idx;
+        if (eynfs_traverse_path(drive, &sb, search_path, &start_entry, &parent_block, &entry_idx) == 0) {
+            if (start_entry.type == EYNFS_TYPE_DIR) {
+                start_block = start_entry.first_block;
+            } else {
+                printf("%cError: '%s' is not a directory.\n", 255, 0, 0, search_path);
+                return;
+            }
+        } else {
+            printf("%cError: Path '%s' not found.\n", 255, 0, 0, search_path);
+            return;
+        }
+    }
+    
+    // Start recursive search
     int found_count = 0;
-    search_recursive(g_current_drive, &sb, sb.root_dir_block, pattern, 
-                    search_filenames, search_contents, &found_count, "/", 1);
+    search_recursive(drive, &sb, start_block, pattern, 1, 1, &found_count, search_path, strlen(search_path));
     
     if (found_count == 0) {
         printf("%cNo matches found for '%s'.\n", 255, 0, 0, pattern);
@@ -440,7 +599,7 @@ void ver()
     printf("%c#######     ##     ##  ##  ##  #####  ##    ##   #####\n");
     printf("%c###         ##     ##    ####         ##    ##       ##\n");
     printf("%c#######     ##     ##      ##          ######    #####\n");
-    printf("%c(Release 13)\n", 200, 200, 200);
+    printf("%c(Release 14)\n", 200, 200, 200);
 }
 
 // help implementation
@@ -631,9 +790,12 @@ void lsata() {
     printf("%c================\n", 255, 255, 255);
     
     int found_drives = 0;
-    for (int d = 0; d < 8; d++) {
+    for (int logical_d = 0; logical_d < ata_get_num_logical_drives(); logical_d++) {
+        uint8 physical_d = ata_logical_to_physical(logical_d);
+        if (physical_d == 0xFF) continue;
+        
         uint16 id[256];
-        int res = ata_identify(d, id);
+        int res = ata_identify(physical_d, id);
         if (res == 0) {
             found_drives++;
             char model[41];
@@ -660,14 +822,12 @@ void lsata() {
                 drive_type = "SATA";
             }
             
-            printf("%cDrive %d: %s\n", 255, 255, 255, d, model);
+            printf("%cDrive %d: %s\n", 255, 255, 255, logical_d, model);
             printf("%c  Type: %s\n", 255, 255, 255, drive_type);
             printf("%c  Size: %d MB (%d GB)\n", 255, 255, 255, mb, gb);
             printf("%c  Sectors: %d\n", 255, 255, 255, sectors);
             printf("%c  Status: Present and responding\n", 0, 255, 0);
             printf("\n");
-        } else {
-            printf("%cDrive %d: Not present or not responding\n", 255, 165, 0, d);
         }
     }
     
@@ -710,9 +870,9 @@ void drives_cmd(string ch) {
         printf("%c- Some drives may require jumper settings\n", 255, 255, 255);
     } else {
         printf("%c\nDrive Information:\n", 255, 255, 0);
-        for (int d = 0; d < 8; d++) {
-            if (ata_drive_present(d)) {
-                printf("%cDrive %d: Present\n", 0, 255, 0, d);
+        for (int logical_d = 0; logical_d < ata_get_num_logical_drives(); logical_d++) {
+            if (ata_logical_drive_present(logical_d)) {
+                printf("%cDrive %d: Present\n", 0, 255, 0, logical_d);
             }
         }
     }
@@ -730,15 +890,25 @@ void drive_cmd(string ch) {
     while (ch[i] && ch[i] != ' ') i++;
     while (ch[i] && ch[i] == ' ') i++;
     if (ch[i] >= '0' && ch[i] <= '9') {
-        uint32_t drive = 0;
+        uint32_t logical_drive = 0;
         while (ch[i] >= '0' && ch[i] <= '9') {
-            drive = drive * 10 + (ch[i] - '0');
+            logical_drive = logical_drive * 10 + (ch[i] - '0');
             i++;
         }
-        g_current_drive = (uint8_t)drive;
-        printf("%cSwitched to drive %d\n", 0, 255, 0, g_current_drive);
+        
+        // convert logical drive to physical drive
+        uint8 physical_drive = ata_logical_to_physical((uint8_t)logical_drive);
+        if (physical_drive == 0xFF) {
+            printf("%cInvalid drive number %d\n", 255, 0, 0, logical_drive);
+            printf("%cAvailable drives: 0 to %d\n", 255, 255, 255, ata_get_num_logical_drives() - 1);
+            return;
+        }
+        
+        g_current_drive = physical_drive;
+        printf("%cSwitched to drive %d\n", 0, 255, 0, logical_drive);
     } else {
         printf("%cUsage: drive <n>\n", 255, 255, 255);
+        printf("%cAvailable drives: 0 to %d\n", 255, 255, 255, ata_get_num_logical_drives() - 1);
     }
 }
 
@@ -856,7 +1026,40 @@ void size(string ch) {
             return;
         }
         char outbuf[128];
-        snprintf(outbuf, sizeof(outbuf), "%s: %u bytes", abspath, entry.size);
+        strcpy(outbuf, abspath);
+        strcat(outbuf, ": ");
+        // Convert size to string (simple approach)
+        char size_str[32];
+        uint32 size = entry.size;
+        int size_pos = 0;
+        if (size >= 1000000) {
+            size_str[size_pos++] = '0' + (size / 1000000);
+            size = size % 1000000;
+        }
+        if (size >= 100000) {
+            size_str[size_pos++] = '0' + (size / 100000);
+            size = size % 100000;
+        }
+        if (size >= 10000) {
+            size_str[size_pos++] = '0' + (size / 10000);
+            size = size % 10000;
+        }
+        if (size >= 1000) {
+            size_str[size_pos++] = '0' + (size / 1000);
+            size = size % 1000;
+        }
+        if (size >= 100) {
+            size_str[size_pos++] = '0' + (size / 100);
+            size = size % 100;
+        }
+        if (size >= 10) {
+            size_str[size_pos++] = '0' + (size / 10);
+            size = size % 10;
+        }
+        size_str[size_pos++] = '0' + size;
+        size_str[size_pos] = '\0';
+        strcat(outbuf, size_str);
+        strcat(outbuf, " bytes");
         printf("%c%s\n", 255, 255, 255, outbuf);
         return;
     }
@@ -1186,5 +1389,67 @@ void init_cmd(string ch) {
     printf("%cSystem initialization complete!\n", 0, 255, 0);
     printf("%cAll services are now available.\n", 0, 255, 0);
 }
+
+// Pipeline system commands
+void jobs_cmd(string ch) {
+    printf("%cBackground Jobs:\n", 255, 255, 255);
+    list_background_processes();
+}
+
+void fg_cmd(string ch) {
+    // Parse PID from command
+    char* space = strchr(ch, ' ');
+    if (!space) {
+        printf("%cUsage: fg <pid>\n", 255, 255, 255);
+        printf("%cExample: fg 1\n", 255, 255, 255);
+        return;
+    }
+    
+    space++;
+    int pid = atoi(space);
+    if (pid <= 0) {
+        printf("%cInvalid PID: %s\n", 255, 0, 0, space);
+        return;
+    }
+    
+    wait_for_background_process(pid);
+}
+
+void bg_cmd(string ch) {
+    printf("%cBackground process management:\n", 255, 255, 255);
+    printf("%c  Use '&' at the end of commands to run in background\n", 255, 255, 255);
+    printf("%c  Example: ls & (runs ls in background)\n", 255, 255, 255);
+    printf("%c  Use 'jobs' to list background processes\n", 255, 255, 255);
+    printf("%c  Use 'fg <pid>' to bring process to foreground\n", 255, 255, 255);
+}
+
+void pipe_cmd(string ch) {
+    printf("%cPipeline System:\n", 255, 255, 255);
+    printf("%c  Use '|' to pipe output between commands\n", 255, 255, 255);
+    printf("%c  Example: ls | grep .txt\n", 255, 255, 255);
+    printf("%c  Use '<' for input redirection\n", 255, 255, 255);
+    printf("%c  Example: sort < input.txt\n", 255, 255, 255);
+    printf("%c  Use '>' for output redirection\n", 255, 255, 255);
+    printf("%c  Example: ls > output.txt\n", 255, 255, 255);
+    printf("%c  Use '>>' for append redirection\n", 255, 255, 255);
+    printf("%c  Example: echo 'new line' >> file.txt\n", 255, 255, 255);
+}
+
+// Register pipeline commands
+REGISTER_SHELL_COMMAND(jobs, "jobs", jobs_cmd, CMD_STREAMING,
+    "List background processes.\nUsage: jobs",
+    "jobs");
+
+REGISTER_SHELL_COMMAND(fg, "fg", fg_cmd, CMD_STREAMING,
+    "Bring background process to foreground.\nUsage: fg <pid>",
+    "fg 1");
+
+REGISTER_SHELL_COMMAND(bg, "bg", bg_cmd, CMD_STREAMING,
+    "Show background process management help.\nUsage: bg",
+    "bg");
+
+REGISTER_SHELL_COMMAND(pipe, "pipe", pipe_cmd, CMD_STREAMING,
+    "Show pipeline system help.\nUsage: pipe",
+    "pipe");
 
  

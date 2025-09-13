@@ -14,15 +14,6 @@ void search_type_cmd(string ch);
 void search_empty_cmd(string ch);
 void search_depth_cmd(string ch);
 
-// Help sub-command functions
-void help_write_cmd(string ch);
-void help_search_cmd(string ch);
-void help_fs_cmd(string ch);
-void help_edit_cmd(string ch);
-void help_system_cmd(string ch);
-void help_game_cmd(string ch);
-void help_dev_cmd(string ch);
-
 // LS sub-command functions
 void ls_tree_cmd(string ch);
 void ls_size_cmd(string ch);

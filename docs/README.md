@@ -8,6 +8,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 - **[System Overview](system-overview.md)** - High-level architecture and design principles
 - **[Boot Process](boot-process.md)** - How EYN-OS boots from GRUB to kernel
 - **[Memory Management](memory-management.md)** - Memory allocation and management
+- **[Memory Management with Paging](memory-management.md)** - Virtual memory and paging system
 - **[Interrupts & Exceptions](interrupts.md)** - IDT, ISRs, and exception handling
 
 ### Filesystems
@@ -19,6 +20,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 ### User Interface
 - **[TUI System](ui/tui.md)** - Text User Interface framework
 - **[Shell System](ui/shell.md)** - Command-line interface and shell commands
+- **[Pipeline System](pipeline-system.md)** - Unix-like pipelines and redirection
 - **[Help System](ui/help.md)** - Interactive help command
 
 ### Development Tools

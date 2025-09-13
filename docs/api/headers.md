@@ -519,10 +519,10 @@ typedef struct {
 ## API Usage Guidelines
 
 ### Header Inclusion
-Always use relative paths when including headers:
+Always include headers between greater/lesser than signs:
 ```c
-#include "../../../include/vga.h"
-#include "../../../include/string.h"
+#include <vga.h>
+#include <string.h>
 ```
 
 ### Function Naming

@@ -96,8 +96,26 @@ status          # Check which commands are loaded
 | `echo` | Echo text | `echo Hello` |
 | `random` | Generate random number | `random 100` |
 | `sort` | Sort file lines | `sort data.txt` |
-| `search` | Search files | `search "text"` |
+| `search` | Universal search (filesystem/command/pipeline) | `search test.txt` |
 | `spam` | Spam EYN-OS | `spam` |
+
+## Pipeline and Redirection (In Development)
+
+**Note**: These features are currently in development. Only basic functionality is available.
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `\|` | Pipe output (2 commands max) | `ls \| search test.txt` |
+| `>` | Redirect output (overwrite) | `echo "Hello" > file.txt` |
+| `>>` | Redirect output (append) | `echo "World" >> file.txt` |
+
+### Search Command Examples
+```bash
+search test.txt                    # Search filesystem
+search test.txt ls                 # Search ls output  
+search test.txt 0:/                # Search drive 0 from root
+ls | search test.txt               # Pipeline filtering
+```
 
 ## Error and Debug Commands
 
@@ -281,9 +299,10 @@ status              # Check command loading status
 - **High Memory**: 0x00800000+ (if available)
 
 ### Memory Requirements
-- **Minimum**: 16MB RAM (with optimizations)
-- **Recommended**: 32MB+ RAM
-- **Optimal**: 64MB+ RAM
+- **Minimum**: 3MB RAM (with GRUB bootloader), 1MB RAM (with direct boot)
+- **Recommended**: 8MB+ RAM (for comfortable usage with all features)
+- **Optimal**: 16MB+ RAM (for full performance and multitasking)
+- **Note**: GRUB bootloader requires additional memory for its internal scripting system
 
 ### Filesystem
 - **EYNFS**: Native filesystem
@@ -321,23 +340,3 @@ status              # Check command loading status
 - **REI Images**: Native image format with pixel-perfect rendering
 - **Markdown**: Formatted text display with bold/italic support
 - **Raw Data**: Binary file display with hex dump support
-
-## Release 12 Features
-
-### Stability Improvements
-- **Intelligent Exception Handling**: System attempts recovery instead of halting
-- **Memory Corruption Detection**: Advanced heap validation and error reporting
-- **Command Safety**: Input validation and argument sanitization
-- **Process Isolation**: Memory separation for user programs
-
-### Portability Enhancements
-- **Dynamic Memory Detection**: Automatic RAM detection using multiboot info
-- **Adaptive Heap Sizing**: Conservative memory allocation for low-end systems
-- **Streaming Command System**: On-demand command loading to reduce memory footprint
-- **Optimized File I/O**: Dynamic buffering with efficient memory usage
-
-### User Experience
-- **Professional Help System**: Interactive TUI with dual-pane layout
-- **File Format Support**: REI image rendering and Markdown formatting
-- **Clean Output**: Removed debug messages for professional appearance
-- **Command Consistency**: All registered commands properly included in streaming system

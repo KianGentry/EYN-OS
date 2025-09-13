@@ -122,9 +122,6 @@ Game engine and gaming commands.
 - Game directory structure
 - Example game commands
 
-#### `help_dev`
-Development and programming tools.
-
 **Covers:**
 - Assembly (`assemble`)
 - Execution (`run`)

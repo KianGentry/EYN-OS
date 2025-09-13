@@ -14,6 +14,7 @@ void catram(string ch);
 void lsram(string input);
 void writeram(string ch);
 int write_output_to_file(const char* buf, int len, const char* filename, uint8_t disk);
+int append_output_to_file(const char* buf, int len, const char* filename, uint8_t disk);
 int check_filesystem_integrity(uint8_t disk);
 void to_fat32_83(const char* input, char* output);
 void copy_cmd(string ch);

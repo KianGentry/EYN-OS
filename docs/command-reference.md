@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2025-08-19 02:04:36
+This document is auto-generated from the source code. Last updated: 2025-09-13 17:27:04
 
 **Total Commands:** 38
 
@@ -746,8 +746,8 @@ assemble example.asm example.eyn
 **File:** `run_command.c`
 
 **Description:**
-Run a .eyn executable with process isolation.
-Usage: run <program.eyn>
+Run a .eyn executable or .shell script.
+Usage: run <program.eyn|script.shell>
 
 **Example:**
 ```bash

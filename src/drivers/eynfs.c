@@ -147,8 +147,8 @@ static eynfs_dir_cache_entry_t* eynfs_dir_cache_alloc() {
     // Find free slot or evict least recently used
     for (int i = 0; i < EYNFS_DIR_CACHE_SIZE; i++) {
         if (!dir_cache[i].entries) {
-            // Allocate enough space for larger directory entries (16KB limit)
-            dir_cache[i].entries = (eynfs_dir_entry_t*)malloc(16384);
+            // Allocate space for directory entries (4KB limit for low-memory systems)
+            dir_cache[i].entries = (eynfs_dir_entry_t*)malloc(4096);
             if (dir_cache[i].entries) {
                 return &dir_cache[i];
             }
@@ -158,7 +158,7 @@ static eynfs_dir_cache_entry_t* eynfs_dir_cache_alloc() {
     // Evict first entry (simple LRU)
     if (dir_cache[0].entries) {
         free(dir_cache[0].entries);
-        dir_cache[0].entries = (eynfs_dir_entry_t*)malloc(16384);
+        dir_cache[0].entries = (eynfs_dir_entry_t*)malloc(4096);
         if (dir_cache[0].entries) {
             return &dir_cache[0];
         }
@@ -521,10 +521,10 @@ int eynfs_find_in_dir(uint8 drive, const eynfs_superblock_t *sb, uint32_t dir_bl
     size_t allocation_size = sizeof(eynfs_dir_entry_t) * entry_count;
     
     // Safety check: limit allocation to prevent memory exhaustion
-    if (allocation_size > 16384) { // 16KB limit for directory operations
-        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 16KB\n", 255, 165, 0, allocation_size);
-        entry_count = 16384 / sizeof(eynfs_dir_entry_t);
-        allocation_size = 16384;
+    if (allocation_size > 4096) { // 4KB limit for directory operations
+        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 4KB\n", 255, 165, 0, allocation_size);
+        entry_count = 4096 / sizeof(eynfs_dir_entry_t);
+        allocation_size = 4096;
     }
     
     eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(allocation_size);
@@ -555,7 +555,7 @@ int eynfs_find_in_dir(uint8 drive, const eynfs_superblock_t *sb, uint32_t dir_bl
             
             // Bounds check for memory copy
             size_t copy_size = count * sizeof(eynfs_dir_entry_t);
-            if (copy_size <= 16384) {
+            if (copy_size <= 4096) {
                 memcpy(new_cache->entries, entries, copy_size);
                 new_cache->sorted = 0; // Not sorted, use linear search
             } else {
@@ -623,10 +623,10 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
     size_t allocation_size = sizeof(eynfs_dir_entry_t) * entry_count;
     
     // Safety check: limit allocation to prevent memory exhaustion
-    if (allocation_size > 16384) { // 16KB limit for directory operations
-        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 16KB\n", 255, 165, 0, allocation_size);
-        entry_count = 16384 / sizeof(eynfs_dir_entry_t);
-        allocation_size = 16384;
+    if (allocation_size > 4096) { // 4KB limit for directory operations
+        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 4KB\n", 255, 165, 0, allocation_size);
+        entry_count = 4096 / sizeof(eynfs_dir_entry_t);
+        allocation_size = 4096;
     }
     
     eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(allocation_size);
@@ -656,8 +656,8 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
     if (free_idx == -1) {
         // Need to add a new entry - check if we can safely reallocate
         size_t new_allocation_size = sizeof(eynfs_dir_entry_t) * (entry_count + 1);
-        if (new_allocation_size > 16384) { // 16KB limit
-            printf("%cWarning: Cannot add new entry - directory allocation would exceed 16KB limit\n", 255, 165, 0);
+        if (new_allocation_size > 4096) { // 4KB limit
+            printf("%cWarning: Cannot add new entry - directory allocation would exceed 4KB limit\n", 255, 165, 0);
             free(entries);
             return -1;
         }
@@ -725,10 +725,10 @@ int eynfs_delete_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
     size_t allocation_size = sizeof(eynfs_dir_entry_t) * entry_count;
     
     // Safety check: limit allocation to prevent memory exhaustion
-    if (allocation_size > 16384) { // 16KB limit for directory operations
-        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 16KB\n", 255, 165, 0, allocation_size);
-        entry_count = 16384 / sizeof(eynfs_dir_entry_t);
-        allocation_size = 16384;
+    if (allocation_size > 4096) { // 4KB limit for directory operations
+        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 4KB\n", 255, 165, 0, allocation_size);
+        entry_count = 4096 / sizeof(eynfs_dir_entry_t);
+        allocation_size = 4096;
     }
     
     eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(allocation_size);
@@ -883,10 +883,10 @@ int eynfs_write_file(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *ent
     size_t allocation_size = sizeof(eynfs_dir_entry_t) * entry_count;
     
     // Safety check: limit allocation to prevent memory exhaustion
-    if (allocation_size > 16384) { // 16KB limit for directory operations
-        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 16KB\n", 255, 165, 0, allocation_size);
-        entry_count = 16384 / sizeof(eynfs_dir_entry_t);
-        allocation_size = 16384;
+    if (allocation_size > 4096) { // 4KB limit for directory operations
+        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 4KB\n", 255, 165, 0, allocation_size);
+        entry_count = 4096 / sizeof(eynfs_dir_entry_t);
+        allocation_size = 4096;
     }
     
     eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(allocation_size);

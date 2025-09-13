@@ -121,7 +121,7 @@ void shell_log_flush() {
     size_t max_log_size = (shell_log_buf_size > 8192) ? 8192 : shell_log_buf_size;
     if (total_size > max_log_size) { // Dynamic limit based on buffer size
         printf("%cWarning: Log operation too large (%d bytes), limiting to %d bytes\n", 255, 165, 0, total_size, max_log_size);
-        if (old_size > max_log_size / 2) old_size = max_log_size / 2;
+        if ((size_t)old_size > max_log_size / 2) old_size = (int)(max_log_size / 2);
         if (shell_log_pos > (int)shell_log_buf_size) shell_log_pos = shell_log_buf_size;
         total_size = old_size + shell_log_pos;
     }
@@ -137,7 +137,7 @@ void shell_log_flush() {
     if (n < 0) n = 0;
     
     // Bounds check for memory copy
-    if (n + shell_log_pos <= total_size) {
+    if ((size_t)(n + shell_log_pos) <= total_size) {
         memcpy(newbuf + n, shell_log_buf, shell_log_pos);
     } else {
         printf("%cWarning: Log buffer overflow prevented\n", 255, 165, 0);
@@ -211,14 +211,14 @@ void drawText(int charnum, int r, int g, int b)
 	int h; // vertical position of the pixel in the 8x8 pattern
 	
 
-	if (height == (g_mbi->framebuffer_height)) 
+	if (height == (int)(g_mbi->framebuffer_height)) 
     {
 		clearScreen(); // "scrolling"
 	}
 
 	// charnum = charnum + 1;
 	// Moving the cursor to the next line when we reached the end of the existing line
-	if (width > (g_mbi->framebuffer_width - 20))
+	if (width > (int)(g_mbi->framebuffer_width - 20))
     {
 		width = 0;
 		height = height + 8;
@@ -382,7 +382,7 @@ void printf(const char* format, ...)
 		temp[temp_pos] = '\0';
 		// Append to the log buffer
 		for (int i = 0; i < temp_pos; ++i) {
-			if (shell_log_pos < LOG_BUF_SIZE - 1) {
+			if (shell_log_pos < shell_log_buf_size - 1) {
 				// Check if we need to start a new line
 				if (shell_log_pos == 0 || shell_log_buf[shell_log_pos - 1] == '\n') {
 					shell_log_current_line_start = shell_log_pos;
@@ -713,4 +713,58 @@ void render_markdown(const char* content) {
     }
     
     printf("\n");
+}
+
+// --- simple 2x2 windowing support ---
+typedef struct { int x, y, w, h; } vga_window_rect_t;
+static vga_window_rect_t g_win_rects[4];
+static int g_active_window = -1;
+
+static void vga_draw_window_frame(int x, int y, int w, int h, const char* title) {
+    drawRect(x, y, w, 12, 40, 40, 40);
+    drawRect(x, y + 12, w, h - 12, 0, 0, 0);
+    if (title) {
+        int old_w = width, old_h = height;
+        width = x + 4;
+        height = y + 2;
+        for (const char* p = title; *p; ++p) drawText(*p, 255, 255, 0);
+        width = old_w; height = old_h;
+    }
+}
+
+void vga_windows_init_2x2(void) {
+    clearScreen();
+    int W = g_mbi->framebuffer_width;
+    int H = g_mbi->framebuffer_height;
+    int halfW = W / 2;
+    int halfH = H / 2;
+    g_win_rects[0] = (vga_window_rect_t){ 0, 0, halfW, halfH };
+    g_win_rects[1] = (vga_window_rect_t){ halfW, 0, W - halfW, halfH };
+    g_win_rects[2] = (vga_window_rect_t){ 0, halfH, halfW, H - halfH };
+    g_win_rects[3] = (vga_window_rect_t){ halfW, halfH, W - halfW, H - halfH };
+    for (int i = 0; i < 4; i++) {
+        vga_draw_window_frame(g_win_rects[i].x, g_win_rects[i].y, g_win_rects[i].w, g_win_rects[i].h, "");
+    }
+    g_active_window = 0;
+    width = g_win_rects[0].x;
+    height = g_win_rects[0].y + 13;
+}
+
+void vga_set_active_window(int index) {
+    if (index < 0 || index > 3) return;
+    g_active_window = index;
+    width = g_win_rects[index].x;
+    height = g_win_rects[index].y + 13;
+}
+
+int vga_get_active_window(void) { return g_active_window; }
+
+void vga_clear_window(int index) {
+    if (index < 0 || index > 3) return;
+    drawRect(g_win_rects[index].x + 1, g_win_rects[index].y + 13, g_win_rects[index].w - 2, g_win_rects[index].h - 14, 0, 0, 0);
+}
+
+void vga_window_set_title(int index, const char* title) {
+    if (index < 0 || index > 3) return;
+    vga_draw_window_frame(g_win_rects[index].x, g_win_rects[index].y, g_win_rects[index].w, g_win_rects[index].h, title);
 }

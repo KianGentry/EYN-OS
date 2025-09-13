@@ -26,17 +26,6 @@ static const subcommand_info_t search_subcommands[] = {
     {NULL, NULL, NULL}
 };
 
-static const subcommand_info_t help_subcommands[] = {
-    {"help_write", "Text editor help", "help_write"},
-    {"help_search", "Search commands help", "help_search"},
-    {"help_fs", "Filesystem commands help", "help_fs"},
-    {"help_edit", "Editing commands help", "help_edit"},
-    {"help_system", "System commands help", "help_system"},
-    {"help_game", "Game commands help", "help_game"},
-    {"help_dev", "Development tools help", "help_dev"},
-    {NULL, NULL, NULL}
-};
-
 static const subcommand_info_t ls_subcommands[] = {
     {"ls_tree", "Tree view listing", "ls_tree [depth]"},
     {"ls_size", "Size-based listing", "ls_size [depth]"},
@@ -65,7 +54,6 @@ static const subcommand_info_t read_subcommands[] = {
 // Function to check if a command has sub-commands
 static int has_subcommands(const char* cmd_name) {
     return (strcmp(cmd_name, "search") == 0 ||
-            strcmp(cmd_name, "help") == 0 ||
             strcmp(cmd_name, "ls") == 0 ||
             strcmp(cmd_name, "fs") == 0 ||
             strcmp(cmd_name, "read") == 0);
@@ -74,7 +62,6 @@ static int has_subcommands(const char* cmd_name) {
 // Function to get sub-commands for a base command
 static const subcommand_info_t* get_subcommands(const char* cmd_name) {
     if (strcmp(cmd_name, "search") == 0) return search_subcommands;
-    if (strcmp(cmd_name, "help") == 0) return help_subcommands;
     if (strcmp(cmd_name, "ls") == 0) return ls_subcommands;
     if (strcmp(cmd_name, "fs") == 0) return fs_subcommands;
     if (strcmp(cmd_name, "read") == 0) return read_subcommands;

@@ -16,7 +16,7 @@ _start:
     mov eax, 1          ; syscall number for write
     mov ebx, 1          ; file descriptor (stdout)
     mov ecx, message    ; message to write
-    mov edx, 14         ; message length (including newline)
+    mov edx, 18         ; message length (including newline)
     int 0x80            ; make syscall
     
     ; Exit syscall (syscall 2)

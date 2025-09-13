@@ -829,7 +829,6 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
         
         if (strcmp(def->directive, "db") == 0) {
             // Parse comma-separated values for db
-            printf("[assemble] DEBUG: Processing db directive: '%s'\n", def->value);
             
             // Manual parsing to handle quoted strings properly
             const char* p = def->value;
@@ -842,24 +841,23 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                     // String literal: "Hello, World!"
                     p++; // Skip opening quote
                     const char* start = p;
-                    printf("[assemble] DEBUG: Found opening quote, starting at: '%s'\n", p);
+                    // Found opening quote
                     while (*p && *p != '"') {
-                        printf("[assemble] DEBUG: Character '%c' (0x%02X)\n", *p, (unsigned char)*p);
+                        // Character processing
                         p++;
                     }
                     if (*p == '"') {
                         int len = p - start;
-                        printf("[assemble] DEBUG: Found closing quote, length=%d\n", len);
-                        printf("[assemble] DEBUG: String literal, length %d: '%.*s'\n", len, len, start);
+                        // Found closing quote
+                        // String literal processed
                         if (data_pos + len < data_bytes) {
                             memcpy((*data) + data_pos, start, len);
-                            printf("[assemble] DEBUG: Copied %d bytes to data[%d]\n", len, data_pos);
-                            printf("[assemble] DEBUG: Bytes written:");
+                            // Copied bytes to data
+                            // Bytes written
                             for (int i = 0; i < len && i < 20; i++) {
-                                printf(" 0x%02X('%c')", (unsigned char)(*data)[data_pos + i], 
-                                       ((*data)[data_pos + i] >= 32 && (*data)[data_pos + i] <= 126) ? (*data)[data_pos + i] : '?');
+                                // Byte written
                             }
-                            printf("\n");
+                            // End of bytes
                             data_pos += len;
                         }
                         p++; // Skip closing quote
@@ -867,7 +865,7 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                 } else if (strncmp(p, "0x", 2) == 0) {
                     // Hex value: 0x0A
                     int val = parse_hex(p);
-                    printf("[assemble] DEBUG: Hex value %d (0x%02X)\n", val, val);
+                    // Hex value processed
                     if (data_pos < data_bytes) {
                         (*data)[data_pos++] = val & 0xFF;
                     }
@@ -876,7 +874,7 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                 } else {
                     // Decimal value or other
                     int val = parse_imm(p);
-                    printf("[assemble] DEBUG: Decimal value %d\n", val);
+                    // Decimal value processed
                     if (data_pos < data_bytes) {
                         (*data)[data_pos++] = val & 0xFF;
                     }
@@ -947,7 +945,7 @@ char* read_file_to_buffer(const char* filename, uint32_t* out_size) {
     
     char* buf = (char*)malloc(size + 1);
     if (!buf) {
-        printf("[assemble] Out of memory.\n");
+        printf("[assemble] Out of memory. Requested %d bytes.\n", size + 1);
         return 0;
     }
     int n = eynfs_read_file(g_current_drive, &sb, &entry, buf, size, 0);
@@ -994,8 +992,10 @@ int assemble(const char *input_path, const char *output_path) {
     int start_addr = lookup_label(&symtab, "_start", SECTION_TEXT);
     if (start_addr >= 0) {
         hdr.entry_point = start_addr - CODE_BASE;  // Convert absolute address to offset
+        // Found _start label
     } else {
         hdr.entry_point = 0;  // Default to start of code if no _start label
+        printf("[assemble] _start label not found, using entry point 0 (start of code)\n");
     }
     hdr.code_size = code_size;
     hdr.data_size = data_size;
@@ -1114,7 +1114,7 @@ AST* parse(const char *src) {
     int line_num = 1;
     AST* ast = (AST*)malloc(sizeof(AST));
     if (!ast) {
-        printf("[parse] Out of memory for AST\n");
+        printf("[parse] Out of memory for AST (requested %d bytes)\n", sizeof(AST));
         return 0;
     }
     ast->instructions = 0;

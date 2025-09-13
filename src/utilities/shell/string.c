@@ -391,7 +391,8 @@ uint8 cmdLength(string ch) {
             size++;
         }
         
-        return size;
+        // Use hasSpace to determine return value
+        return hasSpace ? size : realSize;
 }
 
 uint8 isStringEmpty(string ch1) {

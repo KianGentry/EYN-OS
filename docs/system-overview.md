@@ -8,7 +8,7 @@ EYN-OS is a freestanding x86 operating system designed with the philosophy of "r
 - **Architecture**: Intel x86 (32-bit)
 - **Bootloader**: GRUB (Multiboot 1.0 compliant, ultra-minimal 6.3MB ISO)
 - **Memory Model**: Flat memory model (no segmentation/paging)
-- **Target Hardware**: Low-end systems (16MB RAM minimum, optimized for 128KB+ systems)
+- **Target Hardware**: Low-end systems (3MB RAM minimum with GRUB, 1MB with direct boot, optimized for 128KB+ systems)
 - **ISO Size**: 6.3MB (78% reduction from original 29MB)
 
 ### Core Design Principles
@@ -97,12 +97,26 @@ EYN-OS/
 
 ## Boot Process
 
+### GRUB Boot (Standard)
 1. **GRUB Loads**: Multiboot header recognized by GRUB
 2. **Kernel Entry**: `kernel.asm` sets up initial stack and calls `kernel.c`
 3. **Memory Detection**: Dynamic detection of available RAM using multiboot info
 4. **System Init**: Initialize IDT, drivers, filesystem with adaptive sizing
 5. **Shell Launch**: Start command-line interface with streaming commands
 6. **User Interaction**: Ready for user commands
+
+### Direct Boot (Ultra-Low Memory)
+1. **Direct Load**: Kernel loaded directly by QEMU/emulator
+2. **Kernel Entry**: `kernel.asm` sets up initial stack and calls `kernel.c`
+3. **Memory Detection**: Dynamic detection of available RAM using multiboot info
+4. **System Init**: Initialize IDT, drivers, filesystem with adaptive sizing
+5. **Shell Launch**: Start command-line interface with streaming commands
+6. **User Interaction**: Ready for user commands
+
+### Boot Method Selection
+- **Use GRUB**: For systems with 3MB+ RAM, provides boot menu and configuration
+- **Use Direct Boot**: For systems with 1-2MB RAM, bypasses bootloader overhead
+- **Memory Savings**: Direct boot saves ~2MB of RAM by eliminating GRUB requirements
 
 ## Memory Layout
 
@@ -122,10 +136,11 @@ EYN-OS/
 - **Serial**: Basic serial port communication
 
 ### Memory Requirements
-- **Minimum**: 16MB RAM (with optimizations)
-- **Recommended**: 32MB+ RAM
-- **Optimal**: 64MB+ RAM
+- **Minimum**: 3MB RAM (with GRUB bootloader), 1MB RAM (with direct boot)
+- **Recommended**: 8MB+ RAM (for comfortable usage with all features)
+- **Optimal**: 16MB+ RAM (for full performance and multitasking)
 - **Target**: Systems as low as 128KB RAM (future goal)
+- **Note**: GRUB bootloader requires additional memory for its internal scripting system
 
 ## Streaming Command Architecture
 
@@ -156,25 +171,26 @@ Loaded on-demand to conserve memory:
 - **Error Handling**: Graceful error recovery where possible
 - **Professional Output**: Clean, informative user messages
 
-## Release 12 Highlights
+## Practical Usage
 
-### Stability Improvements
-- **Intelligent Exception Handling**: System attempts recovery instead of halting
-- **Memory Corruption Detection**: Advanced heap validation and error reporting
-- **Command Safety**: Input validation and argument sanitization
-- **Process Isolation**: Memory separation for user programs
+### Memory Requirements by Use Case
+- **Basic CLI Usage**: 1MB RAM (direct boot)
+- **File Operations**: 2MB RAM (direct boot)
+- **Full Features**: 3MB RAM (GRUB boot)
+- **Development Work**: 8MB+ RAM (comfortable)
+- **Gaming**: 16MB+ RAM (optimal performance)
 
-### Portability Enhancements
-- **Dynamic Memory Detection**: Automatic RAM detection using multiboot info
-- **Adaptive Heap Sizing**: Conservative memory allocation for low-end systems
-- **Streaming Command System**: On-demand command loading to reduce memory footprint
-- **Optimized File I/O**: Dynamic buffering with efficient memory usage
+### Boot Method Selection Guide
+- **1-2MB RAM Systems**: Use `make test_direct` for direct boot
+- **3MB+ RAM Systems**: Use `make run` for GRUB boot
+- **Testing/Development**: Use `make test` for 64MB configuration
+- **Ultra-Low Memory**: Use `make test_direct` with `-m 1M` QEMU flag
 
-### User Experience
-- **Professional Help System**: Interactive TUI with dual-pane layout
-- **File Format Support**: REI image rendering and Markdown formatting
-- **Clean Output**: Removed debug messages for professional appearance
-- **Command Consistency**: All registered commands properly included in streaming system
+### Memory Optimization Tips
+- Use `unload` to free command memory when not needed
+- Monitor memory usage with `memory stats`
+- Use `portable stats` to see memory savings
+- Consider direct boot for systems with very limited RAM
 
 ## Future Directions
 

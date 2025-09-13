@@ -76,6 +76,9 @@ int eynfs_format_partition(uint8 drive, uint8 partition_num);
 int eynfs_open(const char* path, int mode);
 int eynfs_seek(int fd, size_t offset, int whence);
 int eynfs_close(int fd);
+int write(int fd, const void* buf, int size);
+int read(int fd, void* buf, int size);
+int close(int fd);
 
 // File operation modes
 #define EYNFS_READ  0

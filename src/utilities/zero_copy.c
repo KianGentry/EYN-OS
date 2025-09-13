@@ -37,7 +37,7 @@ static uint8_t get_max_zero_copy_files() {
     
     // Set limits based on available memory
     if (available_memory < 8 * 1024 * 1024) {        // Less than 8MB
-        return 4;   // Very conservative for low-memory systems
+        return 2;   // Very conservative for low-memory systems
     } else if (available_memory < 32 * 1024 * 1024) { // Less than 32MB
         return 8;   // Conservative for medium-memory systems
     } else if (available_memory < 128 * 1024 * 1024) { // Less than 128MB
@@ -57,7 +57,7 @@ void zero_copy_init(void) {
     if (!g_zero_copy_files) {
         // Fallback to static allocation if dynamic allocation fails
         printf("%c[ZERO-COPY] Primary allocation failed, trying fallback\n", 255, 165, 0);
-        g_zero_copy_max_files = 4;
+        g_zero_copy_max_files = 2;
         g_zero_copy_files = (zero_copy_file_t*)malloc(g_zero_copy_max_files * sizeof(zero_copy_file_t));
         if (!g_zero_copy_files) {
             printf("%c[ZERO-COPY] Warning: Failed to allocate zero-copy file array\n", 255, 165, 0);

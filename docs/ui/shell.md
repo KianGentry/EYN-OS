@@ -459,26 +459,6 @@ printf("Error: Unknown command '%s'\n", cmd);
 - **Essential Commands**: ~4KB for core commands
 - **Streaming Commands**: Loaded on-demand (~8KB when loaded)
 
-## Release 12 Improvements
-
-### Stability Enhancements
-- **Intelligent Exception Handling**: System attempts recovery instead of halting
-- **Command Safety**: Input validation and argument sanitization
-- **Memory Protection**: Heap corruption detection and validation
-- **Process Isolation**: Memory separation for user programs
-
-### Portability Features
-- **Dynamic Memory Detection**: Automatic RAM detection using multiboot info
-- **Adaptive Heap Sizing**: Conservative memory allocation for low-end systems
-- **Streaming Command System**: On-demand command loading to reduce memory footprint
-- **Optimized File I/O**: Dynamic buffering with efficient memory usage
-
-### User Experience
-- **Professional Help System**: Interactive TUI with dual-pane layout
-- **File Format Support**: REI image rendering and Markdown formatting
-- **Clean Output**: Removed debug messages for professional appearance
-- **Command Consistency**: All registered commands properly included in streaming system
-
 ## Future Enhancements
 
 ### Planned Features
