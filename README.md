@@ -152,10 +152,10 @@ EYN-OS welcomes contributions! Whether you want to add new commands, improve exi
 ## System Requirements
 
 - **Architecture**: Intel x86 (32-bit)
-- **Memory**: Minimum 16MB RAM, recommended 32MB+, optimal 64MB+
+- **Memory**: 3MB+ RAM
 - **Storage**: Any block device (hard disk, USB, etc.)
-- **Display**: VGA text mode (80x25)
-- **ISO Size**: 6.3MB (ultra-minimal, legacy BIOS only)
+- **Display**: VGA "graphical" mode (80x25, 640x480)
+- **ISO Size**: 2.8MB
 
 ## Architecture
 
@@ -200,7 +200,7 @@ EYN-OS welcomes contributions! Whether you want to add new commands, improve exi
 - **Customization**: Tailored to specific needs
 
 ### Code Style
-- **Clear Comments**: Extensive documentation in code
+- **Clear Comments**: Extensive documentation in code. Avoid explaining what a function does, and try explaining why it does it.
 - **Simple Functions**: One function, one purpose
 - **Consistent Naming**: Descriptive function and variable names
 - **Error Handling**: Graceful error recovery where possible
