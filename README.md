@@ -84,20 +84,6 @@ make
 make run
 ```
 
-#### Direct Boot (1-2MB RAM)
-```bash
-make test_direct
-```
-
-#### Manual QEMU Commands
-```bash
-# Standard GRUB boot
-qemu-system-i386 -cdrom EYNOS.iso -hda eynfs.img -boot d -m 4M
-
-# Direct kernel boot (ultra-low memory)
-qemu-system-i386 -kernel tmp/boot/kernel.bin -hda eynfs.img -m 1M
-```
-
 ### Running on Real Hardware
 Flash the `EYNOS.iso` to a USB drive and boot from it. Tested on Intel x86 hardware.
 
