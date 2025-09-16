@@ -6,10 +6,10 @@ EYN-OS is a freestanding x86 operating system designed with the philosophy of "r
 
 ### Target Platform
 - **Architecture**: Intel x86 (32-bit)
-- **Bootloader**: GRUB (Multiboot 1.0 compliant, ultra-minimal 6.3MB ISO)
+- **Bootloader**: GRUB (Multiboot 1.0 compliant)
 - **Memory Model**: Flat memory model (no segmentation/paging)
-- **Target Hardware**: Low-end systems (3MB RAM minimum with GRUB, 1MB with direct boot, optimized for 128KB+ systems)
-- **ISO Size**: 6.3MB (78% reduction from original 29MB)
+- **Target Hardware**: Low-end systems (3MB RAM minimum), i386 or higher
+- **ISO Size**: 2.4MB
 
 ### Core Design Principles
 1. **Freestanding Environment**: No dependency on standard C libraries
@@ -95,29 +95,6 @@ EYN-OS/
 -Oz                    # Optimize for size
 ```
 
-## Boot Process
-
-### GRUB Boot (Standard)
-1. **GRUB Loads**: Multiboot header recognized by GRUB
-2. **Kernel Entry**: `kernel.asm` sets up initial stack and calls `kernel.c`
-3. **Memory Detection**: Dynamic detection of available RAM using multiboot info
-4. **System Init**: Initialize IDT, drivers, filesystem with adaptive sizing
-5. **Shell Launch**: Start command-line interface with streaming commands
-6. **User Interaction**: Ready for user commands
-
-### Direct Boot (Ultra-Low Memory)
-1. **Direct Load**: Kernel loaded directly by QEMU/emulator
-2. **Kernel Entry**: `kernel.asm` sets up initial stack and calls `kernel.c`
-3. **Memory Detection**: Dynamic detection of available RAM using multiboot info
-4. **System Init**: Initialize IDT, drivers, filesystem with adaptive sizing
-5. **Shell Launch**: Start command-line interface with streaming commands
-6. **User Interaction**: Ready for user commands
-
-### Boot Method Selection
-- **Use GRUB**: For systems with 3MB+ RAM, provides boot menu and configuration
-- **Use Direct Boot**: For systems with 1-2MB RAM, bypasses bootloader overhead
-- **Memory Savings**: Direct boot saves ~2MB of RAM by eliminating GRUB requirements
-
 ## Memory Layout
 
 ```
@@ -136,11 +113,9 @@ EYN-OS/
 - **Serial**: Basic serial port communication
 
 ### Memory Requirements
-- **Minimum**: 3MB RAM (with GRUB bootloader), 1MB RAM (with direct boot)
+- **Minimum**: 3MB RAM
 - **Recommended**: 8MB+ RAM (for comfortable usage with all features)
-- **Optimal**: 16MB+ RAM (for full performance and multitasking)
-- **Target**: Systems as low as 128KB RAM (future goal)
-- **Note**: GRUB bootloader requires additional memory for its internal scripting system
+- **Note**: GRUB bootloader requires additional memory for its internal scripting system. This is why it requires 3MB.
 
 ## Streaming Command Architecture
 
@@ -170,27 +145,6 @@ Loaded on-demand to conserve memory:
 - **Consistent Naming**: Descriptive function and variable names
 - **Error Handling**: Graceful error recovery where possible
 - **Professional Output**: Clean, informative user messages
-
-## Practical Usage
-
-### Memory Requirements by Use Case
-- **Basic CLI Usage**: 1MB RAM (direct boot)
-- **File Operations**: 2MB RAM (direct boot)
-- **Full Features**: 3MB RAM (GRUB boot)
-- **Development Work**: 8MB+ RAM (comfortable)
-- **Gaming**: 16MB+ RAM (optimal performance)
-
-### Boot Method Selection Guide
-- **1-2MB RAM Systems**: Use `make test_direct` for direct boot
-- **3MB+ RAM Systems**: Use `make run` for GRUB boot
-- **Testing/Development**: Use `make test` for 64MB configuration
-- **Ultra-Low Memory**: Use `make test_direct` with `-m 1M` QEMU flag
-
-### Memory Optimization Tips
-- Use `unload` to free command memory when not needed
-- Monitor memory usage with `memory stats`
-- Use `portable stats` to see memory savings
-- Consider direct boot for systems with very limited RAM
 
 ## Future Directions
 
