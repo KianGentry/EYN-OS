@@ -176,7 +176,7 @@ build: all eynfsimg sourceimg docs
 	@echo '    multiboot /boot/kernel.bin' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo '    boot' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo '}' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	grub-mkrescue --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o EYNOS.iso tmp/grub_ultra_minimal/
+	grub2-mkrescue --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o EYNOS.iso tmp/grub_ultra_minimal/
 	@echo "Ultra-minimal ISO created: EYNOS.iso"
 	@ls -lh EYNOS.iso
 	@echo "Removing EFI files from ISO..."
@@ -231,7 +231,7 @@ run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
 	-boot d \
-	-m 3M
+	-m 4M
 # Just runs the OS, no rebuilding.
 
 test: sourceimg
