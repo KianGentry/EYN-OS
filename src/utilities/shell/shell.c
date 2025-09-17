@@ -172,11 +172,7 @@ void lsram_cmd(string arg) { lsram(arg); }
 
 typedef void (*shell_cmd_handler_t)(string arg);
 
-// Command registration is now handled by the linker section .shellcmds
 // All command information is stored in shell_command_info_t structures
-
-// Unified command registration - all commands are now registered via REGISTER_SHELL_COMMAND macro
-// The linker section .shellcmds contains all registered commands
 
 // Command loading state
 static int streaming_commands_loaded = 0;
@@ -262,35 +258,6 @@ shell_cmd_handler_t find_command(const char* name) {
     }
     return NULL;
 }
-
-// Remove unused functions to fix compilation warnings
-/*
-// Command validation function
-static int validate_command_name(const char* name) {
-    if (!name) return 0;
-    
-    // Basic validation - command names should be alphanumeric with underscores
-    for (size_t i = 0; name[i]; i++) {
-        if (!((name[i] >= 'a' && name[i] <= 'z') ||
-              (name[i] >= 'A' && name[i] <= 'Z') ||
-              (name[i] >= '0' && name[i] <= '9') ||
-              name[i] == '_')) {
-            return 0;
-        }
-    }
-    
-    return 1;
-}
-
-// Get command information
-static const shell_command_info_t* get_command_info(const char* name) {
-    if (!name) return NULL;
-    
-    // This would normally look up command metadata
-    // For now, return NULL since we don't have a command registry
-    return NULL;
-}
-*/
 
 static int validate_command_arguments(const char* cmd) {
     if (!cmd) return 0;
