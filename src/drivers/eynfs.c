@@ -1189,3 +1189,104 @@ void eynfs_cache_clear() {
 int eynfs_alloc_block_fast(uint8 drive, eynfs_superblock_t *sb) {
     return eynfs_alloc_block_optimized(drive, sb);
 } 
+
+// --- Streaming writer implementation ---
+int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
+    if (!s || !path) return -1;
+    memset(s, 0, sizeof(*s));
+    s->drive = drive;
+    if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &s->sb) != 0) return -1;
+    // Determine parent dir and file name
+    char parent_path[256];
+    const char* filename = strrchr(path, '/');
+    if (filename) {
+        size_t plen = filename - path;
+        if (plen >= sizeof(parent_path)) return -1;
+        memcpy(parent_path, path, plen);
+        parent_path[plen] = '\0';
+        filename++;
+        if (parent_path[0] == '\0') strcpy(parent_path, "/");
+    } else {
+        strcpy(parent_path, "/");
+        filename = path;
+    }
+    eynfs_dir_entry_t parent_entry;
+    uint32_t parent_block, entry_idx;
+    if (eynfs_traverse_path(drive, &s->sb, parent_path, &parent_entry, &parent_block, NULL) != 0) return -1;
+    // If file exists, delete it to simplify streaming overwrite
+    eynfs_dir_entry_t tmp;
+    if (eynfs_find_in_dir(drive, &s->sb, parent_entry.first_block, filename, &tmp, &entry_idx) == 0) {
+        eynfs_delete_entry(drive, &s->sb, parent_entry.first_block, filename);
+    }
+    if (eynfs_create_entry(drive, &s->sb, parent_entry.first_block, filename, EYNFS_TYPE_FILE) != 0) return -1;
+    if (eynfs_find_in_dir(drive, &s->sb, parent_entry.first_block, filename, &s->entry, &s->entry_index) != 0) return -1;
+    s->parent_block = parent_entry.first_block;
+    s->curr_block = 0;
+    s->first_block = 0;
+    s->size = 0;
+    s->pos_in_block = 0;
+    return 0;
+}
+
+int eynfs_stream_write(eynfs_stream_t* s, const void* buf, size_t size) {
+    if (!s || !buf || size==0) return 0;
+    const uint8* p = (const uint8*)buf;
+    size_t remaining = size;
+    size_t total_written = 0;
+    while (remaining > 0) {
+        // Ensure we have a current block with space
+        if (s->curr_block == 0 || s->pos_in_block >= (EYNFS_BLOCK_SIZE - 4)) {
+            int new_block = eynfs_alloc_block(s->drive, &s->sb);
+            if (new_block < 0) return -1;
+            // Initialize the new block's link to 0 and clear data area
+            uint8 block[EYNFS_BLOCK_SIZE] = {0};
+            *(uint32_t*)block = 0;
+            if (ata_write_sector(s->drive, new_block, block) != 0) return -1;
+            // Link from previous current block if it exists
+            if (s->curr_block != 0) {
+                uint8 prev[EYNFS_BLOCK_SIZE];
+                if (ata_read_sector(s->drive, s->curr_block, prev) != 0) return -1;
+                *(uint32_t*)prev = new_block;
+                if (ata_write_sector(s->drive, s->curr_block, prev) != 0) return -1;
+            }
+            s->curr_block = (uint32_t)new_block;
+            if (s->first_block == 0) s->first_block = s->curr_block;
+            s->pos_in_block = 0;
+        }
+        // Write into current block at current position
+        uint8 block[EYNFS_BLOCK_SIZE];
+        if (ata_read_sector(s->drive, s->curr_block, block) != 0) return -1;
+        size_t space = (EYNFS_BLOCK_SIZE - 4) - s->pos_in_block;
+        size_t chunk = remaining < space ? remaining : space;
+        memcpy(block + 4 + s->pos_in_block, p + total_written, chunk);
+        if (ata_write_sector(s->drive, s->curr_block, block) != 0) return -1;
+        s->pos_in_block += (uint16_t)chunk;
+        s->size += chunk;
+        total_written += chunk;
+        remaining -= chunk;
+    }
+    return (int)total_written;
+}
+
+int eynfs_stream_end(eynfs_stream_t* s) {
+    if (!s) return -1;
+    // Update entry and dir table
+    s->entry.first_block = s->first_block;
+    s->entry.size = s->size;
+    int entry_count = eynfs_count_dir_entries(s->drive, s->parent_block);
+    if (entry_count < 0) return -1;
+    size_t allocation_size = sizeof(eynfs_dir_entry_t) * entry_count;
+    if (allocation_size > 4096) {
+        entry_count = 4096 / sizeof(eynfs_dir_entry_t);
+        allocation_size = 4096;
+    }
+    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(allocation_size);
+    if (!entries) return -1;
+    int count = eynfs_read_dir_table(s->drive, s->parent_block, entries, entry_count);
+    if (count < 0) { free(entries); return -1; }
+    if (s->entry_index >= (uint32_t)count) s->entry_index = count - 1;
+    entries[s->entry_index] = s->entry;
+    int res = eynfs_write_dir_table(s->drive, s->parent_block, entries, count);
+    free(entries);
+    return (res < 0) ? -1 : 0;
+}

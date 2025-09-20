@@ -11,7 +11,6 @@
 #include <string.h>
 #include <eynfs.h>
 #include <shell.h>
-#include <game_engine.h>
 #include <isr.h>
 #include <stdint.h>
 #include <help_tui.h>
@@ -34,7 +33,7 @@ void lsram_cmd(string arg);
 void random_cmd(string arg);
 void sort_cmd(string arg);
 void search_cmd(string arg);
-void game_cmd(string arg);
+// game engine removed
 void error_cmd(string arg);
 void validate_cmd(string arg);
 void portable_cmd(string arg);
@@ -510,63 +509,6 @@ void search_cmd(string ch) {
 }
 
 // game command implementation
-void game_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
-        printf("%cUsage: game <filename>\n", 255, 255, 255);
-        printf("%cExample: game snake\n", 255, 255, 255);
-        printf("%cLoads and runs a game from a .txt file.\n", 255, 255, 255);
-        return;
-    }
-    
-    // Parse filename
-    char filename[64] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 63) {
-        filename[j++] = ch[i++];
-    }
-    filename[j] = '\0';
-    
-    if (strlen(filename) == 0) {
-        printf("%cError: No game filename provided.\n", 255, 0, 0);
-        return;
-    }
-    
-    // Add .txt extension if not present
-    if (strlen(filename) < 4 || strcmp(filename + strlen(filename) - 4, ".txt") != 0) {
-        strncat(filename, ".txt", sizeof(filename) - strlen(filename) - 1);
-    }
-    
-    // Resolve the path properly
-    char abspath[128];
-    resolve_path(filename, shell_current_path, abspath, sizeof(abspath));
-    
-    printf("%cLoading game: %s\n", 255, 255, 255, abspath);
-    
-    // Initialize game engine
-    if (game_engine_init() != 0) {
-        printf("%cError: Failed to initialize game engine.\n", 255, 0, 0);
-        return;
-    }
-    
-    // Load and run game
-    game_state_t state;
-    if (game_load_from_text_file(abspath, &state) != 0) {
-        printf("%cError: Failed to load game file.\n", 255, 0, 0);
-        game_engine_cleanup();
-        return;
-    }
-    
-    // Run the game
-    game_run(&state);
-    
-    // Cleanup
-    game_free_state(&state);
-    game_engine_cleanup();
-}
 
 // echo implementation
 void echo(string ch)
@@ -690,7 +632,7 @@ REGISTER_SHELL_COMMAND(lsram, "lsram", lsram_cmd, CMD_STREAMING, "List files in 
 REGISTER_SHELL_COMMAND(random, "random", random_cmd, CMD_STREAMING, "Generate random numbers.\nUsage: random [count] | random [min] [max]\nExample: random 5 | random 10 20", "random 5");
 REGISTER_SHELL_COMMAND(sort, "sort", sort_cmd, CMD_STREAMING, "Sort strings alphabetically.\nUsage: sort <string1> <string2> <string3> ...\nExample: sort zebra apple banana", "sort zebra apple banana");
 REGISTER_SHELL_COMMAND(search, "search", search_cmd, CMD_STREAMING, "Search for text in filenames and file contents using Boyer-Moore algorithm.\nUsage: search <pattern> [-f|-c|-a]\nExample: search hello -a", "search hello -a");
-REGISTER_SHELL_COMMAND(game, "game", game_cmd, CMD_STREAMING, "Load and run a game from a .dat file.\nUsage: game <filename>\nExample: game snake", "game snake");
+/* game command removed */
 REGISTER_SHELL_COMMAND(error, "error", error_cmd, CMD_STREAMING, "Display system error statistics and status.\nUsage: error [clear|details]", "error");
 REGISTER_SHELL_COMMAND(validate, "validate", validate_cmd, CMD_STREAMING, "Display input validation statistics and test validation.\nUsage: validate [test|stats]", "validate");
 REGISTER_SHELL_COMMAND(portable, "portable", portable_cmd, CMD_ESSENTIAL, "Display portability optimizations and memory usage.\nUsage: portable [stats|optimize]", "portable");

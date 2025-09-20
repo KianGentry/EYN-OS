@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2025-09-17 15:58:38
+This document is auto-generated from the source code. Last updated: 2025-09-20 04:25:48
 
-**Total Commands:** 38
+**Total Commands:** 37
 
 ## Table of Contents
 
@@ -165,26 +165,6 @@ Usage: error [clear|details]
 **Example:**
 ```bash
 error
-```
-
----
-
-### game
-
-**Handler:** `game_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
-
-**Description:**
-Load and run a game from a .dat file.
-Usage: game <filename>
-Example: game snake
-
-**Example:**
-```bash
-game snake
 ```
 
 ---
@@ -761,7 +741,7 @@ run test.eyn
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 6 |
+| Streaming Commands | 5 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |

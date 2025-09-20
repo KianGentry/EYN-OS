@@ -4,6 +4,7 @@
 #include <string.h>
 #include <kernel_api.h>
 #include <vga.h>
+#include <kb.h>
 
 // Process management
 #define MAX_NATIVE_PROCESSES 8
@@ -80,6 +81,7 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
     }
     
     // EYN executable loaded
+    printf("[native_exec] Loaded '%s' (code=%u, data=%u, entry_off=%u)\n", filename, hdr->code_size, hdr->data_size, hdr->entry_point);
     
     // Initialize process structure
     memset(process, 0, sizeof(native_process_t));
@@ -126,6 +128,11 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
     if (hdr->code_size > 0) {
         uint8_t* code = (uint8_t*)(buf + sizeof(struct eyn_exe_header));
         memcpy((void*)process->code_start, code, hdr->code_size);
+        // Tiny dump of first bytes for sanity
+        uint32_t preview = hdr->code_size < 8 ? hdr->code_size : 8;
+        printf("[native_exec] Code preview:");
+        for (uint32_t i = 0; i < preview; i++) { printf(" %02X", code[i]); }
+        printf("\n");
     }
     
     // Copy data section
@@ -198,7 +205,10 @@ exec_result_t native_run_process(native_process_t* process) {
     uint32_t regs[8] = {0}; // eax, ecx, edx, ebx, esp, ebp, esi, edi
     
     // Simple instruction simulation for basic instructions
-    while (pc < process->code_size && pc < 100) { // Limit to prevent infinite loops
+    uint32_t __max_steps = process->code_size * 16 + 1024;
+    if (__max_steps < 2048) __max_steps = 2048;
+    uint32_t __steps = 0;
+    while (pc < process->code_size && __steps++ < __max_steps) { // Limit to prevent infinite loops
         uint8_t opcode = code_ptr[pc];
         
         // Debug output removed for clean program execution
@@ -225,7 +235,7 @@ exec_result_t native_run_process(native_process_t* process) {
                 if (imm == 0x80) {
                     // Handle syscall
                     if (regs[0] == 1) { // WRITE
-                        if (regs[3] == 1 && regs[2] > 0 && regs[2] <= 100) {
+                        if (regs[3] == 1 && regs[2] > 0 && regs[2] <= 512) {
                             // stdout, reasonable length
                             uint32_t buffer_addr = regs[1];
                             if (buffer_addr >= process->data_start && 
@@ -255,6 +265,32 @@ exec_result_t native_run_process(native_process_t* process) {
                         }
                     } else if (regs[0] == 2) { // EXIT
                         break;
+                    } else if (regs[0] == 3) { // READ
+                        // fd in EBX (regs[3]), buf in ECX (regs[1]), len in EDX (regs[2])
+                        if (regs[3] == 0 && regs[1] && regs[2] > 0) {
+                            string s = readStr();
+                            if (s) {
+                                int slen = (int)strlen(s);
+                                int maxcpy = (int)regs[2];
+                                int n = slen;
+                                if (n > maxcpy - 1) n = maxcpy - 1;
+                                // Only allow writes into data section for safety
+                                uint32_t buffer_addr = regs[1];
+                                if (buffer_addr >= process->data_start && 
+                                    buffer_addr < process->data_start + process->data_size && n >= 0) {
+                                    memcpy((void*)buffer_addr, s, n);
+                                    ((char*)buffer_addr)[n] = '\0';
+                                    regs[0] = n;
+                                } else {
+                                    regs[0] = -1;
+                                }
+                                free(s);
+                            } else {
+                                regs[0] = -1;
+                            }
+                        } else {
+                            regs[0] = -1;
+                        }
                     } else {
                         regs[0] = -1;
                     }
@@ -263,23 +299,136 @@ exec_result_t native_run_process(native_process_t* process) {
             } else {
                 break;
             }
+        } else if (opcode == 0x8D) {
+            // lea r32, m
+            if (pc + 1 < process->code_size) {
+                uint8_t modrm = code_ptr[pc + 1];
+                uint8_t dst = (modrm >> 3) & 7;
+                uint8_t mod = (modrm >> 6) & 3;
+                uint8_t rm  = modrm & 7;
+                uint32_t ea = 0; // effective address (only absolute disp32 handled)
+                int step = 2;
+                if (mod == 0 && rm == 5) {
+                    // [disp32] absolute
+                    if (pc + 6 <= process->code_size) {
+                        ea = *(uint32_t*)(code_ptr + pc + 2);
+                        step = 6;
+                    }
+                } else if (mod == 0 && rm == 4) {
+                    // SIB present; handle special case [disp32] via SIB base=5
+                    if (pc + 3 <= process->code_size) {
+                        uint8_t sib = code_ptr[pc + 2];
+                        step = 3;
+                        uint8_t base = sib & 7;
+                        if (base == 5) {
+                            if (pc + 7 <= process->code_size) {
+                                ea = *(uint32_t*)(code_ptr + pc + 3);
+                                step = 7;
+                            }
+                        }
+                    }
+                } else if (mod == 2) {
+                    // disp32 with base register (we don't compute full EA here)
+                    step = 6; // skip over disp32
+                } else if (mod == 1) {
+                    step = 3; // skip over disp8
+                } else {
+                    step = 2; // register-direct; treat as NOP for LEA
+                }
+                if (ea != 0) {
+                    // If this looks like a data address pre-patch, it has already been rebased by loader
+                    // so just assign it; otherwise assign as-is.
+                    regs[dst] = ea;
+                }
+                pc += step;
+            } else {
+                pc++;
+            }
+        } else if (opcode == 0x0F) {
+            // extended opcodes
+            if (pc + 1 < process->code_size) {
+                uint8_t op2 = code_ptr[pc + 1];
+                if (op2 == 0xB6 || op2 == 0xBE) {
+                    // movzx/movsx r32, r/m8 (support reg8 and simple [disp32])
+                    int is_zx = (op2 == 0xB6);
+                    if (pc + 2 < process->code_size) {
+                        uint8_t modrm = code_ptr[pc + 2];
+                        uint8_t dst = (modrm >> 3) & 7;
+                        uint8_t mod = (modrm >> 6) & 3;
+                        uint8_t rm  = modrm & 7;
+                        uint32_t v = 0;
+                        int step = 3;
+                        if (mod == 3) {
+                            // reg8 source from low/high 8 bits of regs
+                            uint8_t src8 = rm; // al=0..bh=7
+                            uint32_t src32 = regs[src8 & 3];
+                            if (src8 < 4) v = src32 & 0xFF; else v = (src32 >> 8) & 0xFF;
+                        } else if (mod == 0 && rm == 5 && pc + 6 <= process->code_size) {
+                            // [disp32]
+                            uint32_t ea = *(uint32_t*)(code_ptr + pc + 3);
+                            step = 7;
+                            if (ea >= process->data_start && ea < process->data_start + process->data_size) {
+                                v = *(uint8_t*)ea;
+                            } else {
+                                v = 0;
+                            }
+                        }
+                        if (!is_zx) {
+                            int8_t sv = (int8_t)(v & 0xFF);
+                            regs[dst] = (uint32_t)(int32_t)sv;
+                        } else {
+                            regs[dst] = (uint32_t)(v & 0xFF);
+                        }
+                        pc += step;
+                    } else {
+                        pc += 2;
+                    }
+                } else {
+                    pc += 2; // unhandled 0F xx
+                }
+            } else {
+                pc++;
+            }
         } else if (opcode == 0xC3) {
             // ret
             break;
         } else if (opcode == 0x89) {
-            // mov reg, reg (32-bit)
+            // mov r/m32, r32 (handle reg,reg)
             if (pc + 1 < process->code_size) {
+                uint8_t modrm = code_ptr[pc + 1];
+                if ((modrm >> 6) == 3) {
+                    uint8_t src = (modrm >> 3) & 7;
+                    uint8_t dst = modrm & 7;
+                    regs[dst] = regs[src];
+                }
                 pc += 2;
             } else {
                 pc++;
             }
         } else if (opcode == 0x8B) {
-            // mov reg, [mem] (32-bit)
+            // mov r32, r/m32 (handle reg,reg)
             if (pc + 1 < process->code_size) {
+                uint8_t modrm = code_ptr[pc + 1];
+                if ((modrm >> 6) == 3) {
+                    uint8_t dst = (modrm >> 3) & 7;
+                    uint8_t src = modrm & 7;
+                    regs[dst] = regs[src];
+                }
                 pc += 2;
             } else {
                 pc++;
             }
+        } else if (opcode == 0x31 || opcode == 0x33) {
+            // xor r/m32, r32 (0x31) or xor r32, r/m32 (0x33) for reg,reg
+            if (pc + 1 < process->code_size) {
+                uint8_t modrm = code_ptr[pc + 1];
+                if ((modrm >> 6) == 3) {
+                    uint8_t reg = (modrm >> 3) & 7;
+                    uint8_t rm  = modrm & 7;
+                    if (opcode == 0x31) regs[rm] ^= regs[reg]; else regs[reg] ^= regs[rm];
+                }
+                pc += 2;
+            } else { pc++; }
         } else if (opcode == 0x01) {
             // add reg, reg (32-bit)
             if (pc + 1 < process->code_size) {
@@ -493,21 +642,4 @@ int native_validate_user_memory(uint32 addr, uint32 size) {
         return 0;
     }
     return 1;
-}
-
-// User mode execution support (stubs for now)
-void native_switch_to_user_mode(native_process_t* process) {
-    // Switching to user mode
-    // In a full implementation, this would:
-    // 1. Set up user mode segment selectors
-    // 2. Set up user mode page tables
-    // 3. Switch CPU privilege level
-}
-
-void native_switch_to_kernel_mode(void) {
-    // Switching to kernel mode
-    // In a full implementation, this would:
-    // 1. Restore kernel segment selectors
-    // 2. Restore kernel page tables
-    // 3. Switch CPU privilege level
 }

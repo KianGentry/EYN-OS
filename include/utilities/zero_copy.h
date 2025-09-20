@@ -6,9 +6,6 @@
 #include <stddef.h>
 #include <eynfs.h>
 
-// Zero-copy file operations system
-// Provides efficient file access without data copying
-
 // File operation modes
 #define ZERO_COPY_READ_ONLY  0x01
 #define ZERO_COPY_WRITE_ONLY 0x02
@@ -77,6 +74,6 @@ int zero_copy_buffer_write(zero_copy_buffer_t* buffer, const void* data, uint32_
 int eynfs_zero_copy_read(uint8_t drive, const eynfs_dir_entry_t* entry, 
                         void** addr, size_t* size, uint32_t offset);
 int eynfs_zero_copy_write(uint8_t drive, eynfs_dir_entry_t* entry,
-                         const void* data, size_t size, uint32_t offset);
+                        const void* data, size_t size, uint32_t offset);
 
 #endif // ZERO_COPY_H 

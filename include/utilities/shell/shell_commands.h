@@ -1,6 +1,6 @@
 #ifndef SHELL_COMMANDS_H
 #define SHELL_COMMANDS_H
-#include "types.h"
+#include <types.h>
 
 void echo(string ch);
 void help();
@@ -19,7 +19,6 @@ void random_cmd(string ch);
 void history_cmd(string ch);
 void sort_cmd(string ch);
 void search_cmd(string ch);
-void game_cmd(string ch);
 void error_cmd(string ch);
 void validate_cmd(string ch);
 void process_cmd(string ch);

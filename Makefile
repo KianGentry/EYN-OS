@@ -2,6 +2,7 @@ COMPILER = gcc
 LINKER = ld
 ASSEMBLER = nasm
 CFLAGS = -m32 -c -ffreestanding -fcommon -Oz -fno-stack-protector -I include/ \
+		 -I include/cpu -I include/drivers -I include/misc -I include/graphics -I include/network -I include/utilities -I include/utilities/shell \
          -Wall -Wextra -Werror=implicit-function-declaration \
          -Wno-unused-parameter -Wno-unused-variable \
          -fno-strict-overflow -fwrapv \
@@ -17,7 +18,7 @@ LDFLAGS = -m elf_i386 -T src/boot/link.ld
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/game_engine.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o
+OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o
 OUTPUT = tmp/boot/kernel.bin
 
 # Source files to object files
@@ -117,12 +118,9 @@ obj/tui.o:src/utilities/tui/tui.c
 obj/help_tui.o:src/utilities/shell/help_tui.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/help_tui.c -o obj/help_tui.o
 
-obj/assemble.o:src/utilities/shell/assemble.c src/utilities/shell/instruction_set.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/assemble.c -o obj/assemble.o
-	$(COMPILER) $(CFLAGS) src/utilities/shell/instruction_set.c -o obj/instruction_set.o
-
-obj/game_engine.o:src/utilities/games/game_engine.c
-	$(COMPILER) $(CFLAGS) src/utilities/games/game_engine.c -o obj/game_engine.o
+obj/assemble.o:src/utilities/assembler/assemble.c src/utilities/assembler/instruction_set.c
+	$(COMPILER) $(CFLAGS) src/utilities/assembler/assemble.c -o obj/assemble.o 
+	$(COMPILER) $(CFLAGS) src/utilities/assembler/instruction_set.c -o obj/instruction_set.o 
 
 obj/subcommands.o:src/utilities/shell/subcommands.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/subcommands.c -o obj/subcommands.o
@@ -154,10 +152,10 @@ obj/native_exec.o:src/cpu/native_exec.c
 obj/native_run.o:src/utilities/shell/native_run.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/native_run.c -o obj/native_run.o
 
-obj/sched.o:src/cpu/sched.c include/sched.h
+obj/sched.o:src/cpu/sched.c include/misc/sched.h
 	$(COMPILER) $(CFLAGS) src/cpu/sched.c -o obj/sched.o
 
-obj/irq.o:src/cpu/irq.c include/irq.h
+obj/irq.o:src/cpu/irq.c include/cpu/irq.h
 	$(COMPILER) $(CFLAGS) src/cpu/irq.c -o obj/irq.o
 
 # Actually building the OS (The stuff you should actually run, i.e. make run, make build, etc.)
@@ -201,14 +199,14 @@ clean:
 clear: clean
 
 # Build the userland EYNFS format tool
-eynfs_format: eynfs_format.c include/eynfs.h
-	$(COMPILER) -o eynfs_format eynfs_format.c
+eynfs_format: eynfs_format.c
+	$(COMPILER) -I include -I include/misc -I include/drivers -I include/cpu -I include/utilities -I include/graphics -I include/network -o eynfs_format eynfs_format.c
 
-# Create and format a 5MB EYNFS disk image
-eynfsimg: eynfs_format
+# Create and format a 10MB EYNFS disk image
+eynfsimg:
 	rm -f eynfs.img
 	dd if=/dev/zero of=eynfs.img bs=1M count=10
-	$(COMPILER) -o eynfs_format eynfs_format.c
+	$(COMPILER) -I include -I include/misc -I include/drivers -I include/cpu -I include/utilities -I include/graphics -I include/network -o eynfs_format eynfs_format.c
 	./eynfs_format eynfs.img
 	python3 devtools/copy_testdir_to_eynfs.py testdir/
 
@@ -216,7 +214,7 @@ eynfsimg: eynfs_format
 sourceimg: eynfs_format
 	rm -f source.img
 	dd if=/dev/zero of=source.img bs=1M count=20
-	$(COMPILER) -o eynfs_format eynfs_format.c
+	$(COMPILER) -I include -I include/misc -I include/drivers -I include/cpu -I include/utilities -I include/graphics -I include/network -o eynfs_format eynfs_format.c
 	./eynfs_format source.img
 	mkdir -p temp_source_structure
 	cp -r src temp_source_structure/
@@ -239,4 +237,4 @@ test: sourceimg
 	-hda eynfs.img \
 	-hdb source.img \
 	-boot d \
-	-m 64M
+	-m 16M

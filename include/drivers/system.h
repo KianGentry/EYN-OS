@@ -1,6 +1,6 @@
 #ifndef SYSTEM_H
 #define SYSTEM_H
-#include "types.h"
+#include <types.h>
 #include <stdint.h>
 
 uint8 inportb (uint16 _port);

@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "types.h"
+#include <types.h>
 
 // EYNFS magic number ('EYNF')
 #define EYNFS_MAGIC 0x45594E46
@@ -95,5 +95,25 @@ void eynfs_get_cache_stats(uint32_t* hits, uint32_t* misses);
 void eynfs_reset_cache_stats();
 void eynfs_cache_clear();
 int eynfs_alloc_block_fast(uint8 drive, eynfs_superblock_t *sb);
+
+// Streaming writer for low-memory environments
+typedef struct {
+    uint8 drive;
+    eynfs_superblock_t sb;
+    eynfs_dir_entry_t entry;
+    uint32_t parent_block;
+    uint32_t entry_index;
+    uint32_t curr_block;   // current block being filled
+    uint32_t first_block;
+    uint32_t size;
+    uint16_t pos_in_block; // write cursor within current block's data area [0..EYNFS_BLOCK_SIZE-4]
+} eynfs_stream_t;
+
+// Begin a streaming write to the given path (overwrites if exists)
+int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s);
+// Write a chunk (any size); splits into filesystem blocks internally
+int eynfs_stream_write(eynfs_stream_t* s, const void* buf, size_t size);
+// Finalize and update directory entry
+int eynfs_stream_end(eynfs_stream_t* s);
 
 #endif // EYNFS_H 

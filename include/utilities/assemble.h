@@ -48,6 +48,9 @@ typedef enum {
 typedef struct {
     OperandType type;
     char value[64];
+    // Optional size hint from tokens like 'byte', 'word', 'dword'. 0 if unspecified.
+    // Valid values: 8, 16, 32
+    int size_hint;
 } Operand;
 
 // Instruction
@@ -72,7 +75,7 @@ typedef struct Label {
 // Data definition
 typedef struct DataDef {
     char directive[8];
-    char value[64];
+    char value[128];
     int line_num;
     struct DataDef* next;
 } DataDef;
@@ -82,6 +85,8 @@ typedef struct AST {
     Instruction* instructions;
     Label* labels;
     DataDef* data_defs;
+    // If 1, nodes are allocated from an arena and freed in bulk
+    int arena_backed;
 } AST;
 
 // Symbol table entry
@@ -103,6 +108,10 @@ typedef enum {
     TOKEN_MNEMONIC,
     TOKEN_REGISTER,
     TOKEN_IMMEDIATE,
+    // New: token representing a full memory operand like [eax+4] or [label]
+    TOKEN_MEMORY,
+    // New: size override keywords like byte/word/dword
+    TOKEN_SIZE,
     TOKEN_SECTION,
     TOKEN_DIRECTIVE,
     TOKEN_COMMA,
@@ -147,5 +156,8 @@ int is_valid_instruction(const char* name);
 const char* get_category_description(InstructionCategory cat);
 void print_instruction_help(const char* mnemonic);
 void list_all_instructions(void);
+
+// Global assembler verbosity (0=quiet, 1=verbose)
+extern int g_asm_verbose;
 
 #endif // ASSEMBLE_H 

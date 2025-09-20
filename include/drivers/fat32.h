@@ -1,6 +1,6 @@
 #ifndef FAT32_H
 #define FAT32_H
-#include "types.h"
+#include <types.h>
 #include "multiboot.h"
 
 // BIOS Parameter Block (BPB) for FAT32

@@ -246,9 +246,14 @@ static void calculate_optimal_heap_size() {
         heap_size = 0x2000000;                       // 32MB (doubled)
     }
     
-    // Ensure heap doesn't exceed available memory (more conservative)
-    if (heap_size > available_ram / 4) { // Use 1/4 instead of 1/8
-        heap_size = available_ram / 4;
+    // Ensure heap doesn't exceed available memory
+    // Be more generous on low-RAM systems to support tools like the assembler
+    if (available_ram <= 8 * 1024 * 1024) {
+        // Up to half of RAM as heap when total RAM <= 8MB
+        if (heap_size > available_ram / 2) heap_size = available_ram / 2;
+    } else {
+        // Otherwise cap at a quarter of RAM
+        if (heap_size > available_ram / 4) heap_size = available_ram / 4;
     }
     
     // Ensure minimum heap size
@@ -450,7 +455,7 @@ void* malloc(size_t nbytes) {
     }
     
     // Increased limit for larger files like .rei images, assembler, and zero-copy operations
-    uint32 max_allocation = heap_size * 4 / 5; // 80% of heap for larger files (increased from 75%)
+    uint32 max_allocation = heap_size * 9 / 10; // 90% of heap allowed for single allocation
     if (nbytes > max_allocation) {
         printf("%c[MEMORY] Request too large: %d bytes (heap: %d KB, max: %d bytes)\n", 255, 0, 0, nbytes, heap_size / 1024, max_allocation);
         return NULL;

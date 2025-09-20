@@ -18,7 +18,6 @@
 #include <run_command.h>
 #include <assemble.h>
 #include <subcommands.h>
-#include <game_engine.h>
 #include <tui.h>
 #include <shell_command_info.h>
 #include <pipeline.h>
@@ -172,7 +171,11 @@ void lsram_cmd(string arg) { lsram(arg); }
 
 typedef void (*shell_cmd_handler_t)(string arg);
 
+// Command registration is now handled by the linker section .shellcmds
 // All command information is stored in shell_command_info_t structures
+
+// Unified command registration - all commands are now registered via REGISTER_SHELL_COMMAND macro
+// The linker section .shellcmds contains all registered commands
 
 // Command loading state
 static int streaming_commands_loaded = 0;
@@ -259,6 +262,35 @@ shell_cmd_handler_t find_command(const char* name) {
     return NULL;
 }
 
+// Remove unused functions to fix compilation warnings
+/*
+// Command validation function
+static int validate_command_name(const char* name) {
+    if (!name) return 0;
+    
+    // Basic validation - command names should be alphanumeric with underscores
+    for (size_t i = 0; name[i]; i++) {
+        if (!((name[i] >= 'a' && name[i] <= 'z') ||
+              (name[i] >= 'A' && name[i] <= 'Z') ||
+              (name[i] >= '0' && name[i] <= '9') ||
+              name[i] == '_')) {
+            return 0;
+        }
+    }
+    
+    return 1;
+}
+
+// Get command information
+static const shell_command_info_t* get_command_info(const char* name) {
+    if (!name) return NULL;
+    
+    // This would normally look up command metadata
+    // For now, return NULL since we don't have a command registry
+    return NULL;
+}
+*/
+
 static int validate_command_arguments(const char* cmd) {
     if (!cmd) return 0;
     
@@ -310,6 +342,10 @@ void handler_assemble(string arg) {
     while (arg[i] && arg[i] != ' ') i++;
     while (arg[i] && arg[i] == ' ') i++;
     
+    // Optional -v flag
+    int verbose = 0;
+    if (arg[i] == '-' && arg[i+1] == 'v') { verbose = 1; i += 2; while (arg[i] == ' ') i++; }
+
     // Get input file
     int j = 0;
     while (arg[i] && arg[i] != ' ' && j < 255) {
@@ -333,6 +369,10 @@ void handler_assemble(string arg) {
         return;
     }
     
+    // Set verbosity
+    extern int g_asm_verbose;
+    g_asm_verbose = verbose;
+
     // Call the actual assembler
     int result = assemble(input_file, output_file);
     if (result == 0) {

@@ -5,6 +5,7 @@
 #include <shell.h>
 #include <util.h>
 #include <string.h>
+#include <kb.h>
 
 extern multiboot_info_t *g_mbi;
 
@@ -290,7 +291,22 @@ uint32 syscall_dispatch(regs_t* r) {
             break;
         }
         case SYSCALL_READ: {
-            r->eax = 0; // no input yet
+            // read(fd=0, buf=arg2, len=arg3)
+            if (arg3 == 0) { r->eax = 0; break; }
+            if (arg1 != 0 || arg2 == 0) { r->eax = (uint32)-1; break; }
+            // Use keyboard driver to read a line (echoed by driver); returns malloc'd buffer
+            string s = readStr();
+            if (!s) { r->eax = (uint32)-1; break; }
+            int slen = (int)strlen(s);
+            int maxcpy = (int)arg3;
+            if (maxcpy <= 0) { free(s); r->eax = 0; break; }
+            // Copy up to len-1 bytes and NUL-terminate for convenience
+            int n = slen;
+            if (n > maxcpy - 1) n = maxcpy - 1;
+            memcpy((void*)arg2, s, n);
+            ((char*)arg2)[n] = '\0';
+            r->eax = (uint32)n;
+            free(s);
             break;
         }
         case SYSCALL_EXIT: {

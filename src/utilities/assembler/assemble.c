@@ -7,7 +7,23 @@
 #include <types.h>
 #include <eynfs.h>
 #include <assemble.h>
+int g_asm_verbose = 0;
 #include <shell_command_info.h>
+
+// Simple arena allocator to reduce fragmentation during assembly parsing
+typedef struct {
+    uint8_t* buf;
+    size_t size;
+    size_t used;
+} asm_arena_t;
+
+static void arena_init(asm_arena_t* a, uint8_t* buf, size_t size) {
+    a->buf = buf; a->size = size; a->used = 0;
+}
+static void* arena_alloc(asm_arena_t* a, size_t n) {
+    if (!a || !a->buf || a->used + n > a->size) return NULL;
+    void* p = a->buf + a->used; a->used += (n + 7) & ~7; return p;
+}
 
 // Helper to count bytes for a db directive value string, handling quotes and numbers
 static int count_db_bytes(const char* s) {
@@ -138,7 +154,22 @@ Token lexer_next_token(Lexer *lexer) {
         return token;
     }
 
-    // Identifiers, labels, mnemonics, registers, directives, section
+    // Memory operand in square brackets: [ ... ]
+    if (src[pos] == '[') {
+        size_t start = pos;
+        pos++; // skip '['
+        while (pos < len && src[pos] != ']') pos++;
+        if (pos < len && src[pos] == ']') pos++; // include ']'
+        size_t mlen = pos - start;
+        if (mlen >= sizeof(token.text)) mlen = sizeof(token.text) - 1;
+        memcpy(token.text, (char*)src + start, mlen);
+        token.text[mlen] = 0;
+        token.type = TOKEN_MEMORY;
+        lexer->pos = pos;
+        return token;
+    }
+
+    // Identifiers, labels, mnemonics, registers, directives, section, size keywords
     if ((src[pos] >= 'A' && src[pos] <= 'Z') || (src[pos] >= 'a' && src[pos] <= 'z') || src[pos] == '_' || src[pos] == '.') {
         size_t start = pos;
         while (pos < len && ((src[pos] >= 'A' && src[pos] <= 'Z') || (src[pos] >= 'a' && src[pos] <= 'z') || (src[pos] >= '0' && src[pos] <= '9') || src[pos] == '.' || src[pos] == '_')) pos++;
@@ -146,6 +177,12 @@ Token lexer_next_token(Lexer *lexer) {
         if (id_len >= sizeof(token.text)) id_len = sizeof(token.text) - 1;
         memcpy(token.text, (char*)src + start, id_len);
         token.text[id_len] = 0;
+        // Size keywords
+        if (!strcmp(token.text, "byte") || !strcmp(token.text, "word") || !strcmp(token.text, "dword")) {
+            token.type = TOKEN_SIZE;
+            lexer->pos = pos;
+            return token;
+        }
         // Label (if followed by ':')
         if (src[pos] == ':') {
             token.type = TOKEN_LABEL;
@@ -171,8 +208,8 @@ Token lexer_next_token(Lexer *lexer) {
             return token;
         }
         // Directive
-        const char* dirs[] = {"db","dw","dd","global"};
-        for (int i = 0; i < 4; i++) {
+        const char* dirs[] = {"db","dw","dd","resb","resw","resd","align","global"};
+        for (int i = 0; i < 8; i++) {
             if (strcmp(token.text, dirs[i]) == 0) {
                 token.type = TOKEN_DIRECTIVE;
                 lexer->pos = pos;
@@ -257,6 +294,10 @@ static const int DATA_BASE = 0x2000000 + 0x1000; // runtime data base
 static int reg_encoding(const char* reg) {
     return get_register_encoding(reg);
 }
+// Helper: 8-bit reg encoding
+static int reg8_encoding(const char* reg) {
+    return get_register8_encoding(reg);
+}
 
 // Helper: parse immediate (decimal or hex)
 static int parse_imm(const char* s) {
@@ -273,6 +314,157 @@ static int parse_imm(const char* s) {
     } else {
         return str_to_int((char*)s);
     }
+}
+
+// Parse memory operand token like "[eax]", "[ebx+4]", "[0x2000]", or "[label]"
+// Outputs:
+//  - base_reg: register code 0-7 or -1 if absolute
+//  - has_disp/disp: displacement if present for [reg+disp]
+//  - is_abs/abs_addr: for [imm32] or [label]
+// Parse [base + index*scale + disp] and [label] or [imm32].
+static void parse_memory_operand(const char* mem_token, SymbolTable* table,
+                                 int* base_reg, int* index_reg, int* scale,
+                                 int* has_disp, int* disp,
+                                 int* is_abs, int* abs_addr) {
+    *base_reg = -1; *index_reg = -1; *scale = 1; *has_disp = 0; *disp = 0; *is_abs = 0; *abs_addr = 0;
+    if (!mem_token || mem_token[0] != '[') return;
+    // Extract inside brackets
+    char expr[80]; int elen = 0;
+    for (int i = 1; mem_token[i] && mem_token[i] != ']'; i++) {
+        if (elen < (int)sizeof(expr) - 1) expr[elen++] = mem_token[i];
+    }
+    expr[elen] = 0;
+
+    // Tokenize by + and -
+    int sign = 1; char token[40]; int tpos = 0;
+    for (int i = 0; ; i++) {
+        char c = expr[i];
+        if (c == ' ' || c == '\t') continue;
+        if (c == '+' || c == '-' || c == 0) {
+            if (tpos > 0) {
+                token[tpos] = 0;
+                // reg*scale or reg or number/label
+                const char* star = strchr(token, '*');
+                if (star) {
+                    char l[16]={0}, r[16]={0};
+                    int ln=(int)(star-token); if (ln>15) ln=15; memcpy(l, token, ln); l[ln]=0;
+                    strncpy(r, star+1, sizeof(r)-1);
+                    int rcode = get_register_encoding(l);
+                    int sc = parse_imm(r);
+                    if (rcode >= 0) {
+                        if (sc==1||sc==2||sc==4||sc==8) { *index_reg = rcode; *scale = sc; }
+                    }
+                } else {
+                    int rcode = get_register_encoding(token);
+                    if (rcode >= 0) {
+                        if (*base_reg < 0) *base_reg = rcode; else if (*index_reg < 0 && rcode != 4) *index_reg = rcode; // avoid ESP as index
+                    } else {
+                        // numeric or label
+                        int addr = lookup_label(table, token, SECTION_DATA);
+                        if (addr < 0) addr = lookup_label(table, token, SECTION_TEXT);
+                        if (addr >= 0) {
+                            *is_abs = 1; *abs_addr = addr;
+                        } else {
+                            int val = parse_imm(token);
+                            *disp += sign * val; *has_disp = 1;
+                        }
+                    }
+                }
+                tpos = 0;
+            }
+            if (c == 0) break;
+            sign = (c == '+') ? 1 : -1;
+        } else {
+            if (tpos < (int)sizeof(token)-1) token[tpos++] = c;
+        }
+    }
+
+    // If absolute detected with any reg/index, drop absolute (unsupported combo)
+    if (*is_abs && (*base_reg >= 0 || *index_reg >= 0)) {
+        *is_abs = 0; // fallback: treat as disp only with base if provided
+    }
+}
+
+// Emit ModR/M (+SIB/disp) for r/m32 addressing.
+static void emit_ea(uint8_t **code, int *code_pos, int text_bytes,
+                    int reg_field, int base, int index, int scale,
+                    int has_disp, int disp, int is_abs, int abs_addr) {
+    if (is_abs) {
+        (*code)[(*code_pos)++] = 0x00 | (reg_field<<3) | 0x05; // [disp32]
+        (*code)[(*code_pos)++] = abs_addr & 0xFF;
+        (*code)[(*code_pos)++] = (abs_addr>>8) & 0xFF;
+        (*code)[(*code_pos)++] = (abs_addr>>16) & 0xFF;
+        (*code)[(*code_pos)++] = (abs_addr>>24) & 0xFF;
+        return;
+    }
+    int need_sib = (index >= 0) || (base == 4);
+    int mod = 0; int disp_size = 0;
+    if (!has_disp) {
+        if (base == 5) { mod = 1; disp_size = 1; disp = 0; }
+        else mod = 0;
+    } else {
+        if (disp >= -128 && disp <= 127) { mod = 1; disp_size = 1; }
+        else { mod = 2; disp_size = 4; }
+    }
+    if (need_sib) {
+        (*code)[(*code_pos)++] = (mod<<6) | (reg_field<<3) | 0x04; // r/m = 100
+        int ss = (scale==1?0: scale==2?1: scale==4?2: 3);
+        int idx = (index >=0 && index != 4) ? index : 4; // 4 indicates none
+        int bas = (base >= 0) ? base : 5;
+        (*code)[(*code_pos)++] = (ss<<6) | (idx<<3) | bas;
+    } else {
+        (*code)[(*code_pos)++] = (mod<<6) | (reg_field<<3) | (base<0?5:base);
+    }
+    if (disp_size == 1) {
+        (*code)[(*code_pos)++] = (uint8_t)disp;
+    } else if (disp_size == 4) {
+        (*code)[(*code_pos)++] = disp & 0xFF;
+        (*code)[(*code_pos)++] = (disp>>8) & 0xFF;
+        (*code)[(*code_pos)++] = (disp>>16) & 0xFF;
+        (*code)[(*code_pos)++] = (disp>>24) & 0xFF;
+    }
+}
+
+// Emit EA for 8-bit forms uses same ModR/M/SIB as 32-bit; kept separate for clarity if future differs
+static void emit_ea8(uint8_t **code, int *code_pos, int text_bytes,
+                    int reg_field, int base, int index, int scale,
+                    int has_disp, int disp, int is_abs, int abs_addr) {
+    emit_ea(code, code_pos, text_bytes, reg_field, base, index, scale, has_disp, disp, is_abs, abs_addr);
+}
+
+// Map ALU opcodes for r/m32,r32 and r32,r/m32 and imm group ext.
+static void get_alu_op(const char* m, uint8_t* rm_r, uint8_t* r_rm, int* ext) {
+    *rm_r = 0; *r_rm = 0; *ext = -1;
+    if (!strcmp(m, "add")) { *rm_r=0x01; *r_rm=0x03; *ext=0; }
+    else if (!strcmp(m, "or")) { *rm_r=0x09; *r_rm=0x0B; *ext=1; }
+    else if (!strcmp(m, "and")) { *rm_r=0x21; *r_rm=0x23; *ext=4; }
+    else if (!strcmp(m, "sub")) { *rm_r=0x29; *r_rm=0x2B; *ext=5; }
+    else if (!strcmp(m, "xor")) { *rm_r=0x31; *r_rm=0x33; *ext=6; }
+    else if (!strcmp(m, "cmp")) { *rm_r=0x39; *r_rm=0x3B; *ext=7; }
+}
+
+// Map Jcc to short and near opcodes.
+static int get_jcc_codes(const char* m, uint8_t* short_opc, uint8_t* near_opc) {
+    struct { const char* n; uint8_t s; uint8_t n2; } t[] = {
+        {"je",  0x74, 0x84}, {"jz",  0x74, 0x84},
+        {"jne", 0x75, 0x85}, {"jnz", 0x75, 0x85},
+        {"ja",  0x77, 0x87}, {"jnbe",0x77, 0x87},
+        {"jae", 0x73, 0x83}, {"jnb", 0x73, 0x83},
+        {"jb",  0x72, 0x82}, {"jnae",0x72, 0x82},
+        {"jbe", 0x76, 0x86}, {"jna", 0x76, 0x86},
+        {"jg",  0x7F, 0x8F}, {"jnle",0x7F, 0x8F},
+        {"jge", 0x7D, 0x8D}, {"jnl", 0x7D, 0x8D},
+        {"jl",  0x7C, 0x8C}, {"jnge",0x7C, 0x8C},
+        {"jle", 0x7E, 0x8E}, {"jng", 0x7E, 0x8E},
+        {"js",  0x78, 0x88}, {"jns", 0x79, 0x89},
+        {"jo",  0x70, 0x80}, {"jno", 0x71, 0x81},
+        {"jp",  0x7A, 0x8A}, {"jpe", 0x7A, 0x8A},
+        {"jnp", 0x7B, 0x8B}, {"jpo", 0x7B, 0x8B},
+    };
+    for (unsigned i=0;i<sizeof(t)/sizeof(t[0]);i++) {
+        if (!strcmp(m, t[i].n)) { *short_opc = t[i].s; *near_opc = t[i].n2; return 1; }
+    }
+    return 0;
 }
 
 // Helper function to check for buffer overflow
@@ -300,11 +492,23 @@ static int estimate_instr_size(const Instruction* inst) {
         if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_IMMEDIATE) return 5;
         if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_REGISTER) return 2;
         if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_LABEL) return 5;
+        if ((inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_MEMORY) ||
+            (inst->operands[0].type == OPERAND_MEMORY && inst->operands[1].type == OPERAND_REGISTER)) return 6;
         return 1;
+    }
+    if (!strcmp(inst->mnemonic, "lea")) {
+        // lea r32, [mem]
+        return 6;
     }
     if (!strcmp(inst->mnemonic, "add") || !strcmp(inst->mnemonic, "sub") || !strcmp(inst->mnemonic, "and") || !strcmp(inst->mnemonic, "or") || !strcmp(inst->mnemonic, "xor") || !strcmp(inst->mnemonic, "cmp")) {
         if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_IMMEDIATE) return 6;
         return 1;
+    }
+    if (!strcmp(inst->mnemonic, "mul") || !strcmp(inst->mnemonic, "div") || !strcmp(inst->mnemonic, "idiv") || !strcmp(inst->mnemonic, "neg") || !strcmp(inst->mnemonic, "not")) {
+        return 3; // opcode + modrm (+ optional disp)
+    }
+    if (!strcmp(inst->mnemonic, "imul")) {
+        return 6; // imul r32, r/m32 (0x0F 0xAF /r)
     }
     if (!strcmp(inst->mnemonic, "shl") || !strcmp(inst->mnemonic, "shr")) {
         if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_IMMEDIATE) return 3;
@@ -312,6 +516,20 @@ static int estimate_instr_size(const Instruction* inst) {
     }
     if (!strcmp(inst->mnemonic, "jg")) return 6;
     if (!strcmp(inst->mnemonic, "jmp") || !strcmp(inst->mnemonic, "call")) return 5;
+    if (!strcmp(inst->mnemonic, "je") || !strcmp(inst->mnemonic, "jz") ||
+        !strcmp(inst->mnemonic, "jne") || !strcmp(inst->mnemonic, "jnz") ||
+        !strcmp(inst->mnemonic, "ja") || !strcmp(inst->mnemonic, "jnbe") ||
+        !strcmp(inst->mnemonic, "jae") || !strcmp(inst->mnemonic, "jnb") ||
+        !strcmp(inst->mnemonic, "jb") || !strcmp(inst->mnemonic, "jnae") ||
+        !strcmp(inst->mnemonic, "jbe") || !strcmp(inst->mnemonic, "jna") ||
+        !strcmp(inst->mnemonic, "jg") || !strcmp(inst->mnemonic, "jnle") ||
+        !strcmp(inst->mnemonic, "jge") || !strcmp(inst->mnemonic, "jnl") ||
+        !strcmp(inst->mnemonic, "jl") || !strcmp(inst->mnemonic, "jnge") ||
+        !strcmp(inst->mnemonic, "jle") || !strcmp(inst->mnemonic, "jng") ||
+        !strcmp(inst->mnemonic, "js") || !strcmp(inst->mnemonic, "jns") ||
+        !strcmp(inst->mnemonic, "jo") || !strcmp(inst->mnemonic, "jno") ||
+        !strcmp(inst->mnemonic, "jp") || !strcmp(inst->mnemonic, "jpe") ||
+        !strcmp(inst->mnemonic, "jnp") || !strcmp(inst->mnemonic, "jpo")) return 6; // near worst-case
     if (!strcmp(inst->mnemonic, "ret")) return 1;
     if (!strcmp(inst->mnemonic, "int")) return 2;
     if (!strcmp(inst->mnemonic, "push")) { if (inst->operands[0].type == OPERAND_REGISTER) return 1; else return 5; }
@@ -365,7 +583,15 @@ static void build_label_addresses(AST* ast, SymbolTable* table, int* out_text_si
     int data_index = 0;
     while (def) {
         int added = 0;
-        if (!strcmp(def->directive, "db")) added = 1; else if (!strcmp(def->directive, "dw")) added = 2; else if (!strcmp(def->directive, "dd")) added = 4;
+        if (!strcmp(def->directive, "db")) added = 1;
+        else if (!strcmp(def->directive, "dw")) added = 2;
+        else if (!strcmp(def->directive, "dd")) added = 4;
+        else if (!strcmp(def->directive, "resb")) { added = parse_imm(def->value); }
+        else if (!strcmp(def->directive, "resw")) { added = parse_imm(def->value) * 2; }
+        else if (!strcmp(def->directive, "resd")) { added = parse_imm(def->value) * 4; }
+        else if (!strcmp(def->directive, "align")) {
+            int a = parse_imm(def->value); if (a<=0) a=1; int rem = data_bytes % a; added = (rem==0)?0:(a-rem);
+        }
         // Assign any labels that point to this data index
         Label* lbl2 = ast->labels;
         while (lbl2) {
@@ -386,58 +612,22 @@ static void build_label_addresses(AST* ast, SymbolTable* table, int* out_text_si
 // For now, only .text section is emitted as code, .data as data
 // Returns 0 on success, sets *code, *code_size, *data, *data_size
 int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_size, uint8_t **data, size_t *data_size, const char* input_path) {
-    // First pass: count actual sizes needed
+    // Compute label addresses and size estimates (already includes instruction/data sizes)
     int text_bytes = 0;
     int data_bytes = 0;
-    // First pass: compute label addresses and better estimates
     build_label_addresses(ast, table, &text_bytes, &data_bytes);
-    Instruction* inst = ast->instructions;
-    while (inst) {
-        if (inst->section == SECTION_TEXT) {
-            // Estimate instruction size based on type
-            const InstructionInfo* info = find_instruction_info(inst->mnemonic);
-            if (info) {
-                text_bytes += 1; // opcode
-                if (info->modrm_required) text_bytes += 1; // ModR/M
-                if (info->immediate_required) text_bytes += 4; // immediate
-                if (info->displacement_required) text_bytes += 4; // displacement
-            } else {
-                text_bytes += 4; // fallback
-            }
-        }
-        inst = inst->next;
-    }
-    DataDef* def = ast->data_defs;
-    while (def) {
-        if (strcmp(def->directive, "db") == 0) {
-            // Estimate size for db by parsing like the emitter does
-            data_bytes += count_db_bytes(def->value);
-        }
-        else if (strcmp(def->directive, "dw") == 0) data_bytes += 2;
-        else if (strcmp(def->directive, "dd") == 0) data_bytes += 4;
-        def = def->next;
-    }
+    Instruction* inst = 0;
+    DataDef* def = 0;
     
-    // Add some padding for safety
+    // Add small padding for safety (RET insertion, etc.)
     text_bytes += 64;
-    data_bytes += 64;
+    data_bytes += 32;
     
-    // Cap at reasonable limits (16KB each)
-    if (text_bytes > 16384) text_bytes = 16384;
-    if (data_bytes > 16384) data_bytes = 16384;
+    // Cap at reasonable limits (increased to 64KB each)
+    if (text_bytes > 65536) text_bytes = 65536;
+    if (data_bytes > 65536) data_bytes = 65536;
     
-    // Memory safety: limit total allocation to prevent heap exhaustion
-    size_t total_allocation = text_bytes + data_bytes;
-    if (total_allocation > 8192) { // 8KB limit for assembler
-        printf("[codegen] Warning: Total allocation too large (%d bytes), limiting to 8KB\n", total_allocation);
-        if (text_bytes > 4096) text_bytes = 4096;
-        if (data_bytes > 4096) data_bytes = 4096;
-        // Ensure total doesn't exceed 8KB
-        if (text_bytes + data_bytes > 8192) {
-            text_bytes = 4096;
-            data_bytes = 4096;
-        }
-    }
+    // Note: removed previous 8KB total cap; assembler can handle larger sources now
     
     // Allocate buffers
     *code = (uint8_t*)malloc(text_bytes);
@@ -450,6 +640,9 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
         *data = NULL;
         return 1;
     }
+    // Initialize with zeros so any unused tail is predictable (will be trimmed later)
+    memset(*code, 0, text_bytes);
+    memset(*data, 0, data_bytes);
     *code_size = text_bytes;
     *data_size = data_bytes;
     
@@ -482,7 +675,7 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
     }
         
         // Handle different instruction types
-        if (strcmp(inst->mnemonic, "mov") == 0) {
+    if (strcmp(inst->mnemonic, "mov") == 0) {
             if (inst->operands[0].type == OPERAND_REGISTER && 
                 inst->operands[1].type == OPERAND_IMMEDIATE) {
                 // mov reg, imm32
@@ -504,12 +697,18 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
             } else if (inst->operands[0].type == OPERAND_REGISTER && 
                        inst->operands[1].type == OPERAND_REGISTER) {
                 // mov reg, reg
-                int reg1 = reg_encoding(inst->operands[0].value);
-                int reg2 = reg_encoding(inst->operands[1].value);
+                int is8 = inst->operands[0].size_hint==8 || inst->operands[1].size_hint==8;
+                int reg1 = is8 ? reg8_encoding(inst->operands[0].value) : reg_encoding(inst->operands[0].value);
+                int reg2 = is8 ? reg8_encoding(inst->operands[1].value) : reg_encoding(inst->operands[1].value);
                 if (reg1 >= 0 && reg2 >= 0) {
-                    // Use 32-bit register-to-register move opcode
-                    (*code)[code_pos-1] = 0x89; // mov r/m32, r32
-                    (*code)[code_pos++] = 0xC0 | (reg2 << 3) | reg1; // ModR/M (mod=11, reg=src, r/m=dst)
+                    if (is8) {
+                        (*code)[code_pos-1] = 0x88; // mov r/m8, r8
+                        (*code)[code_pos++] = 0xC0 | (reg2 << 3) | reg1; // dst in r/m, src in reg
+                    } else {
+                        // Use 32-bit register-to-register move opcode
+                        (*code)[code_pos-1] = 0x89; // mov r/m32, r32
+                        (*code)[code_pos++] = 0xC0 | (reg2 << 3) | reg1; // ModR/M (mod=11, reg=src, r/m=dst)
+                    }
                     
                     // Check for buffer overflow after mov reg, reg
                     if (check_code_overflow(code_pos, text_bytes)) {
@@ -542,8 +741,8 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                     addr += CODE_BASE;
                 }
                 if (is_data && addr < DATA_BASE) {
-                    // Common case observed: addr == 0x1000 → make it 0x200000 + 0x1000
-                    addr += CODE_BASE;
+                    // Map to DATA_BASE, not CODE_BASE
+                    addr = DATA_BASE + (addr - DATA_BASE);
                 }
                 if (reg >= 0) {
                     (*code)[code_pos-1] = 0xB8 + reg;
@@ -553,78 +752,187 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                     (*code)[code_pos++] = (addr >> 24) & 0xFF;
                     if (check_code_overflow(code_pos, text_bytes)) return 1;
                 }
-            }
-        } else if (strcmp(inst->mnemonic, "add") == 0) {
-            if (inst->operands[0].type == OPERAND_REGISTER && 
-                inst->operands[1].type == OPERAND_IMMEDIATE) {
-                // add reg, imm32
-                int reg = reg_encoding(inst->operands[0].value);
-                int imm = parse_imm(inst->operands[1].value);
-                if (reg >= 0) {
-                    (*code)[code_pos-1] = 0x81; // add r/m, imm32
-                    (*code)[code_pos++] = 0xC0 | reg; // ModR/M
-                    (*code)[code_pos++] = imm & 0xFF;
-                    (*code)[code_pos++] = (imm >> 8) & 0xFF;
-                    (*code)[code_pos++] = (imm >> 16) & 0xFF;
-                    (*code)[code_pos++] = (imm >> 24) & 0xFF;
-                    
-                    if (check_code_overflow(code_pos, text_bytes)) {
-                        return 1;
-                    }
-                    
+            } else if (inst->operands[0].type == OPERAND_REGISTER &&
+                       inst->operands[1].type == OPERAND_MEMORY) {
+                // mov r32, [mem]
+                int want8 = inst->operands[1].size_hint == 8 || reg8_encoding(inst->operands[0].value) >= 0;
+                int dst = want8 ? reg8_encoding(inst->operands[0].value) : reg_encoding(inst->operands[0].value);
+                int base=-1, index=-1, scale=1, has_disp=0, disp=0, is_abs=0, abs=0;
+                parse_memory_operand(inst->operands[1].value, table, &base, &index, &scale, &has_disp, &disp, &is_abs, &abs);
+                if (want8) {
+                    (*code)[code_pos-1] = 0x8A; // mov r8, r/m8
+                    emit_ea8(code, &code_pos, text_bytes, dst, base, index, scale, has_disp, disp, is_abs, abs);
+                } else {
+                    (*code)[code_pos-1] = 0x8B; // mov r32, r/m32
+                    emit_ea(code, &code_pos, text_bytes, dst, base, index, scale, has_disp, disp, is_abs, abs);
                 }
-            }
-        } else if (strcmp(inst->mnemonic, "sub") == 0) {
-            if (inst->operands[0].type == OPERAND_REGISTER && 
-                inst->operands[1].type == OPERAND_IMMEDIATE) {
-                // sub reg, imm32
-                int reg = reg_encoding(inst->operands[0].value);
-                int imm = parse_imm(inst->operands[1].value);
-                if (reg >= 0) {
-                    (*code)[code_pos-1] = 0x81; // sub r/m, imm32
-                    (*code)[code_pos++] = 0xE8 | reg; // ModR/M
-                    (*code)[code_pos++] = imm & 0xFF;
-                    (*code)[code_pos++] = (imm >> 8) & 0xFF;
-                    (*code)[code_pos++] = (imm >> 16) & 0xFF;
-                    (*code)[code_pos++] = (imm >> 24) & 0xFF;
-                    
-                    if (check_code_overflow(code_pos, text_bytes)) {
-                        return 1;
-                    }
-                    
+                if (check_code_overflow(code_pos, text_bytes)) return 1;
+            } else if (inst->operands[0].type == OPERAND_MEMORY &&
+                       inst->operands[1].type == OPERAND_REGISTER) {
+                // mov [mem], r32
+                int want8 = inst->operands[0].size_hint == 8 || reg8_encoding(inst->operands[1].value) >= 0;
+                int src = want8 ? reg8_encoding(inst->operands[1].value) : reg_encoding(inst->operands[1].value);
+                int base=-1, index=-1, scale=1, has_disp=0, disp=0, is_abs=0, abs=0;
+                parse_memory_operand(inst->operands[0].value, table, &base, &index, &scale, &has_disp, &disp, &is_abs, &abs);
+                if (want8) {
+                    (*code)[code_pos-1] = 0x88; // mov r/m8, r8
+                    emit_ea8(code, &code_pos, text_bytes, src, base, index, scale, has_disp, disp, is_abs, abs);
+                } else {
+                    (*code)[code_pos-1] = 0x89; // mov r/m32, r32
+                    emit_ea(code, &code_pos, text_bytes, src, base, index, scale, has_disp, disp, is_abs, abs);
                 }
+                if (check_code_overflow(code_pos, text_bytes)) return 1;
             }
+        } else if (!strcmp(inst->mnemonic, "movzx") || !strcmp(inst->mnemonic, "movsx")) {
+            // movzx/movsx r32, r/m8 or r/m16 (implement r/m8 here)
+            int is_zx = !strcmp(inst->mnemonic, "movzx");
+            if (inst->operands[0].type == OPERAND_REGISTER &&
+                (inst->operands[1].type == OPERAND_REGISTER || inst->operands[1].type == OPERAND_MEMORY)) {
+                // Emit prefix 0F and opcode B6 (r/m8) for movzx, BE for movsx
+                (*code)[code_pos-1] = 0x0F;
+                (*code)[code_pos++] = is_zx ? 0xB6 : 0xBE; // byte source
+                if (inst->operands[1].type == OPERAND_REGISTER) {
+                    int dst = reg_encoding(inst->operands[0].value);
+                    int src8 = reg8_encoding(inst->operands[1].value);
+                    if (dst < 0 || src8 < 0) {
+                        // Fallback to NOP on invalid regs
+                        (*code)[code_pos-2] = 0x90; // replace 0F with NOP
+                        code_pos -= 1; // discard second byte
+                    } else {
+                        (*code)[code_pos++] = 0xC0 | (dst<<3) | src8;
+                    }
+                } else {
+                    int dst = reg_encoding(inst->operands[0].value);
+                    int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0,abs=0;
+                    parse_memory_operand(inst->operands[1].value, table, &base,&index,&scale,&has_disp,&disp,&is_abs,&abs);
+                    emit_ea8(code, &code_pos, text_bytes, dst, base,index,scale,has_disp,disp,is_abs,abs);
+                }
+                if (check_code_overflow(code_pos, text_bytes)) return 1;
+            }
+        } else if (!strcmp(inst->mnemonic, "add") || !strcmp(inst->mnemonic, "sub") || !strcmp(inst->mnemonic, "and") || !strcmp(inst->mnemonic, "or") || !strcmp(inst->mnemonic, "xor") || !strcmp(inst->mnemonic, "cmp")) {
+            // ALU: r/m32, r32  | r32, r/m32 | r/m32, imm32
+            uint8_t rm_r=0, r_rm=0; int ext=-1;
+            get_alu_op(inst->mnemonic, &rm_r, &r_rm, &ext);
+            if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_REGISTER) {
+                int dst = reg_encoding(inst->operands[0].value);
+                int src = reg_encoding(inst->operands[1].value);
+                if (dst>=0 && src>=0) {
+                    (*code)[code_pos-1] = r_rm; // r32, r/m32
+                    (*code)[code_pos++] = 0xC0 | (dst<<3) | src;
+                }
+            } else if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_MEMORY) {
+                int reg = reg_encoding(inst->operands[0].value);
+                int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0,abs=0;
+                parse_memory_operand(inst->operands[1].value, table, &base,&index,&scale,&has_disp,&disp,&is_abs,&abs);
+                (*code)[code_pos-1] = r_rm; // r32, r/m32
+                emit_ea(code, &code_pos, text_bytes, reg, base,index,scale,has_disp,disp,is_abs,abs);
+            } else if (inst->operands[0].type == OPERAND_MEMORY && inst->operands[1].type == OPERAND_REGISTER) {
+                int reg = reg_encoding(inst->operands[1].value);
+                int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0,abs=0;
+                parse_memory_operand(inst->operands[0].value, table, &base,&index,&scale,&has_disp,&disp,&is_abs,&abs);
+                (*code)[code_pos-1] = rm_r; // r/m32, r32
+                emit_ea(code, &code_pos, text_bytes, reg, base,index,scale,has_disp,disp,is_abs,abs);
+            } else if ((inst->operands[0].type == OPERAND_REGISTER || inst->operands[0].type == OPERAND_MEMORY) && inst->operands[1].type == OPERAND_IMMEDIATE) {
+                int imm = parse_imm(inst->operands[1].value);
+                int use_imm8 = (imm >= -128 && imm <= 127) ? 1 : 0;
+                (*code)[code_pos-1] = use_imm8 ? 0x83 : 0x81; // 83 => sign-extended imm8
+                if (inst->operands[0].type == OPERAND_REGISTER) {
+                    int rm = reg_encoding(inst->operands[0].value);
+                    (*code)[code_pos++] = 0xC0 | (ext<<3) | rm;
+                } else {
+                    int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0,abs=0;
+                    parse_memory_operand(inst->operands[0].value, table, &base,&index,&scale,&has_disp,&disp,&is_abs,&abs);
+                    emit_ea(code, &code_pos, text_bytes, ext, base,index,scale,has_disp,disp,is_abs,abs);
+                }
+                if (use_imm8) { (*code)[code_pos++] = (uint8_t)imm; }
+                else { (*code)[code_pos++] = imm & 0xFF; (*code)[code_pos++] = (imm>>8)&0xFF; (*code)[code_pos++] = (imm>>16)&0xFF; (*code)[code_pos++] = (imm>>24)&0xFF; }
+            }
+            if (check_code_overflow(code_pos, text_bytes)) return 1;
+        } else if (!strcmp(inst->mnemonic, "lea")) {
+            // lea r32, [mem]
+            if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_MEMORY) {
+                int dst = reg_encoding(inst->operands[0].value);
+                int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0,abs=0;
+                parse_memory_operand(inst->operands[1].value, table, &base,&index,&scale,&has_disp,&disp,&is_abs,&abs);
+                (*code)[code_pos-1] = 0x8D; // lea r32, r/m32
+                emit_ea(code, &code_pos, text_bytes, dst, base,index,scale,has_disp,disp,is_abs,abs);
+                if (check_code_overflow(code_pos, text_bytes)) return 1;
+            }
+        } else if (!strcmp(inst->mnemonic, "imul")) {
+            // imul r32, r/m32   -> 0x0F 0xAF /r
+            if (inst->operands[0].type == OPERAND_REGISTER && (inst->operands[1].type == OPERAND_REGISTER || inst->operands[1].type == OPERAND_MEMORY)) {
+                (*code)[code_pos-1] = 0x0F; (*code)[code_pos++] = 0xAF;
+                if (inst->operands[1].type == OPERAND_REGISTER) {
+                    int dst = reg_encoding(inst->operands[0].value);
+                    int src = reg_encoding(inst->operands[1].value);
+                    (*code)[code_pos++] = 0xC0 | (dst<<3) | src;
+                } else {
+                    int dst = reg_encoding(inst->operands[0].value);
+                    int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0,abs=0;
+                    parse_memory_operand(inst->operands[1].value, table, &base,&index,&scale,&has_disp,&disp,&is_abs,&abs);
+                    emit_ea(code, &code_pos, text_bytes, dst, base,index,scale,has_disp,disp,is_abs,abs);
+                }
+                if (check_code_overflow(code_pos, text_bytes)) return 1;
+            }
+        } else if (!strcmp(inst->mnemonic, "mul") || !strcmp(inst->mnemonic, "div") || !strcmp(inst->mnemonic, "idiv") || !strcmp(inst->mnemonic, "neg") || !strcmp(inst->mnemonic, "not")) {
+            // One-operand group encodings on r/m32
+            int ext = -1; int needs_f7 = 1;
+            if (!strcmp(inst->mnemonic, "mul")) ext = 4; else if (!strcmp(inst->mnemonic, "div")) ext = 6; else if (!strcmp(inst->mnemonic, "idiv")) ext = 7; else if (!strcmp(inst->mnemonic, "neg")) { ext = 3; } else if (!strcmp(inst->mnemonic, "not")) { ext = 2; }
+            (*code)[code_pos-1] = needs_f7 ? 0xF7 : 0xF6; // Always 32-bit here
+            if (inst->operands[0].type == OPERAND_REGISTER) {
+                int rm = reg_encoding(inst->operands[0].value);
+                (*code)[code_pos++] = 0xC0 | (ext<<3) | rm;
+            } else if (inst->operands[0].type == OPERAND_MEMORY) {
+                int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0,abs=0;
+                parse_memory_operand(inst->operands[0].value, table, &base,&index,&scale,&has_disp,&disp,&is_abs,&abs);
+                emit_ea(code, &code_pos, text_bytes, ext, base,index,scale,has_disp,disp,is_abs,abs);
+            }
+            if (check_code_overflow(code_pos, text_bytes)) return 1;
         } else if (strcmp(inst->mnemonic, "jmp") == 0) {
             if (inst->operands[0].type == OPERAND_LABEL) {
-                // jmp rel32
                 int target = lookup_label(table, inst->operands[0].value, SECTION_TEXT);
-                int rel = (target >= 0) ? (target - (code_pos + 5)) : 0;
-                (*code)[code_pos-1] = 0xE9; // jmp rel32
-                (*code)[code_pos++] = rel & 0xFF;
-                (*code)[code_pos++] = (rel >> 8) & 0xFF;
-                (*code)[code_pos++] = (rel >> 16) & 0xFF;
-                (*code)[code_pos++] = (rel >> 24) & 0xFF;
-                
-                if (check_code_overflow(code_pos, text_bytes)) {
-                    return 1;
+                int rel32 = (target >= 0) ? (target - (CODE_BASE + code_pos + 5)) : 0;
+                // Try short if fits
+                int rel8 = (target >= 0) ? (target - (CODE_BASE + code_pos + 2)) : 0;
+                if (rel8 >= -128 && rel8 <= 127) {
+                    (*code)[code_pos-1] = 0xEB; // short
+                    (*code)[code_pos++] = (uint8_t)rel8;
+                } else {
+                    (*code)[code_pos-1] = 0xE9; // near
+                    (*code)[code_pos++] = rel32 & 0xFF; (*code)[code_pos++] = (rel32>>8)&0xFF; (*code)[code_pos++] = (rel32>>16)&0xFF; (*code)[code_pos++] = (rel32>>24)&0xFF;
                 }
-                
+                if (check_code_overflow(code_pos, text_bytes)) return 1;
+            } else if (inst->operands[0].type == OPERAND_REGISTER || inst->operands[0].type == OPERAND_MEMORY) {
+                // jmp r/m32
+                (*code)[code_pos-1] = 0xFF;
+                if (inst->operands[0].type == OPERAND_REGISTER) {
+                    int rm = reg_encoding(inst->operands[0].value);
+                    (*code)[code_pos++] = 0xE0 | rm; // /4
+                } else {
+                    int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0,abs=0;
+                    parse_memory_operand(inst->operands[0].value, table, &base,&index,&scale,&has_disp,&disp,&is_abs,&abs);
+                    emit_ea(code, &code_pos, text_bytes, 4, base,index,scale,has_disp,disp,is_abs,abs);
+                }
+                if (check_code_overflow(code_pos, text_bytes)) return 1;
             }
         } else if (strcmp(inst->mnemonic, "call") == 0) {
             if (inst->operands[0].type == OPERAND_LABEL) {
-                // call rel32
                 int target = lookup_label(table, inst->operands[0].value, SECTION_TEXT);
-                int rel = (target >= 0) ? (target - (code_pos + 5)) : 0;
+                int rel32 = (target >= 0) ? (target - (CODE_BASE + code_pos + 5)) : 0;
                 (*code)[code_pos-1] = 0xE8; // call rel32
-                (*code)[code_pos++] = rel & 0xFF;
-                (*code)[code_pos++] = (rel >> 8) & 0xFF;
-                (*code)[code_pos++] = (rel >> 16) & 0xFF;
-                (*code)[code_pos++] = (rel >> 24) & 0xFF;
-                
-                if (check_code_overflow(code_pos, text_bytes)) {
-                    return 1;
+                (*code)[code_pos++] = rel32 & 0xFF; (*code)[code_pos++] = (rel32>>8)&0xFF; (*code)[code_pos++] = (rel32>>16)&0xFF; (*code)[code_pos++] = (rel32>>24)&0xFF;
+                if (check_code_overflow(code_pos, text_bytes)) return 1;
+            } else if (inst->operands[0].type == OPERAND_REGISTER || inst->operands[0].type == OPERAND_MEMORY) {
+                (*code)[code_pos-1] = 0xFF;
+                if (inst->operands[0].type == OPERAND_REGISTER) {
+                    int rm = reg_encoding(inst->operands[0].value);
+                    (*code)[code_pos++] = 0xD0 | rm; // /2
+                } else {
+                    int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0,abs=0;
+                    parse_memory_operand(inst->operands[0].value, table, &base,&index,&scale,&has_disp,&disp,&is_abs,&abs);
+                    emit_ea(code, &code_pos, text_bytes, 2, base,index,scale,has_disp,disp,is_abs,abs);
                 }
-                
+                if (check_code_overflow(code_pos, text_bytes)) return 1;
             }
         } else if (strcmp(inst->mnemonic, "ret") == 0) {
             (*code)[code_pos-1] = 0xC3; // ret
@@ -781,17 +1089,33 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                     if (check_code_overflow(code_pos, text_bytes)) return 1;
                 }
             }
-        } else if (strcmp(inst->mnemonic, "jg") == 0) {
+        } else if (!strcmp(inst->mnemonic, "je") || !strcmp(inst->mnemonic, "jz") ||
+                   !strcmp(inst->mnemonic, "jne") || !strcmp(inst->mnemonic, "jnz") ||
+                   !strcmp(inst->mnemonic, "ja") || !strcmp(inst->mnemonic, "jnbe") ||
+                   !strcmp(inst->mnemonic, "jae") || !strcmp(inst->mnemonic, "jnb") ||
+                   !strcmp(inst->mnemonic, "jb") || !strcmp(inst->mnemonic, "jnae") ||
+                   !strcmp(inst->mnemonic, "jbe") || !strcmp(inst->mnemonic, "jna") ||
+                   !strcmp(inst->mnemonic, "jg") || !strcmp(inst->mnemonic, "jnle") ||
+                   !strcmp(inst->mnemonic, "jge") || !strcmp(inst->mnemonic, "jnl") ||
+                   !strcmp(inst->mnemonic, "jl") || !strcmp(inst->mnemonic, "jnge") ||
+                   !strcmp(inst->mnemonic, "jle") || !strcmp(inst->mnemonic, "jng") ||
+                   !strcmp(inst->mnemonic, "js") || !strcmp(inst->mnemonic, "jns") ||
+                   !strcmp(inst->mnemonic, "jo") || !strcmp(inst->mnemonic, "jno") ||
+                   !strcmp(inst->mnemonic, "jp") || !strcmp(inst->mnemonic, "jpe") ||
+                   !strcmp(inst->mnemonic, "jnp") || !strcmp(inst->mnemonic, "jpo")) {
             last_was_ret = 0;
             if (inst->operands[0].type == OPERAND_LABEL) {
+                uint8_t s=0,n=0; if (!get_jcc_codes(inst->mnemonic, &s, &n)) { (*code)[code_pos-1]=0x90; }
                 int target = lookup_label(table, inst->operands[0].value, SECTION_TEXT);
-                int rel = (target >= 0) ? (target - (code_pos + 6)) : 0; // rel32
-                (*code)[code_pos-1] = 0x0F; // 2-byte opcode prefix
-                (*code)[code_pos++] = 0x8F; // jg rel32
-                (*code)[code_pos++] = rel & 0xFF;
-                (*code)[code_pos++] = (rel >> 8) & 0xFF;
-                (*code)[code_pos++] = (rel >> 16) & 0xFF;
-                (*code)[code_pos++] = (rel >> 24) & 0xFF;
+                int rel8 = (target >= 0) ? (target - (CODE_BASE + code_pos + 2)) : 0;
+                if (rel8 >= -128 && rel8 <= 127) {
+                    (*code)[code_pos-1] = s;
+                    (*code)[code_pos++] = (uint8_t)rel8;
+                } else {
+                    int rel32 = (target >= 0) ? (target - (CODE_BASE + code_pos + 6)) : 0;
+                    (*code)[code_pos-1] = 0x0F; (*code)[code_pos++] = n;
+                    (*code)[code_pos++] = rel32 & 0xFF; (*code)[code_pos++] = (rel32>>8)&0xFF; (*code)[code_pos++] = (rel32>>16)&0xFF; (*code)[code_pos++] = (rel32>>24)&0xFF;
+                }
                 if (check_code_overflow(code_pos, text_bytes)) return 1;
             }
         } else {
@@ -899,6 +1223,14 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                 (*data)[data_pos++] = (val >> 16) & 0xFF;
                 (*data)[data_pos++] = (val >> 24) & 0xFF;
             }
+        } else if (strcmp(def->directive, "resb") == 0) {
+            int n = parse_imm(def->value); while (n-- > 0 && data_pos < data_bytes) { (*data)[data_pos++] = 0x00; }
+        } else if (strcmp(def->directive, "resw") == 0) {
+            int n = parse_imm(def->value) * 2; while (n-- > 0 && data_pos < data_bytes) { (*data)[data_pos++] = 0x00; }
+        } else if (strcmp(def->directive, "resd") == 0) {
+            int n = parse_imm(def->value) * 4; while (n-- > 0 && data_pos < data_bytes) { (*data)[data_pos++] = 0x00; }
+        } else if (strcmp(def->directive, "align") == 0) {
+            int a = parse_imm(def->value); if (a<=0) a=1; int rem = data_pos % a; int pad = (rem==0)?0:(a-rem); while (pad-- > 0 && data_pos < data_bytes) { (*data)[data_pos++] = 0x00; }
         }
         
         def = def->next;
@@ -938,9 +1270,9 @@ char* read_file_to_buffer(const char* filename, uint32_t* out_size) {
     uint32_t size = entry.size;
     
     // Memory safety: limit file size to prevent excessive allocation
-    if (size > 8192) { // 8KB limit for source files
-        printf("[assemble] Warning: Source file too large (%d bytes), limiting to 8KB\n", size);
-        size = 8192;
+    if (size > 32768) { // 32KB limit for source files (increased)
+        printf("[assemble] Warning: Source file too large (%d bytes), limiting to 32KB\n", size);
+        size = 32768;
     }
     
     char* buf = (char*)malloc(size + 1);
@@ -968,6 +1300,9 @@ int assemble(const char *input_path, const char *output_path) {
     }
 
     AST *ast = parse(src);
+    // Free source buffer early to reduce peak memory
+    free(src);
+    src = NULL;
     SymbolTable symtab;
     symbol_table_init(&symtab);
     uint8_t *code = 0;
@@ -977,9 +1312,16 @@ int assemble(const char *input_path, const char *output_path) {
     int gen_result = generate_code(ast, &symtab, &code, &code_size, &data, &data_size, input_path);
     if (gen_result != 0) {
         print_error(input_path, 0, "Code generation failed.", NULL);
-        free(src);
+        // Free any partially allocated structures to avoid leaks on repeated runs
+        if (code) free(code);
+        if (data) free(data);
+        free_ast(ast);
         return 1;
     }
+
+    // We no longer need the AST; free it before allocating large buffers
+    free_ast(ast);
+    ast = NULL;
 
     // Prepare EYN-OS header
     struct eyn_exe_header hdr;
@@ -1002,76 +1344,67 @@ int assemble(const char *input_path, const char *output_path) {
     hdr.bss_size = 0;  // No BSS for now
     hdr.dyn_table_off = 0;  // No dynamic linking for now
     hdr.dyn_table_size = 0;  // No dynamic linking for now
+    // Debug: print header and small dumps
+    printf("[assemble] hdr: code=%d data=%d entry_off=%d hdr_size=%d\n", (int)hdr.code_size, (int)hdr.data_size, (int)hdr.entry_point, (int)sizeof(hdr));
+    if (code && code_size > 0) {
+        uint32_t prev = code_size < 16 ? (uint32_t)code_size : 16;
+        printf("[assemble] code[0..%d):", (int)prev);
+        for (uint32_t i = 0; i < prev; i++) printf(" %02X", code[i]);
+        printf("\n");
+    }
+    if (data && data_size > 0) {
+        uint32_t prev = data_size < 16 ? (uint32_t)data_size : 16;
+        printf("[assemble] data[0..%d):", (int)prev);
+        for (uint32_t i = 0; i < prev; i++) printf(" %02X", data[i]);
+        printf("\n");
+    }
     
     // Get filesystem info for output
     eynfs_superblock_t sb;
     eynfs_dir_entry_t entry;
     if (eynfs_read_superblock(g_current_drive, EYNFS_SUPERBLOCK_LBA, &sb) != 0) {
         printf("[assemble] Failed to read superblock for output\n");
-        free(src);
-        free_ast(ast);
         return 1;
     }
     
-    // Create output file entry
-    if (eynfs_create_entry(g_current_drive, &sb, sb.root_dir_block, output_path, EYNFS_TYPE_FILE) != 0) {
-        printf("[assemble] Failed to create output file entry\n");
-        free(src);
-        free_ast(ast);
+    // Stream the output to disk to reduce peak memory
+    eynfs_stream_t stream;
+    if (eynfs_stream_begin(g_current_drive, output_path, &stream) != 0) {
+        printf("[assemble] Failed to open stream for output file\n");
         return 1;
     }
-    
-    // Find the created entry
-    uint32_t entry_index;
-    if (eynfs_find_in_dir(g_current_drive, &sb, sb.root_dir_block, output_path, &entry, &entry_index) != 0) {
-        printf("[assemble] Failed to find created output file entry\n");
-        free(src);
-        free_ast(ast);
+    int w1 = eynfs_stream_write(&stream, &hdr, sizeof(hdr));
+    if (w1 < 0) {
+        printf("[assemble] Failed to write header\n");
         return 1;
     }
-    
-    // Prepare complete output buffer: header + code + data
-    size_t total_size = sizeof(hdr) + code_size + data_size;
-    char* output_buffer = (char*)malloc(total_size);
-    if (!output_buffer) {
-        printf("[assemble] Failed to allocate output buffer\n");
-        free(src);
-        free_ast(ast);
-        return 1;
-    }
-    
-    // Copy header, code, and data into single buffer
-    size_t offset = 0;
-    memcpy(output_buffer + offset, &hdr, sizeof(hdr));
-    offset += sizeof(hdr);
-    
+    printf("[assemble] wrote header bytes: %d\n", w1);
     if (code && code_size > 0) {
-        memcpy(output_buffer + offset, code, code_size);
-        offset += code_size;
+        int w2 = eynfs_stream_write(&stream, code, code_size);
+        if (w2 < 0) {
+            printf("[assemble] Failed to write code segment\n");
+            return 1;
+        }
+        printf("[assemble] wrote code bytes: %d\n", w2);
         free(code);
     }
-    
     if (data && data_size > 0) {
-        memcpy(output_buffer + offset, data, data_size);
-        offset += data_size;
+        int w3 = eynfs_stream_write(&stream, data, data_size);
+        if (w3 < 0) {
+            printf("[assemble] Failed to write data segment\n");
+            return 1;
+        }
+        printf("[assemble] wrote data bytes: %d\n", w3);
         free(data);
     }
-    
-    // Write complete file in single operation
-    if (eynfs_write_file(0, &sb, &entry, output_buffer, total_size, sb.root_dir_block, entry_index) < 0) {
-        printf("[assemble] Failed to write output file\n");
-        free(output_buffer);
-        free(src);
-        free_ast(ast);
+    if (eynfs_stream_end(&stream) != 0) {
+        printf("[assemble] Failed to finalize output file\n");
         return 1;
     }
-    
-    free(output_buffer);
-    
+
+    size_t total_size = sizeof(hdr) + code_size + data_size;
     printf("Successfully wrote %d bytes to %s\n", (int)total_size, output_path);
     printf("Assembly successful: %s -> %s\n", input_path, output_path);
-    free(src);
-    free_ast(ast);
     return 0;
 }
 
@@ -1112,14 +1445,15 @@ AST* parse(const char *src) {
     Token token;
     SectionType current_section = SECTION_NONE;
     int line_num = 1;
-    AST* ast = (AST*)malloc(sizeof(AST));
-    if (!ast) {
-        printf("[parse] Out of memory for AST (requested %d bytes)\n", sizeof(AST));
-        return 0;
-    }
+    // Use a modest arena (e.g., 32KB) for AST nodes to avoid many small mallocs
+    static uint8_t arena_buf[32*1024];
+    asm_arena_t arena; arena_init(&arena, arena_buf, sizeof(arena_buf));
+    AST* ast = (AST*)arena_alloc(&arena, sizeof(AST));
+    if (!ast) { printf("[parse] Out of memory for AST arena\n"); return 0; }
     ast->instructions = 0;
     ast->labels = 0;
     ast->data_defs = 0;
+    ast->arena_backed = 1;
     int text_instr_index = 0;
     int data_def_index = 0;
 
@@ -1135,19 +1469,19 @@ AST* parse(const char *src) {
             Token next = lexer_next_token(&lexer);
             if (strcmp(next.text, ".text") == 0) {
                 current_section = SECTION_TEXT;
-                printf("[parse] Section: .text\n");
+                if (g_asm_verbose) printf("[parse] Section: .text\n");
             } else if (strcmp(next.text, ".data") == 0) {
                 current_section = SECTION_DATA;
-                printf("[parse] Section: .data\n");
+                if (g_asm_verbose) printf("[parse] Section: .data\n");
             } else {
-                printf("[parse] Unknown section: %s\n", next.text);
+                if (g_asm_verbose) printf("[parse] Unknown section: %s\n", next.text);
                 current_section = SECTION_NONE;
             }
             continue;
         }
         if (token.type == TOKEN_LABEL) {
             // Add label to AST
-            Label* label = (Label*)malloc(sizeof(Label));
+            Label* label = (Label*)arena_alloc(&arena, sizeof(Label));
             if (!label) continue;
             strncpy(label->name, token.text, sizeof(label->name)-1);
             label->name[sizeof(label->name)-1] = 0;
@@ -1163,28 +1497,50 @@ AST* parse(const char *src) {
                 label->instr_index = 0;
             }
             add_label(ast, label);
-            printf("[parse] Label: %s (section %d)\n", label->name, label->section);
+            if (g_asm_verbose) printf("[parse] Label: %s (section %d)\n", label->name, label->section);
             continue;
         }
         if (token.type == TOKEN_MNEMONIC) {
             // Parse instruction and operands
-            Instruction* inst = (Instruction*)malloc(sizeof(Instruction));
+            Instruction* inst = (Instruction*)arena_alloc(&arena, sizeof(Instruction));
             if (!inst) continue;
+            memset(inst, 0, sizeof(Instruction));
             strncpy(inst->mnemonic, token.text, sizeof(inst->mnemonic)-1);
             inst->mnemonic[sizeof(inst->mnemonic)-1] = 0;
             inst->section = current_section;
             inst->line_num = line_num;
             // Parse up to 2 operands with comma handling
             int op_index = 0;
+            int pending_size_hint = 0; // 0=unspecified, else 8/16/32
             while (op_index < 2) {
                 Token next = lexer_next_token(&lexer);
                 if (next.type == TOKEN_COMMA) {
                     // stray comma; skip
                     continue;
+                } else if (next.type == TOKEN_SIZE) {
+                    // size override before an operand
+                    if (!strcmp(next.text, "byte")) pending_size_hint = 8;
+                    else if (!strcmp(next.text, "word")) pending_size_hint = 16;
+                    else if (!strcmp(next.text, "dword")) pending_size_hint = 32;
+                    // continue to fetch the actual operand token
+                    continue;
+                } else if (next.type == TOKEN_MEMORY) {
+                    inst->operands[op_index].type = OPERAND_MEMORY;
+                    strncpy(inst->operands[op_index].value, next.text, sizeof(inst->operands[op_index].value)-1);
+                    inst->operands[op_index].value[sizeof(inst->operands[op_index].value)-1] = 0;
+                    inst->operands[op_index].size_hint = pending_size_hint;
+                    pending_size_hint = 0;
+                    op_index++;
+                    Token maybe_comma = lexer_next_token(&lexer);
+                    if (maybe_comma.type != TOKEN_COMMA) {
+                        // no pushback; ignore
+                    }
                 } else if (next.type == TOKEN_REGISTER) {
                     inst->operands[op_index].type = OPERAND_REGISTER;
                     strncpy(inst->operands[op_index].value, next.text, sizeof(inst->operands[op_index].value)-1);
                     inst->operands[op_index].value[sizeof(inst->operands[op_index].value)-1] = 0;
+                    inst->operands[op_index].size_hint = pending_size_hint;
+                    pending_size_hint = 0;
                     op_index++;
                     // expect optional comma after operand, consume if present
                     Token maybe_comma = lexer_next_token(&lexer);
@@ -1196,6 +1552,8 @@ AST* parse(const char *src) {
                     inst->operands[op_index].type = OPERAND_IMMEDIATE;
                     strncpy(inst->operands[op_index].value, next.text, sizeof(inst->operands[op_index].value)-1);
                     inst->operands[op_index].value[sizeof(inst->operands[op_index].value)-1] = 0;
+                    inst->operands[op_index].size_hint = pending_size_hint;
+                    pending_size_hint = 0;
                     op_index++;
                     Token maybe_comma = lexer_next_token(&lexer);
                     if (maybe_comma.type != TOKEN_COMMA) {
@@ -1205,6 +1563,8 @@ AST* parse(const char *src) {
                     inst->operands[op_index].type = OPERAND_LABEL;
                     strncpy(inst->operands[op_index].value, next.text, sizeof(inst->operands[op_index].value)-1);
                     inst->operands[op_index].value[sizeof(inst->operands[op_index].value)-1] = 0;
+                    inst->operands[op_index].size_hint = pending_size_hint;
+                    pending_size_hint = 0;
                     op_index++;
                     Token maybe_comma = lexer_next_token(&lexer);
                     if (maybe_comma.type != TOKEN_COMMA) {
@@ -1217,7 +1577,7 @@ AST* parse(const char *src) {
             if (current_section == SECTION_TEXT) {
                 text_instr_index++;
             }
-            printf("[parse] Instruction: %s (section %d, line %d)\n", inst->mnemonic, inst->section, inst->line_num);
+            if (g_asm_verbose) printf("[parse] Instruction: %s (section %d, line %d)\n", inst->mnemonic, inst->section, inst->line_num);
             continue;
         }
         if (token.type == TOKEN_DIRECTIVE) {
@@ -1225,11 +1585,11 @@ AST* parse(const char *src) {
             if (strcmp(token.text, "global") == 0) {
                 // Skip for now (could add to export table)
                 Token next = lexer_next_token(&lexer);
-                printf("[parse] Global: %s\n", next.text);
+                if (g_asm_verbose) printf("[parse] Global: %s\n", next.text);
                 continue;
             } else {
                 // db, dw, dd
-                DataDef* def = (DataDef*)malloc(sizeof(DataDef));
+                DataDef* def = (DataDef*)arena_alloc(&arena, sizeof(DataDef));
                 if (!def) continue;
                 strncpy(def->directive, token.text, sizeof(def->directive)-1);
                 def->directive[sizeof(def->directive)-1] = 0;
@@ -1267,7 +1627,7 @@ AST* parse(const char *src) {
                 if (current_section == SECTION_DATA) {
                     data_def_index++;
                 }
-                printf("[parse] Data: %s %s (line %d)\n", def->directive, def->value, def->line_num);
+                if (g_asm_verbose) printf("[parse] Data: %s %s (line %d)\n", def->directive, def->value, def->line_num);
                 continue;
             }
         }
@@ -1281,31 +1641,16 @@ REGISTER_SHELL_COMMAND(assemble, "assemble", handler_assemble, CMD_STREAMING, "C
 // Free AST and all its components
 void free_ast(AST* ast) {
     if (!ast) return;
-    
-    // Free instruction linked list
+    // If arena-backed, nothing to free per-node. Just return.
+    if (ast->arena_backed) {
+        return;
+    }
+    // Fallback path if non-arena (not expected with current code)
     Instruction* inst = ast->instructions;
-    while (inst) {
-        Instruction* next = inst->next;
-        free(inst);
-        inst = next;
-    }
-    
-    // Free label linked list
+    while (inst) { Instruction* next = inst->next; free(inst); inst = next; }
     Label* label = ast->labels;
-    while (label) {
-        Label* next = label->next;
-        free(label);
-        label = next;
-    }
-    
-    // Free data definition linked list
+    while (label) { Label* next = label->next; free(label); label = next; }
     DataDef* data_def = ast->data_defs;
-    while (data_def) {
-        DataDef* next = data_def->next;
-        free(data_def);
-        data_def = next;
-    }
-    
-    // Free the AST itself
+    while (data_def) { DataDef* next = data_def->next; free(data_def); data_def = next; }
     free(ast);
 }

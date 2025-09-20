@@ -1,0 +1,5 @@
+{
+    "files.associations": {
+        "game_engine.h": "c"
+    }
+}

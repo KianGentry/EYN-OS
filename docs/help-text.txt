@@ -14,7 +14,6 @@ Streaming Commands:
 ------------------
   catram          - Display contents of a file from RAM disk (FAT32).
   error           - Display system error statistics and status.
-  game            - Load and run a game from a .dat file.
   lsram           - List files in the RAM disk (FAT32) with directory tree.
   size            - Show the size of a file in bytes.
   validate        - Display input validation statistics and test validation.
