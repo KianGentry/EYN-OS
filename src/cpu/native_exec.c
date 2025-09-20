@@ -631,8 +631,7 @@ void* native_user_alloc(uint32 size) {
 }
 
 void native_user_free(void* ptr) {
-    // Simple implementation - no actual freeing for now
-    // In a full implementation, this would maintain a free list
+    // Will implement later, no actual freeing yet.
     (void)ptr; // Suppress unused parameter warning
 }
 
