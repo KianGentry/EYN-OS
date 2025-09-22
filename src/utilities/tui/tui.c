@@ -12,6 +12,9 @@ static int tui_screen_height = 25;
 static int tui_cur_x = 0;
 static int tui_cur_y = 0;
 
+// exported flag, updated by tui_read_key
+int tui_alt_pressed = 0;
+
 // Helper to set the global cursor position for drawText
 static void tui_set_cursor(int x, int y) {
     tui_cur_x = x;
@@ -124,19 +127,37 @@ void tui_draw_status_bar(const tui_window_t* win, const char* text, tui_style_t 
     int y = (win == NULL) ? (tui_screen_height) : (win->y + win->height);
     int x = (win == NULL) ? 0 : win->x;
     int width = (win == NULL) ? tui_screen_width : win->width;
-    char bar[width + 1];
-    int len = strlen(text);
-    // Left-align the text
-    int i = 0;
-    for (; i < len && i < width - 1; ++i) bar[i] = text[i];
-    for (; i < width - 1; ++i) bar[i] = ' ';
-    bar[width - 1] = '\0';
-    tui_draw_text(x, y, bar, style);
+    // Map style to RGB
+    int r = 255, g = 255, b = 255;
+    switch (style.fg_color) {
+        case TUI_COLOR_YELLOW: r = 255; g = 255; b = 0; break;
+        case TUI_COLOR_RED:    r = 255; g = 0;   b = 0; break;
+        case TUI_COLOR_MAGENTA:r = 255; g = 0;   b = 255; break;
+        case TUI_COLOR_WHITE:  r = 255; g = 255; b = 255; break;
+        case TUI_COLOR_BLACK:  r = 0;   g = 0;   b = 0; break;
+        case TUI_COLOR_GRAY:   r = 192; g = 192; b = 192; break;
+        default:               r = 255; g = 255; b = 255; break;
+    }
+
+    // Convert TUI grid coords to pixel coords
+    int px = x * 8;
+    int py = y * 8;
+    int clip_min = px;
+    int clip_max = (x + width) * 8 - 8; // last character must fit 8 pixels
+
+    // Draw characters one-by-one clipped to the provided window area
+    for (int i = 0; text && text[i]; ++i) {
+        int cx = px + i * 8;
+        if (cx + 7 > clip_max) break;
+        if (cx < clip_min) continue; // should not happen for left-aligned, but safe
+        drawCharAt(cx, py, (int)(unsigned char)text[i], r, g, b);
+    }
 }
 
 int tui_read_key() {
     uint8_t ctrl_pressed = 0;
     uint8_t shift_pressed = 0;
+    uint8_t super_pressed = 0;
     uint8_t caps_lock = 0;
     while (1) {
         if (inportb(0x64) & 0x1) {
@@ -145,10 +166,14 @@ int tui_read_key() {
                 uint8_t realcode = scancode & 0x7F;
                 if (realcode == 42 || realcode == 54) shift_pressed = 0;
                 if (realcode == 29) ctrl_pressed = 0;
+                if (realcode == 91) super_pressed = 0;
+                if (realcode == 56) tui_alt_pressed = 0; // left Alt release
                 continue;
             }
             if (scancode == 42 || scancode == 54) { shift_pressed = 1; continue; }
             if (scancode == 29) { ctrl_pressed = 1; continue; }
+            if (scancode == 91) { super_pressed = 1; continue; }
+            if (scancode == 56) { tui_alt_pressed = 1; continue; } // left Alt press
             if (scancode == 58) { caps_lock = !caps_lock; continue; } // Caps Lock toggle
             // Ctrl+O and Ctrl+X only if ctrl_pressed
             if (ctrl_pressed) {
@@ -188,14 +213,15 @@ int tui_read_key() {
             }
             if (is_letter) {
                 int upper = (caps_lock && !shift_pressed) || (!caps_lock && shift_pressed);
-                if (upper) return base - 32; // Uppercase
-                else return base; // Lowercase
+                int ret = upper ? (base - 32) : base;
+                if (super_pressed) return 0x4000 | ret; // encode Super modifier in high bits
+                return ret; // normal
             }
             switch (scancode) {
-                case 72: return 0x1001; // Up arrow
-                case 80: return 0x1002; // Down arrow
-                case 75: return 0x1003; // Left arrow
-                case 77: return 0x1004; // Right arrow
+                case 72: return super_pressed ? (0x4000 | 0x1001) : 0x1001; // Up arrow
+                case 80: return super_pressed ? (0x4000 | 0x1002) : 0x1002; // Down arrow
+                case 75: return super_pressed ? (0x4000 | 0x1003) : 0x1003; // Left arrow
+                case 77: return super_pressed ? (0x4000 | 0x1004) : 0x1004; // Right arrow
                 case 14: return '\b';   // Backspace
                 case 28: return '\n';   // Enter
                 case 1:  return 27;     // Escape

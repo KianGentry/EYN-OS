@@ -202,6 +202,14 @@ int rei_display_image(const rei_image_t* image, int x, int y) {
     
     printf("%cRendering at position (%d, %d)...\n", 120, 120, 255, display_x, display_y);
     
+    // If shell output is being redirected (e.g., running inside a tiled vterm), don't draw pixels
+    extern int shell_redirect_active;
+    if (shell_redirect_active) {
+        // Inform the caller via printf which will feed the redirect buffer instead of drawing
+        printf("%c(REI image rendering skipped because output is redirected)\n", 200, 200, 200);
+        return 0;
+    }
+
     // Clear screen before rendering
     clearScreen();
     

@@ -53,4 +53,7 @@ void tui_refresh();
 // Keyboard input (returns key code)
 int tui_read_key();
 
+// Set when Alt is held down (updated by tui_read_key)
+extern int tui_alt_pressed;
+
 #endif // TUI_H 

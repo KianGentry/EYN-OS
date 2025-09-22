@@ -21,6 +21,10 @@ void shell_log_flush(void);
 // Drawing functions
 void drawRect(int x, int y, int w, int h, int r, int g, int b);
 void drawText(int charnum, int r, int g, int b);
+// Draw a NUL-terminated string at pixel coordinates (x,y) using 8x8 font
+void drawTextAt(int x, int y, const char* text, int r, int g, int b);
+// Draw a single character at pixel coords (x,y)
+void drawCharAt(int x, int y, int charnum, int r, int g, int b);
 void drawText_bold(int charnum, int r, int g, int b);
 void drawText_italic(int charnum, int r, int g, int b);
 void drawText_large(int charnum, int r, int g, int b);
@@ -39,6 +43,14 @@ void vga_window_set_title(int index, const char* title);
 void start_shell_redirect(void);
 void stop_shell_redirect(void);
 extern char shell_redirect_buf[SHELL_REDIRECT_BUF_SIZE];
+// Color used for the last redirected output (set by printf while redirect active)
+extern int shell_redirect_color_r;
+extern int shell_redirect_color_g;
+extern int shell_redirect_color_b;
+// Per-character color for redirected output (parallel to shell_redirect_buf)
+extern unsigned char shell_redirect_r[SHELL_REDIRECT_BUF_SIZE];
+extern unsigned char shell_redirect_g[SHELL_REDIRECT_BUF_SIZE];
+extern unsigned char shell_redirect_b[SHELL_REDIRECT_BUF_SIZE];
 
 // Shell logging variables
 extern char* shell_log_buf;
@@ -48,6 +60,12 @@ extern int shell_log_pos;
 
 // Double buffer integration
 void vga_swap_buffers(void);
+// Initialize the software backbuffer (safe no-op if allocation fails)
+void vga_init_double_buffer(void);
+// Mark a rectangle in the backbuffer as dirty (so swap will blit it)
+void vga_mark_dirty_rect(int x, int y, int w, int h);
+// Begin a new frame (reset dirty rect tracking)
+void vga_begin_frame(void);
 
 // Global variables
 extern int width, height;

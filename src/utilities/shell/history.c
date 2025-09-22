@@ -36,7 +36,8 @@ void add_to_history(command_history_t* history, const char* command) {
     // Add new command
     strcpy(history->commands[history->count], command);
     history->count++;
-    history->current = history->count; // Reset current position
+    // Set current to the index of the most-recently-added command
+    history->current = history->count - 1;
 }
 
 // Clear the history
@@ -47,7 +48,7 @@ void clear_history(command_history_t* history) {
         history->commands[i][0] = '\0';
     }
     history->count = 0;
-    history->current = 0;
+    history->current = -1;
 }
 
 // Show history (for debugging)

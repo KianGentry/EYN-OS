@@ -19,6 +19,9 @@ EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
 OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o
+
+OBJS += obj/tiling_manager.o obj/tiling_cmd.o
+OBJS += obj/terminals.o
 OUTPUT = tmp/boot/kernel.bin
 
 # Source files to object files
@@ -114,6 +117,14 @@ obj/compile_command.o:src/utilities/shell/compile_command.c
 
 obj/tui.o:src/utilities/tui/tui.c
 	$(COMPILER) $(CFLAGS) src/utilities/tui/tui.c -o obj/tui.o
+obj/tiling_manager.o:src/utilities/tui/tiling_manager.c
+	$(COMPILER) $(CFLAGS) src/utilities/tui/tiling_manager.c -o obj/tiling_manager.o
+
+obj/terminals.o:src/utilities/tui/terminals.c
+	$(COMPILER) $(CFLAGS) src/utilities/tui/terminals.c -o obj/terminals.o
+
+obj/tiling_cmd.o:src/utilities/shell/tiling_cmd.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/tiling_cmd.c -o obj/tiling_cmd.o
 
 obj/help_tui.o:src/utilities/shell/help_tui.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/help_tui.c -o obj/help_tui.o

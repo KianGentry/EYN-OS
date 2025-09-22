@@ -13,10 +13,28 @@ extern multiboot_info_t *g_mbi;
 int width, height;
 int r = 255, g = 255, b = 255; // Default to white
 
+// Simple software backbuffer (RGBA8)
+static unsigned char* g_backbuffer = NULL;
+static int g_backbuffer_w = 0;
+static int g_backbuffer_h = 0;
+// Dirty rect tracking (min/max inclusive)
+static int g_dirty_min_x = INT32_MAX;
+static int g_dirty_min_y = INT32_MAX;
+static int g_dirty_max_x = -1;
+static int g_dirty_max_y = -1;
+
 // Shell redirection globals
 int shell_redirect_active = 0;
 char shell_redirect_buf[SHELL_REDIRECT_BUF_SIZE];
 int shell_redirect_pos = 0;
+// Color for redirected output
+int shell_redirect_color_r = 255;
+int shell_redirect_color_g = 255;
+int shell_redirect_color_b = 255;
+// Per-char redirect colors parallel to shell_redirect_buf
+unsigned char shell_redirect_r[SHELL_REDIRECT_BUF_SIZE];
+unsigned char shell_redirect_g[SHELL_REDIRECT_BUF_SIZE];
+unsigned char shell_redirect_b[SHELL_REDIRECT_BUF_SIZE];
 
 // Dynamic buffer sizing based on available memory
 char* shell_log_buf = NULL;
@@ -158,11 +176,32 @@ void shell_log_flush() {
 void drawRect(int x, int y, int w, int h, int r, int g, int b)
 {
 	int i, j;
+	// If a backbuffer is available, draw into it; otherwise draw directly to framebuffer
+	if (g_backbuffer && g_backbuffer_w >= (int)g_mbi->framebuffer_width && g_backbuffer_h >= (int)g_mbi->framebuffer_height) {
+		unsigned int offset = (x + y * g_backbuffer_w) * 4;
+		for (i = 0; i < h; i++) {
+			for (j = 0; j < w; j++) {
+				unsigned int o = offset + j * 4;
+				g_backbuffer[o] = (unsigned char)b;
+				g_backbuffer[o + 1] = (unsigned char)g;
+				g_backbuffer[o + 2] = (unsigned char)r;
+				g_backbuffer[o + 3] = 0;
+			}
+			offset += g_backbuffer_w * 4;
+		}
+        // expand dirty rect to include this rectangle
+        if (x < g_dirty_min_x) g_dirty_min_x = x;
+        if (y < g_dirty_min_y) g_dirty_min_y = y;
+        if (x + w - 1 > g_dirty_max_x) g_dirty_max_x = x + w - 1;
+        if (y + h - 1 > g_dirty_max_y) g_dirty_max_y = y + h - 1;
+		return;
+	}
+	// fallback to drawing directly to framebuffer
 	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
 	unsigned int offset = (x + y * g_mbi->framebuffer_width) * 4; // find location of the pixel
 	for (i = 0; i < h; i++) {
 		for (j = 0; j < w; j++) // colouring in each line
-        {
+		{
 			video[offset + j * 4] = b;
 			video[offset + j * 4 + 1] = g;
 			video[offset + j * 4 + 2] = r;
@@ -210,6 +249,28 @@ void drawText(int charnum, int r, int g, int b)
 	int w; // horizontal position of the pixel in the 8x8 pattern
 	int h; // vertical position of the pixel in the 8x8 pattern
 	
+	// If shell output is being redirected, capture characters into the redirect buffer
+	if (shell_redirect_active) {
+		// Only handle printable ASCII and newline/backspace; ignore graphic-only ops (charnum == -1)
+		if (charnum >= 0 && shell_redirect_pos < SHELL_REDIRECT_BUF_SIZE - 1) {
+			char ch = (char)charnum;
+			shell_redirect_buf[shell_redirect_pos] = ch;
+			shell_redirect_r[shell_redirect_pos] = (unsigned char)r;
+			shell_redirect_g[shell_redirect_pos] = (unsigned char)g;
+			shell_redirect_b[shell_redirect_pos] = (unsigned char)b;
+			shell_redirect_pos++;
+			shell_redirect_buf[shell_redirect_pos] = '\0';
+		} else if (charnum == 10 && shell_redirect_pos < SHELL_REDIRECT_BUF_SIZE - 1) { // newline
+			shell_redirect_buf[shell_redirect_pos] = '\n';
+			shell_redirect_r[shell_redirect_pos] = (unsigned char)r;
+			shell_redirect_g[shell_redirect_pos] = (unsigned char)g;
+			shell_redirect_b[shell_redirect_pos] = (unsigned char)b;
+			shell_redirect_pos++;
+			shell_redirect_buf[shell_redirect_pos] = '\0';
+		}
+		return;
+	}
+
 
 	if (height == (int)(g_mbi->framebuffer_height)) 
     {
@@ -327,10 +388,20 @@ void printf(const char* format, ...)
 		}
 		temp[temp_pos] = '\0';
 		
+		// record color for redirected output so callers can render it with the same color
+		shell_redirect_color_r = r;
+		shell_redirect_color_g = g;
+		shell_redirect_color_b = b;
 		// Append to the global buffer (with bounds checking)
 		int to_copy = temp_pos;
 		if (shell_redirect_pos + to_copy >= SHELL_REDIRECT_BUF_SIZE - 1) {
 			to_copy = SHELL_REDIRECT_BUF_SIZE - shell_redirect_pos - 1;
+		}
+		// store per-char color metadata for the temp buffer (for the actual copied count)
+		for (int i = 0; i < to_copy; ++i) {
+			shell_redirect_r[shell_redirect_pos + i] = (unsigned char)r;
+			shell_redirect_g[shell_redirect_pos + i] = (unsigned char)g;
+			shell_redirect_b[shell_redirect_pos + i] = (unsigned char)b;
 		}
 		for (int i = 0; i < to_copy; ++i) {
 			shell_redirect_buf[shell_redirect_pos++] = temp[i];
@@ -465,15 +536,30 @@ void printf(const char* format, ...)
 
 void drawPixel(int x, int y, int r, int g, int b) 
 {
+	// Bounds check
+	if (!g_mbi) return;
+	if (x < 0 || y < 0 || x >= (int)g_mbi->framebuffer_width || y >= (int)g_mbi->framebuffer_height) return;
+
+	if (g_backbuffer && g_backbuffer_w >= (int)g_mbi->framebuffer_width && g_backbuffer_h >= (int)g_mbi->framebuffer_height) {
+		unsigned int offset = (x + y * g_backbuffer_w) * 4;
+		g_backbuffer[offset] = (unsigned char)b;
+		g_backbuffer[offset + 1] = (unsigned char)g;
+		g_backbuffer[offset + 2] = (unsigned char)r;
+		g_backbuffer[offset + 3] = 0;
+		// expand dirty rect
+		if (x < g_dirty_min_x) g_dirty_min_x = x;
+		if (y < g_dirty_min_y) g_dirty_min_y = y;
+		if (x > g_dirty_max_x) g_dirty_max_x = x;
+		if (y > g_dirty_max_y) g_dirty_max_y = y;
+		return;
+	}
+
 	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
-	
 	unsigned int offset = (x + y * g_mbi->framebuffer_width) * 4; // finding loc of pixel
-
-	video[offset] = b;   // setting the colour of pixel; blue, green, red
-	video[offset + 1] = g;
-	video[offset + 2] = r;
+	video[offset] = (unsigned char)b;   // setting the colour of pixel; blue, green, red
+	video[offset + 1] = (unsigned char)g;
+	video[offset + 2] = (unsigned char)r;
 	video[offset + 3] = 0;
-
 	return;
 }
 
@@ -540,17 +626,153 @@ void clearScreen()
 	height = 0;
 }
 
+// Initialize a simple software backbuffer sized to the framebuffer.
+void vga_init_double_buffer(void) {
+	if (!g_mbi) return;
+	int fbw = g_mbi->framebuffer_width;
+	int fbh = g_mbi->framebuffer_height;
+	if (fbw <= 0 || fbh <= 0) return;
+	// If backbuffer already allocated and matches size, nothing to do
+	if (g_backbuffer && g_backbuffer_w == fbw && g_backbuffer_h == fbh) return;
+	// Free existing if sizes differ
+	if (g_backbuffer) {
+		free(g_backbuffer);
+		g_backbuffer = NULL;
+	}
+	// Try to allocate backbuffer; if allocation fails, leave g_backbuffer NULL and use direct framebuffer
+	size_t bytes = (size_t)fbw * (size_t)fbh * 4;
+	// Try predictive allocator first if available
+	void* buf = NULL;
+	// predictive_malloc is declared in predictive_memory.h if available
+	// We'll attempt to use it via weak reference: if symbol exists, use it, otherwise fall back to malloc
+	buf = malloc(bytes);
+	g_backbuffer = (unsigned char*)buf;
+	if (!g_backbuffer) {
+		g_backbuffer_w = 0;
+		g_backbuffer_h = 0;
+		return;
+	}
+	g_backbuffer_w = fbw;
+	g_backbuffer_h = fbh;
+	// Initialize to black
+	memset(g_backbuffer, 0, bytes);
+}
+
+// Blit backbuffer to real framebuffer (safe no-op if backbuffer not allocated)
+void vga_swap_buffers(void) {
+	if (!g_mbi) return;
+	if (!g_backbuffer) return;
+	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	int fbw = g_mbi->framebuffer_width;
+	int fbh = g_mbi->framebuffer_height;
+	// If nothing dirty, nothing to copy
+	if (g_dirty_max_x < 0 || g_dirty_max_y < 0) return;
+
+	// Clip dirty rect to framebuffer
+	if (g_dirty_min_x < 0) g_dirty_min_x = 0;
+	if (g_dirty_min_y < 0) g_dirty_min_y = 0;
+	if (g_dirty_max_x >= fbw) g_dirty_max_x = fbw - 1;
+	if (g_dirty_max_y >= fbh) g_dirty_max_y = fbh - 1;
+
+	int copy_w = g_dirty_max_x - g_dirty_min_x + 1;
+	int copy_h = g_dirty_max_y - g_dirty_min_y + 1;
+
+	for (int y = 0; y < copy_h; ++y) {
+		unsigned char* src = g_backbuffer + ((size_t)(g_dirty_min_y + y) * g_backbuffer_w + g_dirty_min_x) * 4;
+		unsigned char* dst = fb + ((size_t)(g_dirty_min_y + y) * fbw + g_dirty_min_x) * 4;
+		memcpy(dst, src, copy_w * 4);
+	}
+
+	// reset dirty rect after swap
+	g_dirty_min_x = INT32_MAX;
+	g_dirty_min_y = INT32_MAX;
+	g_dirty_max_x = -1;
+	g_dirty_max_y = -1;
+}
+
+void vga_begin_frame(void) {
+	// reset dirty tracking so the first draw sets the rect
+	g_dirty_min_x = INT32_MAX;
+	g_dirty_min_y = INT32_MAX;
+	g_dirty_max_x = -1;
+	g_dirty_max_y = -1;
+}
+
+// Mark a pixel rectangle dirty without writing pixels (useful when
+// static decorations are present in backbuffer but we want to ensure
+// the area is included in the next blit).
+void vga_mark_dirty_rect(int x, int y, int w, int h) {
+    if (!g_backbuffer) return;
+    if (x < g_dirty_min_x) g_dirty_min_x = x;
+    if (y < g_dirty_min_y) g_dirty_min_y = y;
+    if (x + w - 1 > g_dirty_max_x) g_dirty_max_x = x + w - 1;
+    if (y + h - 1 > g_dirty_max_y) g_dirty_max_y = y + h - 1;
+}
+
+// Draw a NUL-terminated string at (x,y) in pixels using the existing drawText implementation.
+// This temporarily adjusts the global cursor (width/height) so we don't need to duplicate the font table.
+void drawTextAt(int x, int y, const char* text, int rr, int gg, int bb)
+{
+	if (!text) return;
+	int old_w = width;
+	int old_h = height;
+	int cx = x;
+	int cy = y;
+
+	for (const char* p = text; *p; ++p) {
+		if (*p == '\n') {
+			cx = x;
+			cy += 8;
+			continue;
+		}
+		// draw a single char at the pixel position with color
+		drawCharAt(cx, cy, (int)(unsigned char)*p, rr, gg, bb);
+		cx += 8;
+	}
+
+	// restore previous cursor
+	width = old_w;
+	height = old_h;
+}
+
+void drawCharAt(int x, int y, int charnum, int rr, int gg, int bb) {
+	if (charnum < 0) return;
+	// reuse the font array from drawText by duplicating access (font defined inside drawText)
+	// To avoid duplicating the huge font, we'll call drawText in a safe cursor-swap mode
+	int old_w = width;
+	int old_h = height;
+	width = x;
+	height = y;
+	drawText(charnum, rr, gg, bb);
+	width = old_w;
+	height = old_h;
+}
+
 // Start redirection
 void start_shell_redirect() {
 	shell_redirect_active = 1;
 	shell_redirect_pos = 0;
 	shell_redirect_buf[0] = '\0';
+	// clear per-char redirect color arrays
+	for (int i = 0; i < SHELL_REDIRECT_BUF_SIZE; ++i) {
+		shell_redirect_r[i] = 0;
+		shell_redirect_g[i] = 0;
+		shell_redirect_b[i] = 0;
+	}
+	// reset current redirect color so new typed input falls back to vterm default
+	shell_redirect_color_r = 0;
+	shell_redirect_color_g = 0;
+	shell_redirect_color_b = 0;
 }
 
 // Stop redirection
 void stop_shell_redirect() {
 	shell_redirect_active = 0;
 	shell_redirect_pos = 0;
+	// clear redirect color so subsequent typed input doesn't inherit last printed color
+	shell_redirect_color_r = 0;
+	shell_redirect_color_g = 0;
+	shell_redirect_color_b = 0;
 }
 
 // Minimal snprintf for kernel shell (supports %s, %u, %d, %c)

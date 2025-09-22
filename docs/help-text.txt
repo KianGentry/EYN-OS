@@ -16,6 +16,7 @@ Streaming Commands:
   error           - Display system error statistics and status.
   lsram           - List files in the RAM disk (FAT32) with directory tree.
   size            - Show the size of a file in bytes.
+  tiling          - Launch the tiling front-end manager.
   validate        - Display input validation statistics and test validation.
 
 Filesystem Commands:

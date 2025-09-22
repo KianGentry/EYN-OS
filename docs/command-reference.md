@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2025-09-20 04:25:48
+This document is auto-generated from the source code. Last updated: 2025-09-22 20:07:27
 
-**Total Commands:** 37
+**Total Commands:** 38
 
 ## Table of Contents
 
@@ -203,6 +203,24 @@ Usage: size <filename>
 **Example:**
 ```bash
 size myfile.txt
+```
+
+---
+
+### tiling
+
+**Handler:** `tiling_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `tiling_cmd.c`
+
+**Description:**
+Launch the tiling front-end manager.
+
+**Example:**
+```bash
+tiling
 ```
 
 ---
@@ -741,7 +759,7 @@ run test.eyn
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 5 |
+| Streaming Commands | 6 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |
