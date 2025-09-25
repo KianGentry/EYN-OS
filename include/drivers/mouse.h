@@ -2,6 +2,7 @@
 #define MOUSE_H
 
 #include <types.h>
+#include <rei.h>
 
 // Mouse button definitions
 #define MOUSE_BUTTON_LEFT    0x01
@@ -33,6 +34,10 @@ int mouse_get_position(int* x, int* y);
 int mouse_get_buttons(uint8* buttons);
 void mouse_set_position(int x, int y);
 void mouse_set_bounds(int min_x, int min_y, int max_x, int max_y);
+// Poll the controller for pending AUX bytes and update state (fallback when IRQ12 isn't firing)
+int mouse_poll(void);
+// Provide a cursor image to be used for the hardware cursor overlay; pass NULL to use fallback
+void mouse_set_cursor_image(const rei_image_t* image);
 
 // Mouse interrupt handler
 void mouse_interrupt_handler(void);

@@ -18,7 +18,7 @@ LDFLAGS = -m elf_i386 -T src/boot/link.ld
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o
+OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o
 
 OBJS += obj/tiling_manager.o obj/tiling_cmd.o
 OBJS += obj/terminals.o
@@ -75,6 +75,8 @@ obj/math.o:src/utilities/basic/math.c
 
 obj/vga.o:src/drivers/vga.c
 	$(COMPILER) $(CFLAGS) src/drivers/vga.c -o obj/vga.o
+obj/mouse.o:src/drivers/mouse.c
+	$(COMPILER) $(CFLAGS) src/drivers/mouse.c -o obj/mouse.o
 
 obj/fat32.o:src/drivers/fat32.c
 	$(COMPILER) $(CFLAGS) src/drivers/fat32.c -o obj/fat32.o
@@ -224,7 +226,7 @@ eynfsimg:
 # Create source code drive for testing
 sourceimg: eynfs_format
 	rm -f source.img
-	dd if=/dev/zero of=source.img bs=1M count=20
+	dd if=/dev/zero of=source.img bs=1M count=10
 	$(COMPILER) -I include -I include/misc -I include/drivers -I include/cpu -I include/utilities -I include/graphics -I include/network -o eynfs_format eynfs_format.c
 	./eynfs_format source.img
 	mkdir -p temp_source_structure
@@ -239,6 +241,7 @@ sourceimg: eynfs_format
 run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
+	-hdb source.img \
 	-boot d \
 	-m 4M
 # Just runs the OS, no rebuilding.

@@ -2,7 +2,9 @@
 #include <system.h>
 #include <vga.h>
 #include <isr.h>
+#include <irq.h>
 #include <string.h>
+#include <types.h>
 
 // PS/2 Mouse ports
 #define PS2_DATA_PORT    0x60
@@ -37,6 +39,7 @@
 
 // Global mouse state
 mouse_state_t g_mouse_state = {0};
+static const rei_image_t* g_cursor_image_ptr = NULL;
 
 // Mouse bounds
 static int mouse_min_x = 0, mouse_min_y = 0;
@@ -45,6 +48,10 @@ static int mouse_max_x = 79, mouse_max_y = 24; // VGA text mode bounds
 // Mouse packet buffer
 static uint8 mouse_packet_buffer[MOUSE_PACKET_SIZE];
 static int mouse_packet_index = 0;
+
+// Helpers for packet synchronization and sign extension
+static inline int mouse_packet_is_sync(uint8 b0) { return (b0 & 0x08) != 0; }
+static inline int8 sign_extend_8(uint8 v) { return (int8)v; }
 
 // Wait for mouse to be ready
 static int mouse_wait_for_ready(void) {
@@ -113,9 +120,8 @@ int mouse_init(void) {
     if (mouse_wait_for_ready() != 0) return -1;
     outportb(PS2_DATA_PORT, status);
     
-    // Reset mouse
+    // Reset mouse (best-effort, avoid noisy logs)
     if (mouse_send_command(MOUSE_CMD_RESET) != 0) {
-        printf("Mouse reset failed\n");
         return -1;
     }
     
@@ -123,35 +129,26 @@ int mouse_init(void) {
     if (mouse_wait_for_data() != 0) return -1;
     uint8 response = inportb(PS2_DATA_PORT);
     if (response != 0xAA) {
-        printf("Mouse reset response error: 0x%02X\n", response);
         return -1;
     }
     
     // Wait for device ID
     if (mouse_wait_for_data() != 0) return -1;
     response = inportb(PS2_DATA_PORT);
-    printf("Mouse device ID: 0x%02X\n", response);
     
     // Set default settings
     if (mouse_send_command(MOUSE_CMD_SET_DEFAULTS) != 0) {
-        printf("Mouse set defaults failed\n");
         return -1;
     }
     
     // Enable mouse
     if (mouse_send_command(MOUSE_CMD_ENABLE) != 0) {
-        printf("Mouse enable failed\n");
         return -1;
     }
     
     // Set sample rate to 100 (for better responsiveness)
-    if (mouse_send_command(MOUSE_CMD_SET_SAMPLE_RATE) != 0) {
-        printf("Mouse set sample rate failed\n");
-        return -1;
-    }
-    if (mouse_send_command(100) != 0) {
-        printf("Mouse sample rate value failed\n");
-        return -1;
+    if (mouse_send_command(MOUSE_CMD_SET_SAMPLE_RATE) == 0) {
+        (void)mouse_send_command(100);
     }
     
     // Initialize mouse position to center of screen
@@ -161,8 +158,6 @@ int mouse_init(void) {
     
     // Register mouse interrupt handler
     register_interrupt_handler(12, mouse_interrupt_handler); // IRQ 12 is mouse
-    
-    printf("Mouse initialized successfully\n");
     return 0;
 }
 
@@ -176,42 +171,56 @@ void mouse_cleanup(void) {
 
 // Mouse interrupt handler
 void mouse_interrupt_handler(void) {
-    if (!g_mouse_state.initialized) return;
-    
-    // Read mouse data
-    uint8 data;
-    if (mouse_read_byte(&data) != 0) return;
-    
+    if (!g_mouse_state.initialized) {
+        pic_send_eoi(12);
+        return;
+    }
+
+    // Read one byte directly; data is ready because we were interrupted
+    uint8 data = inportb(PS2_DATA_PORT);
+
+    // Packet synchronization: the first byte must have bit 3 set.
+    if (mouse_packet_index == 0) {
+        if (!mouse_packet_is_sync(data)) {
+            // drop out-of-sync byte and do not advance index
+            pic_send_eoi(12);
+            return;
+        }
+    }
+
     // Store in packet buffer
     mouse_packet_buffer[mouse_packet_index] = data;
     mouse_packet_index++;
-    
-    // Process complete packet
-    if (mouse_packet_index >= MOUSE_PACKET_SIZE) {
-        mouse_packet_index = 0;
-        
-        // Parse mouse packet
+
+    // Process complete packet when index wrapped to 0
+    if (mouse_packet_index == MOUSE_PACKET_SIZE) {
         uint8 status = mouse_packet_buffer[0];
-        int8 delta_x = (int8)mouse_packet_buffer[1];
-        int8 delta_y = (int8)mouse_packet_buffer[2];
-        
+        int8 delta_x = sign_extend_8(mouse_packet_buffer[1]);
+        int8 delta_y = sign_extend_8(mouse_packet_buffer[2]);
+
         // Update button state
         g_mouse_state.prev_buttons = g_mouse_state.buttons;
         g_mouse_state.buttons = status & 0x07;
-        
-        // Update position
-        g_mouse_state.delta_x = delta_x;
-        g_mouse_state.delta_y = delta_y;
-        
+
+        // Update position and deltas
+        g_mouse_state.delta_x += delta_x;
+        g_mouse_state.delta_y += delta_y;
+
         g_mouse_state.x += delta_x;
         g_mouse_state.y -= delta_y; // Invert Y axis
-        
+
         // Clamp to bounds
         if (g_mouse_state.x < mouse_min_x) g_mouse_state.x = mouse_min_x;
         if (g_mouse_state.x > mouse_max_x) g_mouse_state.x = mouse_max_x;
         if (g_mouse_state.y < mouse_min_y) g_mouse_state.y = mouse_min_y;
         if (g_mouse_state.y > mouse_max_y) g_mouse_state.y = mouse_max_y;
+
+        // Ready for next packet
+        mouse_packet_index = 0;
     }
+
+    // Always send End-Of-Interrupt for IRQ12 (slave + cascaded master handled inside)
+    pic_send_eoi(12);
 }
 
 // Read mouse event
@@ -274,4 +283,46 @@ void mouse_set_bounds(int min_x, int min_y, int max_x, int max_y) {
     if (g_mouse_state.initialized) {
         mouse_set_position(g_mouse_state.x, g_mouse_state.y);
     }
+}
+
+void mouse_set_cursor_image(const rei_image_t* image) {
+    g_cursor_image_ptr = image; // currently unused by driver; UI layer uses its own copy
+}
+
+// Non-blocking poll for AUX (mouse) bytes; safe to call from main loop
+int mouse_poll(void) {
+    int progressed = 0;
+    // Drain a few AUX bytes per call to avoid starving the UI
+    for (int i = 0; i < 8; ++i) {
+        uint8 status = inportb(PS2_STATUS_PORT);
+        if (!(status & 0x01)) break; // no data waiting
+        if (!(status & 0x20)) break;  // data is for keyboard; don't consume here
+        uint8 data = inportb(PS2_DATA_PORT);
+        // AUX data: assemble packet with synchronization
+        if (mouse_packet_index == 0 && !mouse_packet_is_sync(data)) {
+            // skip until a valid header
+            continue;
+        }
+        mouse_packet_buffer[mouse_packet_index] = data;
+        mouse_packet_index++;
+        progressed = 1;
+        if (mouse_packet_index == MOUSE_PACKET_SIZE) {
+            uint8 st = mouse_packet_buffer[0];
+            int8 dx = sign_extend_8(mouse_packet_buffer[1]);
+            int8 dy = sign_extend_8(mouse_packet_buffer[2]);
+            if (!g_mouse_state.initialized) g_mouse_state.initialized = 1;
+            g_mouse_state.prev_buttons = g_mouse_state.buttons;
+            g_mouse_state.buttons = st & 0x07;
+            g_mouse_state.delta_x += dx;
+            g_mouse_state.delta_y += dy;
+            g_mouse_state.x += dx;
+            g_mouse_state.y -= dy;
+            if (g_mouse_state.x < mouse_min_x) g_mouse_state.x = mouse_min_x;
+            if (g_mouse_state.x > mouse_max_x) g_mouse_state.x = mouse_max_x;
+            if (g_mouse_state.y < mouse_min_y) g_mouse_state.y = mouse_min_y;
+            if (g_mouse_state.y > mouse_max_y) g_mouse_state.y = mouse_max_y;
+            mouse_packet_index = 0; // ready for next packet
+        }
+    }
+    return progressed ? 0 : 1; // 0=updated, 1=nothing to read
 }

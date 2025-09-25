@@ -20,9 +20,14 @@ string readStr() {
     
     while(reading)
     {
-        if(inportb(0x64) & 0x1)
-        {
-            uint8 scancode = inportb(0x60);
+                if(inportb(0x64) & 0x1)
+                {
+                        uint8 status = inportb(0x64);
+                        if (status & 0x20) {
+                                // AUX (mouse) data present; let mouse handler consume it
+                                continue;
+                        }
+                        uint8 scancode = inportb(0x60);
             
             // Handle modifier keys
             if(scancode == 42 || scancode == 54) {  // Left or Right shift press
@@ -620,8 +625,12 @@ string readStr() {
 
 void poll_keyboard_for_ctrl_c() {
     static uint8 ctrl_pressed = 0;
-    if (inportb(0x64) & 0x1) {
-        uint8 scancode = inportb(0x60);
+        if (inportb(0x64) & 0x1) {
+                uint8 status = inportb(0x64);
+                if (status & 0x20) {
+                        return; // mouse data; ignore in keyboard code
+                }
+                uint8 scancode = inportb(0x60);
         if (scancode == 29) { // Ctrl press
             ctrl_pressed = 1;
         } else if (scancode == 157) { // Ctrl release

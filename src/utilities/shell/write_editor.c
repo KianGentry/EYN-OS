@@ -357,44 +357,68 @@ void write_editor_draw(const char* filename) {
 
 // GUI draw callback (top-level)
 static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
+    // Clear only the content area so we don't overdraw WM decorations
+    if (content_w > 0 && content_h > 0) {
+        drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
+    }
     int cols = content_w / 8;
     int rows = content_h / 8;
-    // cache geometry for key handling
+    if (cols < 1) cols = 1;
+    if (rows < 1) rows = 1;
+    // cache geometry for potential key handling
     write_editor_gui_cols = cols;
     write_editor_gui_rows = rows;
     // Reserve one row at the bottom of the tile content for the status bar
     int text_rows = rows > 1 ? rows - 1 : rows;
-    int max_visible = text_rows;
-    // Draw text area honoring horizontal scroll (write_editor_scroll_x)
-    for (int r = 0; r < max_visible; ++r) {
-        int line_idx = r + write_editor_scroll_y;
-        if (line_idx >= write_editor_num_lines) break;
-        int start_char = write_editor_scroll_x;
-        int x = content_x;
-        for (int col = 0; col < cols && (start_char + col) < MAX_LINE_LENGTH; ++col) {
-            int src_idx = start_char + col;
-            char ch = write_editor_buffer[line_idx][src_idx];
-            if (!ch) ch = ' ';
-            // If the cursor is at this source index, draw '!' and then draw the character shifted right
-            if (line_idx == write_editor_cursor_y && src_idx == write_editor_cursor_x) {
-                // draw cursor glyph
-                drawCharAt(x, content_y + r * 8, (int)'!', 255, 255, 0);
-                x += 8;
-                // draw the underlying character shifted right if it fits
-                if (col + 1 < cols) {
-                    drawCharAt(x, content_y + r * 8, (int)(unsigned char)ch, 255, 255, 255);
-                    x += 8;
-                    // consume an extra column of the visible area to account for the shift
-                    col++;
+
+    // Render text with soft-wrapping: walk absolute lines starting at scroll_y
+    int abs_line = write_editor_scroll_y;
+    int seg = 0; // wrapped segment index within current abs_line
+    for (int r = 0; r < text_rows; ++r) {
+        int draw_y = content_y + r * 8;
+        if (abs_line >= write_editor_num_lines) {
+            // nothing to draw on this row
+            continue;
+        }
+    const char* line = write_editor_buffer[abs_line];
+    int len = strlength((char*)line); // cast to silence discarded qualifier warning
+        int wraps = (len + cols - 1) / cols; if (wraps < 1) wraps = 1;
+        // If we've exhausted wrapped segments for this line, advance to next line and retry this visual row
+        if (seg >= wraps) {
+            abs_line++;
+            seg = 0;
+            r--; // redo this visual row with the next absolute line
+            continue;
+        }
+        int start_col = seg * cols;
+        for (int cc = 0; cc < cols; ++cc) {
+            int src_idx = start_col + cc;
+            char ch = ' ';
+            if (src_idx < len) ch = line[src_idx];
+            // Cursor handling: place a '!' at the cursor position and shift the underlying character right by one cell if it fits.
+            if (abs_line == write_editor_cursor_y) {
+                int cur_wrap = write_editor_cursor_x / cols;
+                int cur_col = write_editor_cursor_x % cols;
+                if (seg == cur_wrap && cc == cur_col) {
+                    // draw cursor glyph
+                    int px = content_x + cc * 8;
+                    if (px >= content_x && px + 7 < content_x + content_w)
+                        drawCharAt(px, draw_y, (int)'!', 255, 255, 0);
+                    // draw underlying character shifted right if room remains
+                    if (cc + 1 < cols) {
+                        int px2 = content_x + (cc + 1) * 8;
+                        if (px2 >= content_x && px2 + 7 < content_x + content_w)
+                            drawCharAt(px2, draw_y, (int)(unsigned char)ch, 255, 255, 255);
+                        cc++; // consume the next cell
+                    }
                     continue;
-                } else {
-                    // no room to show the underlying character
-                    break;
                 }
             }
-            drawCharAt(x, content_y + r * 8, (int)(unsigned char)ch, 255, 255, 255);
-            x += 8;
+            int px = content_x + cc * 8;
+            if (px >= content_x && px + 7 < content_x + content_w)
+                drawCharAt(px, draw_y, (int)(unsigned char)ch, 255, 255, 255);
         }
+        seg++;
     }
 
     // Draw bottom status bar inside this tile (last row)

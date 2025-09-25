@@ -7,21 +7,26 @@
 #include <string.h>
 #include <types.h>
 #include <shell.h>
+#include <system.h>
 
 extern multiboot_info_t *g_mbi;
 
 int width, height;
 int r = 255, g = 255, b = 255; // Default to white
+// When non-zero, drawText operates in a minimal glyph-draw mode used by drawCharAt.
+static int g_drawCharAt_mode = 0;
 
 // Simple software backbuffer (RGBA8)
 static unsigned char* g_backbuffer = NULL;
 static int g_backbuffer_w = 0;
 static int g_backbuffer_h = 0;
-// Dirty rect tracking (min/max inclusive)
-static int g_dirty_min_x = INT32_MAX;
-static int g_dirty_min_y = INT32_MAX;
-static int g_dirty_max_x = -1;
-static int g_dirty_max_y = -1;
+// Optional exclusion rect for swap (e.g., software cursor overlay)
+static int g_exclude_x = -1, g_exclude_y = -1, g_exclude_w = 0, g_exclude_h = 0;
+// Dirty rect tracking (multi-rect)
+typedef struct { int x, y, w, h; } dirty_rect_t;
+#define MAX_DIRTY_RECTS 32
+static dirty_rect_t g_dirty_rects[MAX_DIRTY_RECTS];
+static int g_dirty_count = 0;
 
 // Shell redirection globals
 int shell_redirect_active = 0;
@@ -189,11 +194,8 @@ void drawRect(int x, int y, int w, int h, int r, int g, int b)
 			}
 			offset += g_backbuffer_w * 4;
 		}
-        // expand dirty rect to include this rectangle
-        if (x < g_dirty_min_x) g_dirty_min_x = x;
-        if (y < g_dirty_min_y) g_dirty_min_y = y;
-        if (x + w - 1 > g_dirty_max_x) g_dirty_max_x = x + w - 1;
-        if (y + h - 1 > g_dirty_max_y) g_dirty_max_y = y + h - 1;
+		// mark region dirty
+		vga_mark_dirty_rect(x, y, w, h);
 		return;
 	}
 	// fallback to drawing directly to framebuffer
@@ -214,8 +216,8 @@ void drawRect(int x, int y, int w, int h, int r, int g, int b)
 void drawText(int charnum, int r, int g, int b)
 {
 	// store hex numbers representing the pattern for characters (8 numbers per character) into an array
-    // i knicked all this off of github i cant lie, i am NOT writing this much hex
-	char font[2057] = {
+	// i knicked all this off of github i cant lie, i am NOT writing this much hex
+	static const unsigned char font[2057] = {
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x7E, 0x81, 0xA5, 0x81, 0xBD, 0x99, 0x81, 0x7E,
 		0x7E, 0xFF, 0xDB, 0xFF, 0xC3, 0xE7, 0xFF, 0x7E,
@@ -248,6 +250,43 @@ void drawText(int charnum, int r, int g, int b)
 	int k; // row number in the 8x8 pattern
 	int w; // horizontal position of the pixel in the 8x8 pattern
 	int h; // vertical position of the pixel in the 8x8 pattern
+
+	// Minimal side-effect-free path for drawCharAt to prevent console scrolling/wrapping side effects.
+	if (g_drawCharAt_mode) {
+		if (charnum >= 0) {
+			int x0 = width;
+			int y0 = height;
+			if (g_backbuffer) {
+				for (k = 0; k < 8; k++) {
+					int yy = y0 + k;
+					if (yy < 0 || yy >= g_backbuffer_h) continue;
+					unsigned char rowbits = font[charnum * 8 + k];
+					for (i = 0; i < 8; i++) {
+						if (rowbits & (0x01 << i)) {
+							int xx = x0 + (8 - i);
+							if (xx < 0 || xx >= g_backbuffer_w) continue;
+							size_t o = ((size_t)yy * g_backbuffer_w + xx) * 4;
+							g_backbuffer[o + 0] = (unsigned char)b;
+							g_backbuffer[o + 1] = (unsigned char)g;
+							g_backbuffer[o + 2] = (unsigned char)r;
+							g_backbuffer[o + 3] = 0;
+						}
+					}
+				}
+				// Mark the glyph's 8x8 area dirty
+				vga_mark_dirty_rect(x0, y0, 8, 8);
+			} else {
+				for (k = 0; k < 8; k++) {
+					for (i = 0; i < 8; i++) {
+						if (font[charnum * 8 + k] & (0x01 << i)) {
+							drawPixel((8 - i) + x0, k + y0, r, g, b);
+						}
+					}
+				}
+			}
+		}
+		return;
+	}
 	
 	// If shell output is being redirected, capture characters into the redirect buffer
 	if (shell_redirect_active) {
@@ -540,17 +579,14 @@ void drawPixel(int x, int y, int r, int g, int b)
 	if (!g_mbi) return;
 	if (x < 0 || y < 0 || x >= (int)g_mbi->framebuffer_width || y >= (int)g_mbi->framebuffer_height) return;
 
-	if (g_backbuffer && g_backbuffer_w >= (int)g_mbi->framebuffer_width && g_backbuffer_h >= (int)g_mbi->framebuffer_height) {
+    if (g_backbuffer && g_backbuffer_w >= (int)g_mbi->framebuffer_width && g_backbuffer_h >= (int)g_mbi->framebuffer_height) {
 		unsigned int offset = (x + y * g_backbuffer_w) * 4;
 		g_backbuffer[offset] = (unsigned char)b;
 		g_backbuffer[offset + 1] = (unsigned char)g;
 		g_backbuffer[offset + 2] = (unsigned char)r;
 		g_backbuffer[offset + 3] = 0;
-		// expand dirty rect
-		if (x < g_dirty_min_x) g_dirty_min_x = x;
-		if (y < g_dirty_min_y) g_dirty_min_y = y;
-		if (x > g_dirty_max_x) g_dirty_max_x = x;
-		if (y > g_dirty_max_y) g_dirty_max_y = y;
+		// mark region dirty
+		vga_mark_dirty_rect(x, y, 1, 1);
 		return;
 	}
 
@@ -659,54 +695,275 @@ void vga_init_double_buffer(void) {
 }
 
 // Blit backbuffer to real framebuffer (safe no-op if backbuffer not allocated)
+static int rects_overlap_or_touch(dirty_rect_t a, dirty_rect_t b) {
+	int ax1 = a.x, ay1 = a.y, ax2 = a.x + a.w, ay2 = a.y + a.h; // exclusive
+	int bx1 = b.x, by1 = b.y, bx2 = b.x + b.w, by2 = b.y + b.h; // exclusive
+	// allow touching edges to merge: use <= / >= appropriately
+	return !(ax2 < bx1 || bx2 < ax1 || ay2 < by1 || by2 < ay1);
+}
+
+static void rect_union_inplace(dirty_rect_t* dst, dirty_rect_t src) {
+	int x1 = dst->x < src.x ? dst->x : src.x;
+	int y1 = dst->y < src.y ? dst->y : src.y;
+	int x2 = (dst->x + dst->w) > (src.x + src.w) ? (dst->x + dst->w) : (src.x + src.w);
+	int y2 = (dst->y + dst->h) > (src.y + src.h) ? (dst->y + dst->h) : (src.y + src.h);
+	dst->x = x1; dst->y = y1; dst->w = x2 - x1; dst->h = y2 - y1;
+}
+
 void vga_swap_buffers(void) {
+	// Try to align copies with VBlank to reduce tearing near the top
+	vga_wait_vblank();
 	if (!g_mbi) return;
 	if (!g_backbuffer) return;
 	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
 	int fbw = g_mbi->framebuffer_width;
 	int fbh = g_mbi->framebuffer_height;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8;
+	if (!fb || pitch <= 0 || bpp < 3) return;
 	// If nothing dirty, nothing to copy
-	if (g_dirty_max_x < 0 || g_dirty_max_y < 0) return;
+	if (g_dirty_count <= 0) return;
+	// Helper to copy a span from backbuffer to fb, honoring pitch/bpp
+	#define COPY_SPAN(abs_y, start_x, span_w) do { \
+		if ((span_w) > 0) { \
+			unsigned char* _src = g_backbuffer + ((size_t)(abs_y) * g_backbuffer_w + (start_x)) * 4; \
+			unsigned char* _dst = fb + ((size_t)(abs_y) * pitch + (start_x) * bpp); \
+			if (bpp == 4 && pitch == fbw * 4) { \
+				memcpy(_dst, _src, (size_t)(span_w) * 4); \
+			} else { \
+				for (int _c = 0; _c < (span_w); ++_c) { \
+					_dst[0] = _src[0]; /* B */ \
+					_dst[1] = _src[1]; /* G */ \
+					_dst[2] = _src[2]; /* R */ \
+					if (bpp >= 4) _dst[3] = 0xFF; \
+					_src += 4; \
+					_dst += bpp; \
+				} \
+			} \
+		} \
+	} while (0)
 
-	// Clip dirty rect to framebuffer
-	if (g_dirty_min_x < 0) g_dirty_min_x = 0;
-	if (g_dirty_min_y < 0) g_dirty_min_y = 0;
-	if (g_dirty_max_x >= fbw) g_dirty_max_x = fbw - 1;
-	if (g_dirty_max_y >= fbh) g_dirty_max_y = fbh - 1;
-
-	int copy_w = g_dirty_max_x - g_dirty_min_x + 1;
-	int copy_h = g_dirty_max_y - g_dirty_min_y + 1;
-
-	for (int y = 0; y < copy_h; ++y) {
-		unsigned char* src = g_backbuffer + ((size_t)(g_dirty_min_y + y) * g_backbuffer_w + g_dirty_min_x) * 4;
-		unsigned char* dst = fb + ((size_t)(g_dirty_min_y + y) * fbw + g_dirty_min_x) * 4;
-		memcpy(dst, src, copy_w * 4);
+	// Copy each dirty rectangle, splitting around optional exclusion rect (e.g., cursor)
+	for (int rix = 0; rix < g_dirty_count; ++rix) {
+		int x0 = g_dirty_rects[rix].x;
+		int y0 = g_dirty_rects[rix].y;
+		int x1 = x0 + g_dirty_rects[rix].w; // exclusive
+		int y1 = y0 + g_dirty_rects[rix].h; // exclusive
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 > fbw) x1 = fbw;
+	if (y1 > fbh) y1 = fbh;
+		if (x1 <= x0 || y1 <= y0) continue;
+		// Copy bottom-up to reduce top-edge tearing when we miss exact vblank
+		for (int abs_y = y1 - 1; abs_y >= y0; --abs_y) {
+			int row_x0 = x0;
+			int row_x1 = x1;
+			if (g_exclude_w > 0 && g_exclude_h > 0 &&
+				abs_y >= g_exclude_y && abs_y < g_exclude_y + g_exclude_h) {
+				int ex0 = g_exclude_x;
+				int ex1 = g_exclude_x + g_exclude_w;
+				// Left segment
+				int seg0_x0 = row_x0;
+				int seg0_x1 = (ex0 > row_x0) ? ex0 : row_x0;
+				if (seg0_x1 > row_x1) seg0_x1 = row_x1;
+				COPY_SPAN(abs_y, seg0_x0, seg0_x1 - seg0_x0);
+				// Right segment
+				int seg1_x0 = (ex1 < row_x1) ? ex1 : row_x1;
+				int seg1_x1 = row_x1;
+				if (seg1_x0 < row_x0) seg1_x0 = row_x0;
+				COPY_SPAN(abs_y, seg1_x0, seg1_x1 - seg1_x0);
+			} else {
+				COPY_SPAN(abs_y, row_x0, row_x1 - row_x0);
+			}
+		}
 	}
 
-	// reset dirty rect after swap
-	g_dirty_min_x = INT32_MAX;
-	g_dirty_min_y = INT32_MAX;
-	g_dirty_max_x = -1;
-	g_dirty_max_y = -1;
+	#undef COPY_SPAN
+
+	// reset dirty rects after swap
+	g_dirty_count = 0;
 }
 
 void vga_begin_frame(void) {
-	// reset dirty tracking so the first draw sets the rect
-	g_dirty_min_x = INT32_MAX;
-	g_dirty_min_y = INT32_MAX;
-	g_dirty_max_x = -1;
-	g_dirty_max_y = -1;
+	// reset dirty tracking for the new frame
+	g_dirty_count = 0;
+}
+
+void vga_set_swap_exclude(int x, int y, int w, int h) {
+	g_exclude_x = x; g_exclude_y = y; g_exclude_w = w; g_exclude_h = h;
+}
+
+void vga_clear_swap_exclude(void) {
+	g_exclude_x = -1; g_exclude_y = -1; g_exclude_w = 0; g_exclude_h = 0;
 }
 
 // Mark a pixel rectangle dirty without writing pixels (useful when
 // static decorations are present in backbuffer but we want to ensure
 // the area is included in the next blit).
 void vga_mark_dirty_rect(int x, int y, int w, int h) {
-    if (!g_backbuffer) return;
-    if (x < g_dirty_min_x) g_dirty_min_x = x;
-    if (y < g_dirty_min_y) g_dirty_min_y = y;
-    if (x + w - 1 > g_dirty_max_x) g_dirty_max_x = x + w - 1;
-    if (y + h - 1 > g_dirty_max_y) g_dirty_max_y = y + h - 1;
+	if (!g_backbuffer || !g_mbi) return;
+	if (w <= 0 || h <= 0) return;
+	// Clip to screen
+	int sw = g_mbi->framebuffer_width;
+	int sh = g_mbi->framebuffer_height;
+	if (x < 0) { w += x; x = 0; }
+	if (y < 0) { h += y; y = 0; }
+	if (x + w > sw) w = sw - x;
+	if (y + h > sh) h = sh - y;
+	if (w <= 0 || h <= 0) return;
+
+	dirty_rect_t nr = { x, y, w, h };
+	// Try to merge with existing rects
+	for (int i = 0; i < g_dirty_count; ++i) {
+		if (rects_overlap_or_touch(g_dirty_rects[i], nr)) {
+			rect_union_inplace(&g_dirty_rects[i], nr);
+			// After expanding, try to merge further with others
+			for (int j = 0; j < g_dirty_count; ) {
+				if (j != i && rects_overlap_or_touch(g_dirty_rects[i], g_dirty_rects[j])) {
+					rect_union_inplace(&g_dirty_rects[i], g_dirty_rects[j]);
+					// remove g_dirty_rects[j]
+					g_dirty_rects[j] = g_dirty_rects[g_dirty_count - 1];
+					g_dirty_count--;
+					continue;
+				}
+				++j;
+			}
+			return;
+		}
+	}
+	// Append if space
+	if (g_dirty_count < MAX_DIRTY_RECTS) {
+		g_dirty_rects[g_dirty_count++] = nr;
+		return;
+	}
+	// Fallback: union everything into a single bounding rect
+	int minx = nr.x, miny = nr.y, maxx = nr.x + nr.w, maxy = nr.y + nr.h;
+	for (int i = 0; i < g_dirty_count; ++i) {
+		if (g_dirty_rects[i].x < minx) minx = g_dirty_rects[i].x;
+		if (g_dirty_rects[i].y < miny) miny = g_dirty_rects[i].y;
+		int rx2 = g_dirty_rects[i].x + g_dirty_rects[i].w;
+		int ry2 = g_dirty_rects[i].y + g_dirty_rects[i].h;
+		if (rx2 > maxx) maxx = rx2;
+		if (ry2 > maxy) maxy = ry2;
+	}
+	g_dirty_rects[0].x = minx; g_dirty_rects[0].y = miny;
+	g_dirty_rects[0].w = maxx - minx; g_dirty_rects[0].h = maxy - miny;
+	g_dirty_count = 1;
+}
+
+// Wait for vertical blank using VGA input status register 0x3DA.
+// On non-VGA or if IO isn't available, this is a fast no-op.
+void vga_wait_vblank(void) {
+	// Reading 0x3DA clears the flip-flop; bit 3 (0x08) is vertical retrace
+	// Spin briefly to avoid long stalls. ~1ms worst case on 60Hz.
+	const int max_iters = 50000; // tuned for our environment
+	int it = 0;
+	// Wait for retrace to end
+	while (it++ < max_iters) {
+		uint8 status = inportb(0x3DA);
+		if (!(status & 0x08)) break;
+	}
+	it = 0;
+	// Wait for retrace to start
+	while (it++ < max_iters) {
+		uint8 status = inportb(0x3DA);
+		if (status & 0x08) break;
+	}
+}
+
+// Draw directly to the physical framebuffer (overlay), bypassing the backbuffer
+void vga_drawPixel_fb(int x, int y, int r, int g, int b) {
+	if (!g_mbi) return;
+	if (x < 0 || y < 0) return;
+	if (x >= (int)g_mbi->framebuffer_width || y >= (int)g_mbi->framebuffer_height) return;
+	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8;
+	if (!fb || pitch <= 0 || bpp < 3) return;
+	unsigned char* p = fb + y * pitch + x * bpp;
+	// Framebuffer uses BGR order (consistent with backbuffer writes)
+	p[0] = (unsigned char)b;
+	p[1] = (unsigned char)g;
+	p[2] = (unsigned char)r;
+	if (bpp >= 4) p[3] = 0xFF;
+}
+
+// Copy a rectangle from backbuffer to framebuffer (used to erase overlays like the mouse cursor)
+void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h) {
+	if (!g_mbi || !g_backbuffer) return;
+	int fb_w = g_mbi->framebuffer_width;
+	int fb_h = g_mbi->framebuffer_height;
+	if (x < 0) { w += x; x = 0; }
+	if (y < 0) { h += y; y = 0; }
+	if (x + w > fb_w) w = fb_w - x;
+	if (y + h > fb_h) h = fb_h - y;
+	if (w <= 0 || h <= 0) return;
+	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8;
+	if (!fb || pitch <= 0 || bpp < 3) return;
+	for (int row = 0; row < h; ++row) {
+		unsigned char* src = g_backbuffer + (y + row) * g_backbuffer_w * 4 + x * 4;
+		unsigned char* dst = fb + (y + row) * pitch + x * bpp;
+		for (int col = 0; col < w; ++col) {
+			// Backbuffer layout: [0]=B, [1]=G, [2]=R, [3]=A(ignored)
+			dst[0] = src[0]; // B
+			dst[1] = src[1]; // G
+			dst[2] = src[2]; // R
+			if (bpp >= 4) dst[3] = 0xFF;
+			src += 4;
+			dst += bpp;
+		}
+	}
+}
+
+int vga_get_fb_bpp_bytes(void) {
+	if (!g_mbi) return 0;
+	int bpp = g_mbi->framebuffer_bpp / 8;
+	if (bpp < 3) bpp = 3; // treat <24bpp as 24bpp for our writes
+	return bpp;
+}
+
+int vga_capture_fb_region(int x, int y, int w, int h, unsigned char* out_buf, int out_buf_len) {
+	if (!g_mbi || !out_buf) return -1;
+	int fb_w = g_mbi->framebuffer_width;
+	int fb_h = g_mbi->framebuffer_height;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = vga_get_fb_bpp_bytes();
+	if (w <= 0 || h <= 0 || x >= fb_w || y >= fb_h) return -1;
+	if (x < 0) { w += x; x = 0; }
+	if (y < 0) { h += y; y = 0; }
+	if (x + w > fb_w) w = fb_w - x;
+	if (y + h > fb_h) h = fb_h - y;
+	int need = w * h * bpp;
+	if (need > out_buf_len) return -1;
+	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	for (int row = 0; row < h; ++row) {
+		unsigned char* src = fb + (y + row) * pitch + x * bpp;
+		memcpy(out_buf + row * w * bpp, src, (size_t)w * bpp);
+	}
+	return w * h * bpp;
+}
+
+int vga_restore_fb_region(int x, int y, int w, int h, const unsigned char* in_buf, int in_buf_len) {
+	if (!g_mbi || !in_buf) return -1;
+	int fb_w = g_mbi->framebuffer_width;
+	int fb_h = g_mbi->framebuffer_height;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = vga_get_fb_bpp_bytes();
+	if (w <= 0 || h <= 0 || x >= fb_w || y >= fb_h) return -1;
+	if (x < 0) { w += x; x = 0; }
+	if (y < 0) { h += y; y = 0; }
+	if (x + w > fb_w) w = fb_w - x;
+	if (y + h > fb_h) h = fb_h - y;
+	int need = w * h * bpp;
+	if (need > in_buf_len) return -1;
+	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	for (int row = 0; row < h; ++row) {
+		unsigned char* dst = fb + (y + row) * pitch + x * bpp;
+		memcpy(dst, in_buf + row * w * bpp, (size_t)w * bpp);
+	}
+	return w * h * bpp;
 }
 
 // Draw a NUL-terminated string at (x,y) in pixels using the existing drawText implementation.
@@ -737,13 +994,14 @@ void drawTextAt(int x, int y, const char* text, int rr, int gg, int bb)
 
 void drawCharAt(int x, int y, int charnum, int rr, int gg, int bb) {
 	if (charnum < 0) return;
-	// reuse the font array from drawText by duplicating access (font defined inside drawText)
-	// To avoid duplicating the huge font, we'll call drawText in a safe cursor-swap mode
+	// Use the minimal glyph-draw path in drawText without console side effects.
 	int old_w = width;
 	int old_h = height;
 	width = x;
 	height = y;
+	g_drawCharAt_mode = 1;
 	drawText(charnum, rr, gg, bb);
+	g_drawCharAt_mode = 0;
 	width = old_w;
 	height = old_h;
 }

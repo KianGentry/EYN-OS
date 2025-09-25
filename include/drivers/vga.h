@@ -66,6 +66,18 @@ void vga_init_double_buffer(void);
 void vga_mark_dirty_rect(int x, int y, int w, int h);
 // Begin a new frame (reset dirty rect tracking)
 void vga_begin_frame(void);
+// Optionally exclude a rectangle from swap (e.g., preserve software cursor)
+void vga_set_swap_exclude(int x, int y, int w, int h);
+void vga_clear_swap_exclude(void);
+// Overlay helpers (draw directly to framebuffer without touching backbuffer)
+void vga_drawPixel_fb(int x, int y, int r, int g, int b);
+void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h);
+// Framebuffer region helpers for save-under cursors
+int vga_get_fb_bpp_bytes(void);
+int vga_capture_fb_region(int x, int y, int w, int h, unsigned char* out_buf, int out_buf_len);
+int vga_restore_fb_region(int x, int y, int w, int h, const unsigned char* in_buf, int in_buf_len);
+// Best-effort VBlank sync (safe no-op if unsupported). Waits for start of vblank.
+void vga_wait_vblank(void);
 
 // Global variables
 extern int width, height;

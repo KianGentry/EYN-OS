@@ -155,104 +155,105 @@ void tui_draw_status_bar(const tui_window_t* win, const char* text, tui_style_t 
 }
 
 int tui_read_key() {
-    uint8_t ctrl_pressed = 0;
-    uint8_t shift_pressed = 0;
-    uint8_t super_pressed = 0;
-    uint8_t caps_lock = 0;
-    while (1) {
-        if (inportb(0x64) & 0x1) {
-            uint8_t scancode = inportb(0x60);
-            if (scancode & 0x80) {
-                uint8_t realcode = scancode & 0x7F;
-                if (realcode == 42 || realcode == 54) shift_pressed = 0;
-                if (realcode == 29) ctrl_pressed = 0;
-                if (realcode == 91) super_pressed = 0;
-                if (realcode == 56) tui_alt_pressed = 0; // left Alt release
-                continue;
-            }
-            if (scancode == 42 || scancode == 54) { shift_pressed = 1; continue; }
-            if (scancode == 29) { ctrl_pressed = 1; continue; }
-            if (scancode == 91) { super_pressed = 1; continue; }
-            if (scancode == 56) { tui_alt_pressed = 1; continue; } // left Alt press
-            if (scancode == 58) { caps_lock = !caps_lock; continue; } // Caps Lock toggle
-            // Ctrl+O and Ctrl+X only if ctrl_pressed
-            if (ctrl_pressed) {
-                if (scancode == 24) return 0x2001; // Ctrl+O (save)
-                if (scancode == 45) return 0x2002; // Ctrl+X (exit)
-            }
-            // Letter logic with Shift and Caps Lock
-            int is_letter = 0;
-            char base = 0;
-            switch (scancode) {
-                case 16: base = 'q'; is_letter = 1; break;
-                case 17: base = 'w'; is_letter = 1; break;
-                case 18: base = 'e'; is_letter = 1; break;
-                case 19: base = 'r'; is_letter = 1; break;
-                case 20: base = 't'; is_letter = 1; break;
-                case 21: base = 'y'; is_letter = 1; break;
-                case 22: base = 'u'; is_letter = 1; break;
-                case 23: base = 'i'; is_letter = 1; break;
-                case 24: base = 'o'; is_letter = 1; break;
-                case 25: base = 'p'; is_letter = 1; break;
-                case 30: base = 'a'; is_letter = 1; break;
-                case 31: base = 's'; is_letter = 1; break;
-                case 32: base = 'd'; is_letter = 1; break;
-                case 33: base = 'f'; is_letter = 1; break;
-                case 34: base = 'g'; is_letter = 1; break;
-                case 35: base = 'h'; is_letter = 1; break;
-                case 36: base = 'j'; is_letter = 1; break;
-                case 37: base = 'k'; is_letter = 1; break;
-                case 38: base = 'l'; is_letter = 1; break;
-                case 44: base = 'z'; is_letter = 1; break;
-                case 45: base = 'x'; is_letter = 1; break;
-                case 46: base = 'c'; is_letter = 1; break;
-                case 47: base = 'v'; is_letter = 1; break;
-                case 48: base = 'b'; is_letter = 1; break;
-                case 49: base = 'n'; is_letter = 1; break;
-                case 50: base = 'm'; is_letter = 1; break;
-            }
-            if (is_letter) {
-                int upper = (caps_lock && !shift_pressed) || (!caps_lock && shift_pressed);
-                int ret = upper ? (base - 32) : base;
-                if (super_pressed) return 0x4000 | ret; // encode Super modifier in high bits
-                return ret; // normal
-            }
-            switch (scancode) {
-                case 72: return super_pressed ? (0x4000 | 0x1001) : 0x1001; // Up arrow
-                case 80: return super_pressed ? (0x4000 | 0x1002) : 0x1002; // Down arrow
-                case 75: return super_pressed ? (0x4000 | 0x1003) : 0x1003; // Left arrow
-                case 77: return super_pressed ? (0x4000 | 0x1004) : 0x1004; // Right arrow
-                case 14: return '\b';   // Backspace
-                case 28: return '\n';   // Enter
-                case 1:  return 27;     // Escape
-                case 83: return 0x1005; // Delete
-                case 71: return 0x1006; // Home
-                case 73: return 0x1008; // Page Up
-                case 79: return 0x1007; // End
-                case 81: return 0x1009; // Page Down
-                case 2: return shift_pressed ? '!' : '1';
-                case 3: return shift_pressed ? '@' : '2';
-                case 4: return shift_pressed ? '#' : '3';
-                case 5: return shift_pressed ? '$' : '4';
-                case 6: return shift_pressed ? '%' : '5';
-                case 7: return shift_pressed ? '^' : '6';
-                case 8: return shift_pressed ? '&' : '7';
-                case 9: return shift_pressed ? '*' : '8';
-                case 10: return shift_pressed ? '(' : '9';
-                case 11: return shift_pressed ? ')' : '0';
-                case 12: return shift_pressed ? '_' : '-';
-                case 13: return shift_pressed ? '+' : '=';
-                case 26: return shift_pressed ? '{' : '[';
-                case 27: return shift_pressed ? '}' : ']';
-                case 39: return shift_pressed ? ':' : ';';
-                case 40: return shift_pressed ? '"' : '\'';
-                case 41: return shift_pressed ? '~' : '`';
-                case 43: return shift_pressed ? '|' : '\\';
-                case 51: return shift_pressed ? '<' : ',';
-                case 52: return shift_pressed ? '>' : '.';
-                case 53: return shift_pressed ? '?' : '/';
-                case 57: return ' '; // Space
-            }
-        }
+    static uint8_t ctrl_pressed = 0;
+    static uint8_t shift_pressed = 0;
+    static uint8_t super_pressed = 0;
+    static uint8_t caps_lock = 0;
+
+    // Check controller status (non-blocking)
+    uint8_t status = inportb(0x64);
+    if (!(status & 0x1)) return 0; // no data waiting
+
+    // If the byte in the output buffer is AUX (mouse) data, do NOT consume it here.
+    // Leave it for the mouse driver (ISR or mouse_poll) to process to avoid packet desync.
+    if (status & 0x20) return 0;
+
+    // Read one scancode
+    uint8_t scancode = inportb(0x60);
+
+    // Key release
+    if (scancode & 0x80) {
+        uint8_t realcode = scancode & 0x7F;
+        if (realcode == 42 || realcode == 54) shift_pressed = 0;
+        if (realcode == 29) ctrl_pressed = 0;
+        if (realcode == 91) super_pressed = 0;
+        if (realcode == 56) tui_alt_pressed = 0; // left Alt release
+        return 0;
     }
-} 
+
+    // Modifiers and toggles
+    if (scancode == 42 || scancode == 54) { shift_pressed = 1; return 0; }
+    if (scancode == 29) { ctrl_pressed = 1; return 0; }
+    if (scancode == 91) { super_pressed = 1; return 0; }
+    if (scancode == 56) { tui_alt_pressed = 1; return 0; } // left Alt press
+    if (scancode == 58) { caps_lock = !caps_lock; return 0; } // Caps Lock toggle
+
+    // Ctrl+O and Ctrl+X
+    if (ctrl_pressed) {
+        if (scancode == 24) return 0x2001; // Ctrl+O (save)
+        if (scancode == 45) return 0x2002; // Ctrl+X (exit)
+    }
+
+    // Letters with Shift/Caps
+    int is_letter = 0; char base = 0;
+    switch (scancode) {
+        case 16: base = 'q'; is_letter = 1; break; case 17: base = 'w'; is_letter = 1; break;
+        case 18: base = 'e'; is_letter = 1; break; case 19: base = 'r'; is_letter = 1; break;
+        case 20: base = 't'; is_letter = 1; break; case 21: base = 'y'; is_letter = 1; break;
+        case 22: base = 'u'; is_letter = 1; break; case 23: base = 'i'; is_letter = 1; break;
+        case 24: base = 'o'; is_letter = 1; break; case 25: base = 'p'; is_letter = 1; break;
+        case 30: base = 'a'; is_letter = 1; break; case 31: base = 's'; is_letter = 1; break;
+        case 32: base = 'd'; is_letter = 1; break; case 33: base = 'f'; is_letter = 1; break;
+        case 34: base = 'g'; is_letter = 1; break; case 35: base = 'h'; is_letter = 1; break;
+        case 36: base = 'j'; is_letter = 1; break; case 37: base = 'k'; is_letter = 1; break;
+        case 38: base = 'l'; is_letter = 1; break; case 44: base = 'z'; is_letter = 1; break;
+        case 45: base = 'x'; is_letter = 1; break; case 46: base = 'c'; is_letter = 1; break;
+        case 47: base = 'v'; is_letter = 1; break; case 48: base = 'b'; is_letter = 1; break;
+        case 49: base = 'n'; is_letter = 1; break; case 50: base = 'm'; is_letter = 1; break;
+    }
+    if (is_letter) {
+        int upper = (caps_lock && !shift_pressed) || (!caps_lock && shift_pressed);
+        int ret = upper ? (base - 32) : base;
+        return super_pressed ? (0x4000 | ret) : ret;
+    }
+
+    // Non-letter keys
+    switch (scancode) {
+        case 72: return super_pressed ? (0x4000 | 0x1001) : 0x1001; // Up
+        case 80: return super_pressed ? (0x4000 | 0x1002) : 0x1002; // Down
+        case 75: return super_pressed ? (0x4000 | 0x1003) : 0x1003; // Left
+        case 77: return super_pressed ? (0x4000 | 0x1004) : 0x1004; // Right
+        case 14: return '\b';
+        case 28: return '\n';
+        case 1:  return 27; // Esc
+        case 83: return 0x1005; // Del
+        case 71: return 0x1006; // Home
+        case 73: return 0x1008; // PgUp
+        case 79: return 0x1007; // End
+        case 81: return 0x1009; // PgDn
+        case 2: return shift_pressed ? '!' : '1';
+        case 3: return shift_pressed ? '@' : '2';
+        case 4: return shift_pressed ? '#' : '3';
+        case 5: return shift_pressed ? '$' : '4';
+        case 6: return shift_pressed ? '%' : '5';
+        case 7: return shift_pressed ? '^' : '6';
+        case 8: return shift_pressed ? '&' : '7';
+        case 9: return shift_pressed ? '*' : '8';
+        case 10: return shift_pressed ? '(' : '9';
+        case 11: return shift_pressed ? ')' : '0';
+        case 12: return shift_pressed ? '_' : '-';
+        case 13: return shift_pressed ? '+' : '=';
+        case 26: return shift_pressed ? '{' : '[';
+        case 27: return shift_pressed ? '}' : ']';
+        case 39: return shift_pressed ? ':' : ';';
+        case 40: return shift_pressed ? '"' : '\'';
+        case 41: return shift_pressed ? '~' : '`';
+        case 43: return shift_pressed ? '|' : '\\';
+        case 51: return shift_pressed ? '<' : ',';
+        case 52: return shift_pressed ? '>' : '.';
+        case 53: return shift_pressed ? '?' : '/';
+        case 57: return ' ';
+    }
+
+    return 0;
+}

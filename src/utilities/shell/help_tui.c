@@ -362,51 +362,55 @@ void help_tui() {
 
 // GUI draw callback: draw two panes inside the provided content rectangle (pixel coords)
 static void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
-    // Convert pixels -> TUI grid
+    // Convert pixels -> TUI grid (strictly within content rect)
     int cell_x = content_x / 8;
     int cell_y = content_y / 8;
     int cell_w = content_w / 8;
     int cell_h = content_h / 8;
 
+    // Clear only the content area to avoid touching WM decorations
+    drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
+
     // Left pane width in chars
     int left_chars = CMD_LIST_WIDTH;
-    if (left_chars + 4 >= cell_w) left_chars = cell_w / 2; // fallback
+    if (left_chars + 4 >= cell_w) left_chars = (cell_w > 1) ? (cell_w / 2) : cell_w; // fallback & clamp
 
-    // Use empty titles for the underlying TUI windows so we can render our own subtitles
-    tui_window_t left_win = {cell_x, cell_y, left_chars, cell_h, "", {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1}, {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0}, {TUI_COLOR_BLACK, TUI_COLOR_BLACK, 0}};
-    tui_window_t right_win = {cell_x + left_chars + 2, cell_y, cell_w - left_chars - 2, cell_h, "", {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1}, {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0}, {TUI_COLOR_BLACK, TUI_COLOR_BLACK, 0}};
+    // Use empty titles for underlying TUI windows (we draw our own subtitles inside content)
+    tui_window_t left_win = {cell_x, cell_y + 1, left_chars, (cell_h > 1 ? cell_h - 1 : 0), "", {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1}, {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0}, {TUI_COLOR_BLACK, TUI_COLOR_BLACK, 0}};
+    int right_chars = cell_w - left_chars - 2; if (right_chars < 0) right_chars = 0;
+    tui_window_t right_win = {cell_x + left_chars + 2, cell_y + 1, right_chars, (cell_h > 1 ? cell_h - 1 : 0), "", {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1}, {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0}, {TUI_COLOR_BLACK, TUI_COLOR_BLACK, 0}};
 
-    // Draw a cleared pixel area including the subtitle row so underlying graphics don't show through.
-    // Position the subtitle so its top touches the titlebar: subtitle_top = content_y - 2
-    int subtitle_top = content_y - 2;
-    if (subtitle_top < content_y - 8) subtitle_top = content_y - 8; // safety clamp
-    drawRect(content_x, subtitle_top, content_w, content_h + 2 + (content_y - subtitle_top), 0, 0, 0);
+    // Draw a single faint vertical separator between panes inside content
+    int sep_x = content_x + left_chars * 8;
+    int sep_h = content_h; if (sep_h < 0) sep_h = 0;
+    if (sep_x >= content_x && sep_x < content_x + content_w) {
+        int sep_w = 3; if (sep_x + sep_w > content_x + content_w) sep_w = (content_x + content_w) - sep_x;
+        if (sep_w > 0) drawRect(sep_x, content_y, sep_w, sep_h, 96, 96, 96);
+    }
 
-    // Draw only a single faint vertical separator between the panes (no other window borders)
-    int sep_x = content_x + left_chars * 8; // separator between left and right panes
-    // make separator slightly wider to be more visible
-    drawRect(sep_x, subtitle_top, 3, content_h + 2 + (content_y - subtitle_top), 96, 96, 96);
-
-    // Draw subtitle bars that sit directly under the titlebar
+    // Draw subtitle bars on the first 8px row inside the content
+    int subtitle_y = content_y; // first row of content
+    // Left subtitle
     int left_px_x = content_x;
-    int left_px_y = subtitle_top;
-    int left_px_w = left_chars * 8;
-    drawRect(left_px_x, left_px_y, left_px_w, 8, 64, 64, 64);
-    const char* left_label = "Commands";
-    for (int i = 0; left_label[i]; ++i) {
-        drawCharAt(left_px_x + 8 + i * 8, left_px_y, (int)(unsigned char)left_label[i], 255, 255, 255);
+    int left_px_w = left_chars * 8; if (left_px_w > content_w) left_px_w = content_w;
+    if (left_px_w > 0) {
+        drawRect(left_px_x, subtitle_y, left_px_w, 8, 64, 64, 64);
+        const char* left_label = "Commands";
+        for (int i = 0; left_label[i] && (8 + i * 8) < left_px_w - 1; ++i) {
+            drawCharAt(left_px_x + 8 + i * 8, subtitle_y, (int)(unsigned char)left_label[i], 255, 255, 255);
+        }
     }
-
+    // Right subtitle
     int right_px_x = content_x + left_chars * 8 + 8; // a little padding after separator
-    int right_px_y = subtitle_top;
-    int right_px_w = content_w - left_chars * 8 - 8;
-    drawRect(right_px_x, right_px_y, right_px_w, 8, 64, 64, 64);
-    const char* right_label = "Description";
-    for (int i = 0; right_label[i]; ++i) {
-        drawCharAt(right_px_x + 8 + i * 8, right_px_y, (int)(unsigned char)right_label[i], 255, 255, 255);
+    if (right_px_x < content_x) right_px_x = content_x;
+    int right_px_w = content_w - (right_px_x - content_x);
+    if (right_px_w > 0) {
+        drawRect(right_px_x, subtitle_y, right_px_w, 8, 64, 64, 64);
+        const char* right_label = "Description";
+        for (int i = 0; right_label[i] && (8 + i * 8) < right_px_w - 1; ++i) {
+            drawCharAt(right_px_x + 8 + i * 8, subtitle_y, (int)(unsigned char)right_label[i], 255, 255, 255);
+        }
     }
-
-    // (single separator already drawn above spanning subtitle+content)
 
     // Reuse non-GUI list/drawing code but based on global shared arrays
     tui_style_t norm_style = {TUI_COLOR_WHITE, TUI_COLOR_BLACK, 0};
@@ -417,7 +421,7 @@ static void help_gui_draw(int tile_idx, int content_x, int content_y, int conten
     static char* cmd_names[128];
     for (int i = 0; i < g_cmd_count; ++i) cmd_names[i] = (char*)g_sorted_cmds[i]->name;
 
-    int max_visible = left_win.height - 3;
+    int max_visible = (left_win.height > 3) ? (left_win.height - 3) : 0;
     // Update the global max visible rows so key handler logic matches the drawn height
     g_max_visible = max_visible;
     int display_y = 0;

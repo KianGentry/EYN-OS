@@ -37,6 +37,7 @@ typedef struct {
     uint8_t char_r[TERM_ROWS][TERM_COLS];
     uint8_t char_g[TERM_ROWS][TERM_COLS];
     uint8_t char_b[TERM_ROWS][TERM_COLS];
+    unsigned int version; // increments when content changes
 } vterm_t;
 
 static vterm_t vterms[4];
@@ -64,6 +65,7 @@ void vterm_init_all() {
                 vterms[i].char_b[r][c] = 200;
             }
         }
+        vterms[i].version = 1;
     }
 }
 
@@ -136,6 +138,7 @@ void vterm_write_char(int idx, char ch) {
         t->line_r[t->cur_y] = 200;
         t->line_g[t->cur_y] = 200;
         t->line_b[t->cur_y] = 200;
+        t->version++;
         return;
     }
     if (ch == '\r') return;
@@ -187,6 +190,7 @@ void vterm_write_char(int idx, char ch) {
         t->line_g[t->cur_y] = 200;
         t->line_b[t->cur_y] = 200;
     }
+    t->version++;
 }
 
 const char* vterm_get_line(int idx, int row) {
@@ -243,6 +247,7 @@ static void vterm_append_line(int idx, const char* line) {
         t->cur_y++;
         p += copy;
     }
+    t->version++;
 }
 
     void vterm_clear(int idx) {
@@ -260,6 +265,7 @@ static void vterm_append_line(int idx, const char* line) {
         t->scroll = 0;
         t->input_buf[0] = '\0';
         t->input_pos = 0;
+        t->version++;
     }
 
 // Each vterm can accept full key handling similar to readStr_with_history: editing, history, enter to execute
@@ -376,6 +382,7 @@ void vterm_handle_key(int idx, int key) {
                 t->cur_x--;
                 t->buf[t->cur_y][t->cur_x] = '\0';
             }
+            t->version++;
         }
         return;
     }
@@ -425,7 +432,7 @@ void vterm_handle_key(int idx, int key) {
             // restore previous global cwd
             strncpy(shell_current_path, saved_global_cwd, sizeof(saved_global_cwd)-1);
             shell_current_path[sizeof(saved_global_cwd)-1] = '\0';
-            // append redirected output to vterm
+        // append redirected output to vterm
                 if (shell_redirect_buf[0]) {
                     // The redirect buffer may contain multiple lines; append each line separately
                     const char* p = shell_redirect_buf;
@@ -495,9 +502,15 @@ void vterm_handle_key(int idx, int key) {
         t->input_buf[0] = '\0';
             // After executing, print a fresh prompt line
             vterm_print_prompt(idx);
+        t->version++;
         return;
     }
     // Arrow keys for local navigation in future (ignored for now)
+}
+
+int vterm_get_version(int idx) {
+    if (idx < 0 || idx >= 4) return 0;
+    return vterms[idx].version;
 }
 
 // Return the tail-visible line for a vterm given visible_count.
@@ -554,4 +567,25 @@ void vterm_set_active(int idx, int active) {
 int vterm_is_active(int idx) {
     if (idx < 0 || idx >= 4) return 0;
     return vterms[idx].active;
+}
+
+int vterm_get_cursor_row(int idx) {
+    if (idx < 0 || idx >= 4) return 0;
+    return vterms[idx].cur_y;
+}
+
+void vterm_get_char_color_abs(int idx, int row, int col, int* r, int* g, int* b) {
+    if (r) *r = 200; if (g) *g = 200; if (b) *b = 200;
+    if (idx < 0 || idx >= 4) return;
+    if (row < 0 || row >= TERM_ROWS) return;
+    if (col < 0 || col >= TERM_COLS) return;
+    vterm_t* t = &vterms[idx];
+    if (r) *r = t->char_r[row][col];
+    if (g) *g = t->char_g[row][col];
+    if (b) *b = t->char_b[row][col];
+}
+
+int vterm_get_cursor_col(int idx) {
+    if (idx < 0 || idx >= 4) return 0;
+    return vterms[idx].cur_x;
 }
