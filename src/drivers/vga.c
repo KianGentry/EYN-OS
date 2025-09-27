@@ -24,7 +24,7 @@ static int g_backbuffer_h = 0;
 static int g_exclude_x = -1, g_exclude_y = -1, g_exclude_w = 0, g_exclude_h = 0;
 // Dirty rect tracking (multi-rect)
 typedef struct { int x, y, w, h; } dirty_rect_t;
-#define MAX_DIRTY_RECTS 32
+#define MAX_DIRTY_RECTS 128
 static dirty_rect_t g_dirty_rects[MAX_DIRTY_RECTS];
 static int g_dirty_count = 0;
 
@@ -698,8 +698,8 @@ void vga_init_double_buffer(void) {
 static int rects_overlap_or_touch(dirty_rect_t a, dirty_rect_t b) {
 	int ax1 = a.x, ay1 = a.y, ax2 = a.x + a.w, ay2 = a.y + a.h; // exclusive
 	int bx1 = b.x, by1 = b.y, bx2 = b.x + b.w, by2 = b.y + b.h; // exclusive
-	// allow touching edges to merge: use <= / >= appropriately
-	return !(ax2 < bx1 || bx2 < ax1 || ay2 < by1 || by2 < ay1);
+	// Only merge when there is an actual overlap (not just touching edges)
+	return !(ax2 <= bx1 || bx2 <= ax1 || ay2 <= by1 || by2 <= ay1);
 }
 
 static void rect_union_inplace(dirty_rect_t* dst, dirty_rect_t src) {

@@ -66,6 +66,15 @@ static int cursor_w = 12, cursor_h = 18; // fallback size if no image
 // Track a union of regions touched by the cursor this frame to minimize blits
 // (legacy) damage tracking no longer needed when we explicitly mark
 // previous and current cursor rects dirty each frame.
+// Track if any content/decor dirty rect intersects the previous cursor region.
+static int g_dirty_hits_prev_cursor = 0;
+
+static inline int rects_intersect(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
+    if (aw <= 0 || ah <= 0 || bw <= 0 || bh <= 0) return 0;
+    int ax2 = ax + aw, ay2 = ay + ah;
+    int bx2 = bx + bw, by2 = by + bh;
+    return (ax < bx2 && ax2 > bx && ay < by2 && ay2 > by);
+}
 
 static void draw_cursor_overlay(int x, int y) {
     int w = g_cursor_loaded ? g_cursor_img.header.width : cursor_w;
@@ -498,7 +507,8 @@ void tile_unregister_gui_client(int tile_idx) {
         gui_draw_cb[term] = NULL;
         gui_key_cb[term] = NULL;
         gui_userdata[term] = NULL;
-        gui_needs_redraw[term] = 1;
+        // No GUI anymore; clear any pending GUI invalidation
+        gui_needs_redraw[term] = 0;
     }
 
     // If this tile is a shell, restore its title/status to the default shell values
@@ -506,7 +516,16 @@ void tile_unregister_gui_client(int tile_idx) {
         tiles[tile_idx].title = "EYN-OS Shell";
         tiles[tile_idx].status_left = NULL;
         tiles[tile_idx].status_right = NULL;
+        tiles[tile_idx].status_visible = 0; // hide status unless set again by the shell
+        // Ensure decorations are refreshed next frame
+        tiles[tile_idx].static_drawn = 0;
+        tiles[tile_idx].last_title_ptr = NULL;
+        tiles[tile_idx].last_status_left_ptr = NULL;
+        tiles[tile_idx].last_status_right_ptr = NULL;
     }
+
+    // Force an immediate redraw so the terminal content replaces the last GUI frame
+    g_force_full_redraw = 1;
 }
 
 void start_tiling_manager() {
@@ -575,6 +594,7 @@ void start_tiling_manager() {
         g_tile_scroll_tick++;
         // begin frame: reset dirty tracking for optimized blit
         vga_begin_frame();
+    g_dirty_hits_prev_cursor = 0;
     // draw all tiles
     // Avoid clearing the entire screen each frame to reduce flicker. Only clear the regions we will redraw (each tile).
     // Quick heuristic: clear each tile's rectangle before drawing it.
@@ -653,6 +673,12 @@ void start_tiling_manager() {
             }
             int has_gui = (gui_draw_cb[term_for_i] != NULL);
             if (g_force_full_redraw || (has_gui && gui_needs_redraw[term_for_i]) || tiles[i].last_drawn_version != cur_ver || rect_changed) {
+                // For GUI tiles, pre-mark the entire content area so subsequent per-primitive dirty marks
+                // merge into one big rect, ensuring a single bottom-up copy and avoiding visible sweeps.
+                if (has_gui && cw_now > 0 && ch_now > 0) {
+                    if (rects_intersect(cx_now, cy_now, cw_now, ch_now, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
+                    vga_mark_dirty_rect(cx_now, cy_now, cw_now, ch_now);
+                }
                 draw_tile_content(&tiles[i]);
                 tiles[i].last_drawn_version = cur_ver;
                 tiles[i].last_cx = cx_now; tiles[i].last_cy = cy_now; tiles[i].last_cw = cw_now; tiles[i].last_ch = ch_now;
@@ -668,24 +694,43 @@ void start_tiling_manager() {
             if (show_status) sh = 12;
             // Mark decorations dirty only if we redrew them this frame
             if (need_redraw_decor) {
-                if (th > 0) vga_mark_dirty_rect(tiles[i].x, tiles[i].y, tiles[i].width, th);
-                if (sh > 0) vga_mark_dirty_rect(tiles[i].x, tiles[i].y + th, tiles[i].width, sh);
+                if (th > 0) {
+                    if (rects_intersect(tiles[i].x, tiles[i].y, tiles[i].width, th, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
+                    vga_mark_dirty_rect(tiles[i].x, tiles[i].y, tiles[i].width, th);
+                }
+                if (sh > 0) {
+                    if (rects_intersect(tiles[i].x, tiles[i].y + th, tiles[i].width, sh, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
+                    vga_mark_dirty_rect(tiles[i].x, tiles[i].y + th, tiles[i].width, sh);
+                }
+                if (rects_intersect(tiles[i].x, tiles[i].y, tiles[i].width, 1, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
                 vga_mark_dirty_rect(tiles[i].x, tiles[i].y, tiles[i].width, 1); // top border
+                if (rects_intersect(tiles[i].x, tiles[i].y + tiles[i].height - 1, tiles[i].width, 1, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
                 vga_mark_dirty_rect(tiles[i].x, tiles[i].y + tiles[i].height - 1, tiles[i].width, 1); // bottom border
+                if (rects_intersect(tiles[i].x, tiles[i].y, 1, tiles[i].height, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
                 vga_mark_dirty_rect(tiles[i].x, tiles[i].y, 1, tiles[i].height); // left border
+                if (rects_intersect(tiles[i].x + tiles[i].width - 1, tiles[i].y, 1, tiles[i].height, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
                 vga_mark_dirty_rect(tiles[i].x + tiles[i].width - 1, tiles[i].y, 1, tiles[i].height); // right border
             }
             // If content redrew, mark its content area dirty; otherwise skip to keep blit small
             if (content_redrew) {
-                if (cw_now > 0 && ch_now > 0) vga_mark_dirty_rect(cx_now, cy_now, cw_now, ch_now);
+                // For GUI tiles, rely on the GUI's draw calls (drawRect/drawCharAt) to mark precise dirty areas.
+                // For plain terminals, mark the whole content area to ensure a full region copy.
+                int term_for_i2 = tiles[i].term_idx;
+                int has_gui2 = (term_for_i2 >= 0 && term_for_i2 < MAX_TILES && gui_draw_cb[term_for_i2] != NULL);
+                if (!has_gui2) {
+                    if (cw_now > 0 && ch_now > 0) {
+                        if (rects_intersect(cx_now, cy_now, cw_now, ch_now, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
+                        vga_mark_dirty_rect(cx_now, cy_now, cw_now, ch_now);
+                    }
+                }
             } else {
                 // no new content, nothing to mark beyond borders/title/status
             }
         }
         if (g_force_full_redraw) g_force_full_redraw = 0;
         tui_refresh();
-        // Before swapping, exclude the previous cursor rect so it stays visible during the blit
-        if (prev_saved_w > 0 && prev_saved_h > 0) {
+        // Before swapping, exclude the previous cursor rect only if that area didn't change.
+        if (!g_dirty_hits_prev_cursor && prev_saved_w > 0 && prev_saved_h > 0) {
             vga_set_swap_exclude(prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h);
         } else {
             vga_clear_swap_exclude();
@@ -697,8 +742,8 @@ void start_tiling_manager() {
     // Draw/restore cursor during vblank to minimize tearing/flicker
     vga_wait_vblank();
 
-        // After swap: first restore previous cursor region, then capture and draw the new one
-        if (cursor_prev_x > -100 && cursor_prev_y > -100 && cursor_savebuf && prev_saved_w > 0 && prev_saved_h > 0) {
+        // After swap: restore previous cursor region only if that area did not change this frame
+        if (!g_dirty_hits_prev_cursor && cursor_prev_x > -100 && cursor_prev_y > -100 && cursor_savebuf && prev_saved_w > 0 && prev_saved_h > 0) {
             vga_restore_fb_region(prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h, cursor_savebuf, prev_saved_w * prev_saved_h * vga_get_fb_bpp_bytes());
         }
 

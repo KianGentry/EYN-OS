@@ -367,9 +367,11 @@ static void help_gui_draw(int tile_idx, int content_x, int content_y, int conten
     int cell_y = content_y / 8;
     int cell_w = content_w / 8;
     int cell_h = content_h / 8;
-
-    // Clear only the content area to avoid touching WM decorations
-    drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
+    // Background: only clear the rows we'll redraw this pass.
+    // Top subtitle row
+    if (content_w > 0 && content_h > 0) {
+        drawRect(content_x, content_y, content_w, 8, 0, 0, 0);
+    }
 
     // Left pane width in chars
     int left_chars = CMD_LIST_WIDTH;
@@ -426,6 +428,14 @@ static void help_gui_draw(int tile_idx, int content_x, int content_y, int conten
     g_max_visible = max_visible;
     int display_y = 0;
     // Draw list similar to earlier behavior
+    // Before drawing text rows, clear just those text rows' pixel bands.
+    for (int r = 0; r < max_visible; ++r) {
+        int y_band = (cell_y + 2 + r) * 8;
+        if (y_band >= content_y && y_band + 8 <= content_y + content_h) {
+            drawRect(content_x, y_band, content_w, 8, 0, 0, 0);
+        }
+    }
+
     for (int i = g_scroll; i < g_cmd_count && display_y < max_visible; ++i) {
         int y_pos = left_win.y + 2 + display_y;
         if (i == g_selected && g_selected_sub == 0) {
@@ -447,6 +457,9 @@ static void help_gui_draw(int tile_idx, int content_x, int content_y, int conten
                 int subcmd_count = count_subcommands(subcmds);
                 for (int j = 0; j < subcmd_count && display_y < max_visible; ++j) {
                     int sub_y_pos = left_win.y + 2 + display_y;
+                    // Clear just this sub-row band before drawing
+                    int py = sub_y_pos * 8;
+                    if (py >= content_y && py + 8 <= content_y + content_h) drawRect(content_x, py, content_w, 8, 0, 0, 0);
                     char sub_line[64];
                     snprintf(sub_line, sizeof(sub_line), "  %s", subcmds[j].name);
                     if (i == g_selected && g_selected_sub == j + 1) {

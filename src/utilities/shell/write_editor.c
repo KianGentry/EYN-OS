@@ -357,9 +357,18 @@ void write_editor_draw(const char* filename) {
 
 // GUI draw callback (top-level)
 static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
-    // Clear only the content area so we don't overdraw WM decorations
+    // Incremental clears: clear only the bands we're about to redraw
     if (content_w > 0 && content_h > 0) {
-        drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
+        // Text area bands
+        int rows = content_h / 8;
+        int text_rows = rows > 1 ? rows - 1 : rows; // leave last row for status
+        for (int r = 0; r < text_rows; ++r) {
+            int py = content_y + r * 8;
+            if (py + 8 <= content_y + content_h) drawRect(content_x, py, content_w, 8, 0, 0, 0);
+        }
+        // Status bar band
+        int status_y = content_y + text_rows * 8;
+        if (status_y >= content_y && status_y + 8 <= content_y + content_h) drawRect(content_x, status_y, content_w, 8, 16, 16, 16);
     }
     int cols = content_w / 8;
     int rows = content_h / 8;
@@ -426,9 +435,7 @@ static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, in
         int status_y = content_y + text_rows * 8;
         char status[160];
         snprintf(status, sizeof(status), "Ctrl+O: Save | Ctrl+X: Exit | Line %d Col %d", write_editor_cursor_y + 1, write_editor_cursor_x + 1);
-        // simple background: draw a dark rectangle then text
-        drawRect(content_x, status_y, content_w, 8, 16, 16, 16);
-        // small left padding
+        // background already drawn above
         drawTextAt(content_x + 8, status_y, status, 255, 255, 255);
     }
 }

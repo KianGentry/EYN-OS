@@ -190,18 +190,25 @@ build: all eynfsimg sourceimg docs
 	grub2-mkrescue --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o EYNOS.iso tmp/grub_ultra_minimal/
 	@echo "Ultra-minimal ISO created: EYNOS.iso"
 	@ls -lh EYNOS.iso
-	@echo "Removing EFI files from ISO..."
-	mkdir -p /tmp/iso_edit
-	sudo mount -o loop EYNOS.iso /tmp/iso_edit
-	mkdir -p /tmp/iso_clean
-	cp -r /tmp/iso_edit/* /tmp/iso_clean/
-	rm -rf /tmp/iso_clean/efi*
-	rm -rf /tmp/iso_clean/boot/grub/i386-efi
-	rm -rf /tmp/iso_clean/boot/grub/x86_64-efi
-	sudo umount /tmp/iso_edit
-	xorriso -as mkisofs -o EYNOS.iso -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img -r -V "EYN-OS" -iso-level 3 -joliet-long /tmp/iso_clean
-	rm -rf /tmp/iso_clean
-	@echo "Ultra-minimal ISO created: EYNOS.iso"
+	@echo "Attempting to strip EFI content (optional)..."
+	@# Skip EFI cleanup if sudo isn't available non-interactively; the ISO from grub2-mkrescue works fine for QEMU.
+	@if sudo -n true 2>/dev/null; then \
+		echo "Cleaning ISO EFI content with sudo..."; \
+		mkdir -p /tmp/iso_edit; \
+		sudo mount -o loop EYNOS.iso /tmp/iso_edit; \
+		mkdir -p /tmp/iso_clean; \
+		cp -r /tmp/iso_edit/* /tmp/iso_clean/; \
+		rm -rf /tmp/iso_clean/efi*; \
+		rm -rf /tmp/iso_clean/boot/grub/i386-efi; \
+		rm -rf /tmp/iso_clean/boot/grub/x86_64-efi; \
+		sudo umount /tmp/iso_edit; \
+		xorriso -as mkisofs -o EYNOS.iso -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img -r -V "EYN-OS" -iso-level 3 -joliet-long /tmp/iso_clean; \
+		rm -rf /tmp/iso_clean; \
+		echo "EFI content stripped from ISO."; \
+	else \
+		echo "Skipping EFI cleanup (no sudo available). Using original grub2-mkrescue ISO."; \
+	fi
+	@echo "ISO ready: EYNOS.iso"
 	@ls -lh EYNOS.iso
 
 clean:
@@ -243,7 +250,7 @@ run: build
 	-hda eynfs.img \
 	-hdb source.img \
 	-boot d \
-	-m 4M
+	-m 64M
 # Just runs the OS, no rebuilding.
 
 test: sourceimg
