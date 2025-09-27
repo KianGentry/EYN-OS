@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2025-09-27 08:24:19
+This document is auto-generated from the source code. Last updated: 2025-09-27 22:08:19
 
-**Total Commands:** 38
+**Total Commands:** 42
 
 ## Table of Contents
 
@@ -188,6 +188,26 @@ lsram
 
 ---
 
+### rect
+
+**Handler:** `draw_cmd_handler`
+
+**Type:** CMD_STREAMING
+
+**File:** `shell_commands.c`
+
+**Description:**
+Draw a rectangle.
+Usage: rect <x> <y> <width> <height> <r> <g> <b>.
+Example: rect 10 20 100 50 255 0 0 draws a red rectangle.
+
+**Example:**
+```bash
+rect 10 20 100 50 255 0 0
+```
+
+---
+
 ### size
 
 **Handler:** `size`
@@ -240,6 +260,62 @@ Usage: validate [test|stats]
 **Example:**
 ```bash
 validate
+```
+
+---
+
+### view
+
+**Handler:** `view_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `image_viewer_gui.c`
+
+**Description:**
+Open a REI image in a GUI viewer.
+Usage: view <file.rei>
+
+**Example:**
+```bash
+view eynos.rei
+```
+
+---
+
+### vieww
+
+**Handler:** `vieww_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `image_viewer_gui.c`
+
+**Description:**
+Open a REI image in a floating window.
+Usage: vieww <file.rei>
+
+**Example:**
+```bash
+vieww eynos.rei
+```
+
+---
+
+### win_test
+
+**Handler:** `win_test_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `window_test.c`
+
+**Description:**
+Open a sample floating window to test compositor performance.
+
+**Example:**
+```bash
+win_test
 ```
 
 ---
@@ -539,20 +615,18 @@ calc 2.5+3.7
 
 ### draw
 
-**Handler:** `draw_cmd_handler`
+**Handler:** `draw_cmd`
 
 **Type:** CMD_STREAMING
 
-**File:** `shell_commands.c`
+**File:** `draw_gui.c`
 
 **Description:**
-Draw a rectangle.
-Usage: draw <x> <y> <width> <height> <r> <g> <b>.
-Example: draw 10 20 100 50 255 0 0 draws a red rectangle.
+Create or edit a REI image with a GUI. Usage: draw <filename.rei>
 
 **Example:**
 ```bash
-draw 10 20 100 50 255 0 0
+draw test.rei
 ```
 
 ---
@@ -759,7 +833,7 @@ run test.eyn
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 6 |
+| Streaming Commands | 10 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |

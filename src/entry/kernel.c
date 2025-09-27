@@ -14,6 +14,7 @@
 #include <native_exec.h>
 #include <sched.h>
 #include <irq.h>
+#include <tile_manager.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
@@ -69,7 +70,10 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     // Initialize native execution system
     native_exec_init();
     
-    // Launch shell with full initialization
+    // Launch tiling manager by default; it provides the graphical shell UI
+    start_tiling_manager();
+
+    // If tiling manager exits (e.g., user closes it), fall back to classic shell
     launch_shell(0);
     
     return 0;

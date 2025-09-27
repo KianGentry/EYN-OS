@@ -48,6 +48,96 @@
 			"type": "shell",
 			"command": "make -j$(nproc)",
 			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Rebuild after assembler memory tweaks",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Rebuild after assembler memory tweaks",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
+		},
+		{
+			"label": "Rebuild after assembler memory tweaks",
+			"type": "shell",
+			"command": "make -j$(nproc)",
+			"group": "build"
 		}
 	]
 }

@@ -4,6 +4,7 @@
 #include <string.h>
 #include <multiboot.h>
 #include <stdint.h>
+// Do not include stdio; project provides printf/putchar in VGA/util
 
 // Read REI header from data
 int rei_read_header(const uint8_t* data, size_t size, rei_header_t* header) {
@@ -63,6 +64,8 @@ int rei_parse_image(const uint8_t* data, size_t size, rei_image_t* image) {
     if (rei_validate_header(&image->header) != 0) {
         return -1;
     }
+    // Debug: print header basics once when parsing (can be silenced later)
+    // printf("REI parse: %ux%u depth=%u\n", image->header.width, image->header.height, image->header.depth);
     
     // Calculate expected data size
     int expected_size = rei_calculate_data_size(&image->header);

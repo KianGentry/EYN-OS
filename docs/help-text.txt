@@ -15,9 +15,13 @@ Streaming Commands:
   catram          - Display contents of a file from RAM disk (FAT32).
   error           - Display system error statistics and status.
   lsram           - List files in the RAM disk (FAT32) with directory tree.
+  rect            - Draw a rectangle.
   size            - Show the size of a file in bytes.
   tiling          - Launch the tiling front-end manager.
   validate        - Display input validation statistics and test validation.
+  view            - Open a REI image in a GUI viewer.
+  vieww           - Open a REI image in a floating window.
+  win_test        - Open a sample floating window to test compositor performance.
 
 Filesystem Commands:
 -------------------
@@ -42,7 +46,7 @@ System Commands:
 Utility Commands:
 ----------------
   calc            - 32-bit fixed-point calculator.
-  draw            - Draw a rectangle.
+  draw            - Create or edit a REI image with a GUI.
   echo            - Reprints a given text to the screen.
   history         - Show or clear command history.
   log             - Enable or disable shell logging.

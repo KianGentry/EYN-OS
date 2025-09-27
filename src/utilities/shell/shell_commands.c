@@ -595,7 +595,7 @@ void help()
     printf("%c  size     - Show file sizes\n", 255, 255, 255);
     printf("%c  log      - Logging\n", 255, 255, 255);
     printf("%c  hexdump  - Hex dump\n", 255, 255, 255);
-    printf("%c  draw     - Drawing\n", 255, 255, 255);
+    printf("%c  rect     - Draw rectangle\n", 255, 255, 255);
     
     printf("%c\nMemory Management:\n", 0, 255, 255);
     printf("%c  Use 'load' to load streaming commands when needed\n", 255, 255, 255);
@@ -620,7 +620,7 @@ REGISTER_SHELL_COMMAND(echo, "echo", echo_cmd, CMD_STREAMING, "Reprints a given 
 REGISTER_SHELL_COMMAND(ver, "ver", ver_cmd, CMD_STREAMING, "Shows the current system version and release information.\nUsage: ver", "ver");
 REGISTER_SHELL_COMMAND(spam, "spam", spam_cmd, CMD_STREAMING, "Spam 'EYN-OS' to the shell 100 times for fun.\nUsage: spam", "spam");
 REGISTER_SHELL_COMMAND(calc, "calc", calc_cmd, CMD_STREAMING, "32-bit fixed-point calculator. Supports +, -, *, /.\nUsage: calc <expression>", "calc 2.5+3.7");
-REGISTER_SHELL_COMMAND(draw, "draw", draw_cmd_handler, CMD_STREAMING, "Draw a rectangle.\nUsage: draw <x> <y> <width> <height> <r> <g> <b>.\nExample: draw 10 20 100 50 255 0 0 draws a red rectangle.", "draw 10 20 100 50 255 0 0");
+REGISTER_SHELL_COMMAND(rect, "rect", draw_cmd_handler, CMD_STREAMING, "Draw a rectangle.\nUsage: rect <x> <y> <width> <height> <r> <g> <b>.\nExample: rect 10 20 100 50 255 0 0 draws a red rectangle.", "rect 10 20 100 50 255 0 0");
 REGISTER_SHELL_COMMAND(drive, "drive", drive_cmd, CMD_STREAMING, "Change between different drives (from lsata).\nUsage: drive <n>", "drive 0");
 REGISTER_SHELL_COMMAND(memory, "memory", memory_cmd, CMD_ESSENTIAL, "Memory management and testing.\nUsage: memory stats | test | stress", "memory stats");
 REGISTER_SHELL_COMMAND(log, "log", log_cmd, CMD_STREAMING, "Enable or disable shell logging.\nUsage: log on|off", "log on");
@@ -648,8 +648,8 @@ void draw_cmd_handler(string ch)
     while (ch[i] && ch[i] == ' ') i++;
     if (!ch[i]) 
     {
-        printf("%cUsage: draw <x> <y> <width> <height> <r> <g> <b>\n", 255, 255, 255);
-        printf("%cExample: draw 10 20 100 50 255 0 0\n");
+    printf("%cUsage: rect <x> <y> <width> <height> <r> <g> <b>\n", 255, 255, 255);
+    printf("%cExample: rect 10 20 100 50 255 0 0\n");
         printf("%cIf you provide fewer than 7 parameters, defaults will be used for the rest.\n");
         return;
     }

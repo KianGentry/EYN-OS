@@ -829,7 +829,16 @@ void read_raw_cmd(string ch) {
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     
-    // Try EYNFS first
+    // If tiling manager is active, open GUI viewer instead of direct blit
+    extern int tile_is_tiling_active();
+    if (tile_is_tiling_active()) {
+        extern void view_cmd(string ch);
+        // Reuse existing command path; pass only the filename portion
+        char cmdline[160]; snprintf(cmdline, sizeof(cmdline), "view %s", arg);
+        view_cmd(cmdline);
+        return;
+    }
+    // Try EYNFS first (direct display path)
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(g_current_drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t entry;

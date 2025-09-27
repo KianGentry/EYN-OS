@@ -188,10 +188,13 @@ int tui_read_key() {
     if (scancode == 56) { tui_alt_pressed = 1; return 0; } // left Alt press
     if (scancode == 58) { caps_lock = !caps_lock; return 0; } // Caps Lock toggle
 
-    // Ctrl+O and Ctrl+X
+    // Ctrl combos
     if (ctrl_pressed) {
         if (scancode == 24) return 0x2001; // Ctrl+O (save)
         if (scancode == 45) return 0x2002; // Ctrl+X (exit)
+        if (scancode == 16) return 0x2101; // Ctrl+Q (quit)
+        if (scancode == 13) return 0x2102; // Ctrl+Plus/Equals (zoom in)
+        if (scancode == 12) return 0x2103; // Ctrl+Minus (zoom out)
     }
 
     // Letters with Shift/Caps

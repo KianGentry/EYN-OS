@@ -18,7 +18,7 @@ LDFLAGS = -m elf_i386 -T src/boot/link.ld
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o
+OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o
 
 OBJS += obj/tiling_manager.o obj/tiling_cmd.o
 OBJS += obj/terminals.o
@@ -131,8 +131,21 @@ obj/tiling_cmd.o:src/utilities/shell/tiling_cmd.c
 obj/help_tui.o:src/utilities/shell/help_tui.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/help_tui.c -o obj/help_tui.o
 
+obj/draw_gui.o:src/utilities/shell/draw_gui.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/draw_gui.c -o obj/draw_gui.o
+
+obj/image_viewer_gui.o:src/utilities/shell/image_viewer_gui.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/image_viewer_gui.c -o obj/image_viewer_gui.o
+
+obj/window_test.o:src/utilities/shell/window_test.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/window_test.c -o obj/window_test.o
+
 obj/assemble.o:src/utilities/assembler/assemble.c src/utilities/assembler/instruction_set.c
 	$(COMPILER) $(CFLAGS) src/utilities/assembler/assemble.c -o obj/assemble.o 
+	$(COMPILER) $(CFLAGS) src/utilities/assembler/instruction_set.c -o obj/instruction_set.o 
+
+# Provide an explicit rule so parallel builds can make this target independently
+obj/instruction_set.o:src/utilities/assembler/instruction_set.c
 	$(COMPILER) $(CFLAGS) src/utilities/assembler/instruction_set.c -o obj/instruction_set.o 
 
 obj/subcommands.o:src/utilities/shell/subcommands.c
@@ -173,7 +186,7 @@ obj/irq.o:src/cpu/irq.c include/cpu/irq.h
 
 # Actually building the OS (The stuff you should actually run, i.e. make run, make build, etc.)
 
-build: all eynfsimg sourceimg docs
+build: all eynfsimg docs
 	mkdir -p tmp/grub_ultra_minimal/boot/grub
 	cp tmp/boot/kernel.bin tmp/grub_ultra_minimal/boot/
 	@echo 'set default=0' > tmp/grub_ultra_minimal/boot/grub/grub.cfg
@@ -212,7 +225,7 @@ build: all eynfsimg sourceimg docs
 	@ls -lh EYNOS.iso
 
 clean:
-	rm -rf obj/*.o tmp/boot/kernel.bin eynfs.img source.img eynfs_format EYNOS.iso
+	rm -rf obj/*.o tmp/boot/kernel.bin *.img eynfs_format EYNOS.iso
 	rm -rf tmp/grub_minimal tmp/grub_ultra_minimal
 	rm -f userland/*.o userland/*.bin
 
@@ -248,9 +261,8 @@ sourceimg: eynfs_format
 run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
-	-hdb source.img \
 	-boot d \
-	-m 64M
+	-m 32M
 # Just runs the OS, no rebuilding.
 
 test: sourceimg
@@ -258,4 +270,4 @@ test: sourceimg
 	-hda eynfs.img \
 	-hdb source.img \
 	-boot d \
-	-m 16M
+	-m 64M
