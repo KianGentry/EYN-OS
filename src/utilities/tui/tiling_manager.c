@@ -38,6 +38,8 @@ typedef struct {
 static tile_t tiles[MAX_TILES];
 static int tile_count = 0;
 static int focused = 0; // index of focused tile (0..tile_count-1)
+// Track if any tile content was redrawn this frame so we can composite windows on top
+static int g_any_tile_content_redrew = 0;
 // global scroll tick used for marquee/scrolling text
 static int g_tile_scroll_tick = 0;
 // Force a full redraw of all tiles once (used after layout changes)
@@ -81,6 +83,13 @@ static rei_image_t g_min_icon;
 static int g_min_icon_loaded = 0;
 static rei_image_t g_max_icon;
 static int g_max_icon_loaded = 0;
+// Unfocused variants
+static rei_image_t g_close_icon_unf;
+static int g_close_icon_unf_loaded = 0;
+static rei_image_t g_min_icon_unf;
+static int g_min_icon_unf_loaded = 0;
+static rei_image_t g_max_icon_unf;
+static int g_max_icon_unf_loaded = 0;
 
 // Rectangle intersection helper (used widely; keep it early for prototypes)
 static inline int rects_intersect(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
@@ -137,6 +146,9 @@ static void wm_get_max_rect(const window_t* w, int* rx, int* ry, int* rw, int* r
 static void wm_get_min_rect(const window_t* w, int* rx, int* ry, int* rw, int* rh);
 // Small helper to draw an icon into a button rect with alpha support
 static void wm_draw_icon_into_button(const rei_image_t* icon, int loaded, int bx, int by, int bw, int bh);
+static void load_close_icon_unf_try_paths(uint8 disk);
+static void load_min_icon_unf_try_paths(uint8 disk);
+static void load_max_icon_unf_try_paths(uint8 disk);
 
 // Forward declarations for icon loaders (must appear before start_tiling_manager)
 static void load_close_icon_try_paths(uint8 disk);
@@ -189,7 +201,15 @@ static void wm_draw_decor(window_t* w, int is_focused) {
             drawRect(bx, by, 1, bh, 220, 80, 80);
             drawRect(bx + bw - 1, by, 1, bh, 80, 20, 20);
             if (g_close_icon_loaded && g_close_icon.data) {
-                wm_draw_icon_into_button(&g_close_icon, g_close_icon_loaded, bx, by, bw, bh);
+                if (is_focused) {
+                    wm_draw_icon_into_button(&g_close_icon, g_close_icon_loaded, bx, by, bw, bh);
+                } else {
+                    // prefer unfocused variant; fallback to focused icon if missing
+                    if (g_close_icon_unf_loaded)
+                        wm_draw_icon_into_button(&g_close_icon_unf, g_close_icon_unf_loaded, bx, by, bw, bh);
+                    else
+                        wm_draw_icon_into_button(&g_close_icon, g_close_icon_loaded, bx, by, bw, bh);
+                }
             } else {
                 if (bw >= 8 && bh >= 8) {
                     for (int i = 0; i < 6; ++i) {
@@ -210,7 +230,14 @@ static void wm_draw_decor(window_t* w, int is_focused) {
             drawRect(bx, by, 1, bh, 120, 120, 220);
             drawRect(bx + bw - 1, by, 1, bh, 20, 20, 80);
             if (g_max_icon_loaded && g_max_icon.data) {
-                wm_draw_icon_into_button(&g_max_icon, g_max_icon_loaded, bx, by, bw, bh);
+                if (is_focused) {
+                    wm_draw_icon_into_button(&g_max_icon, g_max_icon_loaded, bx, by, bw, bh);
+                } else {
+                    if (g_max_icon_unf_loaded)
+                        wm_draw_icon_into_button(&g_max_icon_unf, g_max_icon_unf_loaded, bx, by, bw, bh);
+                    else
+                        wm_draw_icon_into_button(&g_max_icon, g_max_icon_loaded, bx, by, bw, bh);
+                }
             } else {
                 // fallback: a square outline
                 drawRect(bx + 3, by + 3, bw - 6, 1, 255, 255, 255);
@@ -228,7 +255,14 @@ static void wm_draw_decor(window_t* w, int is_focused) {
             drawRect(bx, by, 1, bh, 120, 220, 120);
             drawRect(bx + bw - 1, by, 1, bh, 20, 80, 20);
             if (g_min_icon_loaded && g_min_icon.data) {
-                wm_draw_icon_into_button(&g_min_icon, g_min_icon_loaded, bx, by, bw, bh);
+                if (is_focused) {
+                    wm_draw_icon_into_button(&g_min_icon, g_min_icon_loaded, bx, by, bw, bh);
+                } else {
+                    if (g_min_icon_unf_loaded)
+                        wm_draw_icon_into_button(&g_min_icon_unf, g_min_icon_unf_loaded, bx, by, bw, bh);
+                    else
+                        wm_draw_icon_into_button(&g_min_icon, g_min_icon_loaded, bx, by, bw, bh);
+                }
             } else {
                 // fallback: a horizontal line
                 drawRect(bx + 3, by + bh/2, bw - 6, 1, 255, 255, 255);
@@ -705,6 +739,58 @@ static void load_max_icon_try_paths(uint8 disk) {
     }
 }
 
+// Try to load unfocused variants of icons
+static void load_close_icon_unf_try_paths(uint8 disk) {
+    const char* paths[] = { "/close_unfocused.rei", "/ui/close_unfocused.rei", "/testdir/close_unfocused.rei", "/testdir/ui/close_unfocused.rei" };
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
+    for (int pi = 0; pi < (int)(sizeof(paths)/sizeof(paths[0])); ++pi) {
+        eynfs_dir_entry_t entry;
+        if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+            int size = entry.size; uint8_t* buf = (uint8_t*)malloc(size); if (!buf) return;
+            int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
+            if (n == size) {
+                if (rei_parse_image(buf, size, &g_close_icon_unf) == 0) { g_close_icon_unf_loaded = 1; free(buf); return; }
+            }
+            free(buf);
+        }
+    }
+}
+
+static void load_min_icon_unf_try_paths(uint8 disk) {
+    const char* paths[] = { "/min_unfocused.rei", "/ui/min_unfocused.rei", "/minimize_unfocused.rei", "/ui/minimize_unfocused.rei", "/testdir/min_unfocused.rei", "/testdir/ui/min_unfocused.rei" };
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
+    for (int pi = 0; pi < (int)(sizeof(paths)/sizeof(paths[0])); ++pi) {
+        eynfs_dir_entry_t entry;
+        if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+            int size = entry.size; uint8_t* buf = (uint8_t*)malloc(size); if (!buf) return;
+            int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
+            if (n == size) {
+                if (rei_parse_image(buf, size, &g_min_icon_unf) == 0) { g_min_icon_unf_loaded = 1; free(buf); return; }
+            }
+            free(buf);
+        }
+    }
+}
+
+static void load_max_icon_unf_try_paths(uint8 disk) {
+    const char* paths[] = { "/max_unfocused.rei", "/ui/max_unfocused.rei", "/maximize_unfocused.rei", "/ui/maximize_unfocused.rei", "/testdir/max_unfocused.rei", "/testdir/ui/max_unfocused.rei" };
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
+    for (int pi = 0; pi < (int)(sizeof(paths)/sizeof(paths[0])); ++pi) {
+        eynfs_dir_entry_t entry;
+        if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+            int size = entry.size; uint8_t* buf = (uint8_t*)malloc(size); if (!buf) return;
+            int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
+            if (n == size) {
+                if (rei_parse_image(buf, size, &g_max_icon_unf) == 0) { g_max_icon_unf_loaded = 1; free(buf); return; }
+            }
+            free(buf);
+        }
+    }
+}
+
 static void layout_tiles() {
     // Convert layout rules into pixel rectangles
     if (tile_count <= 0) return;
@@ -1140,9 +1226,12 @@ void start_tiling_manager() {
     load_cursor_image_try_paths(0);
     // Try to load a close button icon (optional)
     load_close_icon_try_paths(0);
+    load_close_icon_unf_try_paths(0);
     // Try to load minimize/maximize icons (optional)
     load_min_icon_try_paths(0);
     load_max_icon_try_paths(0);
+    load_min_icon_unf_try_paths(0);
+    load_max_icon_unf_try_paths(0);
     // Allocate save-under buffer once we know cursor size
     int cw0 = g_cursor_loaded ? g_cursor_img.header.width : cursor_w;
     int ch0 = g_cursor_loaded ? g_cursor_img.header.height : cursor_h;
@@ -1192,6 +1281,7 @@ void start_tiling_manager() {
         // begin frame: reset dirty tracking for optimized blit
         vga_begin_frame();
     g_dirty_hits_prev_cursor = 0;
+    g_any_tile_content_redrew = 0;
     // draw all tiles
     // Avoid clearing the entire screen each frame to reduce flicker. Only clear the regions we will redraw (each tile).
     // Quick heuristic: clear each tile's rectangle before drawing it.
@@ -1275,6 +1365,7 @@ void start_tiling_manager() {
                 tiles[i].last_drawn_version = cur_ver;
                 tiles[i].last_cx = cx_now; tiles[i].last_cy = cy_now; tiles[i].last_cw = cw_now; tiles[i].last_ch = ch_now;
                 content_redrew = 1;
+                g_any_tile_content_redrew = 1;
                 if (has_gui) gui_needs_redraw[term_for_i] = 0;
             }
             // Mark only the UI decoration areas (titlebar, statusbar, and 1px borders)
@@ -1327,15 +1418,15 @@ void start_tiling_manager() {
                 window_t* w = &g_windows[wi];
                 if (!w->used) continue;
                 int is_focused_win = (wi == g_win_focused);
-                // Redraw decorations if first time, focus changed, or forced
-                if (!w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw) {
+                // Redraw decorations if first time, focus changed, forced, or underlying tiles changed
+                if (!w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw || g_any_tile_content_redrew) {
                     wm_draw_decor(w, is_focused_win);
                     wm_mark_decor_dirty(w);
                     w->static_drawn = 1;
                     w->last_focused = is_focused_win;
                 }
                 // Redraw content if requested
-                if (w->needs_redraw) {
+                if (w->needs_redraw || g_force_full_redraw || g_any_tile_content_redrew) {
                     wm_draw_content(w);
                     w->needs_redraw = 0;
                 }
@@ -1418,6 +1509,13 @@ void start_tiling_manager() {
                 int w_hit = wm_hit_test(me.x, me.y);
                 if (w_hit >= 0) {
                     wm_bring_to_front(w_hit);
+                    // Bringing a window to front changes composition; redraw all windows
+                    for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                        if (g_windows[wi].used && !g_windows[wi].minimized) {
+                            g_windows[wi].needs_redraw = 1;
+                            g_windows[wi].static_drawn = 0;
+                        }
+                    }
                     int did_action = 0;
                     // Close
                     {
@@ -1480,10 +1578,24 @@ void start_tiling_manager() {
                     if (hit >= 0 && hit < tile_count && hit != focused) {
                         focused = hit;
                         g_force_full_redraw = 1;
+                        // Redraw all windows since tiles will repaint under them
+                        for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                            if (g_windows[wi].used && !g_windows[wi].minimized) {
+                                g_windows[wi].needs_redraw = 1;
+                                g_windows[wi].static_drawn = 0;
+                            }
+                        }
                         if (gui_draw_cb[tiles[focused].term_idx]) gui_needs_redraw[tiles[focused].term_idx] = 1;
                     }
                     // Clicking outside any window clears window focus so tiles receive keys
                     g_win_focused = -1;
+                    // Tiles will repaint; ensure windows repaint on top next frame
+                    for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                        if (g_windows[wi].used && !g_windows[wi].minimized) {
+                            g_windows[wi].needs_redraw = 1;
+                            g_windows[wi].static_drawn = 0;
+                        }
+                    }
                 }
             }
             if (release_edge) { drag_active = 0; drag_win = -1; }
@@ -1491,6 +1603,7 @@ void start_tiling_manager() {
                 window_t* w = &g_windows[drag_win];
                 // mark old rect dirty
                 vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
+                int old_x = w->x, old_y = w->y, old_w = w->w, old_h = w->h;
                 w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
                 w->y = clampi(me.y - drag_off_y, 0, screen_h - w->h);
                 // mark new rect dirty and request redraw
@@ -1499,6 +1612,17 @@ void start_tiling_manager() {
                 w->needs_redraw = 1;
                 // Ensure underlying tiles are refreshed to erase old window frame
                 g_tiles_full_content_redraw = 1;
+                // Invalidate other windows that intersect moved window's old or new rect
+                for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                    if (wi == drag_win) continue;
+                    window_t* wo = &g_windows[wi];
+                    if (!wo->used || wo->minimized) continue;
+                    if (rects_intersect(wo->x, wo->y, wo->w, wo->h, old_x, old_y, old_w, old_h) ||
+                        rects_intersect(wo->x, wo->y, wo->w, wo->h, w->x, w->y, w->w, w->h)) {
+                        wo->needs_redraw = 1;
+                        wo->static_drawn = 0;
+                    }
+                }
             }
             // Mouse routing: deliver to top window iff mouse is inside its rect (or dragging)
             if (g_window_count > 0) {
@@ -1670,8 +1794,11 @@ void start_tiling_manager() {
             if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
                 gui_key_cb[term](focused, key & 0xFFFF, gui_userdata[term]);
                 gui_needs_redraw[term] = 1;
+                g_any_tile_content_redrew = 1; // tile is likely to repaint
             } else {
                 vterm_handle_key(tiles[focused].term_idx, key & 0xFFFF);
+                // Shell/vterm content will change; ensure windows repaint afterward
+                g_any_tile_content_redrew = 1;
             }
         }
     }
