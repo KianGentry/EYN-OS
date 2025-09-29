@@ -38,6 +38,13 @@ typedef struct {
     uint8_t char_g[TERM_ROWS][TERM_COLS];
     uint8_t char_b[TERM_ROWS][TERM_COLS];
     unsigned int version; // increments when content changes
+    // Simple selection for current input line: active flag and [start,end) columns
+    int sel_active;
+    int sel_start_col;
+    int sel_end_col;
+    // input editing render anchors
+    int input_row;        // row where current input is being edited (same as cur_y at prompt)
+    int input_start_col;  // column where input begins (after the prompt)
 } vterm_t;
 
 static vterm_t vterms[4];
@@ -66,7 +73,30 @@ void vterm_init_all() {
             }
         }
         vterms[i].version = 1;
+        vterms[i].sel_active = 0;
+        vterms[i].sel_start_col = 0;
+        vterms[i].sel_end_col = 0;
+        vterms[i].input_row = 0;
+        vterms[i].input_start_col = 0;
     }
+}
+
+// Set scrollback offset for a vterm. 0 = follow the tail (latest). Positive values scroll up.
+void vterm_set_scroll(int idx, int scroll) {
+    if (idx < 0 || idx >= 4) return;
+    if (scroll < 0) scroll = 0;
+    // Maximum scroll is up to current cursor row (lines written so far)
+    int max_scroll = vterms[idx].cur_y;
+    if (scroll > max_scroll) scroll = max_scroll;
+    if (vterms[idx].scroll != scroll) {
+        vterms[idx].scroll = scroll;
+        vterms[idx].version++;
+    }
+}
+
+int vterm_get_scroll(int idx) {
+    if (idx < 0 || idx >= 4) return 0;
+    return vterms[idx].scroll;
 }
 
     // Print the standard shell prompt into the vterm (drive:path! )
@@ -100,7 +130,37 @@ void vterm_init_all() {
                 t->char_b[written_row][written_col] = bb;
             }
         }
+        // After printing prompt, initialize input edit anchors
+        t->input_row = t->cur_y;
+        t->input_start_col = t->cur_x;
+        t->input_buf[0] = '\0';
+        t->input_pos = 0;
+        t->sel_active = 0;
     }
+
+// Helper: re-render the current input buffer onto the screen after the prompt
+static void vterm_render_input(int idx) {
+    if (idx < 0 || idx >= 4) return;
+    vterm_t* t = &vterms[idx];
+    int row = t->input_row;
+    if (row < 0 || row >= TERM_ROWS) return;
+    // Copy input buffer into screen buffer at input_start_col
+    int plen = t->input_start_col;
+    int ilen = strlen(t->input_buf);
+    if (plen + ilen >= TERM_COLS) ilen = TERM_COLS - plen - 1;
+    for (int i = 0; i < ilen; ++i) {
+        t->buf[row][plen + i] = t->input_buf[i];
+        t->char_r[row][plen + i] = 200;
+        t->char_g[row][plen + i] = 200;
+        t->char_b[row][plen + i] = 200;
+    }
+    // Terminate the line right after input
+    t->buf[row][plen + ilen] = '\0';
+    // Position caret
+    t->cur_y = row;
+    t->cur_x = t->input_start_col + t->input_pos;
+    t->version++;
+}
 
 void vterm_write_char(int idx, char ch) {
     if (idx < 0 || idx >= 4) return;
@@ -275,6 +335,41 @@ void vterm_handle_key(int idx, int key) {
     if (!t->active) t->active = 1;
 
     // Handle arrow keys: Up/Down for history, Left/Right for cursor movement
+    if (key == 0x2104) { // Ctrl+A -> select all of current input buffer
+        int len = strlen(t->input_buf);
+        t->sel_active = (len > 0);
+        t->sel_start_col = 0;
+        t->sel_end_col = len;
+        t->version++;
+        return;
+    }
+    if (key == 0x2105) { // Ctrl+L -> select current line (same as all for single-line input)
+        int len = strlen(t->input_buf);
+        t->sel_active = (len > 0);
+        t->sel_start_col = 0;
+        t->sel_end_col = len;
+        t->version++;
+        return;
+    }
+    // Shift+Arrow selection extension indicated via 0x3000 bit combined with base 0x1001..0x1004
+    if ((key & 0x3000) && ((key & 0x0FFF) >= 0x1001 && (key & 0x0FFF) <= 0x1004)) {
+        int base = key & 0x0FFF;
+        // Start selection if not active
+        if (!t->sel_active) { t->sel_active = 1; t->sel_start_col = t->input_pos; t->sel_end_col = t->input_pos; }
+        if (base == 0x1003) { // Left: move caret left and extend selection
+            if (t->input_pos > 0) {
+                t->input_pos--; if (t->cur_x > t->input_start_col) t->cur_x--; t->sel_end_col = t->input_pos;
+            }
+        } else if (base == 0x1004) { // Right
+            int len = strlen(t->input_buf);
+            if (t->input_pos < len) { t->input_pos++; t->cur_x = t->input_start_col + t->input_pos; t->sel_end_col = t->input_pos; }
+        } else if (base == 0x1001 || base == 0x1002) {
+            // Up/Down not meaningful for single-line input; ignore
+        }
+        t->version++;
+        return;
+    }
+
     if (key == 0x1001) { // Up
         if (g_command_history.count > 0) {
             if (t->history_idx == -1) {
@@ -284,62 +379,35 @@ void vterm_handle_key(int idx, int key) {
             } else if (t->history_idx > 0) {
                 t->history_idx--;
             }
-            // clear current displayed input
-            while (t->input_pos > 0) {
-                t->input_pos--;
-                if (t->cur_x > 0) {
-                    t->cur_x--;
-                    t->buf[t->cur_y][t->cur_x] = '\0';
-                }
-            }
+            // clear current displayed input (preserve prompt)
+            t->input_pos = 0;
+            t->buf[t->cur_y][t->input_start_col] = '\0';
+            t->cur_x = t->input_start_col;
             // load history entry (per-vterm browsing)
             strncpy(t->input_buf, g_command_history.commands[t->history_idx], INPUT_BUF_LEN);
             t->input_pos = strlen(t->input_buf);
-            // echo the history entry and ensure echoed chars use default color
-            for (int i = 0; i < t->input_pos; ++i) {
-                vterm_write_char(idx, t->input_buf[i]);
-                int written_row = t->cur_y;
-                int written_col = t->cur_x - 1;
-                if (written_row >= 0 && written_row < TERM_ROWS && written_col >= 0 && written_col < TERM_COLS) {
-                    t->char_r[written_row][written_col] = 200;
-                    t->char_g[written_row][written_col] = 200;
-                    t->char_b[written_row][written_col] = 200;
-                }
-            }
+            vterm_render_input(idx);
         }
         return;
     }
     if (key == 0x1002) { // Down
         if (t->history_idx != -1) {
             t->history_idx++;
-            // clear current displayed input
-            while (t->input_pos > 0) {
-                t->input_pos--;
-                if (t->cur_x > 0) {
-                    t->cur_x--;
-                    t->buf[t->cur_y][t->cur_x] = '\0';
-                }
-            }
+            // clear current displayed input (preserve prompt)
+            t->input_pos = 0;
+            t->buf[t->cur_y][t->input_start_col] = '\0';
+            t->cur_x = t->input_start_col;
             if (t->history_idx >= g_command_history.count) {
                 // restore saved input
                 strncpy(t->input_buf, t->saved_input, INPUT_BUF_LEN);
                 t->input_pos = strlen(t->input_buf);
-                for (int i = 0; i < t->input_pos; ++i) {
-                    vterm_write_char(idx, t->input_buf[i]);
-                    int written_row = t->cur_y;
-                    int written_col = t->cur_x - 1;
-                    if (written_row >= 0 && written_row < TERM_ROWS && written_col >= 0 && written_col < TERM_COLS) {
-                        t->char_r[written_row][written_col] = 200;
-                        t->char_g[written_row][written_col] = 200;
-                        t->char_b[written_row][written_col] = 200;
-                    }
-                }
+                vterm_render_input(idx);
                 t->history_idx = -1;
                 } else {
                 // load next history entry
                 strncpy(t->input_buf, g_command_history.commands[t->history_idx], INPUT_BUF_LEN);
                 t->input_pos = strlen(t->input_buf);
-                for (int i = 0; i < t->input_pos; ++i) vterm_write_char(idx, t->input_buf[i]);
+                vterm_render_input(idx);
             }
         }
         return;
@@ -347,42 +415,68 @@ void vterm_handle_key(int idx, int key) {
     if (key == 0x1003) { // Left
         if (t->input_pos > 0) {
             // move cursor left logically
-            if (t->cur_x > 0) t->cur_x--;
+            if (t->cur_x > t->input_start_col) t->cur_x--;
             t->input_pos--;
         }
+        // clear selection on plain move
+        t->sel_active = 0;
+        // force a redraw so caret overlay updates when moving within existing text
+        t->version++;
         return;
     }
     if (key == 0x1004) { // Right
         int len = strlen(t->input_buf);
         if (t->input_pos < len) {
-            vterm_write_char(idx, t->input_buf[t->input_pos]);
             t->input_pos++;
+            t->cur_x = t->input_start_col + t->input_pos;
         }
+        t->sel_active = 0;
+        // force a redraw so caret overlay updates when moving within existing text
+        t->version++;
         return;
     }
 
     // Printable
     if (key >= 32 && key <= 126) {
-        if (t->input_pos < INPUT_BUF_LEN - 1) {
-            t->input_buf[t->input_pos++] = (char)key;
-            t->input_buf[t->input_pos] = '\0';
-            // echo to vterm
-            vterm_write_char(idx, (char)key);
+        int len = strlen(t->input_buf);
+        // If selection active, delete selected region first
+        if (t->sel_active) {
+            int a = t->sel_start_col, b = t->sel_end_col; if (a > b) { int tmp = a; a = b; b = tmp; }
+            if (a < 0) a = 0; if (b > len) b = len;
+            int tail = len - b;
+            memmove(&t->input_buf[a], &t->input_buf[b], tail);
+            t->input_buf[a + tail] = '\0';
+            t->input_pos = a;
+            t->sel_active = 0;
+            len = strlen(t->input_buf);
+        }
+        if (len < INPUT_BUF_LEN - 1) {
+            // insert at input_pos
+            memmove(&t->input_buf[t->input_pos + 1], &t->input_buf[t->input_pos], len - t->input_pos + 1);
+            t->input_buf[t->input_pos] = (char)key;
+            t->input_pos++;
+            vterm_render_input(idx);
         }
         return;
     }
     // Backspace
     if (key == '\b' || key == 8) {
+        int len = strlen(t->input_buf);
+        if (t->sel_active) {
+            int a = t->sel_start_col, b = t->sel_end_col; if (a > b) { int tmp = a; a = b; b = tmp; }
+            if (a < 0) a = 0; if (b > len) b = len;
+            int tail = len - b;
+            memmove(&t->input_buf[a], &t->input_buf[b], tail);
+            t->input_buf[a + tail] = '\0';
+            t->input_pos = a;
+            t->sel_active = 0;
+            vterm_render_input(idx);
+            return;
+        }
         if (t->input_pos > 0) {
+            memmove(&t->input_buf[t->input_pos - 1], &t->input_buf[t->input_pos], len - t->input_pos + 1);
             t->input_pos--;
-            t->input_buf[t->input_pos] = '\0';
-            // remove last char from display
-            // write a backspace effect: move cur_x back and clear
-            if (t->cur_x > 0) {
-                t->cur_x--;
-                t->buf[t->cur_y][t->cur_x] = '\0';
-            }
-            t->version++;
+            vterm_render_input(idx);
         }
         return;
     }
@@ -497,11 +591,10 @@ void vterm_handle_key(int idx, int key) {
             // reset this vterm's browsing state so next Up starts from the most-recent entry
             t->history_idx = -1;
         }
-        // reset input buffer
-        t->input_pos = 0;
-        t->input_buf[0] = '\0';
-            // After executing, print a fresh prompt line
-            vterm_print_prompt(idx);
+        // reset input buffer via new prompt
+        t->sel_active = 0;
+        // After executing, print a fresh prompt line (this will also reset input anchors)
+        vterm_print_prompt(idx);
         t->version++;
         return;
     }
@@ -588,4 +681,18 @@ void vterm_get_char_color_abs(int idx, int row, int col, int* r, int* g, int* b)
 int vterm_get_cursor_col(int idx) {
     if (idx < 0 || idx >= 4) return 0;
     return vterms[idx].cur_x;
+}
+
+void vterm_clear_selection(int idx) {
+    if (idx < 0 || idx >= 4) return; vterms[idx].sel_active = 0; }
+
+int vterm_is_selected(int idx, int row, int col) {
+    if (idx < 0 || idx >= 4) return 0;
+    vterm_t* t = &vterms[idx];
+    if (!t->sel_active) return 0;
+    if (row != t->cur_y) return 0;
+    int a = t->sel_start_col; int b = t->sel_end_col; if (a > b) { int tmp = a; a = b; b = tmp; }
+    int abs_a = t->input_start_col + a;
+    int abs_b = t->input_start_col + b;
+    return (col >= abs_a && col < abs_b);
 }

@@ -195,6 +195,8 @@ int tui_read_key() {
         if (scancode == 16) return 0x2101; // Ctrl+Q (quit)
         if (scancode == 13) return 0x2102; // Ctrl+Plus/Equals (zoom in)
         if (scancode == 12) return 0x2103; // Ctrl+Minus (zoom out)
+        if (scancode == 30) return 0x2104; // Ctrl+A (select all)
+        if (scancode == 38) return 0x2105; // Ctrl+L (select line)
     }
 
     // Letters with Shift/Caps
@@ -222,10 +224,10 @@ int tui_read_key() {
 
     // Non-letter keys
     switch (scancode) {
-        case 72: return super_pressed ? (0x4000 | 0x1001) : 0x1001; // Up
-        case 80: return super_pressed ? (0x4000 | 0x1002) : 0x1002; // Down
-        case 75: return super_pressed ? (0x4000 | 0x1003) : 0x1003; // Left
-        case 77: return super_pressed ? (0x4000 | 0x1004) : 0x1004; // Right
+    case 72: return (shift_pressed ? 0x3000 : 0) | (super_pressed ? (0x4000 | 0x1001) : 0x1001); // Up (0x3000 flag for Shift)
+    case 80: return (shift_pressed ? 0x3000 : 0) | (super_pressed ? (0x4000 | 0x1002) : 0x1002); // Down
+    case 75: return (shift_pressed ? 0x3000 : 0) | (super_pressed ? (0x4000 | 0x1003) : 0x1003); // Left
+    case 77: return (shift_pressed ? 0x3000 : 0) | (super_pressed ? (0x4000 | 0x1004) : 0x1004); // Right
         case 14: return '\b';
         case 28: return '\n';
         case 1:  return 27; // Esc

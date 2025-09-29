@@ -7,6 +7,9 @@ const char* vterm_get_line(int idx, int row);
 void vterm_feed_input(int idx, int key);
 void vterm_set_active(int idx, int active);
 int vterm_is_active(int idx);
+// Set/Get scrollback offset (0 = follow tail). Positive values scroll up into history.
+void vterm_set_scroll(int idx, int scroll);
+int vterm_get_scroll(int idx);
 // Handle a full key press for the vterm: editing, history, enter to execute command
 void vterm_handle_key(int idx, int key);
 // Print the shell prompt into the vterm (e.g. "0:/! ")
@@ -17,6 +20,9 @@ void vterm_clear(int idx);
 int vterm_get_cursor_row(int idx);
 // Get the current cursor column (0..TERM_COLS-1)
 int vterm_get_cursor_col(int idx);
+// Selection helpers (single-line selection for input line)
+void vterm_clear_selection(int idx);
+int vterm_is_selected(int idx, int row, int col);
 // Get the Nth line from the tail when showing last visible lines. 
 // visible_index is 0..(visible_count-1), where 0 is the earliest visible line.
 const char* vterm_get_tail_line(int idx, int visible_index, int visible_count);

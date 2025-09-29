@@ -42,6 +42,8 @@ static void viewer_draw_image() {
     // Draw image with zoom and pan
     int ox = g_view.content_x + g_view.off_x;
     int oy = g_view.content_y + g_view.off_y;
+    // Mark content area dirty once; we'll draw many pixels without per-pixel dirty marks
+    vga_mark_dirty_rect(g_view.content_x, g_view.content_y, g_view.content_w, g_view.content_h);
     // Compute visible image range in source pixels
     int start_x = (g_view.content_x - ox) / g_view.zoom; if (start_x < 0) start_x = 0;
     int start_y = (g_view.content_y - oy) / g_view.zoom; if (start_y < 0) start_y = 0;
@@ -56,7 +58,7 @@ static void viewer_draw_image() {
                 int px = ox + x*g_view.zoom + zx;
                 int py = oy + y*g_view.zoom + zy;
                 if (px>=g_view.content_x && py>=g_view.content_y && px<g_view.content_x+g_view.content_w && py<g_view.content_y+g_view.content_h)
-                    drawPixel(px, py, r,g,b);
+                    vga_drawPixel_bb(px, py, r,g,b);
             }
         }
     }

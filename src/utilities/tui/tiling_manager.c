@@ -66,6 +66,10 @@ static unsigned char* cursor_savebuf = NULL; // save-under buffer
 static int cursor_save_w = 0, cursor_save_h = 0, cursor_save_len = 0;
 // Dimensions of the last saved-under region (clipped to screen) used for restore
 static int prev_saved_x = 0, prev_saved_y = 0, prev_saved_w = 0, prev_saved_h = 0;
+// When the cursor is clipped at screen edges, remember the offset between the
+// cursor's logical (x,y) and the captured region's top-left so we can index the
+// save-under buffer correctly during overlay alpha blending.
+static int prev_saved_offx = 0, prev_saved_offy = 0;
 static int cursor_w = 12, cursor_h = 18; // fallback size if no image
 // Track a union of regions touched by the cursor this frame to minimize blits
 // (legacy) damage tracking no longer needed when we explicitly mark
@@ -74,6 +78,8 @@ static int cursor_w = 12, cursor_h = 18; // fallback size if no image
 static int g_dirty_hits_prev_cursor = 0;
 // When set, force all tile contents to redraw next frame (used when windows move/close)
 static int g_tiles_full_content_redraw = 0;
+// Live-drag overlay state for smoother window moves
+static int prev_drag_x = -1, prev_drag_y = -1, prev_drag_w = 0, prev_drag_h = 0;
 
 // Optional REI close icon for window titlebars
 static rei_image_t g_close_icon;
@@ -97,6 +103,17 @@ static inline int rects_intersect(int ax, int ay, int aw, int ah, int bx, int by
     int ax2 = ax + aw, ay2 = ay + ah;
     int bx2 = bx + bw, by2 = by + bh;
     return (ax < bx2 && ax2 > bx && ay < by2 && ay2 > by);
+}
+
+static inline void rect_union(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh,
+                              int* rx, int* ry, int* rw, int* rh) {
+    if (aw <= 0 || ah <= 0) { *rx = bx; *ry = by; *rw = bw; *rh = bh; return; }
+    if (bw <= 0 || bh <= 0) { *rx = ax; *ry = ay; *rw = aw; *rh = ah; return; }
+    int x1 = (ax < bx) ? ax : bx;
+    int y1 = (ay < by) ? ay : by;
+    int x2 = ((ax + aw) > (bx + bw)) ? (ax + aw) : (bx + bw);
+    int y2 = ((ay + ah) > (by + bh)) ? (ay + ah) : (by + bh);
+    *rx = x1; *ry = y1; *rw = x2 - x1; *rh = y2 - y1;
 }
 
 // ---------------- Floating Windows (experimental) ----------------
@@ -347,6 +364,8 @@ static void wm_draw_icon_into_button(const rei_image_t* icon, int loaded, int bx
     int maxh = bh - (oy - by);
     const uint8_t* data = icon->data;
     int depth = icon->header.depth;
+    // Mark the whole button area dirty once; we'll write many pixels without per-pixel marks
+    vga_mark_dirty_rect(bx, by, bw, bh);
     // Determine color key for non-alpha formats by sampling corners
     int use_key = 0; uint8_t keyR = 0, keyG = 0, keyB = 0, keyM = 0;
     if (depth == REI_DEPTH_RGB && iw > 0 && ih > 0) {
@@ -372,12 +391,12 @@ static void wm_draw_icon_into_button(const rei_image_t* icon, int loaded, int bx
         for (int xx = 0; xx < iw && xx < maxw; ++xx) {
             int px = ox + xx; if (px < bx || px >= bx + bw) continue;
             if (depth == REI_DEPTH_MONO) {
-                uint8_t v = row[xx]; if (use_key && v == keyM) continue; if (v) drawPixel(px, py, v, v, v);
+                uint8_t v = row[xx]; if (use_key && v == keyM) continue; if (v) vga_drawPixel_bb(px, py, v, v, v);
             } else if (depth == REI_DEPTH_RGB) {
-                const uint8_t* p3 = row + xx * 3; if (use_key && p3[0]==keyR && p3[1]==keyG && p3[2]==keyB) continue; drawPixel(px, py, p3[0], p3[1], p3[2]);
+                const uint8_t* p3 = row + xx * 3; if (use_key && p3[0]==keyR && p3[1]==keyG && p3[2]==keyB) continue; vga_drawPixel_bb(px, py, p3[0], p3[1], p3[2]);
             } else if (depth == REI_DEPTH_RGBA) {
                 const uint8_t* p4 = row + xx * 4; uint8_t a = p4[3];
-                if (a >= 128) drawPixel(px, py, p4[0], p4[1], p4[2]);
+                if (a >= 128) vga_drawPixel_bb(px, py, p4[0], p4[1], p4[2]);
             }
         }
     }
@@ -543,7 +562,6 @@ static void draw_cursor_overlay(int x, int y) {
     }
     // Draw REI image (supports MONO/RGB/RGBA)
     if (g_cursor_loaded && !s_logged_cursor_once) {
-        printf("Cursor REI loaded: %dx%d depth=%d\n", g_cursor_img.header.width, g_cursor_img.header.height, g_cursor_img.header.depth);
         s_logged_cursor_once = 1;
     }
     // Transparency handling:
@@ -572,6 +590,9 @@ static void draw_cursor_overlay(int x, int y) {
         uint8_t br = data[(h - 1) * stride + (w - 1)];
         if (tl == tr && tl == bl && tl == br) { use_key = 1; keyM = tl; }
     }
+    // Offsets into the saved-under buffer if the capture was clipped at edges
+    int soffx = prev_saved_offx;
+    int soffy = prev_saved_offy;
     for (int yy = 0; yy < h; ++yy) {
         int py = y + yy;
         if (py < 0 || py >= screen_h) continue;
@@ -594,10 +615,16 @@ static void draw_cursor_overlay(int x, int y) {
                     // fully transparent
                     continue;
                 }
-                if (cursor_savebuf && (xx < prev_saved_w) && (yy < prev_saved_h)) {
+                // Clamp very low alpha up to improve visibility over bright backgrounds
+                if (a < 200) a = 200;
+                // Map (xx,yy) in cursor space to saved-under buffer coordinates
+                // when the capture region was clipped at the screen boundaries.
+                int bx = xx - soffx;
+                int by = yy - soffy;
+                if (cursor_savebuf && bx >= 0 && by >= 0 && bx < prev_saved_w && by < prev_saved_h) {
                     // alpha blend over saved-under framebuffer if available
                     int bpp = vga_get_fb_bpp_bytes(); if (bpp < 3) bpp = 3;
-                    int idx = (yy * prev_saved_w + xx) * bpp;
+                    int idx = (by * prev_saved_w + bx) * bpp;
                     if (idx + 2 < cursor_save_len) {
                         uint8_t dr = cursor_savebuf[idx + 0];
                         uint8_t dg = cursor_savebuf[idx + 1];
@@ -1020,11 +1047,13 @@ static void draw_tile_content(const tile_t* t) {
         // Compute visible columns from content width.
         int cols = content_w / 8;
         if (cols < 1) cols = 1;
-        // Determine the absolute last row to show (cursor row)
-        int end_row = vterm_get_cursor_row(t->term_idx);
+    // Determine the absolute last row to show (cursor row minus scrollback offset)
+    int end_row = vterm_get_cursor_row(t->term_idx) - vterm_get_scroll(t->term_idx);
         // Build visual rows backward: fill from bottom up
         int vis_row = max_lines - 1;
         int abs_row = end_row;
+        int cursor_row = vterm_get_cursor_row(t->term_idx);
+        int cursor_col = vterm_get_cursor_col(t->term_idx);
         while (vis_row >= 0 && abs_row >= 0) {
             const char* src = vterm_get_line(t->term_idx, abs_row);
             int len = 0; while (src[len] && len < TERM_COLS) len++;
@@ -1045,7 +1074,17 @@ static void draw_tile_content(const tile_t* t) {
                         ch = src[src_col];
                         vterm_get_char_color_abs(t->term_idx, abs_row, src_col, &rr, &gg, &bb);
                     }
+                    int is_sel = vterm_is_selected(t->term_idx, abs_row, src_col);
+                    if (is_sel) {
+                        // selection background teal-ish
+                        drawRect(px, py, 8, 8, 0, 128, 128);
+                    }
+                    // Always draw underlying character first
                     drawCharAt(px, py, (int)(unsigned char)ch, rr, gg, bb);
+                    // Then overlay underscore cursor at the logical caret position
+                    if (abs_row == cursor_row && start_col + cc == cursor_col) {
+                        drawCharAt(px, py, (int)'_', 255, 255, 0);
+                    }
                 }
                 vis_row--;
             }
@@ -1435,25 +1474,50 @@ void start_tiling_manager() {
     if (g_force_full_redraw) g_force_full_redraw = 0;
     if (g_tiles_full_content_redraw) g_tiles_full_content_redraw = 0;
         tui_refresh();
-        // Before swapping, exclude the previous cursor rect only if that area didn't change.
+        // Build swap exclusion to preserve overlays (cursor and live-drag)
+        int ex_x = -1, ex_y = -1, ex_w = 0, ex_h = 0;
+        // Cursor exclusion only if that area was untouched this frame
         if (!g_dirty_hits_prev_cursor && prev_saved_w > 0 && prev_saved_h > 0) {
-            vga_set_swap_exclude(prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h);
-        } else {
-            vga_clear_swap_exclude();
+            ex_x = prev_saved_x; ex_y = prev_saved_y; ex_w = prev_saved_w; ex_h = prev_saved_h;
         }
+        // If dragging a window, also exclude its current rect; union with cursor exclusion if both present
+        if (drag_active && drag_win >= 0 && g_windows[drag_win].used) {
+            window_t* dw = &g_windows[drag_win];
+            int wx = dw->x, wy = dw->y, ww = dw->w, wh = dw->h;
+            if (ex_w > 0 && ex_h > 0) {
+                int ux, uy, uw, uh; rect_union(ex_x, ex_y, ex_w, ex_h, wx, wy, ww, wh, &ux, &uy, &uw, &uh);
+                ex_x = ux; ex_y = uy; ex_w = uw; ex_h = uh;
+            } else {
+                ex_x = wx; ex_y = wy; ex_w = ww; ex_h = wh;
+            }
+        }
+        if (ex_w > 0 && ex_h > 0) vga_set_swap_exclude(ex_x, ex_y, ex_w, ex_h); else vga_clear_swap_exclude();
         // swap backbuffer to framebuffer (if backbuffer in use)
         vga_swap_buffers();
         // After swap, clear exclusion so future swaps can choose a new region
         vga_clear_swap_exclude();
-    // Draw/restore cursor during vblank to minimize tearing/flicker
+    // Draw overlays during vblank to minimize tearing/flicker
     vga_wait_vblank();
+
+        // Live-drag overlay: erase previous overlay and draw the dragged window as an overlay from backbuffer
+        if (prev_drag_w > 0 && prev_drag_h > 0) {
+            // Blit background (current backbuffer content) over the previous overlay region
+            vga_blit_backbuffer_region_to_fb(prev_drag_x, prev_drag_y, prev_drag_w, prev_drag_h);
+            prev_drag_w = prev_drag_h = 0;
+        }
+        if (drag_active && drag_win >= 0 && g_windows[drag_win].used) {
+            window_t* dw = &g_windows[drag_win];
+            // Draw the window from backbuffer to framebuffer at its current position
+            vga_blit_backbuffer_region_to_fb(dw->x, dw->y, dw->w, dw->h);
+            prev_drag_x = dw->x; prev_drag_y = dw->y; prev_drag_w = dw->w; prev_drag_h = dw->h;
+        }
 
         // After swap: restore previous cursor region only if that area did not change this frame
         if (!g_dirty_hits_prev_cursor && cursor_prev_x > -100 && cursor_prev_y > -100 && cursor_savebuf && prev_saved_w > 0 && prev_saved_h > 0) {
             vga_restore_fb_region(prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h, cursor_savebuf, prev_saved_w * prev_saved_h * vga_get_fb_bpp_bytes());
         }
 
-        // Draw mouse cursor overlay on top of the freshly swapped framebuffer
+    // Draw mouse cursor overlay on top of the freshly swapped framebuffer
         if (cur_mx > -100 && cur_my > -100) {
             // Ensure save-under buffer matches current cursor size (if image changed)
             int nw = g_cursor_loaded ? g_cursor_img.header.width : cursor_w;
@@ -1480,11 +1544,16 @@ void start_tiling_manager() {
                     if (need <= cursor_save_len) {
                         vga_capture_fb_region(cap_x, cap_y, cap_w, cap_h, cursor_savebuf, cursor_save_len);
                         prev_saved_x = cap_x; prev_saved_y = cap_y; prev_saved_w = cap_w; prev_saved_h = cap_h;
+                        // Store offsets from logical cursor (cur_mx,cur_my) to the capture top-left
+                        prev_saved_offx = cap_x - cur_mx;
+                        prev_saved_offy = cap_y - cur_my;
                     } else {
                         prev_saved_w = prev_saved_h = 0;
+                        prev_saved_offx = prev_saved_offy = 0;
                     }
                 } else {
                     prev_saved_w = prev_saved_h = 0;
+                    prev_saved_offx = prev_saved_offy = 0;
                 }
             }
             draw_cursor_overlay(cur_mx, cur_my);
@@ -1493,6 +1562,12 @@ void start_tiling_manager() {
             // No valid current position: clear prev so we don't try to restore garbage next frame
             cursor_prev_x = cursor_prev_y = -1000;
             prev_saved_w = prev_saved_h = 0;
+        }
+        // If drag just ended, ensure the last overlay region is reconciled by the next swap
+        if (!drag_active && prev_drag_w > 0 && prev_drag_h > 0) {
+            // The next frame's swap will copy the backbuffer which already has the window at its final position
+            // Here we just clear the overlay bookkeeping so exclusion stops next frame
+            prev_drag_w = prev_drag_h = 0;
         }
         // No swap exclusion used; overlay erase is handled proactively via backbuffer blit each loop
 
@@ -1640,6 +1715,16 @@ void start_tiling_manager() {
                         gui_mouse_cb[fterm](focused, cme, gui_userdata[fterm]);
                         gui_needs_redraw[fterm] = 1;
                     }
+                    // If no GUI registered for the tile, map wheel to terminal scrollback
+                    if (fterm >= 0 && !gui_draw_cb[fterm] && me.wheel_delta != 0) {
+                        int cur = vterm_get_scroll(fterm);
+                        // Map positive wheel (wheel up) to scroll up (decrease), negative to scroll down (increase)
+                        int new_scroll = cur - me.wheel_delta;
+                        if (new_scroll < 0) new_scroll = 0;
+                        vterm_set_scroll(fterm, new_scroll);
+                        // ensure content redraw
+                        g_tiles_full_content_redraw = 1;
+                    }
                 }
             } else {
                 // No windows: forward to focused GUI client if it registered a mouse callback
@@ -1648,6 +1733,14 @@ void start_tiling_manager() {
                     const mouse_event_t* cme = (const mouse_event_t*)&me;
                     gui_mouse_cb[fterm](focused, cme, gui_userdata[fterm]);
                     gui_needs_redraw[fterm] = 1;
+                }
+                // Also map wheel to terminal scrollback when tile is a plain terminal (no GUI)
+                if (fterm >= 0 && !gui_draw_cb[fterm] && me.wheel_delta != 0) {
+                    int cur = vterm_get_scroll(fterm);
+                    int new_scroll = cur - me.wheel_delta;
+                    if (new_scroll < 0) new_scroll = 0;
+                    vterm_set_scroll(fterm, new_scroll);
+                    g_tiles_full_content_redraw = 1;
                 }
             }
 
@@ -1774,13 +1867,27 @@ void start_tiling_manager() {
             break;
         }
 
-        // Ctrl+X: close focused window (global)
+        // Ctrl+X: close focused window (global) or default-exit focused GUI tile
         if (key == 0x2002) {
             if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
                 wm_close_window(g_win_focused);
                 g_win_focused = -1;
                 g_force_full_redraw = 1;
                 continue;
+            } else {
+                // Default for GUI tiles: give the app a chance to handle Ctrl+X; if still registered, unregister
+                int term = tiles[focused].term_idx;
+                if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
+                    tile_gui_key_cb cb = gui_key_cb[term];
+                    void* ud = gui_userdata[term];
+                    cb(focused, key & 0xFFFF, ud);
+                    // If the GUI is still registered (app didn't close itself), default to unregister
+                    if (gui_key_cb[term]) {
+                        tile_unregister_gui_client(focused);
+                        g_force_full_redraw = 1;
+                    }
+                    continue;
+                }
             }
         }
 

@@ -34,8 +34,8 @@
 #define MOUSE_NACK       0xFE
 #define MOUSE_ERROR      0xFC
 
-// Mouse packet structure (3-byte packets)
-#define MOUSE_PACKET_SIZE 3
+// Mouse packet sizes
+#define MOUSE_PACKET_SIZE 4 /* default to 4 if wheel is enabled; will use 3 if not */
 
 // Global mouse state
 mouse_state_t g_mouse_state = {0};
@@ -48,6 +48,11 @@ static int mouse_max_x = 79, mouse_max_y = 24; // VGA text mode bounds
 // Mouse packet buffer
 static uint8 mouse_packet_buffer[MOUSE_PACKET_SIZE];
 static int mouse_packet_index = 0;
+static int mouse_packet_len = 3; // 3 by default; may upgrade to 4 if wheel detected
+
+// Device capabilities
+static int mouse_has_wheel = 0;
+static int mouse_has_5btn = 0;
 
 // Helpers for packet synchronization and sign extension
 static inline int mouse_packet_is_sync(uint8 b0) { return (b0 & 0x08) != 0; }
@@ -140,13 +145,27 @@ int mouse_init(void) {
     if (mouse_send_command(MOUSE_CMD_SET_DEFAULTS) != 0) {
         return -1;
     }
-    
-    // Enable mouse
+
+    // Try to enable IntelliMouse wheel (rate sequence 200,100,80 then read device ID)
+    // Best-effort: ignore failures
+    if (mouse_send_command(MOUSE_CMD_SET_SAMPLE_RATE) == 0) (void)mouse_send_command(200);
+    if (mouse_send_command(MOUSE_CMD_SET_SAMPLE_RATE) == 0) (void)mouse_send_command(100);
+    if (mouse_send_command(MOUSE_CMD_SET_SAMPLE_RATE) == 0) (void)mouse_send_command(80);
+    // Read device ID
+    if (mouse_send_command(MOUSE_CMD_GET_DEVICE_ID) == 0) {
+        if (mouse_wait_for_data() == 0) {
+            uint8 id = inportb(PS2_DATA_PORT);
+            if (id == 3) { mouse_has_wheel = 1; mouse_packet_len = 4; }
+            else if (id == 4) { mouse_has_wheel = 1; mouse_has_5btn = 1; mouse_packet_len = 4; }
+        }
+    }
+
+    // Enable mouse streaming
     if (mouse_send_command(MOUSE_CMD_ENABLE) != 0) {
         return -1;
     }
-    
-    // Set sample rate to 100 (for better responsiveness)
+
+    // Set sample rate to 100 (for better responsiveness) — optional
     if (mouse_send_command(MOUSE_CMD_SET_SAMPLE_RATE) == 0) {
         (void)mouse_send_command(100);
     }
@@ -193,18 +212,33 @@ void mouse_interrupt_handler(void) {
     mouse_packet_index++;
 
     // Process complete packet when index wrapped to 0
-    if (mouse_packet_index == MOUSE_PACKET_SIZE) {
+    if (mouse_packet_index == mouse_packet_len) {
         uint8 status = mouse_packet_buffer[0];
         int8 delta_x = sign_extend_8(mouse_packet_buffer[1]);
         int8 delta_y = sign_extend_8(mouse_packet_buffer[2]);
+        int wheel = 0;
+        if (mouse_has_wheel && mouse_packet_len >= 4) {
+            int8 z = sign_extend_8(mouse_packet_buffer[3]);
+            // Only lower 4 bits are valid for Z in standard IntelliMouse (values -8..+7); treat as signed nibble
+            z = (z & 0x0F);
+            if (z & 0x08) z |= 0xF0; // sign extend 4-bit
+            wheel = (int)z;
+        }
 
         // Update button state
         g_mouse_state.prev_buttons = g_mouse_state.buttons;
         g_mouse_state.buttons = status & 0x07;
+        // 5-button mice encode XButton in 4th byte upper bits (bits 4-5). Map to our flags if present.
+        if (mouse_has_5btn && mouse_packet_len >= 4) {
+            uint8 b4 = mouse_packet_buffer[3];
+            if (b4 & 0x10) g_mouse_state.buttons |= MOUSE_BUTTON_4;
+            if (b4 & 0x20) g_mouse_state.buttons |= MOUSE_BUTTON_5;
+        }
 
         // Update position and deltas
         g_mouse_state.delta_x += delta_x;
         g_mouse_state.delta_y += delta_y;
+        g_mouse_state.wheel_delta += wheel;
 
         g_mouse_state.x += delta_x;
         g_mouse_state.y -= delta_y; // Invert Y axis
@@ -231,12 +265,14 @@ int mouse_read_event(mouse_event_t* event) {
     event->y = g_mouse_state.y;
     event->delta_x = g_mouse_state.delta_x;
     event->delta_y = g_mouse_state.delta_y;
+    event->wheel_delta = g_mouse_state.wheel_delta;
     event->buttons = g_mouse_state.buttons;
     event->button_changes = g_mouse_state.buttons ^ g_mouse_state.prev_buttons;
     
     // Clear deltas after reading
     g_mouse_state.delta_x = 0;
     g_mouse_state.delta_y = 0;
+    g_mouse_state.wheel_delta = 0;
     
     return 0;
 }
@@ -306,15 +342,27 @@ int mouse_poll(void) {
         mouse_packet_buffer[mouse_packet_index] = data;
         mouse_packet_index++;
         progressed = 1;
-        if (mouse_packet_index == MOUSE_PACKET_SIZE) {
+        if (mouse_packet_index == mouse_packet_len) {
             uint8 st = mouse_packet_buffer[0];
             int8 dx = sign_extend_8(mouse_packet_buffer[1]);
             int8 dy = sign_extend_8(mouse_packet_buffer[2]);
+            int wheel = 0;
+            if (mouse_has_wheel && mouse_packet_len >= 4) {
+                int8 z = sign_extend_8(mouse_packet_buffer[3]);
+                z = (z & 0x0F); if (z & 0x08) z |= 0xF0; // sign-extend nibble
+                wheel = (int)z;
+            }
             if (!g_mouse_state.initialized) g_mouse_state.initialized = 1;
             g_mouse_state.prev_buttons = g_mouse_state.buttons;
             g_mouse_state.buttons = st & 0x07;
+            if (mouse_has_5btn && mouse_packet_len >= 4) {
+                uint8 b4 = mouse_packet_buffer[3];
+                if (b4 & 0x10) g_mouse_state.buttons |= MOUSE_BUTTON_4;
+                if (b4 & 0x20) g_mouse_state.buttons |= MOUSE_BUTTON_5;
+            }
             g_mouse_state.delta_x += dx;
             g_mouse_state.delta_y += dy;
+            g_mouse_state.wheel_delta += wheel;
             g_mouse_state.x += dx;
             g_mouse_state.y -= dy;
             if (g_mouse_state.x < mouse_min_x) g_mouse_state.x = mouse_min_x;

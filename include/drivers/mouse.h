@@ -8,11 +8,15 @@
 #define MOUSE_BUTTON_LEFT    0x01
 #define MOUSE_BUTTON_RIGHT   0x02
 #define MOUSE_BUTTON_MIDDLE  0x04
+// Extended buttons for IntelliMouse Explorer (if available)
+#define MOUSE_BUTTON_4       0x08
+#define MOUSE_BUTTON_5       0x10
 
 // Mouse state structure
 typedef struct {
     int x, y;           // Mouse position
     int delta_x, delta_y; // Movement delta
+    int wheel_delta;    // Accumulated wheel delta since last read (positive=up, negative=down)
     uint8 buttons;      // Button state
     uint8 prev_buttons; // Previous button state
     int initialized;    // Initialization status
@@ -22,6 +26,7 @@ typedef struct {
 typedef struct {
     int x, y;
     int delta_x, delta_y;
+    int wheel_delta;    // Wheel movement since last read
     uint8 buttons;
     uint8 button_changes; // Which buttons changed
 } mouse_event_t;

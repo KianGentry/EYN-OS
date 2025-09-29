@@ -30,6 +30,8 @@ void drawText_italic(int charnum, int r, int g, int b);
 void drawText_large(int charnum, int r, int g, int b);
 void drawLine(int x1, int y1, int x2, int y2, int r, int g, int b);
 void drawPixel(int x, int y, int r, int g, int b);
+// Draw to backbuffer only (no dirty mark). Call vga_mark_dirty_rect separately.
+void vga_drawPixel_bb(int x, int y, int r, int g, int b);
 void clearScreen(void);
 
 // windowing (viewport) api - up to 4 windows in a 2x2 grid

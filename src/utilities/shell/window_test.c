@@ -7,10 +7,11 @@
 static void test_draw(int tile_idx, int cx, int cy, int cw, int ch, void* ud) {
     (void)tile_idx; (void)ud;
     // simple pattern: checkerboard
+    vga_mark_dirty_rect(cx, cy, cw, ch);
     for (int y = 0; y < ch; ++y) {
         for (int x = 0; x < cw; ++x) {
             int v = (((x>>4) ^ (y>>4)) & 1) ? 60 : 30;
-            drawPixel(cx + x, cy + y, v, v, v);
+            vga_drawPixel_bb(cx + x, cy + y, v, v, v);
         }
     }
 }

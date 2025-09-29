@@ -89,6 +89,10 @@ static volatile int g_help_running = 0;
 // Forward declarations for GUI callbacks
 static void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata);
 static void help_gui_key(int tile_idx, int key, void* userdata);
+static void help_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata);
+
+// Remember last content rect for mouse hit-testing
+static int g_last_cx = 0, g_last_cy = 0, g_last_cw = 0, g_last_ch = 0;
 
 void help_tui() {
     extern const shell_command_info_t __start_shellcmds[];
@@ -161,7 +165,7 @@ void help_tui() {
         // Set the tile title so the tile shows it's the Help UI. Do NOT set a tile-level status
         // because the GUI will draw its own bottom status bar inside the content area.
         tile_set_title_status(focused, "EYN-OS Help", NULL, NULL);
-        tile_register_gui_client(focused, help_gui_draw, help_gui_key, NULL);
+        tile_register_gui_client2(focused, help_gui_draw, help_gui_key, help_gui_mouse, NULL);
         // Return immediately; the tiling manager will drive drawing and input via our callbacks.
         return;
     }
@@ -362,6 +366,8 @@ void help_tui() {
 
 // GUI draw callback: draw two panes inside the provided content rectangle (pixel coords)
 static void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
+    // Stash the rect for mouse hit-testing
+    g_last_cx = content_x; g_last_cy = content_y; g_last_cw = content_w; g_last_ch = content_h;
     // Convert pixels -> TUI grid (strictly within content rect)
     int cell_x = content_x / 8;
     int cell_y = content_y / 8;
@@ -566,5 +572,52 @@ static void help_gui_key(int tile_idx, int key, void* userdata) {
             g_expanded_commands[g_selected] = !g_expanded_commands[g_selected];
             g_selected_sub = 0;
         }
+    }
+}
+
+// Mouse: wheel scrolls the left list; left-click selects a row in the left pane
+static void help_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata) {
+    (void)tile_idx; (void)userdata;
+    if (!g_sorted_cmds || g_cmd_count <= 0) return;
+    // Convert to cell coords
+    int cell_x = g_last_cx / 8;
+    int cell_y = g_last_cy / 8;
+    int cell_w = g_last_cw / 8;
+    int cell_h = g_last_ch / 8;
+    if (cell_w <= 0 || cell_h <= 0) return;
+    int left_chars = CMD_LIST_WIDTH;
+    if (left_chars + 4 >= cell_w) left_chars = (cell_w > 1) ? (cell_w / 2) : cell_w;
+    int click_cx = me->x / 8;
+    int click_cy = me->y / 8;
+    // Wheel: adjust scroll
+    if (me->wheel_delta != 0) {
+        int delta = me->wheel_delta;
+        int ns = g_scroll + (delta > 0 ? -1 : 1); // wheel up = scroll up
+        if (ns < 0) ns = 0;
+        // compute a rough maximum scroll: limit so at least one item remains visible
+        int max_vis = (cell_h > 3) ? (cell_h - 3) : cell_h;
+        int max_scroll = (g_cmd_count > max_vis) ? (g_cmd_count - max_vis) : 0;
+        if (ns > max_scroll) ns = max_scroll;
+        if (ns != g_scroll) g_scroll = ns;
+        return;
+    }
+    // Left-click selection in left pane list
+    uint8 left_down = (me->buttons & MOUSE_BUTTON_LEFT) != 0;
+    if (!left_down) return;
+    // Window geometry from draw: left window starts at (cell_x, cell_y+1), list rows start at y+2
+    int list_x0 = cell_x + 1;
+    int list_x1 = cell_x + left_chars - 2;
+    int list_y0 = cell_y + 1 + 2;
+    if (click_cx >= list_x0 && click_cx <= list_x1 && click_cy >= list_y0) {
+        int row = click_cy - list_y0; // 0-based visible row index
+        int idx = g_scroll + row;
+        if (idx < 0) idx = 0;
+        if (idx >= g_cmd_count) idx = g_cmd_count - 1;
+        g_selected = idx;
+        g_selected_sub = 0;
+        // keep selection in view
+        if (g_selected < g_scroll) g_scroll = g_selected;
+        int max_visible = (cell_h > 3) ? (cell_h - 3) : 1;
+        if (g_selected > g_scroll + max_visible - 1) g_scroll = g_selected - max_visible + 1;
     }
 }

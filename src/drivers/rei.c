@@ -225,7 +225,14 @@ int rei_display_image(const rei_image_t* image, int x, int y) {
         printf("%cImage too large, scaling down by factor %d\n", 120, 120, 255, scale);
     }
     
-    // Draw each pixel to the framebuffer
+    // Compute the destination bounds and mark once as dirty
+    int dst_w = (image->header.width / scale);
+    if (dst_w <= 0) dst_w = image->header.width; // scale==1
+    int dst_h = (image->header.height / scale);
+    if (dst_h <= 0) dst_h = image->header.height;
+    vga_mark_dirty_rect(display_x, display_y, dst_w, dst_h);
+
+    // Draw each pixel to the backbuffer (or framebuffer if no backbuffer)
     for (int py = 0; py < image->header.height; py += scale) {
         for (int px = 0; px < image->header.width; px += scale) {
             uint32_t color = rei_get_pixel_color(image, px, py);
@@ -260,12 +267,12 @@ int rei_display_image(const rei_image_t* image, int x, int y) {
             
             // Draw the pixel (with scaling)
             if (scale == 1) {
-                drawPixel(display_x + px, display_y + py, r, g, b);
+                vga_drawPixel_bb(display_x + px, display_y + py, r, g, b);
             } else {
                 // Draw a scaled pixel (2x2 block)
                 for (int sy = 0; sy < scale; sy++) {
                     for (int sx = 0; sx < scale; sx++) {
-                        drawPixel(display_x + px * scale + sx, display_y + py * scale + sy, r, g, b);
+                        vga_drawPixel_bb(display_x + px * scale + sx, display_y + py * scale + sy, r, g, b);
                     }
                 }
             }

@@ -599,6 +599,33 @@ void drawPixel(int x, int y, int r, int g, int b)
 	return;
 }
 
+// Write a pixel into the backbuffer only (no dirty mark). Callers should
+// mark the affected area once via vga_mark_dirty_rect to avoid per-pixel overhead.
+void vga_drawPixel_bb(int x, int y, int rr, int gg, int bb)
+{
+	if (!g_mbi) return;
+	if (x < 0 || y < 0 || x >= (int)g_mbi->framebuffer_width || y >= (int)g_mbi->framebuffer_height) return;
+
+	if (g_backbuffer && g_backbuffer_w >= (int)g_mbi->framebuffer_width && g_backbuffer_h >= (int)g_mbi->framebuffer_height) {
+		unsigned int offset = (x + y * g_backbuffer_w) * 4;
+		g_backbuffer[offset + 0] = (unsigned char)bb; // B
+		g_backbuffer[offset + 1] = (unsigned char)gg; // G
+		g_backbuffer[offset + 2] = (unsigned char)rr; // R
+		g_backbuffer[offset + 3] = 0;                 // A (unused)
+		return;
+	}
+	// Fallback: draw directly to framebuffer without marking dirty (overlay semantics)
+	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8;
+	if (!video || pitch <= 0 || bpp < 3) return;
+	unsigned char* p = video + y * pitch + x * bpp;
+	p[0] = (unsigned char)bb;
+	p[1] = (unsigned char)gg;
+	p[2] = (unsigned char)rr;
+	if (bpp >= 4) p[3] = 0xFF;
+}
+
 void drawLine(int x1, int y1, int x2, int y2, int r, int g, int b)
 {
 
