@@ -50,10 +50,10 @@ status          # Check which commands are loaded
 | `del` | Delete file | `del test.txt` |
 | `deldir` | Delete directory | `deldir old_dir` |
 | `makedir` | Create directory | `makedir new_dir` |
-| `read` | Smart file display | `read config.txt` |
+| `read` | Display text or markdown | `read config.txt` |
 | `read_raw` | Raw file display | `read_raw data.bin` |
 | `read_md` | Markdown display | `read_md doc.md` |
-| `read_image` | Image display | `read_image logo.rei` |
+| `view`/`vieww` | REI image viewer | `view logo.rei` / `vieww logo.rei` |
 | `write` | Edit file | `write document.txt` |
 | `copy` | Copy file | `copy source.txt dest.txt` |
 | `move` | Move file | `move file.txt /backup/` |
@@ -134,10 +134,11 @@ write newfile.txt    # Create and edit file
 
 ### Reading Files
 ```bash
-read filename.txt    # Smart file display
+read filename.txt    # Display text or markdown
 read_raw data.bin   # Raw file display
 read_md doc.md      # Markdown with formatting
-read_image logo.rei # REI image display
+view logo.rei        # REI image (tile viewer)
+vieww logo.rei       # REI image (window viewer)
 ```
 
 ### Copying Files
@@ -164,8 +165,8 @@ deldir directory     # Delete directory
 EYN-OS supports the custom REI (Raw EYN Image) format for pixel-perfect image display.
 
 ```bash
-read image.rei              # Display REI image
-read_image image.rei        # Direct image subcommand
+view image.rei              # Display REI image in a tile
+vieww image.rei             # Display REI image in a window
 ```
 
 ### Supported Formats
@@ -336,7 +337,7 @@ status              # Check command loading status
 - **Dual-Pane Layout**: Interactive help system
 
 ### File Format Support
-- **Smart File Display**: `read` detects file type automatically
+- **File Display**: `read` shows text/markdown. Use `view`/`vieww` for images
 - **REI Images**: Native image format with pixel-perfect rendering
 - **Markdown**: Formatted text display with bold/italic support
 - **Raw Data**: Binary file display with hex dump support

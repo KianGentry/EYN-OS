@@ -1,0 +1,145 @@
+# Tiling Manager and Floating Windows
+
+The EYN-OS GUI layer now includes a tiling front-end and an experimental floating window manager. This page describes the architecture and APIs for building GUI apps that render inside tiles or windows.
+
+## Overview
+
+- Up to 4 tiles arranged in a grid, each with a title, optional status bar, and border
+- One virtual terminal per tile for shell interaction and text apps
+- Optional GUI client per tile to draw custom content and handle input
+- Floating windows stack above tiles with their own decorations and buttons
+
+## Architecture
+
+```
+┌───────────────────────────────┐
+│            Apps               │
+│  (viewer, draw, write, help) │
+├───────────────────────────────┤
+│  Tile/Window Manager (GUI)    │
+│  (tiling_manager.c)           │
+├───────────────────────────────┤
+│  Virtual Terminals            │
+│  (terminals.c)                │
+├───────────────────────────────┤
+│  VGA + Mouse Drivers          │
+│  (dirty rects, cursor, wheel) │
+└───────────────────────────────┘
+```
+
+Key files:
+- `src/utilities/tui/tiling_manager.c`
+- `src/utilities/tui/terminals.c`, `include/utilities/terminals.h`
+- `include/utilities/tile_manager.h`
+- `src/drivers/vga.c`, `include/drivers/vga.h`
+- `src/drivers/mouse.c`, `include/drivers/mouse.h`
+
+## Tile GUI API
+
+Headers: `include/utilities/tile_manager.h`
+
+```c
+// Create a new GUI tile; returns tile index or -1
+int tile_create_gui_tile(const char* title, const char* status_left);
+
+// Register GUI client callbacks for a tile
+typedef void (*tile_gui_draw_cb)(int tile_idx, int x, int y, int w, int h, void* ud);
+typedef void (*tile_gui_key_cb)(int tile_idx, int key, void* ud);
+typedef void (*tile_gui_mouse_cb)(int tile_idx, const mouse_event_t* me, void* ud);
+
+void tile_register_gui_client2(int tile_idx,
+    tile_gui_draw_cb draw,
+    tile_gui_key_cb key,
+    tile_gui_mouse_cb mouse,
+    void* userdata);
+
+// Title/status helpers and redraw
+void tile_set_title_status(int tile_idx, const char* title, const char* left, const char* right);
+void tile_invalidate_gui(int tile_idx);
+void tile_invalidate_decorations(int tile_idx);
+```
+
+Behavior:
+- The manager calls your draw callback with the content rectangle (excludes title/status/border)
+- Call `tile_invalidate_gui()` when your app state changes to request a redraw
+- Keyboard and mouse callbacks receive events only when the tile is focused
+
+## Floating Window API (experimental)
+
+```c
+// Create a window; returns id or -1
+int wm_create_window(const char* title, int x, int y, int w, int h, const char* status_left);
+
+// Register callbacks
+void wm_register_gui_client2(int win_id,
+    tile_gui_draw_cb draw,
+    tile_gui_key_cb key,
+    tile_gui_mouse_cb mouse,
+    void* userdata);
+
+// Update decorations and request redraws
+void wm_set_title_status(int win_id, const char* title, const char* left, const char* right);
+void wm_invalidate_window(int win_id);
+void wm_close_window(int win_id);
+```
+
+Windows include title bars with minimize, maximize, and close buttons, with focused/unfocused icon variants loaded from REI assets (`testdir/ui/*.rei`).
+
+## Virtual Terminals
+
+Headers: `include/utilities/terminals.h`
+
+- One vterm per tile (80×N), with scrollback
+- Mouse wheel maps to scrollback when no GUI client is registered on a tile
+- Selection visuals on the input line are supported
+
+Key APIs:
+```c
+void vterm_handle_key(int idx, int key);
+void vterm_set_scroll(int idx, int scroll);
+int  vterm_get_version(int idx); // content version for incremental redraw
+```
+
+## Commands
+
+The following commands integrate with the GUI layer:
+- `tiling` — launch the tiling manager UI
+- `view <file.rei>` — open an image viewer in a tile
+- `vieww <file.rei>` — open an image viewer in a floating window
+- `draw` — open a simple canvas editor in a tile
+- `win_test` — open a sample floating window (compositor test)
+
+## Input
+
+- Keyboard: routed to the focused tile/window; common shortcuts like Ctrl+X to close
+- Mouse: click-to-focus, drag within content for apps that support it; wheel scrolls vterm
+- Cursor: optional REI image overlay for the pointer
+
+## Performance
+
+- The manager uses dirty-rectangle tracking and backbuffer-aware pixel ops to reduce flicker
+- GUI apps should draw only within the provided content rect and avoid full-screen clears
+
+## Examples
+
+Minimal tile app:
+```c
+static void app_draw(int t, int x, int y, int w, int h, void* ud) {
+    drawRect(x, y, w, h, 0, 0, 0);
+    const char* msg = "Hello Tile";
+    for (int i = 0; msg[i]; ++i) drawCharAt(x + 4 + i*8, y + 4, (unsigned char)msg[i], 255,255,0);
+}
+
+static void app_key(int t, int key, void* ud) {
+    if (key == 0x2002) { /* Ctrl+X */ tile_unregister_gui_client(t); }
+}
+
+int t = tile_create_gui_tile("Demo", "Ctrl+X: Close");
+tile_register_gui_client2(t, app_draw, app_key, NULL, NULL);
+```
+
+## Future Work
+
+- Window movement/resizing, better stacking controls
+- Extended alpha blending paths and richer widgets
+- Additional input affordances (context menus, selection across lines)

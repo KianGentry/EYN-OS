@@ -36,6 +36,7 @@ Filesystem Commands:
   makedir         - Create a new directory.
   move            - Move a file from source to destination.
   read            - Smart file display - detects file type and displays appropriately.
+                    (Text/Markdown only. For images, use 'view' or 'vieww'.)
   write           - Open nano-like text editor for a file.
 
 System Commands:

@@ -29,7 +29,7 @@ Always available in RAM for core functionality:
 ### Streaming Commands
 Loaded on-demand to conserve memory:
 - **Filesystem**: `format`, `fdisk`, `fscheck`, `copy`, `move`, `del`, `cd`, `makedir`, `deldir`
-- **File Operations**: `read`, `write`, `read_raw`, `read_md`, `read_image`
+- **File Operations**: `read`, `write`, `read_raw`, `read_md`
 - **Basic Commands**: `echo`, `ver`, `calc`, `search`, `drive`, `run`
 - **Advanced**: `random`, `history`, `sort`, `game`, `draw`, `spam`
 - **Development**: `assemble`, `hexdump`, `log`
@@ -169,7 +169,7 @@ makedir new_dir # Create new directory
 ### File Operations
 
 #### `read <filename>`
-Smart file display - detects file type and displays appropriately.
+Display text files (.txt) or render markdown (.md). For images, use the GUI viewer commands `view` or `vieww`.
 ```bash
 read test.txt   # Display text file
 read image.rei  # Display REI image
@@ -188,10 +188,10 @@ Display markdown files with formatting.
 read_md doc.md  # Display markdown with bold/italic formatting
 ```
 
-#### `read_image <filename>`
-Display REI image files.
+> Note: Image viewing moved to GUI commands:
 ```bash
-read_image logo.rei # Display REI image file
+view logo.rei   # Viewer in a tile
+vieww logo.rei  # Viewer in a floating window
 ```
 
 #### `write <filename>`

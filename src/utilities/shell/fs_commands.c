@@ -248,8 +248,8 @@ void read_cmd(string ch) {
     while (ch[i] && ch[i] == ' ') i++;
     if (!ch[i]) {
         printf("%cUsage: read <filename>\n", 255, 255, 255);
-        printf("%cSmart file display - detects file type and displays appropriately.\n", 255, 255, 255);
-        printf("%cSupported formats: .txt (raw), .md (markdown), .png/.jpg/.jpeg/.rei (images)\n", 255, 255, 255);
+        printf("%cDisplay text files (.txt) or render markdown (.md).\n", 255, 255, 255);
+        printf("%cFor images, use: view <file.rei> or vieww <file.rei>\n", 255, 255, 255);
         return;
     }
     
@@ -264,18 +264,16 @@ void read_cmd(string ch) {
     // Check file extension for smart detection
     int name_len = strlen(filename);
     int is_md = (name_len >= 3 && strcmp(filename + name_len - 3, ".md") == 0);
-    int is_png = (name_len >= 4 && strcmp(filename + name_len - 4, ".png") == 0);
-    int is_jpg = (name_len >= 4 && strcmp(filename + name_len - 4, ".jpg") == 0);
-    int is_jpeg = (name_len >= 5 && strcmp(filename + name_len - 5, ".jpeg") == 0);
     int is_rei = (name_len >= 4 && strcmp(filename + name_len - 4, ".rei") == 0);
     
     // Smart detection based on file extension
     if (is_md) {
-        printf("%cDetected markdown file, rendering with formatting...\n", 120, 120, 255);
+        printf("%cRendering markdown file...\n", 120, 120, 255);
         read_md_cmd(ch);
-    } else if (is_png || is_jpg || is_jpeg || is_rei) {
-        printf("%cDetected image file, displaying image...\n", 120, 120, 255);
-        read_image_cmd(ch);
+    } else if (is_rei) {
+        // Guide users toward the GUI viewer commands instead of using read
+        printf("%cImage files are not supported by 'read'. Use: view <file.rei> or vieww <file.rei>\n", 255, 165, 0);
+        return;
     } else {
         // Default to raw display for .txt and other files
         printf("%cDisplaying as raw text...\n", 120, 120, 255);
@@ -1172,7 +1170,7 @@ void move_cmd(string ch) {
 }
 
 REGISTER_SHELL_COMMAND(ls, "ls", ls_cmd, CMD_STREAMING, "List files in the root directory of the selected drive.\nUsage: ls", "ls");
-REGISTER_SHELL_COMMAND(read, "read", read_cmd, CMD_STREAMING, "Smart file display - detects file type and displays appropriately.\nUsage: read <filename>", "read myfile.txt");
+REGISTER_SHELL_COMMAND(read, "read", read_cmd, CMD_STREAMING, "Display text files (.txt) or render markdown (.md). For images, use 'view' or 'vieww'.\nUsage: read <filename>", "read myfile.txt");
 REGISTER_SHELL_COMMAND(del, "del", del, CMD_STREAMING, "Delete a file from the filesystem.\nUsage: del <filename>", "del myfile.txt");
 REGISTER_SHELL_COMMAND(write, "write", write_cmd, CMD_STREAMING, "Open nano-like text editor for a file.\nUsage: write <filename>", "write myfile.txt");
 REGISTER_SHELL_COMMAND(size, "size", size, CMD_STREAMING, "Show the size of a file in bytes.\nUsage: size <filename>", "size myfile.txt");

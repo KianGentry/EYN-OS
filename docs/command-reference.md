@@ -523,7 +523,7 @@ move file1.txt /backup/file1.txt
 **File:** `fs_commands.c`
 
 **Description:**
-Smart file display - detects file type and displays appropriately.
+Display text files (.txt) or render markdown (.md). For images, use 'view' or 'vieww'.
 Usage: read <filename>
 
 **Example:**

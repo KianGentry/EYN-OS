@@ -20,6 +20,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 ### User Interface
 - **[TUI System](ui/tui.md)** - Text User Interface framework
 - **[Shell System](ui/shell.md)** - Command-line interface and shell commands
+- **[Tiling Manager](ui/tiling-manager.md)** - Tile-based UI and floating windows (GUI API)
 - **[Pipeline System](pipeline-system.md)** - Unix-like pipelines and redirection
 - **[Help System](ui/help.md)** - Interactive help command
 
@@ -64,3 +65,4 @@ When adding new features to EYN-OS, please:
 - `Makefile` - Build system documentation
 - `src/` - Source code with inline documentation
 - `include/` - Header files with function documentation
+- `docs/whats-new-dev.md` - Summary of recent changes on dev

@@ -49,7 +49,11 @@ data_size = width × height × depth
 - Red component (0-255)
 - Green component (0-255)
 - Blue component (0-255)
-- Alpha component (0-255, currently ignored in rendering)
+- Alpha component (0-255)
+
+Rendering notes:
+- In GUI compositor overlays (icons, cursor, window buttons), alpha is respected; fully transparent pixels are skipped and high alpha is drawn opaque. Low alpha may be clamped to improve contrast over bright backgrounds.
+- In some legacy paths, RGBA may be treated as RGB. Prefer assets with proper alpha for UI elements.
 
 ### Data Layout
 
@@ -64,13 +68,13 @@ Pixel (0,height-1) | ... | Pixel (width-1,height-1)
 
 ## Usage in EYN-OS
 
-### Reading REI Files
+### Viewing REI Files
 
-REI files are automatically detected and rendered by the `read` command:
+Use the GUI viewer commands:
 
 ```bash
-read image.rei              # Smart detection
-read_image image.rei        # Direct subcommand
+view image.rei              # Open in a tile
+vieww image.rei             # Open in a floating window
 ```
 
 ### Display Features
@@ -112,8 +116,7 @@ python3 devtools/png_to_rei.py image.png -d 4  # RGBA
 REI support is implemented in:
 - `include/rei.h` - Header definitions and function prototypes
 - `src/drivers/rei.c` - Core REI parsing and rendering
-- `src/utilities/shell/subcommands.c` - `read_image_cmd` integration
-- `src/utilities/shell/fs_commands.c` - Smart detection in `read_cmd`
+- `src/utilities/shell/image_viewer_gui.c` - GUI viewer commands `view` and `vieww`
 
 ### Key Functions
 
