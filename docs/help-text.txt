@@ -35,8 +35,7 @@ Filesystem Commands:
   ls              - List files in the root directory of the selected drive.
   makedir         - Create a new directory.
   move            - Move a file from source to destination.
-  read            - Smart file display - detects file type and displays appropriately.
-                    (Text/Markdown only. For images, use 'view' or 'vieww'.)
+  read            - Display text files (.txt) or render markdown (.md).
   write           - Open nano-like text editor for a file.
 
 System Commands:
