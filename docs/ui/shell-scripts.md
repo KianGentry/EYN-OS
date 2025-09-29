@@ -8,7 +8,7 @@ Shell scripts in EYN-OS provide:
 - **Command Automation**: Execute multiple commands in sequence
 - **Comment Support**: Use `#` for comments
 - **Error Handling**: Track successful and failed commands
-- **Line-by-Line Execution**: Each line is executed as a separate command
+- **Variables and Control Flow**: Simple variables, conditionals, and loops
 - **Integration**: Works seamlessly with the existing `run` command
 
 ## File Format
@@ -17,24 +17,46 @@ Shell scripts in EYN-OS provide:
 Shell scripts must use the `.shell` extension to be recognized by the system.
 
 ### Syntax
-- **Commands**: Each line contains a single EYN-OS command
+- **Commands**: Each non-directive line contains a single EYN-OS command
 - **Comments**: Lines starting with `#` are ignored
 - **Empty Lines**: Blank lines are ignored
 - **Whitespace**: Leading and trailing whitespace is trimmed
+- **Variables**: Use `set KEY=VALUE`, reference with `$KEY` or `${KEY}`
+	- You can capture command output with `$(command ...)` inside VALUE
+- **Conditionals**: `ifeq A B` / `ifneq A B` with `else` and `endif`
+- **Loops**: `loop N` ... `endloop` to repeat N times (integer N or variable)
 
 ### Example Shell Script
 ```bash
 # This is a comment
 echo "Hello from EYN-OS shell script!"
 
+# Variables
+set NAME=EYN-OS
+echo "Running on ${NAME}"
+
+# Capture command output into a variable
+set FILES=$(ls)
+echo "Files: $FILES"
+
+# Conditionals
+set MODE=prod
+ifeq $MODE dev
+	echo "Development mode"
+else
+	echo "Production mode"
+endif
+
+# Loop
+set TIMES=3
+loop $TIMES
+	echo "Loop iteration"
+endloop
+
 # Show system information
 ver
 ls
 memory stats
-
-# Demonstrate calculator
-calc 2+3
-calc 10*5
 
 echo "Script completed!"
 ```
@@ -48,6 +70,7 @@ Use the `run` command to execute shell scripts:
 run demo.shell
 run system_info.shell
 run my_script.shell
+run scripts/tools/build.shell      # scripts in subdirectories are supported
 ```
 
 ### Creating Shell Scripts
@@ -191,16 +214,12 @@ Shell scripts complement native `.eyn` programs:
 ## Limitations
 
 ### Current Limitations
-- No variables or parameter passing
-- No conditional execution (if/else)
-- No loops or iteration
 - No function definitions
-- No input redirection within scripts
+- No parameter passing to scripts (use `set` inside)
+- No input/output redirection within scripts
+- Command substitution uses the shell's redirect buffer (4KB). Long outputs are truncated.
 
 ### Future Enhancements
-- Variable support
-- Conditional statements
-- Loop constructs
 - Function definitions
 - Parameter passing
 - Input/output redirection

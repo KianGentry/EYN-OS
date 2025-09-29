@@ -6,6 +6,7 @@
 #include <vga.h>
 #include <shell_command_info.h>
 #include <string.h>
+#include <fs_commands.h> // resolve_path, shell_current_path
 
 // Function declarations
 void run_cmd(string arg);
@@ -32,13 +33,16 @@ void run_command(string arg) {
     }
     
     exec_result_t result;
+    // Resolve relative paths against current shell directory so subdirectories work
+    char abspath[128];
+    resolve_path(filename, shell_current_path, abspath, sizeof(abspath));
     
     if (strcmp(ext, ".shell") == 0) {
         // execute as shell script
-        result = execute_shell_script(filename);
+        result = execute_shell_script(abspath);
     } else if (strcmp(ext, ".eyn") == 0) {
         // execute as native program
-        result = native_execute_program(filename);
+        result = native_execute_program(abspath);
     } else {
         printf("Error: Unsupported file format. Use .eyn for programs or .shell for scripts\n");
         return;

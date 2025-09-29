@@ -30,6 +30,8 @@ static int g_dirty_count = 0;
 
 // Shell redirection globals
 int shell_redirect_active = 0;
+// Global capture mode to force capture during command substitution
+int g_shell_capture_mode = 0; // referenced from shell_script.c
 char shell_redirect_buf[SHELL_REDIRECT_BUF_SIZE];
 int shell_redirect_pos = 0;
 // Color for redirected output
@@ -288,8 +290,8 @@ void drawText(int charnum, int r, int g, int b)
 		return;
 	}
 	
-	// If shell output is being redirected, capture characters into the redirect buffer
-	if (shell_redirect_active) {
+	// If shell output is being redirected (or forced capture), capture characters into the redirect buffer
+	if (shell_redirect_active || g_shell_capture_mode) {
 		// Only handle printable ASCII and newline/backspace; ignore graphic-only ops (charnum == -1)
 		if (charnum >= 0 && shell_redirect_pos < SHELL_REDIRECT_BUF_SIZE - 1) {
 			char ch = (char)charnum;

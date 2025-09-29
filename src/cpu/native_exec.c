@@ -44,11 +44,13 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
         return EXEC_ERROR_INVALID_FORMAT;
     }
     
-    // Find file
-    eynfs_dir_entry_t entry;
-    if (eynfs_find_in_dir(0, &sb, sb.root_dir_block, filename, &entry, 0) != 0) {
-        // File not found
-        return EXEC_ERROR_INVALID_FORMAT;
+    // Find file (support absolute and relative-like paths)
+    eynfs_dir_entry_t entry; uint32_t pb = 0, ei = 0;
+    if (eynfs_traverse_path(0, &sb, filename, &entry, &pb, &ei) != 0) {
+        // Fallback: try root directory by name only (legacy behavior)
+        if (eynfs_find_in_dir(0, &sb, sb.root_dir_block, filename, &entry, 0) != 0) {
+            return EXEC_ERROR_INVALID_FORMAT;
+        }
     }
     
     // Read file

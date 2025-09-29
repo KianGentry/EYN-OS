@@ -44,6 +44,7 @@ extern uint8_t g_current_drive;
 
 // Random number generator command
 void random_cmd(string ch) {
+    extern int shell_redirect_active; // from vga.c
     if (!ch) return; // Prevent null pointer dereference
     
     uint8 i = 0;
@@ -53,7 +54,11 @@ void random_cmd(string ch) {
     // If no arguments, generate a single random number
     if (!ch[i]) {
         uint32_t num = rand_next();
-        printf("%cRandom number: %d\n", 255, 255, 255, (int)num);
+        if (shell_redirect_active) {
+            printf("%d\n", (int)num);
+        } else {
+            printf("%cRandom number: %d\n", 255, 255, 255, (int)num);
+        }
         return;
     }
     
@@ -99,7 +104,11 @@ void random_cmd(string ch) {
             }
             
             uint32_t num = rand_range(arg1, arg2);
-            printf("%cRandom number in range [%d, %d]: %d\n", 255, 255, 255, (int)arg1, (int)arg2, (int)num);
+            if (shell_redirect_active) {
+                printf("%d\n", (int)num);
+            } else {
+                printf("%cRandom number in range [%d, %d]: %d\n", 255, 255, 255, (int)arg1, (int)arg2, (int)num);
+            }
         } else {
             // Limit count to prevent excessive output
             if (arg1 > 1000) {
@@ -107,14 +116,23 @@ void random_cmd(string ch) {
                 return;
             }
             
-            printf("%cGenerating %d random numbers:\n", 255, 255, 255, (int)arg1);
-            for (uint32_t k = 0; k < arg1; k++) {
-                uint32_t num = rand_next();
-                printf("%c%d", 255, 255, 255, (int)num);
-                if (k < arg1 - 1) printf(", ");
-                if ((k + 1) % 10 == 0) printf("\n");
+            if (shell_redirect_active) {
+                for (uint32_t k = 0; k < arg1; k++) {
+                    uint32_t num = rand_next();
+                    printf("%d", (int)num);
+                    if (k < arg1 - 1) printf(" ");
+                }
+                printf("\n");
+            } else {
+                printf("%cGenerating %d random numbers:\n", 255, 255, 255, (int)arg1);
+                for (uint32_t k = 0; k < arg1; k++) {
+                    uint32_t num = rand_next();
+                    printf("%c%d", 255, 255, 255, (int)num);
+                    if (k < arg1 - 1) printf(", ");
+                    if ((k + 1) % 10 == 0) printf("\n");
+                }
+                printf("\n");
             }
-            printf("\n");
         }
     } else {
         printf("%cError: Invalid number format\n", 255, 0, 0);
