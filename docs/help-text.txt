@@ -14,9 +14,11 @@ Streaming Commands:
 ------------------
   catram          - Display contents of a file from RAM disk (FAT32).
   error           - Display system error statistics and status.
+  fatfix          - Scan and repair FAT32 entries incorrectly marked as directories.
   lsram           - List files in the RAM disk (FAT32) with directory tree.
   rect            - Draw a rectangle.
   size            - Show the size of a file in bytes.
+  stats           - Graphical system performance monitor with CPU, memory, disk pies and sortable table
   tiling          - Launch the tiling front-end manager.
   validate        - Display input validation statistics and test validation.
   view            - Open a REI image in a GUI viewer.

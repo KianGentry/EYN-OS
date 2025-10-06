@@ -650,7 +650,6 @@ REGISTER_SHELL_COMMAND(lsram, "lsram", lsram_cmd, CMD_STREAMING, "List files in 
 REGISTER_SHELL_COMMAND(random, "random", random_cmd, CMD_STREAMING, "Generate random numbers.\nUsage: random [count] | random [min] [max]\nExample: random 5 | random 10 20", "random 5");
 REGISTER_SHELL_COMMAND(sort, "sort", sort_cmd, CMD_STREAMING, "Sort strings alphabetically.\nUsage: sort <string1> <string2> <string3> ...\nExample: sort zebra apple banana", "sort zebra apple banana");
 REGISTER_SHELL_COMMAND(search, "search", search_cmd, CMD_STREAMING, "Search for text in filenames and file contents using Boyer-Moore algorithm.\nUsage: search <pattern> [-f|-c|-a]\nExample: search hello -a", "search hello -a");
-/* game command removed */
 REGISTER_SHELL_COMMAND(error, "error", error_cmd, CMD_STREAMING, "Display system error statistics and status.\nUsage: error [clear|details]", "error");
 REGISTER_SHELL_COMMAND(validate, "validate", validate_cmd, CMD_STREAMING, "Display input validation statistics and test validation.\nUsage: validate [test|stats]", "validate");
 REGISTER_SHELL_COMMAND(portable, "portable", portable_cmd, CMD_ESSENTIAL, "Display portability optimizations and memory usage.\nUsage: portable [stats|optimize]", "portable");
@@ -1023,7 +1022,25 @@ void size(string ch) {
         printf("%c%s\n", 255, 255, 255, outbuf);
         return;
     }
-    printf("%cNo supported filesystem found.\n", 255, 0, 0);
+    {
+        #include <fs/vfs.h>
+        uint32 sz = 0;
+        if (vfs_get_file_size(disk, abspath, &sz) == 0) {
+            char outbuf[128];
+            strcpy(outbuf, abspath);
+            strcat(outbuf, ": ");
+            char size_str[32];
+            // Simple itoa
+            uint32 n = sz; int pos = 0; char tmp[16];
+            if (n == 0) tmp[pos++] = '0';
+            while (n > 0 && pos < 16) { tmp[pos++] = '0' + (n % 10); n /= 10; }
+            for (int i = pos-1; i >= 0; --i) { char t[2] = {tmp[i], 0}; strcat(outbuf, t); }
+            strcat(outbuf, " bytes");
+            printf("%c%s\n", 255, 255, 255, outbuf);
+            return;
+        }
+        printf("%cNo supported filesystem found.\n", 255, 0, 0);
+    }
 } 
 
 void log_cmd(string ch) {

@@ -95,9 +95,9 @@ void irq_init(void) {
     mask1 &= ~(1 << 0);
     outportb(PIC1_DATA, mask1);
 
-    pit_init(100); // 100 Hz ticks
+    pit_init(50); // 50 Hz ticks (reduced to lower system interrupt overhead)
     extern void sched_set_tick_hz(uint32);
-    sched_set_tick_hz(100);
+    sched_set_tick_hz(50);
 }
 
 void register_interrupt_handler(int irq, irq_handler_t handler) {

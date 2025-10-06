@@ -12,6 +12,7 @@
 #include <tui.h>
 #include <tile_manager.h>
 #include <vga.h>
+#include <fs/vfs.h>
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern void* fat32_disk_img;
 
@@ -77,6 +78,60 @@ static const char* get_basename(const char* path) {
     return last;
 }
 
+// Delete current selection (if any). Returns 1 if something was deleted and state updated; 0 if no active selection.
+static int write_editor_delete_active_selection(void) {
+    if (!write_editor_sel_active) return 0;
+    int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
+    int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
+    if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
+    // clamp within bounds
+    if (sy < 0) sy = 0; if (sy >= write_editor_num_lines) sy = write_editor_num_lines - 1;
+    if (fy < 0) fy = 0; if (fy >= write_editor_num_lines) fy = write_editor_num_lines - 1;
+    int s_len = strlength(write_editor_buffer[sy]); if (sx < 0) sx = 0; if (sx > s_len) sx = s_len;
+    int f_len = strlength(write_editor_buffer[fy]); if (fx < 0) fx = 0; if (fx > f_len) fx = f_len;
+    if (sy == fy) {
+        // single-line delete
+        int len = strlength(write_editor_buffer[sy]);
+        int rem = fx - sx; if (rem < 0) rem = 0;
+        for (int i = sx; i + rem <= len; ++i) write_editor_buffer[sy][i] = write_editor_buffer[sy][i + rem];
+        write_editor_cursor_y = sy; write_editor_cursor_x = sx;
+    } else {
+        // multi-line: keep prefix of start line up to sx, then append tail of fy from fx
+        char tail[MAX_LINE_LENGTH + 1];
+        int tail_len = 0;
+        const char* ftail = write_editor_buffer[fy] + fx;
+        while (ftail[tail_len] && tail_len < MAX_LINE_LENGTH) { tail[tail_len] = ftail[tail_len]; tail_len++; }
+        tail[tail_len] = '\0';
+        // truncate start line at sx
+        write_editor_buffer[sy][sx] = '\0';
+        int pre_len = strlength(write_editor_buffer[sy]);
+        int space = MAX_LINE_LENGTH - pre_len;
+        int copy = tail_len < space ? tail_len : space;
+        for (int i = 0; i < copy; ++i) write_editor_buffer[sy][pre_len + i] = tail[i];
+        write_editor_buffer[sy][pre_len + copy] = '\0';
+        // shift lines up removing fy-sy lines
+        int remove_count = fy - sy;
+        for (int i = sy + 1; i + remove_count < write_editor_num_lines; ++i) {
+            strcpy(write_editor_buffer[i], write_editor_buffer[i + remove_count]);
+        }
+        write_editor_num_lines -= remove_count;
+        if (write_editor_num_lines < 1) write_editor_num_lines = 1;
+        write_editor_cursor_y = sy; write_editor_cursor_x = sx;
+        // Clear any now-unused lines to avoid stale data showing up
+        for (int i = write_editor_num_lines; i < MAX_LINES; ++i) {
+            write_editor_buffer[i][0] = '\0';
+        }
+    }
+    write_editor_sel_active = 0;
+    write_editor_modified = 1;
+    write_editor_update_tile_modified();
+    // After large deletions (e.g., Ctrl+A), ensure scroll positions are in range
+    if (write_editor_scroll_y > write_editor_cursor_y) write_editor_scroll_y = write_editor_cursor_y;
+    if (write_editor_scroll_x > write_editor_cursor_x) write_editor_scroll_x = write_editor_cursor_x;
+    tile_invalidate_gui(write_editor_gui_tile);
+    return 1;
+}
+
 // Load file content into editor buffer
 int load_file_to_write_editor(const char* path, uint8 disk) {
     // Clear the entire buffer
@@ -86,111 +141,27 @@ int load_file_to_write_editor(const char* path, uint8 disk) {
         }
     }
     write_editor_num_lines = 1;
-    eynfs_superblock_t sb;
-    if (eynfs_read_superblock(disk, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
-        eynfs_dir_entry_t entry;
-        if (eynfs_traverse_path(disk, &sb, path, &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
-            // Use ultra-small buffer for low-memory systems
-            const int chunk_size = 128; // Much smaller than EYNFS_BLOCK_SIZE
-            uint32_t bytes_left = entry.size;
-            uint32_t offset = 0;
-            char buf[chunk_size + 1];
-            int line = 0;
-            int pos = 0;
-            while (bytes_left > 0 && line < MAX_LINES) {
-                int to_read = (bytes_left < chunk_size) ? bytes_left : chunk_size;
-                int n = eynfs_read_file(disk, &sb, &entry, buf, to_read, offset);
-                if (n < 0) break;
-                buf[n] = '\0';
-                for (int i = 0; i < n && line < MAX_LINES; i++) {
-                    if (buf[i] == '\n' || pos >= MAX_LINE_LENGTH) {
-                        write_editor_buffer[line][pos] = '\0';
-                        line++;
-                        pos = 0;
-                        if (buf[i] == '\n') continue;
-                    }
-                    if (pos < MAX_LINE_LENGTH) {
-                        write_editor_buffer[line][pos++] = buf[i];
-                    }
-                }
-                offset += n;
-                bytes_left -= n;
-                if (n == 0) break;
-            }
-            if (pos > 0 && line < MAX_LINES) {
-                write_editor_buffer[line][pos] = '\0';
-                line++;
-            }
-            write_editor_num_lines = line > 0 ? line : 1;
-            return 0;
+
+    // Read via VFS (supports EYNFS and FAT32). Missing file is fine (start empty).
+    const int max_bytes = MAX_LINES * (MAX_LINE_LENGTH + 1);
+    char* buf = (char*)malloc(max_bytes);
+    if (!buf) return -1;
+    int n = vfs_read_file(disk, path, buf, max_bytes);
+    if (n <= 0) { free(buf); return 0; }
+
+    int line = 0, pos = 0;
+    for (int i = 0; i < n && line < MAX_LINES; ++i) {
+        if (buf[i] == '\n' || pos >= MAX_LINE_LENGTH) {
+            write_editor_buffer[line][pos] = '\0';
+            line++; pos = 0;
+            if (buf[i] == '\n') continue;
         }
-        return 0;
+        if (pos < MAX_LINE_LENGTH) write_editor_buffer[line][pos++] = buf[i];
     }
-    uint32 partition_lba_start = fat32_get_partition_lba_start(disk);
-    struct fat32_bpb bpb;
-    if (fat32_read_bpb_sector(disk, partition_lba_start, &bpb) == 0) {
-        char fatname[12];
-        to_fat32_83(path, fatname);
-        uint32 byts_per_sec = bpb.BytsPerSec;
-        uint32 sec_per_clus = bpb.SecPerClus;
-        uint32 rsvd_sec_cnt = bpb.RsvdSecCnt;
-        uint32 num_fats = bpb.NumFATs;
-        uint32 fatsz = bpb.FATSz32;
-        uint32 root_clus = bpb.RootClus;
-        uint32 first_data_sec = rsvd_sec_cnt + (num_fats * fatsz);
-        uint8 sector[512];
-        uint8 fat[512];
-        uint32 cluster = root_clus;
-        while (cluster < 0x0FFFFFF8) {
-            uint32 cluster_first_sec = first_data_sec + ((cluster - 2) * sec_per_clus);
-            for (uint32 sec = 0; sec < sec_per_clus; sec++) {
-                if (ata_read_sector(disk, partition_lba_start + cluster_first_sec + sec, sector) != 0) break;
-                struct fat32_dir_entry* entries = (struct fat32_dir_entry*)sector;
-                for (int i = 0; i < 16; i++) {
-                    if (entries[i].Name[0] == 0x00) break;
-                    if ((entries[i].Attr & 0x0F) == 0x0F) continue;
-                    if (entries[i].Name[0] == 0xE5) continue;
-                    int match = 1;
-                    for (int j = 0; j < 11; j++) {
-                        if (entries[i].Name[j] != fatname[j]) {
-                            match = 0;
-                            break;
-                        }
-                    }
-                    if (match) {
-                        uint32 file_cluster = entries[i].FstClusLO | (entries[i].FstClusHI << 16);
-                        uint32 file_size = entries[i].FileSize;
-                        if (file_size > 0) {
-                            char* data_ptr = (char*)fat32_disk_img + (first_data_sec + ((file_cluster - 2) * sec_per_clus)) * byts_per_sec;
-                            int line = 0;
-                            int pos = 0;
-                            for (int k = 0; k < (int)file_size && line < MAX_LINES; k++) {
-                                if (data_ptr[k] == '\n' || pos >= MAX_LINE_LENGTH) {
-                                    write_editor_buffer[line][pos] = '\0';
-                                    line++;
-                                    pos = 0;
-                                    if (data_ptr[k] == '\n') continue;
-                                }
-                                if (pos < MAX_LINE_LENGTH) {
-                                    write_editor_buffer[line][pos++] = data_ptr[k];
-                                }
-                            }
-                            if (pos > 0 && line < MAX_LINES) {
-                                write_editor_buffer[line][pos] = '\0';
-                                line++;
-                            }
-                            write_editor_num_lines = line > 0 ? line : 1;
-                            return 0;
-                        }
-                        return 0;
-                    }
-                }
-            }
-            cluster = fat32_next_cluster(fat32_disk_img, &bpb, cluster);
-        }
-    }
-    // If we reach here, file was not found or an error occurred
-    return -1;
+    if (pos > 0 && line < MAX_LINES) { write_editor_buffer[line][pos] = '\0'; line++; }
+    write_editor_num_lines = (line > 0) ? line : 1;
+    free(buf);
+    return 0;
 }
 
 // Save editor buffer to file
@@ -219,47 +190,9 @@ int save_write_editor_buffer(const char* path, uint8 disk) {
         }
     }
     data[data_pos] = '\0';
-    eynfs_superblock_t sb;
-    if (eynfs_read_superblock(disk, EYNFS_SUPERBLOCK_LBA, &sb) != 0) {
-        return -1;
-    }
-    if (sb.magic != EYNFS_MAGIC) {
-        return -1;
-    }
-        eynfs_dir_entry_t entry;
-        uint32_t parent_block, entry_idx;
-    int found = eynfs_traverse_path(disk, &sb, path, &entry, &parent_block, &entry_idx);
-    if (found != 0) {
-        // Try to create the file
-            char parent_path[128];
-            if (path) {
-                strcpy(parent_path, path);
-            } else {
-                strcpy(parent_path, "/");
-            }
-            char* last_slash = strrchr(parent_path, '/');
-            if (!last_slash || last_slash == parent_path) {
-                strcpy(parent_path, "/");
-            } else {
-                *last_slash = '\0';
-            }
-            eynfs_dir_entry_t parent_entry;
-            if (eynfs_traverse_path(disk, &sb, parent_path, &parent_entry, NULL, NULL) != 0 || parent_entry.type != EYNFS_TYPE_DIR) {
-                return -1;
-            }
-            const char* filename = get_basename(path);
-            if (eynfs_create_entry(disk, &sb, parent_entry.first_block, filename, EYNFS_TYPE_FILE) != 0) {
-                return -1;
-            }
-            if (eynfs_traverse_path(disk, &sb, path, &entry, &parent_block, &entry_idx) != 0) {
-                return -1;
-            }
-        }
-    int written = eynfs_write_file(disk, &sb, &entry, data, data_pos, parent_block, entry_idx);
-    free(data); // Clean up allocated memory
-    if (written != data_pos) {
-        return -1;
-    }
+    int written = vfs_write_file(disk, path, data, (uint32)data_pos);
+    free(data);
+    if (written < 0 || written != data_pos) return -1;
     return 0;
 }
 
@@ -476,64 +409,11 @@ static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, in
 // GUI key callback (top-level)
 static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
     (void)tile_idx; (void)userdata;
-    // Helper: delete current selection (if any) and place cursor at start of selection
-    auto int delete_active_selection(void); // forward-declare nested helper
-    int delete_active_selection(void) {
-        if (!write_editor_sel_active) return 0;
-        int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
-        int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
-        if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
-        // clamp within bounds
-        if (sy < 0) sy = 0; if (sy >= write_editor_num_lines) sy = write_editor_num_lines - 1;
-        if (fy < 0) fy = 0; if (fy >= write_editor_num_lines) fy = write_editor_num_lines - 1;
-        int s_len = strlength(write_editor_buffer[sy]); if (sx < 0) sx = 0; if (sx > s_len) sx = s_len;
-        int f_len = strlength(write_editor_buffer[fy]); if (fx < 0) fx = 0; if (fx > f_len) fx = f_len;
-        if (sy == fy) {
-            // single-line delete
-            int len = strlength(write_editor_buffer[sy]);
-            int rem = fx - sx; if (rem < 0) rem = 0;
-            for (int i = sx; i + rem <= len; ++i) write_editor_buffer[sy][i] = write_editor_buffer[sy][i + rem];
-            write_editor_cursor_y = sy; write_editor_cursor_x = sx;
-        } else {
-            // multi-line: keep prefix of start line up to sx, then append tail of fy from fx
-            char tail[MAX_LINE_LENGTH + 1];
-            int tail_len = 0;
-            const char* ftail = write_editor_buffer[fy] + fx;
-            while (ftail[tail_len] && tail_len < MAX_LINE_LENGTH) { tail[tail_len] = ftail[tail_len]; tail_len++; }
-            tail[tail_len] = '\0';
-            // truncate start line at sx
-            write_editor_buffer[sy][sx] = '\0';
-            int pre_len = strlength(write_editor_buffer[sy]);
-            int space = MAX_LINE_LENGTH - pre_len;
-            int copy = tail_len < space ? tail_len : space;
-            for (int i = 0; i < copy; ++i) write_editor_buffer[sy][pre_len + i] = tail[i];
-            write_editor_buffer[sy][pre_len + copy] = '\0';
-            // shift lines up removing fy-sy lines
-            int remove_count = fy - sy;
-            for (int i = sy + 1; i + remove_count < write_editor_num_lines; ++i) {
-                strcpy(write_editor_buffer[i], write_editor_buffer[i + remove_count]);
-            }
-            write_editor_num_lines -= remove_count;
-            if (write_editor_num_lines < 1) write_editor_num_lines = 1;
-            write_editor_cursor_y = sy; write_editor_cursor_x = sx;
-            // Clear any now-unused lines to avoid stale data showing up
-            for (int i = write_editor_num_lines; i < MAX_LINES; ++i) {
-                write_editor_buffer[i][0] = '\0';
-            }
-        }
-        write_editor_sel_active = 0;
-        write_editor_modified = 1;
-        write_editor_update_tile_modified();
-        // After large deletions (e.g., Ctrl+A), ensure scroll positions are in range
-        if (write_editor_scroll_y > write_editor_cursor_y) write_editor_scroll_y = write_editor_cursor_y;
-        if (write_editor_scroll_x > write_editor_cursor_x) write_editor_scroll_x = write_editor_cursor_x;
-        tile_invalidate_gui(write_editor_gui_tile);
-        return 1;
-    }
+    // Use global helper to delete active selection when needed
     // Shift+Arrows selection extension
     if ((key & 0x3000) && ((key & 0x0FFF) >= 0x1001 && (key & 0x0FFF) <= 0x1004)) {
         int base = key & 0x0FFF;
-        if (!write_editor_sel_active) { write_editor_sel_active = 1; write_editor_sel_ay = write_editor_cursor_y; write_editor_sel_ax = write_editor_cursor_x; }
+    if (!write_editor_sel_active) { write_editor_sel_active = 1; write_editor_sel_ay = write_editor_cursor_y; write_editor_sel_ax = write_editor_cursor_x; }
         if (base == 0x1001) { // Up
             if (write_editor_cursor_y > 0) {
                 write_editor_cursor_y--;
@@ -658,7 +538,7 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
                 tile_invalidate_gui(write_editor_gui_tile);
                 return;
             }
-            if (delete_active_selection()) return;
+            if (write_editor_delete_active_selection()) return;
         }
         if (write_editor_cursor_x > 0) {
             int line_len = strlength(write_editor_buffer[write_editor_cursor_y]);
@@ -691,7 +571,7 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
     }
     if (key == '\n') { // Enter
         if (write_editor_sel_active) {
-            if (!delete_active_selection()) return; // should delete and update state
+            if (!write_editor_delete_active_selection()) return; // should delete and update state
         }
         if (write_editor_num_lines < MAX_LINES) {
             int line_len = strlength(write_editor_buffer[write_editor_cursor_y]);
@@ -731,7 +611,7 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
     // Printable insert
     if (key >= 32 && key <= 126) {
         if (write_editor_sel_active) {
-            if (!delete_active_selection()) { /* fallthrough */ }
+            if (!write_editor_delete_active_selection()) { /* fallthrough */ }
         }
         int line_len = strlength(write_editor_buffer[write_editor_cursor_y]);
         if (line_len < MAX_LINE_LENGTH) {

@@ -317,20 +317,25 @@ static void draw_gui_key(int tile_idx, int key, void* userdata) {
     else if (key == '[') { if (g_draw.brush > 1) { g_draw.brush--; changed = 1; } }
     else if (key == ']') { if (g_draw.brush < 8) { g_draw.brush++; changed = 1; } }
     else if ((key & 0x20FF) == 's' || (key & 0x20FF) == 'S') {
-        // Save to chosen path on current drive
-        eynfs_stream_t s;
-        if (eynfs_stream_begin(g_draw.disk, g_draw.filepath, &s) == 0) {
-            // Write header then pixel data
-            eynfs_stream_write(&s, &g_draw.img.header, sizeof(rei_header_t));
-            eynfs_stream_write(&s, g_draw.img.data, g_draw.img.data_size);
-            eynfs_stream_end(&s);
-            g_draw.modified = 0;
-            // Update subtitle bar with no [Modified]
-            static char title_buf[128];
-            snprintf(title_buf, sizeof(title_buf), "%s - Draw", g_draw.filename_base);
-            tile_set_title_status(g_draw_tile, title_buf, g_draw.filename_base, NULL);
-        } else {
-            // optional: show failure hint inside content next frame
+        // Save to chosen path on current drive via VFS
+        uint8 disk = g_draw.disk;
+        // Build a contiguous buffer: header + pixel data
+        uint32 total = sizeof(rei_header_t) + (uint32)g_draw.img.data_size;
+        uint8* tmp = (uint8*)malloc(total);
+        if (tmp) {
+            memcpy(tmp, &g_draw.img.header, sizeof(rei_header_t));
+            memcpy(tmp + sizeof(rei_header_t), g_draw.img.data, g_draw.img.data_size);
+            extern int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size);
+            int w = vfs_write_file(disk, g_draw.filepath, tmp, total);
+            free(tmp);
+            if (w == (int)total) {
+                g_draw.modified = 0;
+                static char title_buf[128];
+                snprintf(title_buf, sizeof(title_buf), "%s - Draw", g_draw.filename_base);
+                tile_set_title_status(g_draw_tile, title_buf, g_draw.filename_base, NULL);
+            } else {
+                // optional: failure indicator
+            }
         }
         changed = 1;
     } else if ((key & 0x20FF) == 'q') {

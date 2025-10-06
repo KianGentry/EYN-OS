@@ -68,6 +68,10 @@ int fat32_read_file_sector(uint8 drive, uint32 partition_lba_start, struct fat32
 int fat32_write_file_sector(uint8 drive, uint32 partition_lba_start, struct fat32_bpb* bpb, const char* filename, const char* buf, int bufsize);
 uint32 fat32_next_cluster_sector(uint8 drive, uint32 partition_lba_start, struct fat32_bpb* bpb, uint32 cluster);
 
+// Helper: find entry by 8.3 name in a directory (sector-based device)
+// Returns starting cluster on success (>=2), <0 on error/not found; copies out_entry if provided
+int fat32_find_entry_sector(uint8 drive, struct fat32_bpb* bpb, uint32 dir_cluster, const char* fat_83_name, struct fat32_dir_entry* out_entry);
+
 void to_fat32_83(const char* input, char* output);
 
 #endif 

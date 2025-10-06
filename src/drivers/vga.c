@@ -391,8 +391,8 @@ void printf(const char* format, ...)
 		format += 2; // Skip the color format specifier
 	}
 
-	// Redirection logic
-	if (shell_redirect_active) {
+	// Redirection/capture logic
+	if (shell_redirect_active || g_shell_capture_mode) {
 		// We'll use a local buffer to format the output
 		char temp[512];
 		int temp_pos = 0;

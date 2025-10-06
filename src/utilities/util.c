@@ -229,6 +229,18 @@ uint32 detect_available_memory() {
     return total_ram;
 }
 
+// Cached total RAM accessor for consumers like stats GUI
+uint32 get_total_ram(void) {
+    static uint32 cached_total = 0;
+    if (cached_total == 0) {
+        uint32 v = detect_available_memory();
+        // Basic sanity clamp to avoid zero
+        if (v == 0) v = 32 * 1024 * 1024;
+        cached_total = v;
+    }
+    return cached_total;
+}
+
 // Adaptive heap sizing based on available memory (safer)
 static void calculate_optimal_heap_size() {
     uint32 available_ram = detect_available_memory();
@@ -662,4 +674,28 @@ uint32 get_heap_size() {
 
 void putchar(char c) {
     drawText(c, 255, 255, 255);
+}
+
+// Compute total used bytes in heap by scanning blocks
+uint32 get_heap_used(void) {
+    if (!memory_initialized) return 0;
+    uint32 total_used = 0;
+    uint32 current = first_block;
+    int guard = 0;
+    while (current != NO_BLOCK && guard++ < 20000) {
+        block_header_t* block = (block_header_t*)(heap_start + current);
+        if (!validate_block(block, current)) {
+            break;
+        }
+        if (block->used) {
+            total_used += block->size;
+        }
+        if (block->next == current || block->next >= heap_size) break; // safety
+        current = block->next;
+    }
+    // Exclude header overhead to present closer to payload usage
+    if (total_used >= BLOCK_HEADER_SIZE) {
+        // Roughly subtract one header per average block (approx): keep as-is to avoid negative
+    }
+    return total_used;
 }

@@ -6,6 +6,7 @@
 #include <shell.h>
 #include <shell_command_info.h>
 #include <types.h>
+#include <math.h>
 
 // EYNFS constants
 #define EYNFS_SUPERBLOCK_LBA 2048
@@ -48,6 +49,10 @@ exec_result_t execute_shell_script(const char* filename) {
     
     // Silent by default: don't print a prologue; scripts should behave like typing commands directly
     
+    // Ensure we begin with a clean redirect/capture state
+    extern int shell_redirect_active; if (shell_redirect_active) { stop_shell_redirect(); }
+    g_shell_capture_mode = 0;
+
     // parse and execute the shell file
     int result = parse_shell_file(filename, &ctx);
     
@@ -274,8 +279,14 @@ static int execute_shell_line(const char* line, shell_script_context_t* ctx) {
     // Ensure no redirection/capture flags are active before running a normal command
     extern int shell_redirect_active; if (shell_redirect_active) { stop_shell_redirect(); }
     extern int g_shell_capture_mode; g_shell_capture_mode = 0;
+    // As a belt-and-suspenders guard, force flags to known state
+    shell_redirect_active = 0;
+    g_shell_capture_mode = 0;
     // Execute through the unified shell path so behavior matches interactive use
     handle_shell_command((char*)line);
+    // Ensure we didn't leave capture/redirect on due to a misbehaving command
+    g_shell_capture_mode = 0;
+    if (shell_redirect_active) { stop_shell_redirect(); }
     return 0;
 }
 
@@ -394,6 +405,37 @@ static void substitute_command_outputs(const char* in, char* out, size_t outsz, 
             trim_whitespace(cmd);
             // Expand variables in cmd before executing
             char expanded_cmd[220]; expand_vars(cmd, expanded_cmd, sizeof(expanded_cmd), ctx);
+
+            // Fast path: $(random [args]) -> compute directly without printing
+            if (strncmp(expanded_cmd, "random", 6) == 0 && (expanded_cmd[6] == '\0' || expanded_cmd[6] == ' ')) {
+                const char* p = expanded_cmd + 6; while (*p == ' ') p++;
+                // Parse up to two integer arguments
+                int have1 = 0, have2 = 0; int a = 0, b = 0; int sign = 1;
+                // read first number
+                if (*p == '-' ) { sign = -1; p++; }
+                while (*p >= '0' && *p <= '9') { a = a * 10 + (*p - '0'); p++; have1 = 1; }
+                a *= sign; sign = 1; while (*p == ' ') p++;
+                // read optional second
+                if (*p == '-' ) { sign = -1; p++; }
+                while (*p >= '0' && *p <= '9') { b = b * 10 + (*p - '0'); p++; have2 = 1; }
+                b *= sign;
+                uint32_t val;
+                if (!have1) {
+                    val = rand_next();
+                } else if (have1 && !have2) {
+                    // one arg interpreted as count in command; for substitution return a single number
+                    val = rand_next();
+                } else {
+                    int min = a, max = b; if (min > max) { int t = min; min = max; max = t; }
+                    val = rand_range((uint32_t)min, (uint32_t)max);
+                }
+                // Write directly into out buffer
+                char numbuf[16];
+                snprintf(numbuf, sizeof(numbuf), "%d", (int)val);
+                for (size_t t=0; numbuf[t] && o + 1 < outsz; t++) out[o++] = numbuf[t];
+                continue;
+            }
+
             // Capture output, preserving any prior redirect state
             extern int shell_redirect_active;
             int was_redirecting = shell_redirect_active;

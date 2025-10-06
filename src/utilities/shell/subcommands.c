@@ -4,6 +4,7 @@
 #include <string.h>
 #include <util.h>
 #include <vga.h>
+#include <fs/vfs.h>
 #include <system.h>
 #include <fs_commands.h>
 #include <stdint.h>
@@ -878,7 +879,18 @@ void read_raw_cmd(string ch) {
             printf("%cError: File not found.\n", 255, 0, 0);
         }
     } else {
-        // FAT32 fallback
+        // Try FAT32 via VFS
+        char* buffer = (char*)malloc(65536);
+        if (!buffer) { printf("%cError: Memory allocation failed.\n", 255, 0, 0); return; }
+        int bytes = vfs_read_file(g_current_drive, abspath, buffer, 65535);
+        if (bytes > 0) {
+            buffer[bytes] = '\0';
+            printf("%s", buffer);
+            printf("\n");
+            free(buffer);
+            return;
+        }
+        free(buffer);
         printf("%cError: No supported filesystem found.\n", 255, 0, 0);
     }
 }
@@ -1005,61 +1017,32 @@ void read_image_cmd(string ch) {
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     
-    // Try EYNFS first
-    eynfs_superblock_t sb;
-    if (eynfs_read_superblock(g_current_drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
-        eynfs_dir_entry_t entry;
-        uint32_t parent_block, entry_idx;
-        if (eynfs_traverse_path(g_current_drive, &sb, abspath, &entry, &parent_block, &entry_idx) == 0) {
-            if (entry.type == EYNFS_TYPE_FILE) {
-                // Dynamic buffer sizing based on file size
-                uint32_t buffer_size;
-                if (entry.size <= 16384) { // 16KB or smaller
-                    buffer_size = entry.size;
-                } else if (entry.size <= 65536) { // 64KB or smaller
-                    buffer_size = entry.size;
-                } else {
-                    // For very large files, limit to 64KB
-                    buffer_size = 65536; // 64KB limit for images
-                }
-                
-                uint8_t* buffer = (uint8_t*)malloc(buffer_size);
-                if (buffer) {
-                    // Read the file (up to buffer size)
-                    int bytes_to_read = (entry.size < buffer_size) ? entry.size : buffer_size;
-                    int bytes_read = eynfs_read_file(g_current_drive, &sb, &entry, buffer, bytes_to_read, 0);
-                    
-                    if (bytes_read > 0) {
-                        // Parse and display the REI image
-                        rei_image_t rei_image;
-                        if (rei_parse_image(buffer, bytes_read, &rei_image) == 0) {
-                            printf("%cDisplaying REI image: %dx%d pixels\n", 0, 255, 0, rei_image.header.width, rei_image.header.height);
-                            rei_display_image_centered(&rei_image);
-                            rei_free_image(&rei_image);
-                        } else {
-                            printf("%cError: Invalid REI file format.\n", 255, 0, 0);
-                        }
-                        
-                        // If we couldn't read the entire file, show a message
-                        if (bytes_read < entry.size) {
-                            printf("%c[File truncated - showing first %d bytes of %d total]\n", 255, 165, 0, bytes_read, entry.size);
-                        }
-                    } else {
-                        printf("%cError: Failed to read image file.\n", 255, 0, 0);
-                    }
-                    
-                    free(buffer);
-                } else {
-                    printf("%cError: Memory allocation failed for buffer (%d bytes).\n", 255, 0, 0, buffer_size);
-                }
-            } else {
-                printf("%cError: Path is not a file.\n", 255, 0, 0);
-            }
-        } else {
-            printf("%cError: File not found.\n", 255, 0, 0);
-        }
-    } else {
-        // FAT32 fallback
-        printf("%cError: No supported filesystem found.\n", 255, 0, 0);
+    // Use VFS so images load from either filesystem
+    vfs_stat_t st;
+    if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) {
+        printf("%cError: File not found.\n", 255, 0, 0);
+        return;
     }
+    // Limit read to a reasonable maximum (64KB) to keep viewer responsive
+    uint32_t buffer_size = st.size <= 65536 ? st.size : 65536;
+    uint8_t* buffer = (uint8_t*)malloc(buffer_size);
+    if (!buffer) { printf("%cError: Memory allocation failed for buffer (%d bytes).\n", 255, 0, 0, buffer_size); return; }
+    int bytes_read = vfs_read_file(g_current_drive, abspath, (char*)buffer, (int)buffer_size);
+    if (bytes_read <= 0) {
+        printf("%cError: Failed to read image file.\n", 255, 0, 0);
+        free(buffer);
+        return;
+    }
+    rei_image_t rei_image;
+    if (rei_parse_image(buffer, bytes_read, &rei_image) == 0) {
+        printf("%cDisplaying REI image: %dx%d pixels\n", 0, 255, 0, rei_image.header.width, rei_image.header.height);
+        rei_display_image_centered(&rei_image);
+        rei_free_image(&rei_image);
+    } else {
+        printf("%cError: Invalid REI file format.\n", 255, 0, 0);
+    }
+    if ((uint32)bytes_read < st.size) {
+        printf("%c[File truncated - showing first %d bytes of %d total]\n", 255, 165, 0, bytes_read, st.size);
+    }
+    free(buffer);
 } 

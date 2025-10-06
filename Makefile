@@ -18,7 +18,7 @@ LDFLAGS = -m elf_i386 -T src/boot/link.ld
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o
+OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o
 
 OBJS += obj/tiling_manager.o obj/tiling_cmd.o
 OBJS += obj/terminals.o
@@ -140,6 +140,12 @@ obj/image_viewer_gui.o:src/utilities/shell/image_viewer_gui.c
 obj/window_test.o:src/utilities/shell/window_test.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/window_test.c -o obj/window_test.o
 
+obj/stats_gui.o:src/utilities/shell/stats_gui.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/stats_gui.c -o obj/stats_gui.o
+
+obj/vfs.o:src/fs/vfs.c
+	$(COMPILER) $(CFLAGS) src/fs/vfs.c -o obj/vfs.o
+
 obj/assemble.o:src/utilities/assembler/assemble.c src/utilities/assembler/instruction_set.c
 	$(COMPILER) $(CFLAGS) src/utilities/assembler/assemble.c -o obj/assemble.o 
 	$(COMPILER) $(CFLAGS) src/utilities/assembler/instruction_set.c -o obj/instruction_set.o 
@@ -238,23 +244,19 @@ eynfs_format: eynfs_format.c
 # Create and format a 10MB EYNFS disk image
 eynfsimg:
 	rm -f eynfs.img
+	# Create a 10MB image (20,480 sectors at 512 bytes)
 	dd if=/dev/zero of=eynfs.img bs=1M count=10
 	$(COMPILER) -I include -I include/misc -I include/drivers -I include/cpu -I include/utilities -I include/graphics -I include/network -o eynfs_format eynfs_format.c
-	./eynfs_format eynfs.img
+	# Pass explicit sector count to avoid defaulting to 500MB in the formatter
+	./eynfs_format eynfs.img 20480
 	python3 devtools/copy_testdir_to_eynfs.py testdir/
 
-# Create source code drive for testing
-sourceimg: eynfs_format
-	rm -f source.img
-	dd if=/dev/zero of=source.img bs=1M count=10
+# Create blank drive for testing
+testimg: eynfs_format
+	rm -f testimg.img
+	dd if=/dev/zero of=testimg.img bs=1M count=10
 	$(COMPILER) -I include -I include/misc -I include/drivers -I include/cpu -I include/utilities -I include/graphics -I include/network -o eynfs_format eynfs_format.c
-	./eynfs_format source.img
-	mkdir -p temp_source_structure
-	cp -r src temp_source_structure/
-	cp -r include temp_source_structure/
-	cp -r docs temp_source_structure/
-	python3 devtools/copy_testdir_to_eynfs.py temp_source_structure/ source.img
-	rm -rf temp_source_structure
+	./eynfs_format testimg.img 20480
 
 # Rebuilds and runs the OS
 
@@ -262,12 +264,41 @@ run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
 	-boot d \
-	-m 32M
+	-m 8M
 # Just runs the OS, no rebuilding.
 
-test: sourceimg
+test: testimg
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
-	-hdb source.img \
+	-hdb testimg.img \
+	-boot d \
+	-m 64M
+
+# Create a FAT32 disk image for testing (requires mkfs.vfat from dosfstools)
+fat32img:
+	rm -f fat32.img
+	dd if=/dev/zero of=fat32.img bs=1M count=64
+	@if command -v mkfs.vfat >/dev/null 2>&1; then \
+		mkfs.vfat -F 32 -n EYNOS fat32.img; \
+		echo "FAT32 image created: fat32.img"; \
+	else \
+		echo "mkfs.vfat not found. Please install 'dosfstools' (e.g., sudo apt-get install dosfstools)."; \
+		exit 1; \
+	fi
+
+# Optionally populate fat32.img with testdir contents if mtools is installed
+fat32img-populate: fat32img
+	@if command -v mcopy >/dev/null 2>&1; then \
+		mcopy -i fat32.img -s testdir/* ::/ 2>/dev/null || true; \
+		echo "Copied testdir/ into fat32.img"; \
+	else \
+		echo "mtools not found; skipping population. Install 'mtools' to auto-copy files."; \
+	fi
+
+# Run with FAT32 drive attached as primary disk
+runfat32: build fat32img
+	qemu-system-i386 -cdrom EYNOS.iso \
+	-hda eynfs.img \
+	-hdb fat32.img \
 	-boot d \
 	-m 64M

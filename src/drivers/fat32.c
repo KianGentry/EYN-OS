@@ -482,6 +482,42 @@ uint32 fat32_next_cluster_sector(uint8 drive, uint32 partition_lba_start, struct
     return fat[fat_index] & 0x0FFFFFFF;
 }
 
+// Find a directory entry by 8.3 name in a directory on a real drive
+int fat32_find_entry_sector(uint8 drive, struct fat32_bpb* bpb, uint32 dir_cluster, const char* fat_83_name, struct fat32_dir_entry* out_entry) {
+    if (!bpb || !fat_83_name || dir_cluster < 2) return -1;
+    uint32 byts_per_sec = bpb->BytsPerSec;
+    uint32 sec_per_clus = bpb->SecPerClus;
+    uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
+    uint32 num_fats = bpb->NumFATs;
+    uint32 fatsz = bpb->FATSz32;
+    uint32 part_lba = fat32_get_partition_lba_start(drive);
+    uint32 first_data_sec = rsvd_sec_cnt + (num_fats * fatsz);
+    uint8 sector[512];
+    uint32 cluster = dir_cluster;
+    while (cluster < 0x0FFFFFF8) {
+        uint32 cluster_first_sec = first_data_sec + ((cluster - 2) * sec_per_clus);
+        for (uint32 sec = 0; sec < sec_per_clus; ++sec) {
+            if (ata_read_sector(drive, part_lba + cluster_first_sec + sec, sector) != 0) return -2;
+            struct fat32_dir_entry* entries = (struct fat32_dir_entry*)sector;
+            for (int i = 0; i < (int)(byts_per_sec / sizeof(struct fat32_dir_entry)); ++i) {
+                if (entries[i].Name[0] == 0x00) break;
+                if ((entries[i].Attr & 0x0F) == 0x0F) continue;
+                if (entries[i].Name[0] == 0xE5) continue;
+                char name[12];
+                for (int j = 0; j < 11; j++) name[j] = entries[i].Name[j];
+                name[11] = '\0';
+                if (strcmp(name, fat_83_name) == 0) {
+                    if (out_entry) *out_entry = entries[i];
+                    uint32 entry_cluster = ((uint32)entries[i].FstClusHI << 16) | entries[i].FstClusLO;
+                    return (int)entry_cluster;
+                }
+            }
+        }
+        cluster = fat32_next_cluster_sector(drive, part_lba, bpb, cluster);
+    }
+    return -3;
+}
+
 // Find and return the LBA start of the first valid FAT32 partition
 uint32 fat32_get_partition_lba_start(uint8 drive) {
     uint8 mbr[512];

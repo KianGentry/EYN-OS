@@ -6,6 +6,7 @@ static volatile uint32 g_ticks = 0;
 static uint32 g_tick_hz = 100;
 static uint32 g_timeslice_ticks = 5; // ~50ms at 100Hz
 static uint32 g_current_slice = 0;
+static volatile uint32 g_idle_hlt_count = 0; // counts ticks elapsed while idling (not raw HLTs)
 
 static void sched_irq0_handler(void) {
     sched_tick();
@@ -32,10 +33,16 @@ void sched_sleep_us(uint32 microseconds) {
     uint32 tick_us = 1000000U / g_tick_hz;
     if (tick_us == 0) tick_us = 1;
     uint32 needed_ticks = (microseconds + tick_us - 1) / tick_us;
-    uint32 target_ticks = g_ticks + needed_ticks;
+    uint32 start_ticks = g_ticks;
+    uint32 target_ticks = start_ticks + needed_ticks;
     while ((uint32)g_ticks < target_ticks) {
-        // halt until next interrupt to save cpu
+        // halt until next interrupt to save cpu; track for idle time estimation
         __asm__ __volatile__("hlt");
+    }
+    // Accumulate idle time in ticks that elapsed during this sleep
+    uint32 end_ticks = g_ticks;
+    if (end_ticks > start_ticks) {
+        g_idle_hlt_count += (end_ticks - start_ticks);
     }
 }
 
@@ -60,5 +67,9 @@ void sched_set_timeslice_ticks(uint32 ticks) {
 
 // default weak hook: does nothing; will be implemented with real context switches later
 __attribute__((weak)) void sched_on_timeslice_end(void) {}
+
+uint32 sched_get_tick_count(void) { return g_ticks; }
+uint32 sched_get_tick_hz(void) { return g_tick_hz ? g_tick_hz : 100; }
+uint32 sched_get_idle_hlt_count(void) { return g_idle_hlt_count; }
 
 

@@ -1,0 +1,134 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		},
+		{
+			"label": "Build EYN-OS",
+			"type": "shell",
+			"command": "make",
+			"args": [],
+			"group": "build"
+		}
+	]
+}

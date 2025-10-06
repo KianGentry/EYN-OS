@@ -134,7 +134,7 @@ void example_cmd(string arg) {
 
 ### Headers
 - `include/`: All public headers
-- Use `#include <header.h>` (simplified include system)
+- Use `#include <header.h>`
 
 ## Testing Your Changes
 

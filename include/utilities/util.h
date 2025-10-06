@@ -24,6 +24,10 @@ int get_memory_error_count(void);
 int get_stack_overflow_status(void);
 uint32 get_current_stack_pointer(void);
 uint32 get_heap_size(void);
+// Return approximate used heap bytes
+uint32 get_heap_used(void);
+// Total physical RAM in bytes (from multiboot memory map, cached)
+uint32 get_total_ram(void);
 void putchar(char c);
 
 #endif

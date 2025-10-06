@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2025-09-29 22:17:02
+This document is auto-generated from the source code. Last updated: 2025-10-06 01:16:58
 
-**Total Commands:** 42
+**Total Commands:** 44
 
 ## Table of Contents
 
@@ -169,6 +169,25 @@ error
 
 ---
 
+### fatfix
+
+**Handler:** `fatfix_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `fs_commands.c`
+
+**Description:**
+Scan and repair FAT32 entries incorrectly marked as directories.
+Usage: fatfix [path]
+
+**Example:**
+```bash
+fatfix /
+```
+
+---
+
 ### lsram
 
 **Handler:** `lsram_cmd`
@@ -223,6 +242,24 @@ Usage: size <filename>
 **Example:**
 ```bash
 size myfile.txt
+```
+
+---
+
+### stats
+
+**Handler:** `stats_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `stats_gui.c`
+
+**Description:**
+Graphical system performance monitor with CPU, memory, disk pies and sortable table
+
+**Example:**
+```bash
+stats
 ```
 
 ---
@@ -833,7 +870,7 @@ run test.eyn
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 10 |
+| Streaming Commands | 12 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |

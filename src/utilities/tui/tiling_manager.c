@@ -8,6 +8,8 @@
 #include <rei.h>
 #include <eynfs.h>
 #include <utilities/util.h>
+// allow sleeping the CPU when tiling manager is idle
+#include <sched.h>
 
 #define MAX_TILES 4
 #define MAX_WINDOWS 8
@@ -57,6 +59,8 @@ static int gui_needs_redraw[MAX_TILES];
 
 static int screen_w = 640; // pixels
 static int screen_h = 480; // pixels
+// Periodic GUI heartbeat to allow time-driven GUI apps (like stats) to refresh without busy loops
+static uint32 g_last_gui_heartbeat_tick = 0;
 
 // Mouse cursor image and overlay state
 static rei_image_t g_cursor_img;
@@ -1254,6 +1258,8 @@ void start_tiling_manager() {
     }
     // initialize virtual terminals
     vterm_init_all();
+    // prime GUI heartbeat
+    g_last_gui_heartbeat_tick = sched_get_tick_count();
 
     // initialize simple double-buffer (best-effort)
     vga_init_double_buffer();
@@ -1307,6 +1313,19 @@ void start_tiling_manager() {
 
     int running = 1;
     while (running) {
+        // 1 Hz GUI heartbeat: invalidate GUI tiles once per second so they can update time-based views
+        {
+            uint32 now_ticks_hb = sched_get_tick_count();
+            uint32 hz_hb = sched_get_tick_hz(); if (!hz_hb) hz_hb = 50;
+            if (now_ticks_hb - g_last_gui_heartbeat_tick >= hz_hb) {
+                for (int ti = 0; ti < MAX_TILES; ++ti) {
+                    if (gui_draw_cb[ti]) {
+                        gui_needs_redraw[ti] = 1;
+                    }
+                }
+                g_last_gui_heartbeat_tick = now_ticks_hb;
+            }
+        }
         // Poll mouse in case IRQ12 is not firing (QEMU config)
         mouse_poll();
         // Read current mouse position once per loop
@@ -1907,6 +1926,34 @@ void start_tiling_manager() {
                 // Shell/vterm content will change; ensure windows repaint afterward
                 g_any_tile_content_redrew = 1;
             }
+        }
+
+        /*
+         * Idle optimization: when nothing changed this frame (no tile content redraws,
+         * no pending GUI redraws, no windows pending, and not dragging), yield the CPU
+         * briefly to reduce busy-loop CPU usage. We use sched_sleep_us which halts
+         * the processor until the next timer/interrupt which keeps latency low.
+         */
+        int idle_ok = 1;
+        if (g_any_tile_content_redrew) idle_ok = 0;
+        if (g_force_full_redraw) idle_ok = 0;
+        if (g_tiles_full_content_redraw) idle_ok = 0;
+        if (drag_active) idle_ok = 0;
+        // Any GUI clients asking for redraw? (per-term)
+        for (int _ti = 0; _ti < MAX_TILES; ++_ti) {
+            if (gui_needs_redraw[_ti]) { idle_ok = 0; break; }
+        }
+        // Any windows needing redraw?
+        if (idle_ok && g_window_count > 0) {
+            for (int _wi = 0; _wi < MAX_WINDOWS; ++_wi) {
+                if (g_windows[_wi].used && g_windows[_wi].needs_redraw) { idle_ok = 0; break; }
+            }
+        }
+        if (idle_ok) {
+            /* Sleep ~2ms to yield CPU but remain responsive. This will execute
+             * `hlt` inside sched_sleep_us and wake on interrupts (mouse/keyboard/timer).
+             */
+            sched_sleep_us(2000);
         }
     }
 }
