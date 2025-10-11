@@ -301,7 +301,7 @@ run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
 	-boot d \
-	-m 4M
+	-m 8M
 
 # Debug run with serial logging and detailed CPU/interrupt logs
 .PHONY: qemu-debug
