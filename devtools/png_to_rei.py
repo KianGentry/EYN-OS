@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-PNG to REI Converter
-Converts PNG images to EYN-OS REI format
-"""
-
 import sys
 import struct
 from PIL import Image
@@ -14,18 +8,58 @@ REI_MAGIC = 0x52454900  # 'REI\0'
 REI_MAX_WIDTH = 320
 REI_MAX_HEIGHT = 200
 
-def create_rei_header(width, height, depth):
+def create_rei_header(width, height, depth, flags=0):
     """Create REI header structure"""
     return struct.pack('<IHHBBH',
         REI_MAGIC,      # Magic number
         width,          # Width
         height,         # Height
         depth,          # Color depth (1=mono, 3=RGB, 4=RGBA)
-        0,              # Reserved1
+        flags & 0xFF,   # Flags/Compression (low nibble)
         0               # Reserved2
     )
 
-def convert_png_to_rei(input_file, output_file, depth=3, auto=True):
+def _encode_rle(pixels_bytes: bytes, pixel_size: int) -> bytes:
+    """PackBits-style RLE operating on whole pixels (of pixel_size bytes)."""
+    out = bytearray()
+    n = len(pixels_bytes)
+    i = 0
+    # Helper to compare pixels
+    def same_px(a_off, b_off):
+        return pixels_bytes[a_off:a_off+pixel_size] == pixels_bytes[b_off:b_off+pixel_size]
+    while i < n:
+        # Try to find a run of repeated pixels
+        run_start = i
+        i += pixel_size
+        run_len = 1
+        while i < n and same_px(i, run_start) and run_len < 128:
+            run_len += 1
+            i += pixel_size
+        if run_len >= 2:
+            # Emit replicate packet: count encoded as (1 - count) signed byte
+            out.append((256 + (1 - run_len)) & 0xFF)
+            out.extend(pixels_bytes[run_start:run_start+pixel_size])
+            continue
+        # Otherwise, build a literal run until a repetition or limit
+        lit_start = run_start
+        lit_count = 1
+        while i < n and lit_count < 128:
+            # Peek if a repetition starts at i
+            next_is_run = False
+            if i + pixel_size <= n and i + 2*pixel_size <= n:
+                next_is_run = same_px(i, i + pixel_size)
+            if next_is_run:
+                break
+            # Consume one literal pixel
+            i += pixel_size
+            lit_count += 1
+        # Emit literal packet: count-1 in control byte
+        out.append((lit_count - 1) & 0x7F)
+        out.extend(pixels_bytes[lit_start:lit_start + lit_count*pixel_size])
+    return bytes(out)
+
+
+def convert_png_to_rei(input_file, output_file, depth=3, auto=True, rle=False):
     """Convert PNG to REI format"""
     try:
         # Open and convert image
@@ -60,9 +94,6 @@ def convert_png_to_rei(input_file, output_file, depth=3, auto=True):
         width, height = img.size
         print(f"Converting {width}x{height} image to REI format (depth={depth})...")
         
-        # Create header
-        header = create_rei_header(width, height, depth)
-        
         # Convert pixels
         pixels = []
         for y in range(height):
@@ -85,16 +116,35 @@ def convert_png_to_rei(input_file, output_file, depth=3, auto=True):
                     gray = int(0.299 * r + 0.587 * g + 0.114 * b)
                     pixels.append(struct.pack('B', gray))
         
+        # Optionally compress with RLE on pixel boundaries
+        flags = 0
+        if rle:
+            pixel_bytes = b''.join(pixels)
+            compressed = _encode_rle(pixel_bytes, depth)
+            # Only keep if it helps
+            if len(compressed) < len(pixel_bytes):
+                payload = compressed
+                flags = 0x01  # RLE
+                print(f"RLE compressed: {len(pixel_bytes)} -> {len(compressed)} bytes ({100.0*len(compressed)/max(1,len(pixel_bytes)):.1f}%)")
+            else:
+                payload = pixel_bytes
+                print("RLE not effective; keeping raw data")
+        else:
+            payload = b''.join(pixels)
+
+        # Create header
+        header = create_rei_header(width, height, depth, flags)
+
         # Write REI file
         with open(output_file, 'wb') as f:
             f.write(header)
-            for pixel in pixels:
-                f.write(pixel)
+            f.write(payload)
         
         print(f"Successfully created {output_file}")
         print(f"Header size: {len(header)} bytes")
-        print(f"Data size: {len(pixels) * depth} bytes")
-        print(f"Total size: {len(header) + len(pixels) * depth} bytes")
+        payload_size = len(payload)
+        print(f"Data size: {payload_size} bytes (uncomp {width*height*depth} bytes)")
+        print(f"Total size: {len(header) + payload_size} bytes")
         
     except Exception as e:
         print(f"Error: {e}")
@@ -140,6 +190,10 @@ def main():
     parser.add_argument('-d', '--depth', type=int, choices=[1, 3, 4], default=3,
                        help='Color depth (1=mono, 3=RGB, 4=RGBA). If the input has an alpha channel, depth will be promoted to 4 unless --no-auto-depth is passed.')
     parser.add_argument('--no-auto-depth', action='store_true', help='Disable auto alpha detection; use the exact depth specified.')
+    # Compression options: default is RLE enabled; --no-rle disables.
+    # Keep --rle for compatibility; it is redundant when default is on.
+    parser.add_argument('--rle', action='store_true', help='Enable PackBits-style RLE compression (default)')
+    parser.add_argument('--no-rle', action='store_true', help='Disable RLE compression (write raw pixels)')
     parser.add_argument('--test', action='store_true', help='Create test pattern instead')
     
     args = parser.parse_args()
@@ -152,7 +206,13 @@ def main():
             print("Error: Input file required when not using --test")
             sys.exit(1)
         output_file = args.output or args.input.rsplit('.', 1)[0] + '.rei'
-        convert_png_to_rei(args.input, output_file, args.depth, auto=(not args.no_auto_depth))
+        # Effective RLE default is True unless explicitly disabled
+        rle_eff = True
+        if args.no_rle:
+            rle_eff = False
+        elif args.rle:
+            rle_eff = True
+        convert_png_to_rei(args.input, output_file, args.depth, auto=(not args.no_auto_depth), rle=rle_eff)
 
 if __name__ == '__main__':
     main() 

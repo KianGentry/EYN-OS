@@ -165,9 +165,9 @@ int mouse_init(void) {
         return -1;
     }
 
-    // Set sample rate to 100 (for better responsiveness) — optional
+    // Set sample rate to 200 for better responsiveness (many emulators/hardware support this)
     if (mouse_send_command(MOUSE_CMD_SET_SAMPLE_RATE) == 0) {
-        (void)mouse_send_command(100);
+        (void)mouse_send_command(200);
     }
     
     // Initialize mouse position to center of screen
@@ -329,7 +329,7 @@ void mouse_set_cursor_image(const rei_image_t* image) {
 int mouse_poll(void) {
     int progressed = 0;
     // Drain a few AUX bytes per call to avoid starving the UI
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 32; ++i) {
         uint8 status = inportb(PS2_STATUS_PORT);
         if (!(status & 0x01)) break; // no data waiting
         if (!(status & 0x20)) break;  // data is for keyboard; don't consume here

@@ -10,9 +10,13 @@
 #include <utilities/util.h>
 // allow sleeping the CPU when tiling manager is idle
 #include <sched.h>
+#include <watchdog.h>
 
 #define MAX_TILES 4
 #define MAX_WINDOWS 8
+
+// Provided by the bootloader; used for framebuffer size and memory totals
+extern multiboot_info_t* g_mbi;
 
 typedef enum { TILE_EMPTY = 0, TILE_SHELL, TILE_EDITOR } tile_type_t;
 
@@ -61,6 +65,15 @@ static int screen_w = 640; // pixels
 static int screen_h = 480; // pixels
 // Periodic GUI heartbeat to allow time-driven GUI apps (like stats) to refresh without busy loops
 static uint32 g_last_gui_heartbeat_tick = 0;
+// Low-spec mode: enabled automatically on <8MB systems; also tunes frame pacing
+static int g_gui_low_mode = 0;           // global toggle for low-memory/slow-CPU optimizations
+static uint32 g_frame_target_us = 0;     // frame pacing target in microseconds (0 = unlimited)
+static uint32 g_last_frame_tick = 0;     // last frame start tick for limiter
+// Wireframe drag overlay state (low mode): previous outline rect to erase cheaply
+static int prev_outline_x = -1, prev_outline_y = -1, prev_outline_w = 0, prev_outline_h = 0;
+// Drag throttle (ticks between visual updates) to avoid overdraw on slow CPUs
+static uint32 g_drag_throttle_ticks = 0; // computed from HZ (e.g., ~20-33ms)
+static uint32 g_last_drag_tick = 0;
 
 // Mouse cursor image and overlay state
 static rei_image_t g_cursor_img;
@@ -101,6 +114,50 @@ static int g_min_icon_unf_loaded = 0;
 static rei_image_t g_max_icon_unf;
 static int g_max_icon_unf_loaded = 0;
 
+// ---------------- Per-tile background images ----------------
+typedef enum { BG_NONE=0, BG_TILE=1, BG_SCALE=2, BG_CENTER=3 } bg_mode_t;
+typedef struct {
+    rei_image_t* img;   // owned; freed when replaced/cleared
+    bg_mode_t mode;     // how to draw
+    uint8_t darken;     // 0..255 darken factor (0=none)
+    uint8_t adapt_text; // 1=auto switch terminal text brightness based on bg
+    uint8_t text_shadow; // 1=draw a small shadow/glow behind terminal text for readability
+    uint8_t local_darken; // 1=darken only behind visible terminal text cells instead of the whole background
+} tile_bg_t;
+static tile_bg_t g_tile_bg[MAX_TILES];
+
+// Convert RGBA image to RGB in-place for background use (alpha<128 becomes black)
+static void bg_convert_rgba_to_rgb(rei_image_t* im) {
+    if (!im || !im->data) return;
+    if (im->header.depth != REI_DEPTH_RGBA) return;
+    int w = im->header.width, h = im->header.height;
+    size_t out_sz = (size_t)w * (size_t)h * (size_t)REI_DEPTH_RGB;
+    uint8_t* rgb = (uint8_t*)malloc(out_sz);
+    if (!rgb) return;
+    const uint8_t* src = im->data;
+    size_t si = 0, di = 0; size_t total = (size_t)w * (size_t)h;
+    for (size_t i = 0; i < total; ++i) {
+        uint8_t r8 = src[si + 0], g8 = src[si + 1], b8 = src[si + 2], a = src[si + 3];
+        if (a < 128) { r8 = g8 = b8 = 0; }
+        rgb[di + 0] = r8; rgb[di + 1] = g8; rgb[di + 2] = b8;
+        si += 4; di += 3;
+    }
+    free(im->data);
+    im->data = rgb;
+    im->data_size = (int)out_sz;
+    im->header.depth = REI_DEPTH_RGB;
+}
+
+static inline void apply_darken(uint8_t* pr, uint8_t* pg, uint8_t* pb, uint8_t factor) {
+    if (!factor) return; // 0=no darken
+    *pr = (uint8_t)((uint16_t)(*pr) * (255 - factor) / 255);
+    *pg = (uint8_t)((uint16_t)(*pg) * (255 - factor) / 255);
+    *pb = (uint8_t)((uint16_t)(*pb) * (255 - factor) / 255);
+}
+static inline uint8_t rgb_luma(uint8_t r8, uint8_t g8, uint8_t b8) {
+    return (uint8_t)((77*r8 + 150*g8 + 29*b8) >> 8);
+}
+
 // Rectangle intersection helper (used widely; keep it early for prototypes)
 static inline int rects_intersect(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
     if (aw <= 0 || ah <= 0 || bw <= 0 || bh <= 0) return 0;
@@ -119,6 +176,8 @@ static inline void rect_union(int ax, int ay, int aw, int ah, int bx, int by, in
     int y2 = ((ay + ah) > (by + bh)) ? (ay + ah) : (by + bh);
     *rx = x1; *ry = y1; *rw = x2 - x1; *rh = y2 - y1;
 }
+
+// Use vga_fillRect_fb for overlay rect fills; local helper removed for simplicity
 
 // ---------------- Floating Windows (experimental) ----------------
 typedef struct {
@@ -177,6 +236,42 @@ static void load_min_icon_try_paths(uint8 disk);
 static void load_max_icon_try_paths(uint8 disk);
 
 static void wm_draw_decor(window_t* w, int is_focused) {
+    // In low mode, draw simpler decorations: skip icons and minimize overdraw
+    if (g_gui_low_mode) {
+        int th = win_title_height(w);
+        int sh = win_status_height(w);
+        // frame background
+        drawRect(w->x, w->y, w->w, w->h, 0, 0, 0);
+        // title bar
+        int title_color_r = is_focused ? 160 : 90;
+        int title_color_g = is_focused ? 160 : 90;
+        int title_color_b = is_focused ? 50 : 50;
+        drawRect(w->x, w->y, w->w, th, title_color_r, title_color_g, title_color_b);
+        if (w->title && w->title[0]) {
+            int len = strlen(w->title);
+            int max_chars = (w->w / 8) - 2; if (max_chars < 0) max_chars = 0;
+            int color_r = is_focused ? 0 : 255, color_g = is_focused ? 0 : 255, color_b = is_focused ? 0 : 255;
+            int text_y = w->y + 4;
+            if (len > max_chars) len = max_chars;
+            int start_x = w->x + 4;
+            for (int i = 0; i < len; ++i) drawCharAt(start_x + i * 8, text_y, (unsigned char)w->title[i], color_r, color_g, color_b);
+        }
+        // optional compact status
+        if (sh > 0) {
+            int sy = w->y + th;
+            drawRect(w->x, sy, w->w, sh, 32, 32, 32);
+            const char* left = w->status_left ? w->status_left : "";
+            int max_chars = (w->w - 8) / 8; if (max_chars < 0) max_chars = 0;
+            for (int i = 0; left[i] && i < max_chars; ++i) drawCharAt(w->x + 4 + i * 8, sy + 2, (unsigned char)left[i], 220, 220, 220);
+        }
+        // border
+        int br = is_focused ? 120 : 60, bg = is_focused ? 120 : 60, bb = is_focused ? 80 : 60;
+        drawRect(w->x, w->y, w->w, 1, br, bg, bb);
+        drawRect(w->x, w->y + w->h - 1, w->w, 1, br, bg, bb);
+        drawRect(w->x, w->y, 1, w->h, br, bg, bb);
+        drawRect(w->x + w->w - 1, w->y, 1, w->h, br, bg, bb);
+        return;
+    }
     int th = win_title_height(w);
     int sh = win_status_height(w);
     // frame background
@@ -627,8 +722,8 @@ static void draw_cursor_overlay(int x, int y) {
                 int by = yy - soffy;
                 if (cursor_savebuf && bx >= 0 && by >= 0 && bx < prev_saved_w && by < prev_saved_h) {
                     // alpha blend over saved-under framebuffer if available
-                    int bpp = vga_get_fb_bpp_bytes(); if (bpp < 3) bpp = 3;
-                    int idx = (by * prev_saved_w + bx) * bpp;
+                    int bpp_blend = vga_get_fb_bpp_bytes(); if (bpp_blend < 3) bpp_blend = 3;
+                    int idx = (by * prev_saved_w + bx) * bpp_blend;
                     if (idx + 2 < cursor_save_len) {
                         uint8_t dr = cursor_savebuf[idx + 0];
                         uint8_t dg = cursor_savebuf[idx + 1];
@@ -860,6 +955,69 @@ static int get_title_height(const tile_t* t) {
 static void draw_decorations(tile_t* t, int is_focused) {
     if (t->type == TILE_EMPTY) return;
     int title_h = get_title_height(t);
+    // In low mode, draw simpler title/status without scrolling text or fancy clipping
+    if (g_gui_low_mode) {
+        if (title_h > 0) {
+            int title_y = t->y;
+            int title_color_r = is_focused ? 160 : 90;
+            int title_color_g = is_focused ? 160 : 90;
+            int title_color_b = is_focused ? 50 : 50;
+            drawRect(t->x, title_y, t->width, title_h, title_color_r, title_color_g, title_color_b);
+            if (t->title && t->title[0]) {
+                int title_len = (int)strlen(t->title);
+                int max_chars = t->width / 8; if (max_chars < 0) max_chars = 0;
+                int text_y = title_y + 4;
+                int cr = is_focused ? 0 : 255, cg = is_focused ? 0 : 255, cb = is_focused ? 0 : 255;
+                if (title_len <= max_chars) {
+                    int start_x = t->x + (t->width - (8 * title_len)) / 2;
+                    for (int i = 0; i < title_len; ++i) {
+                        int cx = start_x + i * 8;
+                        int clip_left = t->x + 4;
+                        int clip_right = t->x + t->width - 4;
+                        if (cx < clip_left) continue;
+                        if (cx + 8 > clip_right) break;
+                        if (cx < 0 || cx + 8 > screen_w) break;
+                        drawCharAt(cx, text_y, (int)(unsigned char)t->title[i], cr, cg, cb);
+                    }
+                } else {
+                    int window = max_chars;
+                    int speed = 6;
+                    int period = title_len + window;
+                    int pos = (g_tile_scroll_tick / speed) % period;
+                    for (int i = 0; i < window; ++i) {
+                        int idx = pos + i; char ch = ' ';
+                        if (idx < title_len) ch = t->title[idx];
+                        else { int wrap_idx = idx - title_len; if (wrap_idx < title_len) ch = t->title[wrap_idx]; }
+                        int cx = t->x + i * 8;
+                        int clip_left = t->x + 4;
+                        int clip_right = t->x + t->width - 4;
+                        if (cx < clip_left) continue;
+                        if (cx + 8 > clip_right) break;
+                        if (cx < 0 || cx + 8 > screen_w) break;
+                        drawCharAt(cx, text_y, (int)(unsigned char)ch, cr, cg, cb);
+                    }
+                }
+            }
+        }
+    int status_h = 0;
+        int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
+        if (show_status) {
+            int status_y = t->y + title_h;
+            status_h = 12;
+            drawRect(t->x, status_y, t->width, status_h, 32, 32, 32);
+            const char* left_text = t->status_left ? t->status_left : "";
+            int left_len = (int)strlen(left_text);
+            int max_chars = (t->width - 8) / 8; if (max_chars < 0) max_chars = 0;
+            if (left_len > max_chars) left_len = max_chars;
+            for (int i = 0; i < left_len; ++i) drawCharAt(t->x + 4 + i * 8, status_y + 2, (unsigned char)left_text[i], 220, 220, 220);
+        }
+        int border_r = is_focused ? 120 : 48, border_g = is_focused ? 120 : 48, border_b = is_focused ? 80 : 48;
+        drawRect(t->x, t->y, t->width, 1, border_r, border_g, border_b);
+        drawRect(t->x, t->y + t->height - 1, t->width, 1, border_r, border_g, border_b);
+        drawRect(t->x, t->y, 1, t->height, border_r, border_g, border_b);
+        drawRect(t->x + t->width - 1, t->y, 1, t->height, border_r, border_g, border_b);
+        return;
+    }
     if (title_h > 0) {
         int title_y = t->y;
         int title_color_r = is_focused ? 200 : 120;
@@ -910,7 +1068,6 @@ static void draw_decorations(tile_t* t, int is_focused) {
     }
     // Status bar (repositioned at top if fullscreen hides title)
     int status_h = 0;
-    extern int tui_alt_pressed;
     int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
     if (show_status) {
         int status_y = t->y + title_h; // if title_h==0 this is top
@@ -1018,7 +1175,6 @@ static void draw_static_tile(tile_t* t, int is_focused) {
     t->last_title_ptr = t->title;
     t->last_status_left_ptr = t->status_left;
     t->last_status_right_ptr = t->status_right;
-    extern int tui_alt_pressed;
     int title_h = get_title_height(t);
     int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
     t->last_show_status = show_status;
@@ -1030,7 +1186,6 @@ static void draw_tile_content(const tile_t* t) {
     if (t->type == TILE_EMPTY) return;
     int title_h = get_title_height(t);
     int status_h = 0;
-    extern int tui_alt_pressed;
     int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
     if (show_status) status_h = 12;
     // Keep a 1px margin for the border so clears don't overwrite border pixels
@@ -1040,9 +1195,68 @@ static void draw_tile_content(const tile_t* t) {
     int max_lines = (t->height - (title_h + status_h + 2)) / line_h;
     int content_w = t->width - 2; // leave 1px border on left/right
     int content_h = t->height - (title_h + status_h) - 2; // leave 1px top/bottom border
+    int bg_bright = -1; // -1 unknown; 0=dark; 1=bright
     if (content_w > 0 && content_h > 0) {
-        // Clear content area to background so new frames don't draw over old content
+        // Always start with a clean content area to avoid any residuals around centered/scaled images
         drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
+        // Draw configured background (if any); else clear to black
+        int ti_bg = t - tiles;
+        tile_bg_t* bg = (ti_bg >= 0 && ti_bg < MAX_TILES) ? &g_tile_bg[ti_bg] : NULL;
+        int drew_bg = 0;
+        if (bg && bg->img && bg->img->data && bg->mode != BG_NONE) {
+            const rei_image_t* im = bg->img; int iw = im->header.width, ih = im->header.height; int depth = im->header.depth; const uint8_t* base = im->data;
+            if (bg->mode == BG_TILE) {
+                for (int yy = 0; yy < content_h; ++yy) {
+                    int sy = yy % ih; const uint8_t* row = base + sy * iw * depth; int py = content_y + yy;
+                    for (int xx = 0; xx < content_w; ++xx) {
+                        int sx = xx % iw; int px = content_x + xx;
+                        if (depth == REI_DEPTH_MONO) { uint8_t v=row[sx]; apply_darken(&v,&v,&v,bg->darken); vga_drawPixel_bb(px, py, v, v, v); }
+                        else if (depth == REI_DEPTH_RGB) { const uint8_t* p=row+sx*3; uint8_t r8=p[0],g8=p[1],b8=p[2]; apply_darken(&r8,&g8,&b8,bg->darken); vga_drawPixel_bb(px, py, r8,g8,b8); }
+                        else if (depth == REI_DEPTH_RGBA) { const uint8_t* p=row+sx*4; uint8_t a=p[3]; if (a>=128){ uint8_t r8=p[0],g8=p[1],b8=p[2]; apply_darken(&r8,&g8,&b8,bg->darken); vga_drawPixel_bb(px, py, r8,g8,b8);} }
+                    }
+                }
+                drew_bg = 1;
+            } else if (bg->mode == BG_CENTER) {
+                int ox = content_x + (content_w - iw)/2; int oy = content_y + (content_h - ih)/2;
+                for (int yy=0; yy<ih; ++yy) { int py = oy + yy; if (py < content_y || py >= content_y + content_h) continue; const uint8_t* row = base + yy * iw * depth;
+                    for (int xx=0; xx<iw; ++xx) { int px = ox + xx; if (px < content_x || px >= content_x + content_w) continue;
+                        if (depth == REI_DEPTH_MONO) { uint8_t v=row[xx]; apply_darken(&v,&v,&v,bg->darken); vga_drawPixel_bb(px, py, v,v,v); }
+                        else if (depth == REI_DEPTH_RGB) { const uint8_t* p=row+xx*3; uint8_t r8=p[0],g8=p[1],b8=p[2]; apply_darken(&r8,&g8,&b8,bg->darken); vga_drawPixel_bb(px, py, r8,g8,b8);} 
+                        else if (depth == REI_DEPTH_RGBA) { const uint8_t* p=row+xx*4; uint8_t a=p[3]; if (a>=128){ uint8_t r8=p[0],g8=p[1],b8=p[2]; apply_darken(&r8,&g8,&b8,bg->darken); vga_drawPixel_bb(px, py, r8,g8,b8);} }
+                    }
+                }
+                drew_bg = 1;
+            } else if (bg->mode == BG_SCALE) {
+                int sx_num = content_w, sx_den = iw; int sy_num = content_h, sy_den = ih;
+                int use_x = ( (long long)sx_num * sy_den <= (long long)sy_num * sx_den );
+                int num = use_x ? sx_num : sy_num; int den = use_x ? sx_den : sy_den;
+                if (den > 0 && num > 0) {
+                    int dw = (iw * num) / den; int dh = (ih * num) / den;
+                    int ox = content_x + (content_w - dw)/2; int oy = content_y + (content_h - dh)/2;
+                    for (int yy=0; yy<dh; ++yy) { int syi = (yy * den) / num; if (syi >= ih) syi = ih - 1; const uint8_t* row = base + syi * iw * depth; int py = oy + yy; if (py < content_y || py >= content_y + content_h) continue;
+                        for (int xx=0; xx<dw; ++xx) { int sxi = (xx * den) / num; if (sxi >= iw) sxi = iw - 1; int px = ox + xx; if (px < content_x || px >= content_x + content_w) continue;
+                            if (depth == REI_DEPTH_MONO) { uint8_t v=row[sxi]; apply_darken(&v,&v,&v,bg->darken); vga_drawPixel_bb(px, py, v,v,v); }
+                            else if (depth == REI_DEPTH_RGB) { const uint8_t* p=row+sxi*3; uint8_t r8=p[0],g8=p[1],b8=p[2]; apply_darken(&r8,&g8,&b8,bg->darken); vga_drawPixel_bb(px, py, r8,g8,b8);} 
+                            else if (depth == REI_DEPTH_RGBA) { const uint8_t* p=row+sxi*4; uint8_t a=p[3]; if (a>=128){ uint8_t r8=p[0],g8=p[1],b8=p[2]; apply_darken(&r8,&g8,&b8,bg->darken); vga_drawPixel_bb(px, py, r8,g8,b8);} }
+                        }
+                    }
+                    drew_bg = 1;
+                }
+            }
+            if (drew_bg && bg->adapt_text) {
+                // Estimate brightness from source image center after darken
+                int sx = im->header.width/2; if (sx>=iw) sx=iw-1; int sy = im->header.height/2; if (sy>=ih) sy=ih-1; const uint8_t* row = base + sy * iw * depth;
+                int luma = 128;
+                if (depth == REI_DEPTH_MONO) { uint8_t v=row[sx]; apply_darken(&v,&v,&v,bg->darken); luma = rgb_luma(v,v,v); }
+                else if (depth == REI_DEPTH_RGB) { const uint8_t* p=row+sx*3; uint8_t r8=p[0],g8=p[1],b8=p[2]; apply_darken(&r8,&g8,&b8,bg->darken); luma = rgb_luma(r8,g8,b8); }
+                else if (depth == REI_DEPTH_RGBA) { const uint8_t* p=row+sx*4; if (p[3]>=128){ uint8_t r8=p[0],g8=p[1],b8=p[2]; apply_darken(&r8,&g8,&b8,bg->darken); luma = rgb_luma(r8,g8,b8);} }
+                bg_bright = (luma >= 128) ? 1 : 0;
+            }
+        }
+        if (!drew_bg) {
+            // No background configured
+            drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
+        }
     }
     if (gui_draw_cb[t->term_idx]) {
         gui_draw_cb[t->term_idx](t - tiles, content_x, content_y, content_w, content_h, gui_userdata[t->term_idx]);
@@ -1078,12 +1292,53 @@ static void draw_tile_content(const tile_t* t) {
                         ch = src[src_col];
                         vterm_get_char_color_abs(t->term_idx, abs_row, src_col, &rr, &gg, &bb);
                     }
+                    // Adaptive default text brightness against background
+                    if (bg_bright != -1 && rr == 200 && gg == 200 && bb == 200) {
+                        if (bg_bright) { rr = 40; gg = 40; bb = 40; } else { rr = 230; gg = 230; bb = 230; }
+                    } else {
+                        // If a background is set but adaptive is off, lift default gray to white-ish
+                        int ti_bg_idx2 = t - tiles;
+                        if (ti_bg_idx2 >= 0 && ti_bg_idx2 < MAX_TILES) {
+                            tile_bg_t* bgp2 = &g_tile_bg[ti_bg_idx2];
+                            if (bgp2->img && bgp2->mode != BG_NONE && !bgp2->adapt_text) {
+                                if (rr == 200 && gg == 200 && bb == 200) { rr = 240; gg = 240; bb = 240; }
+                            }
+                        }
+                    }
+                    // Optional local darken: semi-transparent darken behind non-space glyphs
+                    {
+                        int ti_bg_idx3 = t - tiles;
+                        if (ti_bg_idx3 >= 0 && ti_bg_idx3 < MAX_TILES) {
+                            tile_bg_t* bgp3 = &g_tile_bg[ti_bg_idx3];
+                            if (bgp3->img && bgp3->mode != BG_NONE && bgp3->local_darken && ch != ' ') {
+                                // Multiply darken by ~50% for a softer look
+                                vga_darkenRect_bb(px, py, 8, 8, 128);
+                            }
+                        }
+                    }
                     int is_sel = vterm_is_selected(t->term_idx, abs_row, src_col);
                     if (is_sel) {
                         // selection background teal-ish
                         drawRect(px, py, 8, 8, 0, 128, 128);
                     }
-                    // Always draw underlying character first
+                    // Optional text shadow: draw small dark offset before main glyph
+                    int ti_bg_idx = t - tiles;
+                    int use_shadow = 0; int sr = 0, sg = 0, sb = 0;
+                    if (ti_bg_idx >= 0 && ti_bg_idx < MAX_TILES) {
+                        tile_bg_t* bgp = &g_tile_bg[ti_bg_idx];
+                        if (bgp->img && bgp->text_shadow) {
+                            use_shadow = 1;
+                            // Choose shadow color opposing the text brightness slightly for contrast
+                            // If text is bright, use darker shadow; if text is dark, use very dark gray
+                            if (rr + gg + bb > 380) { sr = 0; sg = 0; sb = 0; }
+                            else { sr = 10; sg = 10; sb = 10; }
+                        }
+                    }
+                    if (use_shadow) {
+                        // 1px down-right shadow
+                        drawCharAt(px + 1, py + 1, (int)(unsigned char)ch, sr, sg, sb);
+                    }
+                    // Draw main character
                     drawCharAt(px, py, (int)(unsigned char)ch, rr, gg, bb);
                     // Then overlay underscore cursor at the logical caret position
                     if (abs_row == cursor_row && start_col + cc == cursor_col) {
@@ -1111,6 +1366,134 @@ void tile_set_title_status(int tile_idx, const char* title, const char* status_l
     tiles[tile_idx].last_title_ptr = NULL;
     tiles[tile_idx].last_status_left_ptr = NULL;
     tiles[tile_idx].last_status_right_ptr = NULL;
+}
+
+// Modal state for background choice
+static struct { int active; int tile; rei_image_t* img; int selected; int only_scale; } g_bg_modal = {0, -1, NULL, 0, 0};
+
+// Very small modal: draws a centered box with options Tile/Scale/Center
+static void draw_bg_modal() {
+    if (!g_bg_modal.active) return;
+    const char* opts_all[3] = {"Tile", "Scale", "Center"};
+    int opt_count = g_bg_modal.only_scale ? 1 : 3;
+    const char** opts = opts_all;
+    int box_w = 18 * 8; int box_h = (opt_count + 4) * 8; // simple size
+    int bx = (screen_w - box_w) / 2; int by = (screen_h - box_h) / 2;
+    // Dim background by drawing a translucent-like dark box using backbuffer primitives
+    // We avoid full-screen framebuffer fills to prevent flicker; draw a padded backdrop instead.
+    int pad = 12;
+    int dbx = bx - pad; if (dbx < 0) dbx = 0;
+    int dby = by - pad; if (dby < 0) dby = 0;
+    int dbw = box_w + pad*2; if (dbx + dbw > screen_w) dbw = screen_w - dbx;
+    int dbh = box_h + pad*2; if (dby + dbh > screen_h) dbh = screen_h - dby;
+    drawRect(dbx, dby, dbw, dbh, 0, 0, 0);
+    // border and title
+    drawRect(bx, by, box_w, box_h, 32, 32, 32);
+    const char* title = "Background Mode";
+    for (int i = 0; title[i]; ++i) drawCharAt(bx + 8 + i*8, by + 8, (int)(unsigned char)title[i], 255, 255, 0);
+    const char* hint = "Enter=Select  Esc=Cancel";
+    for (int i = 0; hint[i]; ++i) drawCharAt(bx + 8 + i*8, by + 24, (int)(unsigned char)hint[i], 200, 200, 200);
+    int y0 = by + 40;
+    for (int i = 0; i < opt_count; ++i) {
+        int rr = (i == g_bg_modal.selected) ? 255 : 200;
+        int gg = (i == g_bg_modal.selected) ? 255 : 200;
+        int bb = (i == g_bg_modal.selected) ? 0 : 200;
+        for (int j = 0; opts[i][j]; ++j) drawCharAt(bx + 16 + j*8, y0 + i*12, (int)(unsigned char)opts[i][j], rr, gg, bb);
+    }
+    // mark only the modal region dirty to keep the blit minimal
+    vga_mark_dirty_rect(dbx, dby, dbw, dbh);
+}
+
+// Handle keys for the modal; return 1 if consumed
+static int handle_bg_modal_key(int key) {
+    if (!g_bg_modal.active) return 0;
+    int opt_count = g_bg_modal.only_scale ? 1 : 3;
+    if (key == 0x1001) { // up
+        if (g_bg_modal.selected > 0) {
+            g_bg_modal.selected--;
+        }
+        return 1;
+    }
+    if (key == 0x1002) { // down
+        if (g_bg_modal.selected < opt_count - 1) {
+            g_bg_modal.selected++;
+        }
+        return 1;
+    }
+    if (key == 27) { // Esc
+        // cancel
+        if (g_bg_modal.img) { rei_free_image(g_bg_modal.img); free(g_bg_modal.img); }
+        g_bg_modal.active = 0; g_bg_modal.tile = -1; g_bg_modal.img = NULL; return 1;
+    }
+    if (key == '\n' || key == 10) {
+        int mode = g_bg_modal.only_scale ? BG_SCALE : (g_bg_modal.selected==0?BG_TILE:(g_bg_modal.selected==1?BG_SCALE:BG_CENTER));
+        int ti = g_bg_modal.tile;
+        if (ti >= 0 && ti < MAX_TILES) {
+            // Clear old
+            if (g_tile_bg[ti].img) { rei_free_image(g_tile_bg[ti].img); free(g_tile_bg[ti].img); g_tile_bg[ti].img = NULL; }
+            g_tile_bg[ti].img = g_bg_modal.img; g_bg_modal.img = NULL;
+            // For backgrounds, if image has alpha, convert to RGB with alpha->black
+            if (g_tile_bg[ti].img && g_tile_bg[ti].img->header.depth == REI_DEPTH_RGBA) {
+                bg_convert_rgba_to_rgb(g_tile_bg[ti].img);
+            }
+            g_tile_bg[ti].mode = (bg_mode_t)mode;
+            g_tile_bg[ti].darken = 16; // keep global darken light; rely on local darken under text
+            g_tile_bg[ti].adapt_text = 0; // keep terminal default colors (often white) consistent
+            g_tile_bg[ti].text_shadow = 1; // default: enable shadow for readability
+            g_tile_bg[ti].local_darken = 1; // darken only behind text
+            // Force content redraw
+            g_tiles_full_content_redraw = 1;
+        } else {
+            if (g_bg_modal.img) { rei_free_image(g_bg_modal.img); free(g_bg_modal.img); }
+        }
+        g_bg_modal.active = 0; g_bg_modal.tile = -1; g_bg_modal.img = NULL; return 1;
+    }
+    return 1;
+}
+
+// Optional: allow mouse to click options to avoid keyboard-only selection
+static int handle_bg_modal_mouse(const mouse_event_t* me) {
+    if (!g_bg_modal.active || !me) return 0;
+    const char* opts_all[3] = {"Tile", "Scale", "Center"};
+    int opt_count = g_bg_modal.only_scale ? 1 : 3;
+    int box_w = 18 * 8; int box_h = (opt_count + 4) * 8;
+    int bx = (screen_w - box_w) / 2; int by = (screen_h - box_h) / 2;
+    int y0 = by + 40;
+    int left_down = (me->buttons & MOUSE_BUTTON_LEFT) != 0;
+    for (int i = 0; i < opt_count; ++i) {
+        int text_w = (int)strlen(opts_all[i]) * 8;
+        int ox = bx + 16; int oy = y0 + i * 12;
+        int ow = text_w; int oh = 10;
+        if (me->x >= ox && me->x < ox + ow && me->y >= oy && me->y < oy + oh) {
+            // Hover highlights
+            if (g_bg_modal.selected != i) {
+                g_bg_modal.selected = i;
+            }
+            if (left_down) {
+                // Synthesize Enter
+                (void)handle_bg_modal_key('\n');
+            }
+            return 1; // consumed by modal
+        }
+    }
+    return 1; // consume mouse while modal active even if not over an option
+}
+
+int tile_begin_set_background_from_rei(int tile_idx, rei_image_t* image) {
+    if (tile_idx < 0 || tile_idx >= MAX_TILES || !image) return -1;
+    // If image is larger than screen in either dimension, restrict to Scale only
+    int only_scale = (image->header.width > screen_w) || (image->header.height > screen_h);
+    g_bg_modal.active = 1; g_bg_modal.tile = tile_idx; g_bg_modal.img = image; g_bg_modal.selected = only_scale ? 0 : 1; g_bg_modal.only_scale = only_scale;
+    // Ensure next frame draws modal
+    g_force_full_redraw = 1; g_tiles_full_content_redraw = 1;
+    return 0;
+}
+
+void tile_clear_background(int tile_idx) {
+    if (tile_idx < 0 || tile_idx >= MAX_TILES) return;
+    if (g_tile_bg[tile_idx].img) { rei_free_image(g_tile_bg[tile_idx].img); free(g_tile_bg[tile_idx].img); g_tile_bg[tile_idx].img = NULL; }
+    g_tile_bg[tile_idx].mode = BG_NONE; g_tile_bg[tile_idx].darken = 0; g_tile_bg[tile_idx].adapt_text = 0; g_tile_bg[tile_idx].text_shadow = 0; g_tile_bg[tile_idx].local_darken = 0;
+    g_tiles_full_content_redraw = 1;
 }
 
 void tile_invalidate_decorations(int tile_idx) {
@@ -1251,11 +1634,29 @@ void tile_invalidate_gui(int tile_idx) {
 
 void start_tiling_manager() {
     // initialize screen dimensions from global framebuffer if available
-    extern multiboot_info_t* g_mbi;
     if (g_mbi) {
         screen_w = g_mbi->framebuffer_width;
         screen_h = g_mbi->framebuffer_height;
     }
+    // Decide low-memory/slow-CPU mode early so we can avoid loading heavy assets
+    if (g_mbi && (g_mbi->flags & MULTIBOOT_INFO_MEMORY)) {
+        uint32 total_kb = g_mbi->mem_lower + g_mbi->mem_upper; // in KB
+        if (total_kb < 8192) g_gui_low_mode = 1; // <8MB
+    }
+    // Configure pacing and drag throttle
+    if (g_gui_low_mode) {
+        g_frame_target_us = 50000; // ~20 FPS cap
+        // Keep vsync enabled to reduce tearing even on slow CPUs; can be overridden via gui command
+        vga_set_vsync_enabled(1);
+        vga_set_dirty_strategy(1); // single-rect blit to minimize tearing
+    } else {
+        g_frame_target_us = 0;     // unlimited
+        vga_set_vsync_enabled(1);
+        vga_set_dirty_strategy(0); // smart multi-rect blit for throughput
+    }
+    uint32 hz_tmp0 = sched_get_tick_hz(); if (!hz_tmp0) hz_tmp0 = 50;
+    g_drag_throttle_ticks = g_gui_low_mode ? (hz_tmp0 / 40 + 1) : (hz_tmp0 / 100 + 1);
+    g_last_frame_tick = sched_get_tick_count();
     // initialize virtual terminals
     vterm_init_all();
     // prime GUI heartbeat
@@ -1267,23 +1668,27 @@ void start_tiling_manager() {
     // Initialize mouse and bounds to pixel space
     mouse_init();
     mouse_set_bounds(0, 0, screen_w - 1, screen_h - 1);
-    // Try to load cursor image from EYNFS disk 0
+    // Try to load UI assets unless in low mode (saves memory and draw time)
+    // Always try to load the cursor image (small asset); other window icons are skipped in low mode.
     load_cursor_image_try_paths(0);
-    // Try to load a close button icon (optional)
-    load_close_icon_try_paths(0);
-    load_close_icon_unf_try_paths(0);
-    // Try to load minimize/maximize icons (optional)
-    load_min_icon_try_paths(0);
-    load_max_icon_try_paths(0);
-    load_min_icon_unf_try_paths(0);
-    load_max_icon_unf_try_paths(0);
+    if (!g_gui_low_mode) {
+        // window button icons (focused/unfocused)
+        load_close_icon_try_paths(0);
+        load_close_icon_unf_try_paths(0);
+        load_min_icon_try_paths(0);
+        load_max_icon_try_paths(0);
+        load_min_icon_unf_try_paths(0);
+        load_max_icon_unf_try_paths(0);
+    }
     // Allocate save-under buffer once we know cursor size
     int cw0 = g_cursor_loaded ? g_cursor_img.header.width : cursor_w;
     int ch0 = g_cursor_loaded ? g_cursor_img.header.height : cursor_h;
-    int bpp = vga_get_fb_bpp_bytes(); if (bpp < 3) bpp = 3;
+    int bpp0 = vga_get_fb_bpp_bytes(); if (bpp0 < 3) bpp0 = 3;
     cursor_save_w = cw0; cursor_save_h = ch0;
-    cursor_save_len = cw0 * ch0 * bpp;
+    cursor_save_len = cw0 * ch0 * bpp0;
     cursor_savebuf = (unsigned char*)malloc(cursor_save_len);
+
+    // Low-mode detection already done above; pacing and throttle configured
 
     // Initialize tiles
     tile_count = 1;
@@ -1313,6 +1718,8 @@ void start_tiling_manager() {
 
     int running = 1;
     while (running) {
+        // UI loop heartbeat for the watchdog
+        watchdog_kick("wm-loop");
         // 1 Hz GUI heartbeat: invalidate GUI tiles once per second so they can update time-based views
         {
             uint32 now_ticks_hb = sched_get_tick_count();
@@ -1327,11 +1734,17 @@ void start_tiling_manager() {
             }
         }
         // Poll mouse in case IRQ12 is not firing (QEMU config)
-        mouse_poll();
+    mouse_poll();
+    watchdog_kick("wm-mouse");
         // Read current mouse position once per loop
         int cur_mx = -1000, cur_my = -1000;
         if (mouse_get_position(&cur_mx, &cur_my) != 0) {
-            cur_mx = -1000; cur_my = -1000; // invalid
+            // Mouse may not be initialized yet under some emulators; show a default cursor so UI looks alive
+            if (cursor_prev_x <= -900 || cursor_prev_y <= -900) {
+                cur_mx = screen_w / 2; cur_my = screen_h / 2;
+            } else {
+                cur_mx = cursor_prev_x; cur_my = cursor_prev_y;
+            }
         }
         // Do not erase cursor before swap; keep it visible during backbuffer rendering.
         // advance scroll tick each frame for marquee effects
@@ -1344,7 +1757,6 @@ void start_tiling_manager() {
     // Avoid clearing the entire screen each frame to reduce flicker. Only clear the regions we will redraw (each tile).
     // Quick heuristic: clear each tile's rectangle before drawing it.
         // If Alt held, draw a help/status bar on the main shell tile (index 0 if active)
-        extern int tui_alt_pressed;
         if (tui_alt_pressed) {
             // Build status text
             static char alt_help[128];
@@ -1372,15 +1784,24 @@ void start_tiling_manager() {
                         if (cx + 7 > clip_max) break;
                         drawCharAt(cx, 2, (int)(unsigned char)*p, 255, 255, 255);
                     }
-                }
         }
+    }
     for (int i = 0; i < tile_count; ++i) {
         if (g_force_full_redraw) tiles[i].static_drawn = 0; // force static re-render
         int decor_fresh = 0;
         if (!tiles[i].static_drawn) { draw_static_tile(&tiles[i], i == focused); decor_fresh = 1; }
-            // Redraw decorations each frame to ensure subtitle/title are always current
+            // Redraw decorations: in low mode, only when changed; otherwise each frame for freshness
             int need_redraw_decor = 1;
-            extern int tui_alt_pressed;
+            if (g_gui_low_mode) {
+                need_redraw_decor = 0;
+                int th_now_dec = get_title_height(&tiles[i]);
+                int show_status_now_dec = (tiles[i].status_left != NULL) || (tiles[i].status_right != NULL) || (tiles[i].status_visible) || (tui_alt_pressed);
+                if (!tiles[i].static_drawn || tiles[i].last_title_ptr != tiles[i].title ||
+                    tiles[i].last_status_left_ptr != tiles[i].status_left || tiles[i].last_status_right_ptr != tiles[i].status_right ||
+                    tiles[i].last_show_status != show_status_now_dec || tiles[i].last_focused != (i == focused)) {
+                    need_redraw_decor = 1;
+                }
+            }
             int th_now_dec = get_title_height(&tiles[i]);
             int show_status_now_dec = (tiles[i].status_left != NULL) || (tiles[i].status_right != NULL) || (tiles[i].status_visible) || (tui_alt_pressed);
             // We still maintain caches for potential future optimization
@@ -1393,7 +1814,6 @@ void start_tiling_manager() {
                 tiles[i].last_focused = (i == focused);
             }
             // Compute current content rect for this tile
-            extern int tui_alt_pressed;
             int show_status_now = (tiles[i].status_left != NULL) || (tiles[i].status_right != NULL) || (tiles[i].status_visible) || (tui_alt_pressed);
             int th_now = get_title_height(&tiles[i]);
             int sh_now = 0;
@@ -1429,7 +1849,6 @@ void start_tiling_manager() {
             // Mark only the UI decoration areas (titlebar, statusbar, and 1px borders)
             // so the blit stays small while ensuring decorations are kept in sync.
             int th = get_title_height(&tiles[i]);
-            extern int tui_alt_pressed;
             int sh = 0;
             int show_status = (tiles[i].status_left != NULL) || (tiles[i].status_right != NULL) || (tiles[i].status_visible) || (tui_alt_pressed);
             if (show_status) sh = 12;
@@ -1466,7 +1885,7 @@ void start_tiling_manager() {
                 }
             } else {
                 // no new content, nothing to mark beyond borders/title/status
-        }
+            }
         }
         // Draw floating windows on top of tiles (back-to-front)
         if (g_window_count > 0) {
@@ -1490,13 +1909,16 @@ void start_tiling_manager() {
                 }
             }
         }
+        // If a modal is active, draw it now on top of everything
+        if (g_bg_modal.active) { draw_bg_modal(); }
     if (g_force_full_redraw) g_force_full_redraw = 0;
     if (g_tiles_full_content_redraw) g_tiles_full_content_redraw = 0;
         tui_refresh();
         // Build swap exclusion to preserve overlays (cursor and live-drag)
         int ex_x = -1, ex_y = -1, ex_w = 0, ex_h = 0;
-        // Cursor exclusion only if that area was untouched this frame
-        if (!g_dirty_hits_prev_cursor && prev_saved_w > 0 && prev_saved_h > 0) {
+        // Always exclude the previous cursor rectangle from the swap; we'll refresh it
+        // from the backbuffer after the swap to avoid flicker on borders.
+        if (prev_saved_w > 0 && prev_saved_h > 0) {
             ex_x = prev_saved_x; ex_y = prev_saved_y; ex_w = prev_saved_w; ex_h = prev_saved_h;
         }
         // If dragging a window, also exclude its current rect; union with cursor exclusion if both present
@@ -1515,35 +1937,63 @@ void start_tiling_manager() {
         vga_swap_buffers();
         // After swap, clear exclusion so future swaps can choose a new region
         vga_clear_swap_exclude();
-    // Draw overlays during vblank to minimize tearing/flicker
-    vga_wait_vblank();
+        // Ensure excluded cursor rectangle now reflects updated backbuffer content
+        if (prev_saved_w > 0 && prev_saved_h > 0) {
+            vga_blit_backbuffer_region_to_fb(prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h);
+        }
+        // Draw overlays near vblank; if swap already waited for vblank, skip extra wait
+        if (!vga_get_vsync_enabled()) vga_wait_vblank();
 
-        // Live-drag overlay: erase previous overlay and draw the dragged window as an overlay from backbuffer
-        if (prev_drag_w > 0 && prev_drag_h > 0) {
-            // Blit background (current backbuffer content) over the previous overlay region
-            vga_blit_backbuffer_region_to_fb(prev_drag_x, prev_drag_y, prev_drag_w, prev_drag_h);
-            prev_drag_w = prev_drag_h = 0;
-        }
-        if (drag_active && drag_win >= 0 && g_windows[drag_win].used) {
-            window_t* dw = &g_windows[drag_win];
-            // Draw the window from backbuffer to framebuffer at its current position
-            vga_blit_backbuffer_region_to_fb(dw->x, dw->y, dw->w, dw->h);
-            prev_drag_x = dw->x; prev_drag_y = dw->y; prev_drag_w = dw->w; prev_drag_h = dw->h;
+        // Live-drag overlay
+    if (!g_gui_low_mode) {
+            // High/normal mode: blit full window area as overlay for smoothness
+            if (prev_drag_w > 0 && prev_drag_h > 0) {
+                vga_blit_backbuffer_region_to_fb(prev_drag_x, prev_drag_y, prev_drag_w, prev_drag_h);
+                prev_drag_w = prev_drag_h = 0;
+            }
+            if (drag_active && drag_win >= 0 && g_windows[drag_win].used) {
+                window_t* dw = &g_windows[drag_win];
+                vga_blit_backbuffer_region_to_fb(dw->x, dw->y, dw->w, dw->h);
+                prev_drag_x = dw->x; prev_drag_y = dw->y; prev_drag_w = dw->w; prev_drag_h = dw->h;
+            }
+        } else {
+            // Low mode: wireframe dragging to reduce copies
+            // Erase previous wireframe by restoring only border segments from backbuffer
+            if (prev_outline_w > 0 && prev_outline_h > 0) {
+                // top
+                vga_blit_backbuffer_region_to_fb(prev_outline_x, prev_outline_y, prev_outline_w, 1);
+                // bottom
+                vga_blit_backbuffer_region_to_fb(prev_outline_x, prev_outline_y + prev_outline_h - 1, prev_outline_w, 1);
+                // left
+                vga_blit_backbuffer_region_to_fb(prev_outline_x, prev_outline_y, 1, prev_outline_h);
+                // right
+                vga_blit_backbuffer_region_to_fb(prev_outline_x + prev_outline_w - 1, prev_outline_y, 1, prev_outline_h);
+                prev_outline_w = prev_outline_h = 0;
+            }
+            if (drag_active && drag_win >= 0 && g_windows[drag_win].used) {
+                window_t* dw = &g_windows[drag_win];
+                int bx = dw->x, by = dw->y, bw = dw->w, bh = dw->h;
+                // draw 2px border wireframe
+                int rr = 255, gg = 255, bb = 0;
+                vga_fillRect_fb(bx, by, bw, 2, rr, gg, bb);                   // top
+                vga_fillRect_fb(bx, by + bh - 2, bw, 2, rr, gg, bb);          // bottom
+                vga_fillRect_fb(bx, by, 2, bh, rr, gg, bb);                   // left
+                vga_fillRect_fb(bx + bw - 2, by, 2, bh, rr, gg, bb);          // right
+                prev_outline_x = bx; prev_outline_y = by; prev_outline_w = bw; prev_outline_h = bh;
+            }
         }
 
-        // After swap: restore previous cursor region only if that area did not change this frame
-        if (!g_dirty_hits_prev_cursor && cursor_prev_x > -100 && cursor_prev_y > -100 && cursor_savebuf && prev_saved_w > 0 && prev_saved_h > 0) {
-            vga_restore_fb_region(prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h, cursor_savebuf, prev_saved_w * prev_saved_h * vga_get_fb_bpp_bytes());
-        }
+        // No need to restore the previous cursor from a saved-under buffer; we refreshed
+        // the excluded area directly from the backbuffer post-swap above.
 
     // Draw mouse cursor overlay on top of the freshly swapped framebuffer
         if (cur_mx > -100 && cur_my > -100) {
             // Ensure save-under buffer matches current cursor size (if image changed)
             int nw = g_cursor_loaded ? g_cursor_img.header.width : cursor_w;
             int nh = g_cursor_loaded ? g_cursor_img.header.height : cursor_h;
-            int bpp = vga_get_fb_bpp_bytes(); if (bpp < 3) bpp = 3;
+            int bpp1 = vga_get_fb_bpp_bytes(); if (bpp1 < 3) bpp1 = 3;
             if (!cursor_savebuf || nw != cursor_save_w || nh != cursor_save_h) {
-                int newlen = nw * nh * bpp;
+                int newlen = nw * nh * bpp1;
                 if (cursor_savebuf) free(cursor_savebuf);
                 cursor_savebuf = (unsigned char*)malloc(newlen);
                 cursor_save_w = nw; cursor_save_h = nh; cursor_save_len = newlen;
@@ -1593,6 +2043,13 @@ void start_tiling_manager() {
         // Handle mouse click-to-focus and forward events to focused GUI.
     mouse_event_t me;
     if (mouse_read_event(&me) == 0) {
+            // If the background mode modal is active, handle mouse clicks there first
+            if (g_bg_modal.active) {
+                if (handle_bg_modal_mouse(&me)) {
+                    // consumed; modal handled selection. Skip further mouse routing this frame.
+                    goto after_mouse_handling;
+                }
+            }
             // On left button press edge, set focus to the tile under cursor
             uint8 changes = me.button_changes;
             uint8 downMask = (me.buttons & MOUSE_BUTTON_LEFT);
@@ -1692,29 +2149,54 @@ void start_tiling_manager() {
                     }
                 }
             }
-            if (release_edge) { drag_active = 0; drag_win = -1; }
+            if (release_edge) { 
+                drag_active = 0; drag_win = -1; 
+                // On drag end in low mode, force a full reconcile since we only drew wireframes
+                if (g_gui_low_mode) { 
+                    if (prev_outline_w > 0 && prev_outline_h > 0) {
+                        // erase leftover outline
+                        vga_blit_backbuffer_region_to_fb(prev_outline_x, prev_outline_y, prev_outline_w, 1);
+                        vga_blit_backbuffer_region_to_fb(prev_outline_x, prev_outline_y + prev_outline_h - 1, prev_outline_w, 1);
+                        vga_blit_backbuffer_region_to_fb(prev_outline_x, prev_outline_y, 1, prev_outline_h);
+                        vga_blit_backbuffer_region_to_fb(prev_outline_x + prev_outline_w - 1, prev_outline_y, 1, prev_outline_h);
+                        prev_outline_w = prev_outline_h = 0;
+                    }
+                    g_force_full_redraw = 1; g_tiles_full_content_redraw = 1; 
+                }
+            }
             if (drag_active && drag_win >= 0) {
                 window_t* w = &g_windows[drag_win];
-                // mark old rect dirty
-                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
-                int old_x = w->x, old_y = w->y, old_w = w->w, old_h = w->h;
-                w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
-                w->y = clampi(me.y - drag_off_y, 0, screen_h - w->h);
-                // mark new rect dirty and request redraw
-                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
-                w->static_drawn = 0;
-                w->needs_redraw = 1;
-                // Ensure underlying tiles are refreshed to erase old window frame
-                g_tiles_full_content_redraw = 1;
-                // Invalidate other windows that intersect moved window's old or new rect
-                for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
-                    if (wi == drag_win) continue;
-                    window_t* wo = &g_windows[wi];
-                    if (!wo->used || wo->minimized) continue;
-                    if (rects_intersect(wo->x, wo->y, wo->w, wo->h, old_x, old_y, old_w, old_h) ||
-                        rects_intersect(wo->x, wo->y, wo->w, wo->h, w->x, w->y, w->w, w->h)) {
-                        wo->needs_redraw = 1;
-                        wo->static_drawn = 0;
+                // Drag throttling in low mode
+                if (g_gui_low_mode) {
+                    uint32 nowt = sched_get_tick_count();
+                    if (nowt - g_last_drag_tick < g_drag_throttle_ticks) {
+                        // skip updating geom this loop
+                    } else {
+                        g_last_drag_tick = nowt;
+                        w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
+                        w->y = clampi(me.y - drag_off_y, 0, screen_h - w->h);
+                    }
+                    // Do not mark tiles/windows dirty per-move; wireframe overlay handles visuals
+                    w->static_drawn = 0; // so final commit repaints decor at new spot
+                } else {
+                    // Normal mode: full overlay + underlying refresh
+                    vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
+                    int old_x = w->x, old_y = w->y, old_w = w->w, old_h = w->h;
+                    w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
+                    w->y = clampi(me.y - drag_off_y, 0, screen_h - w->h);
+                    vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
+                    w->static_drawn = 0;
+                    w->needs_redraw = 1;
+                    g_tiles_full_content_redraw = 1;
+                    // Invalidate other windows that intersect moved window's old or new rect
+                    for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                        if (wi == drag_win) continue;
+                        window_t* wo = &g_windows[wi];
+                        if (!wo->used || wo->minimized) continue;
+                        if (rects_intersect(wo->x, wo->y, wo->w, wo->h, old_x, old_y, old_w, old_h) ||
+                            rects_intersect(wo->x, wo->y, wo->w, wo->h, w->x, w->y, w->w, w->h)) {
+                            wo->needs_redraw = 1; wo->static_drawn = 0;
+                        }
                     }
                 }
             }
@@ -1768,7 +2250,6 @@ void start_tiling_manager() {
             if (hit2 >= 0 && hit2 < tile_count) {
                 tile_t* tt = &tiles[hit2];
                 int title_h2 = get_title_height(tt);
-                extern int tui_alt_pressed;
                 int show_status2 = (tt->status_left != NULL) || (tt->status_right != NULL) || (tt->status_visible) || (tui_alt_pressed);
                 if (show_status2) {
                     int sy = tt->y + title_h2;
@@ -1779,7 +2260,14 @@ void start_tiling_manager() {
             }
         }
 
-        int key = tui_read_key();
+after_mouse_handling:
+
+    int key = tui_read_key();
+    if (key) { watchdog_kick("wm-key"); }
+        // If modal is active, handle it first and skip routing
+        if (g_bg_modal.active) {
+            if (handle_bg_modal_key(key)) { continue; }
+        }
         // Super+n -> new shell
         if ((key & 0x4000) && (key & 0xFF) == 'n') {
             if (tile_count < 4) {
@@ -1862,18 +2350,24 @@ void start_tiling_manager() {
             if ((base & 0xFF) == 'q') {
                 // If a window is focused, close it; otherwise, close tile or exit
                 if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
+                    // Allow closing focused floating window regardless of tile count
                     wm_close_window(g_win_focused);
                     g_win_focused = -1;
                     g_force_full_redraw = 1;
                 } else {
-                    // If more than one tile, close the focused tile; otherwise exit tiling manager (return to main shell)
+                    // If more than one tile, close the focused tile.
+                    // If only one tile remains, DO NOT close/exit — keep at least one tile to avoid OS instability.
                     if (tile_count > 1) {
                         tile_close(focused);
                         g_force_full_redraw = 1;
                         layout_tiles();
                     } else {
-                        running = 0; // exit tiling manager and return to main shell
-                        break;
+                        // Refuse to close the final tile; surface a brief status hint.
+                        static char last_tile_msg[64];
+                        snprintf(last_tile_msg, sizeof(last_tile_msg), "Last tile cannot be closed");
+                        tiles[focused].status_left = last_tile_msg;
+                        tiles[focused].status_visible = 1;
+                        g_force_full_redraw = 1;
                     }
                 }
                 continue;
@@ -1955,5 +2449,118 @@ void start_tiling_manager() {
              */
             sched_sleep_us(2000);
         }
+
+        // Simple frame limiter to avoid overdraw on slow CPUs
+        // If mouse is moving and we're in low mode, temporarily boost FPS cap for a snappier cursor.
+        int boost_low = 0; if (g_gui_low_mode && (g_mouse_state.delta_x != 0 || g_mouse_state.delta_y != 0)) boost_low = 1;
+        uint32 frame_target_us_effective = g_frame_target_us;
+        if (boost_low && g_frame_target_us && g_frame_target_us > 0) {
+            // Raise to ~30 FPS during motion if current cap is lower (e.g., 20 FPS)
+            uint32 cap30 = 33333u; if (frame_target_us_effective > cap30) frame_target_us_effective = cap30;
+        }
+        if (frame_target_us_effective) {
+            uint32 now_ticks = sched_get_tick_count();
+            uint32 hz = sched_get_tick_hz(); if (!hz) hz = 50;
+            // Convert target_us to ticks and enforce at least 1 tick
+            uint32 target_ticks = (frame_target_us_effective * hz) / 1000000; if (target_ticks < 1) target_ticks = 1;
+            uint32 elapsed = now_ticks - g_last_frame_tick;
+            if (elapsed < target_ticks) {
+                uint32 remaining_ticks = target_ticks - elapsed;
+                // approx sleep
+                uint32 us_per_tick = 1000000 / hz;
+                sched_sleep_us(remaining_ticks * us_per_tick);
+            }
+            g_last_frame_tick = sched_get_tick_count();
+        }
     }
+}
+
+// ---------------- Runtime GUI tuning (low-spec controls) ----------------
+void tiler_gui_set_mode(int mode) {
+    // mode: 0=high, 1=low, 2=auto
+    int new_low = g_gui_low_mode;
+    if (mode == 2) {
+        if (g_mbi && (g_mbi->flags & MULTIBOOT_INFO_MEMORY)) {
+            uint32 total_kb = g_mbi->mem_lower + g_mbi->mem_upper; // in KB
+            new_low = (total_kb < 8192) ? 1 : 0;
+        }
+    } else if (mode == 0) {
+        new_low = 0;
+    } else if (mode == 1) {
+        new_low = 1;
+    }
+
+    if (new_low != g_gui_low_mode) {
+        g_gui_low_mode = new_low;
+        // Default pacing for new mode
+        if (g_gui_low_mode) {
+            g_frame_target_us = 50000; // ~20 FPS
+            vga_set_vsync_enabled(1);
+            vga_set_dirty_strategy(1);
+        } else {
+            g_frame_target_us = 0; // unlimited
+            vga_set_vsync_enabled(1);
+            vga_set_dirty_strategy(0);
+        }
+        // Update drag throttle from current HZ
+        uint32 hz0 = sched_get_tick_hz(); if (!hz0) hz0 = 50;
+        g_drag_throttle_ticks = g_gui_low_mode ? (hz0 / 40 + 1) : (hz0 / 100 + 1);
+
+        // Force visual refresh of everything
+        g_force_full_redraw = 1;
+        g_tiles_full_content_redraw = 1;
+        for (int i = 0; i < MAX_TILES; ++i) {
+            tiles[i].static_drawn = 0;
+            if (gui_draw_cb[tiles[i].term_idx]) gui_needs_redraw[tiles[i].term_idx] = 1;
+        }
+        for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+            if (g_windows[wi].used) { g_windows[wi].static_drawn = 0; g_windows[wi].needs_redraw = 1; }
+        }
+    }
+}
+
+void tiler_gui_set_fps_cap(int fps) {
+    if (fps <= 0) {
+        g_frame_target_us = 0;
+    } else {
+        if (fps > 240) fps = 240; // clamp
+        g_frame_target_us = 1000000u / (uint32)fps;
+    }
+}
+
+void tiler_gui_set_drag_throttle_ms(int ms) {
+    uint32 hz = sched_get_tick_hz(); if (!hz) hz = 50;
+    if (ms <= 0) {
+        g_drag_throttle_ticks = (hz / 100) + 1; // minimal throttle
+    } else {
+        uint32 ticks = ((uint32)ms * hz) / 1000u;
+        if (ticks < 1) ticks = 1;
+        g_drag_throttle_ticks = ticks;
+    }
+}
+
+void tiler_gui_print_status(void) {
+    int auto_low = 0;
+    if (g_mbi && (g_mbi->flags & MULTIBOOT_INFO_MEMORY)) {
+        uint32 total_kb = g_mbi->mem_lower + g_mbi->mem_upper;
+        auto_low = (total_kb < 8192) ? 1 : 0;
+    }
+    int vs = vga_get_vsync_enabled();
+    int strat = vga_get_dirty_strategy();
+    // Compute FPS cap from microseconds
+    int fps_cap = 0; if (g_frame_target_us) fps_cap = (int)(1000000u / g_frame_target_us);
+    // Convert drag throttle to ms
+    uint32 hz = sched_get_tick_hz(); if (!hz) hz = 50;
+    int drag_ms = (int)((g_drag_throttle_ticks * 1000u) / hz);
+    printf("%cGUI status:\n", 200, 200, 255);
+    printf("%c  mode: %s (auto suggestion: %s)\n", 255, 255, 255,
+           g_gui_low_mode ? "low" : "high",
+           auto_low ? "low" : "high");
+    printf("%c  vsync: %s\n", 255, 255, 255, vs ? "on" : "off");
+    printf("%c  swap: %s\n", 255, 255, 255, strat ? "single" : "smart");
+    if (fps_cap > 0)
+        printf("%c  fps cap: %d\n", 255, 255, 255, fps_cap);
+    else
+        printf("%c  fps cap: off\n", 255, 255, 255);
+    printf("%c  drag throttle: %d ms (%u ticks)\n", 255, 255, 255, drag_ms, (unsigned)g_drag_throttle_ticks);
 }

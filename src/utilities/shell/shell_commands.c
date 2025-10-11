@@ -14,6 +14,12 @@
 #include <isr.h>
 #include <stdint.h>
 #include <help_tui.h>
+#include <panic.h>
+#include <serial.h>
+#include <paging.h>
+#include <fs/vfs.h>
+#include <tile_manager.h>
+#include <rei.h>
 
 // Forward declarations for command handlers
 void help_cmd(string arg);
@@ -38,6 +44,13 @@ void error_cmd(string arg);
 void validate_cmd(string arg);
 void portable_cmd(string arg);
 void init_cmd(string arg);
+// Diagnostics/testing commands
+void panic_cmd(string arg);
+void assertfail_cmd(string arg);
+void serialtest_cmd(string arg);
+void pagingguards_cmd(string arg);
+void setbg_cmd(string arg);
+void clearbg_cmd(string arg);
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
@@ -139,6 +152,36 @@ void random_cmd(string ch) {
         return;
     }
 }
+
+// Set background image for the focused tile: setbg <file.rei>
+void setbg_cmd(string ch) {
+    // Parse first token after command as path
+    uint8 i = 0; while (ch[i] && ch[i] != ' ') i++; while (ch[i] == ' ') i++;
+    if (!ch[i]) { printf("%cUsage: setbg <file.rei>\n", 255, 255, 255); return; }
+    char path[128] = {0}; uint8 j = 0;
+    while (ch[i] && ch[i] != ' ' && j < sizeof(path)-1) { path[j++] = ch[i++]; }
+    path[j] = '\0';
+    // Resolve path
+    char abspath[128]; resolve_path(path, shell_current_path, abspath, sizeof(abspath));
+    vfs_stat_t st; if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) { printf("%cError: File not found.\n", 255, 0, 0); return; }
+    if (st.size > 512*1024) { printf("%cError: File too large (max 512KB).\n", 255, 0, 0); return; }
+    uint32_t to_read = st.size; if (to_read == 0) { printf("%cError: Empty file.\n", 255, 0, 0); return; }
+    uint8_t* buf = (uint8_t*)malloc(to_read); if (!buf) { printf("%cError: Out of memory.\n", 255, 0, 0); return; }
+    int br = vfs_read_file(g_current_drive, abspath, (char*)buf, (int)to_read);
+    if (br <= 0) { printf("%cError: Failed to read file.\n", 255, 0, 0); free(buf); return; }
+    rei_image_t* img = (rei_image_t*)malloc(sizeof(rei_image_t));
+    if (!img) { printf("%cError: Out of memory.\n", 255, 0, 0); free(buf); return; }
+    if (rei_parse_image(buf, br, img) != 0) { printf("%cError: Invalid REI file.\n", 255, 0, 0); free(buf); free(img); return; }
+    free(buf);
+    int focused = tile_get_focused();
+    if (focused < 0) { printf("%cError: Tiling UI not active.\n", 255, 0, 0); rei_free_image(img); free(img); return; }
+    // Hand ownership of img to the tiler (it will free later)
+    int rc = tile_begin_set_background_from_rei(focused, img);
+    if (rc != 0) { printf("%cError: Failed to start background prompt.\n", 255, 0, 0); rei_free_image(img); free(img); }
+}
+
+// Clear background on focused tile
+void clearbg_cmd(string ch) { (void)ch; int focused = tile_get_focused(); if (focused < 0) { printf("%cError: Tiling UI not active.\n", 255, 0, 0); return; } tile_clear_background(focused); }
 
 // history command implementation
 void history_cmd(string ch) {
@@ -250,6 +293,11 @@ void sort_cmd(string ch) {
     
     free(strings);
 }
+
+// Command registration for background helpers
+#include <shell_command_info.h>
+REGISTER_SHELL_COMMAND(setbg_cmd_info, "setbg", setbg_cmd, CMD_STREAMING, "Set a REI image as background for the focused tile (shows Tile/Scale/Center chooser).\nUsage: setbg <file.rei>", "setbg eynos.rei");
+REGISTER_SHELL_COMMAND(clearbg_cmd_info, "clearbg", clearbg_cmd, CMD_STREAMING, "Clear background image for the focused tile.", "clearbg");
 
 // Ultra-lightweight search with streaming (no large allocations)
 void search_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
@@ -654,6 +702,44 @@ REGISTER_SHELL_COMMAND(error, "error", error_cmd, CMD_STREAMING, "Display system
 REGISTER_SHELL_COMMAND(validate, "validate", validate_cmd, CMD_STREAMING, "Display input validation statistics and test validation.\nUsage: validate [test|stats]", "validate");
 REGISTER_SHELL_COMMAND(portable, "portable", portable_cmd, CMD_ESSENTIAL, "Display portability optimizations and memory usage.\nUsage: portable [stats|optimize]", "portable");
 REGISTER_SHELL_COMMAND(init, "init", init_cmd, CMD_ESSENTIAL, "Initialize full system services (ATA drives, etc.).\nUsage: init", "init");
+
+// Diagnostics/testing command implementations
+void panic_cmd(string ch) {
+    // Intentionally trigger a kernel panic to test panic/backtrace and serial mirroring
+    (void)ch; // unused
+    PANIC("manual panic via shell");
+}
+
+void assertfail_cmd(string ch) {
+    // Intentionally trigger an assertion failure
+    (void)ch; // unused
+    ASSERT(0 && "manual assert failure via shell");
+}
+
+void serialtest_cmd(string ch) {
+    (void)ch; // unused
+    const char *msg = "[serialtest] Hello from EYN-OS shell via COM1!\n";
+    int written = serial_write(SERIAL_COM1, msg, (int)strlen(msg));
+    if (written > 0) {
+        printf("%cWrote %d bytes to COM1. Check your -serial stdio or COM1 output.\n", 0, 255, 0, written);
+    } else {
+        printf("%cSerial write failed (COM1 may not be initialized).\n", 255, 0, 0);
+    }
+}
+
+void pagingguards_cmd(string ch) {
+    (void)ch; // unused
+    // Install optional guards; safe no-ops if paging isn't enabled yet
+    paging_install_null_guard();
+    paging_protect_kernel_text_ro();
+    printf("%cRequested paging guards: null-page NX and .text/.rodata RO. If paging is disabled, this has no effect.\n", 255, 255, 255);
+}
+
+// Register diagnostics/testing commands
+REGISTER_SHELL_COMMAND(panic_cmd_info, "panic", panic_cmd, CMD_ESSENTIAL, "Trigger a kernel panic to test diagnostics.\nUsage: panic", "panic");
+REGISTER_SHELL_COMMAND(assertfail_cmd_info, "assertfail", assertfail_cmd, CMD_ESSENTIAL, "Trigger an assertion failure (ASSERT).\nUsage: assertfail", "assertfail");
+REGISTER_SHELL_COMMAND(serialtest_cmd_info, "serialtest", serialtest_cmd, CMD_STREAMING, "Write a test line to COM1 to verify serial output.\nUsage: serialtest", "serialtest");
+REGISTER_SHELL_COMMAND(pagingguards_cmd_info, "pagingguards", pagingguards_cmd, CMD_STREAMING, "Install optional paging guards (null-page, .text/.rodata RO).\nUsage: pagingguards", "pagingguards");
 
 
 // draw_cmd_handler implementation

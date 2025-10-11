@@ -3,9 +3,19 @@ ENTRY(start)
 
 SECTIONS
 {
+    __kernel_start = .;
     .text :
     {
+        __kernel_text_start = .;
         *(.text)
+        __kernel_text_end = .;
+    }
+
+    .rodata :
+    {
+        __kernel_rodata_start = .;
+        *(.rodata*)
+        __kernel_rodata_end = .;
     }
 
     .data : 
@@ -24,4 +34,5 @@ SECTIONS
     {
         *(.bss)  
     }
+    __kernel_end = .;
 }

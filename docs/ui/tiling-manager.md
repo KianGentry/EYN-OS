@@ -120,6 +120,36 @@ The following commands integrate with the GUI layer:
 - The manager uses dirty-rectangle tracking and backbuffer-aware pixel ops to reduce flicker
 - GUI apps should draw only within the provided content rect and avoid full-screen clears
 
+### Runtime GUI Tuning
+
+For low-spec environments or profiling, the tiler exposes a few runtime knobs:
+
+- Mode: 0=high, 1=low, 2=auto (based on detected RAM)
+    - `tiler_gui_set_mode(int mode)`
+- FPS cap to limit redraw rate:
+    - `tiler_gui_set_fps_cap(int fps)` (0 disables)
+- Drag throttle to reduce redraws while dragging windows:
+    - `tiler_gui_set_drag_throttle_ms(int ms)`
+- Inspect current settings:
+    - `tiler_gui_print_status()`
+
+Low mode simplifies decor and uses wireframe outlines during drags to avoid overdraw on very slow CPUs.
+
+### Per-Tile Background Images
+
+Tiles can render a custom REI image behind the terminal text with optional darkening and text adaptation.
+
+Commands:
+- `setbg <file.rei>` — Choose how to display (Tile/Scale/Center) and apply to the focused tile
+- `clearbg` — Remove the background for the focused tile
+
+APIs:
+```c
+// Begin a small chooser and take ownership of the provided image memory
+int tile_begin_set_background_from_rei(int tile_idx, rei_image_t* image);
+void tile_clear_background(int tile_idx);
+```
+
 ## Examples
 
 Minimal tile app:
@@ -136,6 +166,13 @@ static void app_key(int t, int key, void* ud) {
 
 int t = tile_create_gui_tile("Demo", "Ctrl+X: Close");
 tile_register_gui_client2(t, app_draw, app_key, NULL, NULL);
+```
+
+To optimize on very slow machines:
+```c
+tiler_gui_set_mode(2);        // auto
+tiler_gui_set_fps_cap(30);    // cap redraws
+tiler_gui_set_drag_throttle_ms(33); // ~30Hz drag updates
 ```
 
 ## Future Work

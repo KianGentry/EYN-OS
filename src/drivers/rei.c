@@ -67,27 +67,50 @@ int rei_parse_image(const uint8_t* data, size_t size, rei_image_t* image) {
     // Debug: print header basics once when parsing (can be silenced later)
     // printf("REI parse: %ux%u depth=%u\n", image->header.width, image->header.height, image->header.depth);
     
-    // Calculate expected data size
+    // Calculate uncompressed pixel data size
     int expected_size = rei_calculate_data_size(&image->header);
     if (expected_size < 0) {
         return -1;
     }
-    
-    // Check if we have enough data
-    if (size < sizeof(rei_header_t) + expected_size) {
-        return -1;
-    }
-    
-    // Allocate memory for pixel data
+
+    // Determine compression from header flags
+    uint8_t comp = image->header.reserved1 & REI_COMP_MASK;
+
+    // Allocate output buffer (always uncompressed in memory)
     image->data = (uint8_t*)malloc(expected_size);
     if (!image->data) {
         return -1;
     }
-    
-    // Copy pixel data
-            memcpy(image->data, (char*)(data + sizeof(rei_header_t)), expected_size);
-    image->data_size = expected_size;
-    
+
+    const uint8_t* in_ptr = data + sizeof(rei_header_t);
+    size_t in_size = (size > sizeof(rei_header_t)) ? (size - sizeof(rei_header_t)) : 0;
+
+    if (comp == REI_COMP_NONE) {
+        // Ensure input has enough bytes
+        if (in_size < (size_t)expected_size) {
+            free(image->data);
+            image->data = NULL;
+            return -1;
+        }
+        memcpy(image->data, (char*)in_ptr, expected_size);
+        image->data_size = expected_size;
+    } else if (comp == REI_COMP_RLE) {
+        // Decompress RLE into output buffer
+        int rc = rei_decompress_rle(in_ptr, in_size, image->data, expected_size, image->header.depth);
+        if (rc != 0) {
+            free(image->data);
+            image->data = NULL;
+            return -1;
+        }
+        image->data_size = expected_size;
+    } else {
+        // Unsupported compression
+        free(image->data);
+        image->data = NULL;
+        return -1;
+    }
+    // Keep alpha data intact; conversion to RGB (with alpha-to-black) should be done by consumers that require it
+
     return 0;
 }
 
@@ -293,3 +316,47 @@ int rei_display_image_centered(const rei_image_t* image) {
     // For now, just display at top-left
     return rei_display_image(image, 0, 0);
 } 
+
+// RLE decompression based on PackBits-like scheme at pixel granularity
+// Encoding layout in the bytestream (operate on pixels of pixel_size bytes):
+//  - Read signed int8 control 'n':
+//      n in [0..127]  : literal run of (n+1) pixels follows
+//      n in [-127..-1]: replicate next single pixel (1) for (1 - n) times
+//      n == -128      : no-op (skip)
+int rei_decompress_rle(const uint8_t* in, size_t in_size,
+                       uint8_t* out, size_t out_size,
+                       uint8_t pixel_size) {
+    if (!in || !out || pixel_size == 0) return -1;
+    size_t ip = 0;
+    size_t op = 0;
+    while (ip < in_size && op < out_size) {
+        int8_t n;
+        n = (int8_t)in[ip++];
+        if (n >= 0) {
+            // literal run of (n+1) pixels
+            size_t count = (size_t)n + 1;
+            size_t bytes = count * pixel_size;
+            if (ip + bytes > in_size) return -1;
+            if (op + bytes > out_size) return -1;
+            memcpy(out + op, in + ip, bytes);
+            ip += bytes;
+            op += bytes;
+        } else if (n != -128) {
+            // replicate next 1 pixel (1 - n) times
+            size_t count = (size_t)(1 - n);
+            if (ip + pixel_size > in_size) return -1;
+            if (op + count * (size_t)pixel_size > out_size) return -1;
+            // Copy one pixel then replicate
+            const uint8_t* px = in + ip;
+            ip += pixel_size;
+            for (size_t i = 0; i < count; ++i) {
+                memcpy(out + op, px, pixel_size);
+                op += pixel_size;
+            }
+        } else {
+            // n == -128 : no-op
+        }
+    }
+    // Valid if we filled exactly out_size
+    return (op == out_size) ? 0 : -1;
+}

@@ -74,12 +74,23 @@ void vga_clear_swap_exclude(void);
 // Overlay helpers (draw directly to framebuffer without touching backbuffer)
 void vga_drawPixel_fb(int x, int y, int r, int g, int b);
 void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h);
+// Fill a rectangle directly into the physical framebuffer (overlay), clipped to screen
+void vga_fillRect_fb(int x, int y, int w, int h, int r, int g, int b);
+// Multiply-darken a rectangle in the backbuffer (or framebuffer if no backbuffer):
+// out.rgb = (in.rgb * factor + 127) / 255. factor=128 ~= 50% black overlay.
+void vga_darkenRect_bb(int x, int y, int w, int h, int factor);
 // Framebuffer region helpers for save-under cursors
 int vga_get_fb_bpp_bytes(void);
 int vga_capture_fb_region(int x, int y, int w, int h, unsigned char* out_buf, int out_buf_len);
 int vga_restore_fb_region(int x, int y, int w, int h, const unsigned char* in_buf, int in_buf_len);
 // Best-effort VBlank sync (safe no-op if unsupported). Waits for start of vblank.
 void vga_wait_vblank(void);
+// Enable/disable vblank sync during swaps (1=enabled default; 0=disabled for max throughput)
+void vga_set_vsync_enabled(int enabled);
+int vga_get_vsync_enabled(void);
+// Dirty rect blit strategy: 0 = smart/multi-rect, 1 = single bounding rect per swap
+void vga_set_dirty_strategy(int strategy);
+int vga_get_dirty_strategy(void);
 
 // Global variables
 extern int width, height;

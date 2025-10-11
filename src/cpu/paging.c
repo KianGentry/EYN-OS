@@ -5,6 +5,14 @@
 #include <types.h>
 #include <string.h>
 
+// Symbols exported by linker script for section bounds
+extern uint32 __kernel_text_start;
+extern uint32 __kernel_text_end;
+extern uint32 __kernel_rodata_start;
+extern uint32 __kernel_rodata_end;
+extern uint32 __kernel_start;
+extern uint32 __kernel_end;
+
 // Global page directory
 page_directory_t* current_directory = 0;
 
@@ -154,10 +162,9 @@ void init_paging() {
     memset(current_directory, 0, sizeof(page_directory_t));
     current_directory->physical_addr[0] = (uint32)current_directory | 0x7; // PRESENT, RW, US
 
-    // Identity map the first 4MB
+    // Identity map the first 4MB (RW for now)
     for (int i = 0; i < 1024; i++) {
-        // Kernel code is readable from user-space
-        alloc_frame(get_page(i * PAGE_SIZE, 1, current_directory), 0, 0);
+        alloc_frame(get_page(i * PAGE_SIZE, 1, current_directory), 1, 1);
     }
 
     // Page fault handler is already registered as ISR 14
@@ -333,4 +340,34 @@ int is_page_user(uint32 virtual_addr) {
 int is_page_writable(uint32 virtual_addr) {
     page_t* page = get_page(virtual_addr, 0, current_directory);
     return page ? page->rw : 0;
+}
+
+// Optional guards: can be called after switch_page_directory when paging is enabled.
+void paging_install_null_guard(void) {
+    if (!current_directory) return;
+    // Ensure page 0 is not present
+    page_t* p0 = get_page(0x0, 1, current_directory);
+    if (p0) { p0->present = 0; p0->rw = 0; p0->user = 0; p0->frame = 0; }
+    asm volatile("invlpg (0)" ::: "memory");
+}
+
+void paging_protect_kernel_text_ro(void) {
+    if (!current_directory) return;
+    uint32 start = (uint32)&__kernel_text_start;
+    uint32 end   = (uint32)&__kernel_text_end;
+    for (uint32 va = start & ~(PAGE_SIZE-1); va < end; va += PAGE_SIZE) {
+        page_t* pg = get_page(va, 0, current_directory);
+        if (pg && pg->present) { pg->rw = 0; }
+    }
+    // Also make rodata read-only
+    start = (uint32)&__kernel_rodata_start;
+    end   = (uint32)&__kernel_rodata_end;
+    for (uint32 va = start & ~(PAGE_SIZE-1); va < end; va += PAGE_SIZE) {
+        page_t* pg = get_page(va, 0, current_directory);
+        if (pg && pg->present) { pg->rw = 0; }
+    }
+    // TLB shootdown: flush all (cr3 reload)
+    uint32 cr3;
+    asm volatile("mov %%cr3, %0" : "=r"(cr3));
+    asm volatile("mov %0, %%cr3" :: "r"(cr3));
 }

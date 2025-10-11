@@ -6,6 +6,7 @@
 #include <util.h>
 #include <string.h>
 #include <kb.h>
+#include <panic.h>
 
 extern multiboot_info_t *g_mbi;
 
@@ -176,10 +177,14 @@ static void attempt_recovery(error_context_t* ctx) {
 static void handle_error(int isr_num, error_context_t* ctx) {
     switch (ctx->severity) {
         case ERROR_FATAL:
-            printf("%c[FATAL] Critical error - system halt\n", 255, 0, 0);
+            printf("%c[FATAL] Critical error - invoking kernel panic\n", 255, 0, 0);
             printf("%cError count: %d\n", 255, 255, 255, system_error_count);
-            asm("hlt");
-            break;
+            {
+                char msg[128];
+                snprintf(msg, sizeof(msg), "ISR %d at 0x%X", isr_num, ctx->eip);
+                PANIC(msg);
+            }
+            break; // PANIC does not return
             
         case ERROR_RECOVERABLE:
             attempt_recovery(ctx);
@@ -214,12 +219,12 @@ void isr13() { generic_isr_handler(13); }
 void isr14() { 
     // Call our custom page fault handler
     extern void page_fault_handler(regs_t* r);
-    regs_t r;
+    regs_t regs;
     // Extract registers from stack (simplified)
-    asm volatile("mov %%esp, %0" : "=r" (r.esp));
-    r.err_code = 0; // Page fault error code
-    r.cs = 0x08; // Kernel code segment
-    page_fault_handler(&r);
+    asm volatile("mov %%esp, %0" : "=r" (regs.esp));
+    regs.err_code = 0; // Page fault error code
+    regs.cs = 0x08; // Kernel code segment
+    page_fault_handler(&regs);
 }
 void isr15() { generic_isr_handler(15); }
 void isr16() { generic_isr_handler(16); }

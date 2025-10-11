@@ -11,6 +11,13 @@
 // REI format version
 #define REI_VERSION 1
 
+// Compression flags (stored in header.reserved1 low nibble)
+// 0 = none (raw pixel data)
+// 1 = RLE (PackBits-style, pixel-wise)
+#define REI_COMP_NONE 0x0
+#define REI_COMP_RLE  0x1
+#define REI_COMP_MASK 0x0F
+
 // Maximum dimensions (VGA text mode limits)
 #define REI_MAX_WIDTH 320
 #define REI_MAX_HEIGHT 200
@@ -26,7 +33,7 @@ typedef struct {
     uint16_t width;        // Image width in pixels
     uint16_t height;       // Image height in pixels
     uint8_t depth;         // Color depth (1, 3, or 4 bytes per pixel)
-    uint8_t reserved1;     // Reserved for future use
+    uint8_t reserved1;     // Flags/Compression (low nibble = compression)
     uint16_t reserved2;    // Reserved for future use
 } rei_header_t;
 
@@ -43,6 +50,11 @@ int rei_validate_header(const rei_header_t* header);
 int rei_calculate_data_size(const rei_header_t* header);
 int rei_parse_image(const uint8_t* data, size_t size, rei_image_t* image);
 void rei_free_image(rei_image_t* image);
+
+// Decompression (internal helpers)
+int rei_decompress_rle(const uint8_t* in, size_t in_size,
+                       uint8_t* out, size_t out_size,
+                       uint8_t pixel_size);
 
 // Display functions
 int rei_display_image(const rei_image_t* image, int x, int y);

@@ -32,9 +32,15 @@ extern int shell_log_line_starts[1001];
 extern int shell_log_active;
 
 // Command hash table for O(1) lookups
-#define COMMAND_HASH_SIZE 128
-static shell_cmd_handler_t g_command_hash_table[COMMAND_HASH_SIZE];
+// Increased size to reduce collision rate; bounded probing prevents hangs
+#define COMMAND_HASH_SIZE 256
+typedef struct {
+    const char* name;                 // command name key
+    shell_cmd_handler_t handler;      // command handler value
+} command_hash_entry_t;
+static command_hash_entry_t g_command_hash_table[COMMAND_HASH_SIZE];
 static int g_command_hash_initialized = 0;
+static int g_command_hash_disabled = 0; // Fallback to linear search when table would be full
 
 void __stack_chk_fail_local() {
     return;
@@ -62,6 +68,7 @@ static volatile char last_failed_command[64] = {0};
 
 // Command types are now defined in shell_command_info.h
 
+#include <watchdog.h>
 // Forward declarations for command functions
 void init_cmd(string arg);
 void memory_cmd(string arg);
@@ -131,6 +138,7 @@ void size(string arg);
 void log_cmd(string arg);
 void hexdump_cmd(string arg);
 void draw_cmd_handler(string arg);
+// ...existing code...
 
 // RAM disk commands
 void catram_cmd(string arg);
@@ -141,7 +149,7 @@ void search_size_cmd(string arg);
 void search_type_cmd(string arg);
 void search_empty_cmd(string arg);
 void search_depth_cmd(string arg);
-void ls_tree_cmd(string arg);
+// ...existing code...
 void ls_size_cmd(string arg);
 void ls_detail_cmd(string arg);
 void fsstat_cmd(string arg);
@@ -180,7 +188,7 @@ typedef void (*shell_cmd_handler_t)(string arg);
 // Command loading state
 static int streaming_commands_loaded = 0;
 static int commands_loaded_count = 0;
-
+// ...existing code...
 // Command management functions (simplified for unified system)
 static void load_streaming_commands() {
     // All commands are now always available through the linker section
@@ -208,20 +216,28 @@ static void init_command_hash_table() {
     
     // Clear hash table
     for (int i = 0; i < COMMAND_HASH_SIZE; i++) {
-        g_command_hash_table[i] = NULL;
+        g_command_hash_table[i].name = NULL;
+        g_command_hash_table[i].handler = NULL;
     }
     
     // Build hash table from all registered commands
     size_t num_commands = (__stop_shellcmds - __start_shellcmds);
+    // If the number of commands would fill the table completely, disable hashing and fallback to linear search
+    if (num_commands >= COMMAND_HASH_SIZE - 1) {
+        g_command_hash_disabled = 1;
+        g_command_hash_initialized = 1;
+        return;
+    }
     for (size_t i = 0; i < num_commands; i++) {
         const shell_command_info_t* cmd = &__start_shellcmds[i];
         uint32_t hash = command_hash(cmd->name);
         
         // Simple linear probing for collisions
-        while (g_command_hash_table[hash] != NULL) {
+        while (g_command_hash_table[hash].name != NULL) {
             hash = (hash + 1) % COMMAND_HASH_SIZE;
         }
-        g_command_hash_table[hash] = cmd->handler;
+        g_command_hash_table[hash].name = cmd->name;
+        g_command_hash_table[hash].handler = cmd->handler;
     }
     
     g_command_hash_initialized = 1;
@@ -231,25 +247,34 @@ static void init_command_hash_table() {
 shell_cmd_handler_t find_command(const char* name) {
     // Initialize hash table on first use
     init_command_hash_table();
+    if (!name || !*name) return NULL;
     
-    // Try O(1) hash lookup first
-    uint32_t hash = command_hash(name);
-    uint32_t original_hash = hash;
-    
-    // Linear probing for collisions
-    do {
-        if (g_command_hash_table[hash] != NULL) {
-            // Verify this is the correct command by checking the original command list
-            size_t num_commands = (__stop_shellcmds - __start_shellcmds);
-            for (size_t i = 0; i < num_commands; i++) {
-                const shell_command_info_t* cmd = &__start_shellcmds[i];
-                if (strcmp(cmd->name, name) == 0 && cmd->handler == g_command_hash_table[hash]) {
-                    return cmd->handler;
-                }
+    // If hashing is disabled due to table saturation, use linear search
+    if (g_command_hash_disabled) {
+        size_t num_commands = (__stop_shellcmds - __start_shellcmds);
+        for (size_t i = 0; i < num_commands; i++) {
+            const shell_command_info_t* cmd = &__start_shellcmds[i];
+            if (strcmp(cmd->name, name) == 0) {
+                return cmd->handler;
             }
         }
+        return NULL;
+    }
+    
+    // Try O(1) hash lookup first using open addressing and key comparison
+    uint32_t hash = command_hash(name);
+    for (int probes = 0; probes < COMMAND_HASH_SIZE; ++probes) {
+        const char* slot_name = g_command_hash_table[hash].name;
+        if (slot_name == NULL) {
+            // Empty slot: not found
+            return NULL;
+        }
+        if (strcmp(slot_name, name) == 0) {
+            return g_command_hash_table[hash].handler;
+        }
         hash = (hash + 1) % COMMAND_HASH_SIZE;
-    } while (hash != original_hash);
+    }
+    // Not found after probing entire table
     
     // Fallback to linear search if hash lookup fails
     size_t num_commands = (__stop_shellcmds - __start_shellcmds);
@@ -393,14 +418,18 @@ void handle_shell_command(string input) {
     }
     cmd[i] = '\0';
     
+    // If empty input (just Enter), do nothing
+    if (cmd[0] == '\0') {
+        return;
+    }
+    
     // Find and execute the command using unified lookup
     shell_cmd_handler_t handler = find_command(cmd);
     if (handler) {
         safe_command_execution(input, handler); // Pass full input, not just cmd
         return;
     }
-    
-    // Command not found
+    // Command not found: print a friendly message and avoid any undefined handler calls
     printf("%cCommand not found: %s\n", 255, 0, 0, cmd);
 }
 
@@ -437,6 +466,8 @@ void launch_shell(int n) {
     init_pipeline_system();
     
     while (1) {
+        // Note shell loop progress for the watchdog
+        watchdog_kick("shell-loop");
         if (shell_log_active) {
             printf("%c[LOG] ", 0, 255, 0);
         }
@@ -509,6 +540,7 @@ void launch_shell(int n) {
                 if (ch && strlen(ch) > 0) {
                     add_to_history(&g_command_history, ch);
                 }
+                watchdog_kick("exec-pipeline");
                 execute_pipeline(pipeline);
                 free_pipeline(pipeline);
             } else {
@@ -548,6 +580,7 @@ void launch_shell(int n) {
                 if (ch && strlen(ch) > 0) {
                     add_to_history(&g_command_history, ch);
                 }
+                watchdog_kick("exec-line");
                 handle_shell_command(ch);
             }
         }

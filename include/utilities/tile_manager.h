@@ -3,6 +3,7 @@
 
 #include <types.h>
 #include <mouse.h>
+#include <rei.h>
 
 // Set GUI title/status for a given tile index (0..3).
 // title: centered title text
@@ -63,5 +64,26 @@ void wm_invalidate_window(int win_id);
 
 // Close the window
 void wm_close_window(int win_id);
+
+// ---------------- Runtime GUI tuning (low-spec controls) ----------------
+// Mode: 0=high (full features), 1=low (wireframe drag, simplified decor), 2=auto (based on RAM)
+void tiler_gui_set_mode(int mode);
+// FPS cap: 0 disables the cap (unlimited), otherwise set to desired frames per second (e.g., 20/30/60)
+void tiler_gui_set_fps_cap(int fps);
+// Drag throttle in milliseconds (0 means minimal throttling); larger values reduce redraw rate during drags
+void tiler_gui_set_drag_throttle_ms(int ms);
+// Print current GUI tuning status to the shell
+void tiler_gui_print_status(void);
+
+// ---------------- Terminal background images (per tile) ----------------
+// Begin an interactive prompt to set a REI image as the background for a tile's
+// content area. A popup will ask for Tile/Scale/Center (if the image is larger than
+// the screen, only Scale will be offered). The function takes ownership of the image
+// memory; it will be freed automatically on cancel or when the background is replaced.
+// Returns 0 on success (prompt shown or background applied), -1 on failure (tiler inactive or bad params).
+int tile_begin_set_background_from_rei(int tile_idx, rei_image_t* image);
+
+// Clear any configured background image for the given tile (no-op if none).
+void tile_clear_background(int tile_idx);
 
 #endif // TILE_MANAGER_H

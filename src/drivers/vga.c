@@ -8,6 +8,7 @@
 #include <types.h>
 #include <shell.h>
 #include <system.h>
+#include <serial.h>
 
 extern multiboot_info_t *g_mbi;
 
@@ -27,6 +28,10 @@ typedef struct { int x, y, w, h; } dirty_rect_t;
 #define MAX_DIRTY_RECTS 128
 static dirty_rect_t g_dirty_rects[MAX_DIRTY_RECTS];
 static int g_dirty_count = 0;
+// VSync toggle (1 by default to reduce tearing)
+static int g_vsync_enabled = 1;
+// Dirty strategy: 0=multi-rect smart merge, 1=collapse to single bounding rect per swap
+static int g_dirty_strategy = 0;
 
 // Shell redirection globals
 int shell_redirect_active = 0;
@@ -182,19 +187,24 @@ void shell_log_flush() {
 
 void drawRect(int x, int y, int w, int h, int r, int g, int b)
 {
-	int i, j;
+	// Clip rectangle to framebuffer/backbuffer bounds
+	if (w <= 0 || h <= 0) { return; }
+	int sw = g_mbi ? (int)g_mbi->framebuffer_width : 0;
+	int sh = g_mbi ? (int)g_mbi->framebuffer_height : 0;
+	if (x >= sw || y >= sh) { return; }
+	if (x < 0) { w += x; x = 0; }
+	if (y < 0) { h += y; y = 0; }
+	if (x + w > sw) { w = sw - x; }
+	if (y + h > sh) { h = sh - y; }
+	if (w <= 0 || h <= 0) { return; }
+
 	// If a backbuffer is available, draw into it; otherwise draw directly to framebuffer
-	if (g_backbuffer && g_backbuffer_w >= (int)g_mbi->framebuffer_width && g_backbuffer_h >= (int)g_mbi->framebuffer_height) {
-		unsigned int offset = (x + y * g_backbuffer_w) * 4;
-		for (i = 0; i < h; i++) {
-			for (j = 0; j < w; j++) {
-				unsigned int o = offset + j * 4;
-				g_backbuffer[o] = (unsigned char)b;
-				g_backbuffer[o + 1] = (unsigned char)g;
-				g_backbuffer[o + 2] = (unsigned char)r;
-				g_backbuffer[o + 3] = 0;
-			}
-			offset += g_backbuffer_w * 4;
+	if (g_backbuffer && g_backbuffer_w >= sw && g_backbuffer_h >= sh) {
+		// 32-bit packed color write for speed
+		uint32_t packed = ((uint32_t)0 << 24) | ((uint32_t)(unsigned char)r << 16) | ((uint32_t)(unsigned char)g << 8) | (uint32_t)(unsigned char)b;
+		for (int i = 0; i < h; i++) {
+			uint32_t* row = (uint32_t*)(g_backbuffer + ((size_t)(y + i) * g_backbuffer_w + x) * 4);
+			for (int j = 0; j < w; j++) row[j] = packed;
 		}
 		// mark region dirty
 		vga_mark_dirty_rect(x, y, w, h);
@@ -202,16 +212,67 @@ void drawRect(int x, int y, int w, int h, int r, int g, int b)
 	}
 	// fallback to drawing directly to framebuffer
 	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
-	unsigned int offset = (x + y * g_mbi->framebuffer_width) * 4; // find location of the pixel
-	for (i = 0; i < h; i++) {
-		for (j = 0; j < w; j++) // colouring in each line
-		{
-			video[offset + j * 4] = b;
-			video[offset + j * 4 + 1] = g;
-			video[offset + j * 4 + 2] = r;
-			video[offset + j * 4 + 3] = 0;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8;
+	if (bpp < 3) bpp = 3;
+	for (int i = 0; i < h; i++) {
+		unsigned char *row = video + (y + i) * pitch + x * bpp;
+		for (int j = 0; j < w; j++) {
+			row[j*bpp + 0] = (unsigned char)b;
+			row[j*bpp + 1] = (unsigned char)g;
+			row[j*bpp + 2] = (unsigned char)r;
+			if (bpp >= 4) row[j*bpp + 3] = 0xFF;
 		}
-		offset += g_mbi->framebuffer_width * 4; // beginning of each line
+	}
+}
+
+// Multiply-darken a rectangle in the backbuffer (or framebuffer if no backbuffer)
+// factor is 0..255 where 255 leaves image unchanged and 128 is roughly 50% darken.
+void vga_darkenRect_bb(int x, int y, int w, int h, int factor)
+{
+	if (w <= 0 || h <= 0) return;
+	if (factor < 0) factor = 0;
+	if (factor > 255) factor = 255;
+	int sw = g_mbi ? (int)g_mbi->framebuffer_width : 0;
+	int sh = g_mbi ? (int)g_mbi->framebuffer_height : 0;
+	if (x >= sw || y >= sh) return;
+	if (x < 0) { w += x; x = 0; }
+	if (y < 0) { h += y; y = 0; }
+	if (x + w > sw) w = sw - x;
+	if (y + h > sh) h = sh - y;
+	if (w <= 0 || h <= 0) return;
+
+	// Prefer operating on the backbuffer so swap can blit it
+	if (g_backbuffer && g_backbuffer_w >= sw && g_backbuffer_h >= sh) {
+		// Backbuffer is 32bpp RGBA
+		for (int yy = 0; yy < h; ++yy) {
+			uint8_t* row = g_backbuffer + ((size_t)(y + yy) * g_backbuffer_w + x) * 4;
+			for (int xx = 0; xx < w; ++xx) {
+				uint8_t* p = row + xx * 4;
+				// p[0]=B p[1]=G p[2]=R p[3]=A (we keep A as-is)
+				p[0] = (uint8_t)((p[0] * factor + 127) / 255);
+				p[1] = (uint8_t)((p[1] * factor + 127) / 255);
+				p[2] = (uint8_t)((p[2] * factor + 127) / 255);
+			}
+		}
+		vga_mark_dirty_rect(x, y, w, h);
+		return;
+	}
+
+	// Fallback: operate directly on framebuffer
+	if (!g_mbi) return;
+	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8; if (bpp < 3) bpp = 3;
+	for (int yy = 0; yy < h; ++yy) {
+		unsigned char* row = video + (y + yy) * pitch + x * bpp;
+		for (int xx = 0; xx < w; ++xx) {
+			unsigned char* p = row + xx * bpp;
+			p[0] = (uint8_t)((p[0] * factor + 127) / 255);
+			p[1] = (uint8_t)((p[1] * factor + 127) / 255);
+			p[2] = (uint8_t)((p[2] * factor + 127) / 255);
+			if (bpp >= 4) { /* preserve alpha */ }
+		}
 	}
 }
 
@@ -263,15 +324,15 @@ void drawText(int charnum, int r, int g, int b)
 					int yy = y0 + k;
 					if (yy < 0 || yy >= g_backbuffer_h) continue;
 					unsigned char rowbits = font[charnum * 8 + k];
+					unsigned char *dst = g_backbuffer + ((size_t)yy * g_backbuffer_w + x0) * 4;
 					for (i = 0; i < 8; i++) {
+						int xx = (8 - i);
+						if (x0 + xx < 0 || x0 + xx >= g_backbuffer_w) continue;
 						if (rowbits & (0x01 << i)) {
-							int xx = x0 + (8 - i);
-							if (xx < 0 || xx >= g_backbuffer_w) continue;
-							size_t o = ((size_t)yy * g_backbuffer_w + xx) * 4;
-							g_backbuffer[o + 0] = (unsigned char)b;
-							g_backbuffer[o + 1] = (unsigned char)g;
-							g_backbuffer[o + 2] = (unsigned char)r;
-							g_backbuffer[o + 3] = 0;
+							dst[xx*4 + 0] = (unsigned char)b;
+							dst[xx*4 + 1] = (unsigned char)g;
+							dst[xx*4 + 2] = (unsigned char)r;
+							dst[xx*4 + 3] = 0;
 						}
 					}
 				}
@@ -448,6 +509,10 @@ void printf(const char* format, ...)
 			shell_redirect_buf[shell_redirect_pos++] = temp[i];
 		}
 		shell_redirect_buf[shell_redirect_pos] = '\0';
+		// Also mirror to serial without colors
+		for (int i = 0; i < to_copy; ++i) {
+			serial_write_char(SERIAL_COM1, temp[i]);
+		}
 		va_end(ap);
 		return;
 	}
@@ -533,6 +598,42 @@ void printf(const char* format, ...)
 		}
 		shell_log_buf[shell_log_pos] = '\0';
 		va_end(ap_log);
+	}
+
+	// Mirror output to serial as we render to VGA (without color codes)
+	{
+		va_list ap_serial;
+		va_copy(ap_serial, ap);
+		char temp[512];
+		int temp_pos = 0;
+		for (ptr = (uint8*)format; *ptr != '\0' && temp_pos < 511; ptr++) {
+			if (*ptr == '%') {
+				ptr++;
+				switch (*ptr) {
+					case 's': {
+						char* str = va_arg(ap_serial, char*);
+						while (*str && temp_pos < 511) temp[temp_pos++] = *str++;
+						break;
+					}
+					case 'd': {
+						char* num_str = int_to_string(va_arg(ap_serial, int));
+						while (*num_str && temp_pos < 511) temp[temp_pos++] = *num_str++;
+						break;
+					}
+					case '%': temp[temp_pos++] = '%'; break;
+					case 'c': temp[temp_pos++] = (char)va_arg(ap_serial, int); break;
+				}
+			} else if (*ptr == '\n') {
+				temp[temp_pos++] = '\n';
+			} else {
+				temp[temp_pos++] = *ptr;
+			}
+		}
+		temp[temp_pos] = '\0';
+		for (int i = 0; i < temp_pos; ++i) {
+			serial_write_char(SERIAL_COM1, temp[i]);
+		}
+		va_end(ap_serial);
 	}
 
 	for (ptr = (uint8*)format; *ptr != '\0'; ptr++) 
@@ -740,8 +841,8 @@ static void rect_union_inplace(dirty_rect_t* dst, dirty_rect_t src) {
 }
 
 void vga_swap_buffers(void) {
-	// Try to align copies with VBlank to reduce tearing near the top
-	vga_wait_vblank();
+	// Try to align copies with VBlank to reduce tearing near the top (optional)
+	if (g_vsync_enabled) vga_wait_vblank();
 	if (!g_mbi) return;
 	if (!g_backbuffer) return;
 	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
@@ -752,6 +853,24 @@ void vga_swap_buffers(void) {
 	if (!fb || pitch <= 0 || bpp < 3) return;
 	// If nothing dirty, nothing to copy
 	if (g_dirty_count <= 0) return;
+	// If requested, collapse all dirty rects to a single bounding box for a single blit
+	if (g_dirty_strategy == 1 && g_dirty_count > 1) {
+		int minx = g_dirty_rects[0].x, miny = g_dirty_rects[0].y;
+		int maxx = g_dirty_rects[0].x + g_dirty_rects[0].w;
+		int maxy = g_dirty_rects[0].y + g_dirty_rects[0].h;
+		for (int i = 1; i < g_dirty_count; ++i) {
+			int rx2 = g_dirty_rects[i].x + g_dirty_rects[i].w;
+			int ry2 = g_dirty_rects[i].y + g_dirty_rects[i].h;
+			if (g_dirty_rects[i].x < minx) minx = g_dirty_rects[i].x;
+			if (g_dirty_rects[i].y < miny) miny = g_dirty_rects[i].y;
+			if (rx2 > maxx) maxx = rx2;
+			if (ry2 > maxy) maxy = ry2;
+		}
+		g_dirty_rects[0].x = minx; g_dirty_rects[0].y = miny;
+		g_dirty_rects[0].w = maxx - minx; g_dirty_rects[0].h = maxy - miny;
+		g_dirty_count = 1;
+	}
+
 	// Helper to copy a span from backbuffer to fb, honoring pitch/bpp
 	#define COPY_SPAN(abs_y, start_x, span_w) do { \
 		if ((span_w) > 0) { \
@@ -900,6 +1019,22 @@ void vga_wait_vblank(void) {
 	}
 }
 
+void vga_set_vsync_enabled(int enabled) {
+	g_vsync_enabled = enabled ? 1 : 0;
+}
+
+int vga_get_vsync_enabled(void) {
+	return g_vsync_enabled;
+}
+
+void vga_set_dirty_strategy(int strategy) {
+	g_dirty_strategy = (strategy == 1) ? 1 : 0;
+}
+
+int vga_get_dirty_strategy(void) {
+	return g_dirty_strategy;
+}
+
 // Draw directly to the physical framebuffer (overlay), bypassing the backbuffer
 void vga_drawPixel_fb(int x, int y, int r, int g, int b) {
 	if (!g_mbi) return;
@@ -931,16 +1066,68 @@ void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h) {
 	int pitch = g_mbi->framebuffer_pitch;
 	int bpp = g_mbi->framebuffer_bpp / 8;
 	if (!fb || pitch <= 0 || bpp < 3) return;
-	for (int row = 0; row < h; ++row) {
-		unsigned char* src = g_backbuffer + (y + row) * g_backbuffer_w * 4 + x * 4;
-		unsigned char* dst = fb + (y + row) * pitch + x * bpp;
-		for (int col = 0; col < w; ++col) {
-			// Backbuffer layout: [0]=B, [1]=G, [2]=R, [3]=A(ignored)
-			dst[0] = src[0]; // B
-			dst[1] = src[1]; // G
-			dst[2] = src[2]; // R
+	if (bpp == 4 && pitch == fb_w * 4) {
+		// Formats match exactly; copy each row with a single memcpy
+		for (int row = 0; row < h; ++row) {
+			unsigned char* src = g_backbuffer + ((size_t)(y + row) * g_backbuffer_w + x) * 4;
+			unsigned char* dst = fb + ((size_t)(y + row) * pitch + x * 4);
+			memcpy(dst, src, (size_t)w * 4);
+		}
+	} else {
+		for (int row = 0; row < h; ++row) {
+			unsigned char* src = g_backbuffer + (y + row) * g_backbuffer_w * 4 + x * 4;
+			unsigned char* dst = fb + (y + row) * pitch + x * bpp;
+			for (int col = 0; col < w; ++col) {
+				// Backbuffer layout: [0]=B, [1]=G, [2]=R, [3]=A(ignored)
+				dst[0] = src[0]; // B
+				dst[1] = src[1]; // G
+				dst[2] = src[2]; // R
+				if (bpp >= 4) dst[3] = 0xFF;
+				src += 4;
+				dst += bpp;
+			}
+		}
+	}
+}
+
+// Fast overlay rectangle fill directly to framebuffer, clipped
+void vga_fillRect_fb(int x, int y, int w, int h, int rr, int gg, int bb) {
+	if (!g_mbi) return;
+	int sw = g_mbi->framebuffer_width;
+	int sh = g_mbi->framebuffer_height;
+	if (w <= 0 || h <= 0) return;
+	if (x >= sw || y >= sh) return;
+	if (x < 0) { w += x; x = 0; }
+	if (y < 0) { h += y; y = 0; }
+	if (x + w > sw) w = sw - x;
+	if (y + h > sh) h = sh - y;
+	if (w <= 0 || h <= 0) return;
+	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8; if (bpp < 3) bpp = 3;
+	// Precompute a row in a small stack buffer for fast copy when bpp==4
+	if (bpp == 4) {
+		// Fill a temporary row of length w
+		// Limit a small temp row to avoid large stack usage; if too big, fill per-pixel
+		if (w <= 1024) {
+			uint32_t rowbuf[1024];
+			uint32_t packed = ((uint32_t)0xFF << 24) | ((uint32_t)(unsigned char)rr << 16) | ((uint32_t)(unsigned char)gg << 8) | (uint32_t)(unsigned char)bb;
+			for (int i = 0; i < w; ++i) rowbuf[i] = packed;
+			for (int yy = 0; yy < h; ++yy) {
+				uint32_t* dst = (uint32_t*)(fb + (size_t)(y + yy) * pitch + x * 4);
+				memcpy(dst, rowbuf, (size_t)w * 4);
+			}
+			return;
+		}
+	}
+	// Generic path
+	for (int yy = 0; yy < h; ++yy) {
+		unsigned char* dst = fb + (size_t)(y + yy) * pitch + x * bpp;
+		for (int xx = 0; xx < w; ++xx) {
+			dst[0] = (unsigned char)bb;
+			dst[1] = (unsigned char)gg;
+			dst[2] = (unsigned char)rr;
 			if (bpp >= 4) dst[3] = 0xFF;
-			src += 4;
 			dst += bpp;
 		}
 	}

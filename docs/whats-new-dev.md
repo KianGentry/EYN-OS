@@ -11,9 +11,11 @@ This document summarizes notable changes on the dev branch compared to origin/ma
 - Virtual terminals per tile with selection and mouse wheel scrollback
 - GUI versions of commands: write editor and help system
 - New GUI commands: `draw`, `view`, `vieww`, and `win_test`
+- New GUI command: `stats` — graphical CPU/memory/disk monitor
 - REI: RGBA support with alpha respected in compositor overlays
 - VGA driver: dirty-rectangle redraws and backbuffer-aware pixel ops to reduce flicker
 - Mouse driver: wheel events, improved cursor overlay, optional custom cursor image
+- Watchdog timer integrated with shell and GUI loops; panic screen overhauled with stop codes
 - Header reorganization into cpu/, drivers/, misc/, utilities/
 - Assembler moved to utilities/assembler; docs expanded
 - Makefile portability updates (Fedora grub2-mkrescue)
@@ -41,6 +43,8 @@ Features:
   - Per-window GUI client callbacks for draw, key, and mouse
   - Z-order, focus highlight, and unfocused icon variants for buttons
 - Reduced flicker via dirty-rectangle rendering and backbuffer-aware drawing
+- Runtime tuning for low-spec systems (mode, FPS cap, drag throttle)
+- Per-tile background images with REI chooser and darkening
 
 CLI entry points:
 - `tiling` — Launch the tiling front-end manager (`src/utilities/shell/tiling_cmd.c`)
@@ -127,6 +131,25 @@ Files: `src/drivers/mouse.c`, `include/drivers/mouse.h`, `src/utilities/tui/tili
 - Mouse event struct with deltas, wheel, and button change tracking
 - Cursor overlay with save-under restore and optional REI image
 - Terminal scrollback bound to mouse wheel when tile has no GUI client
+
+---
+
+## Diagnostics and Reliability
+
+### Watchdog
+
+Files: `src/misc/watchdog.c`, `include/misc/watchdog.h`
+
+- Detects stalls based on scheduler tick; can be tuned at runtime
+- Components call `watchdog_kick()` to record forward progress
+- Trips into a panic with source and elapsed ticks when starved
+
+### Panic Screen
+
+Files: `src/misc/panic.c`, `include/misc/panic.h`, `docs/stop-codes.md`
+
+- Blue screen of diagnostics with reason, location, category, and stop code
+- Serial backtrace for debugging; see docs for interpreting stop codes
 
 ---
 

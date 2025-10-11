@@ -1,6 +1,7 @@
 #include <sched.h>
 #include <system.h>
 #include <irq.h>
+#include <watchdog.h>
 
 static volatile uint32 g_ticks = 0;
 static uint32 g_tick_hz = 100;
@@ -48,6 +49,8 @@ void sched_sleep_us(uint32 microseconds) {
 
 void sched_tick(void) {
     g_ticks++;
+    // Update watchdog each tick
+    watchdog_on_tick();
     if (++g_current_slice >= g_timeslice_ticks) {
         g_current_slice = 0;
         extern void sched_on_timeslice_end(void);

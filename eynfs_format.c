@@ -50,9 +50,14 @@ int main(int argc, char** argv) {
     fseek(f, superblock_lba * EYNFS_BLOCK_SIZE, SEEK_SET);
     if (fwrite(&sb, 1, sizeof(sb), f) != sizeof(sb)) die("Failed to write superblock");
 
-    // Write zeroed free block bitmap, mark reserved blocks as used
+    // Write zeroed free block bitmap, mark metadata blocks as used
     uint8_t bitmap[EYNFS_BLOCK_SIZE] = {0};
-    for (int i = 0; i < RESERVED_BLOCKS; i++) bitmap[i/8] |= (1 << (i%8));
+    #define SET_BIT(arr, bit) do { (arr)[(bit)/8] |= (uint8_t)(1u << ((bit)%8)); } while(0)
+    SET_BIT(bitmap, superblock_lba);
+    SET_BIT(bitmap, bitmap_lba);
+    SET_BIT(bitmap, nametable_lba);
+    SET_BIT(bitmap, rootdir_lba);
+    #undef SET_BIT
     fseek(f, bitmap_lba * EYNFS_BLOCK_SIZE, SEEK_SET);
     if (fwrite(bitmap, 1, EYNFS_BLOCK_SIZE, f) != EYNFS_BLOCK_SIZE) die("Failed to write bitmap");
 

@@ -66,6 +66,10 @@ RAM:/!         # RAM disk (special drive)
 - **Escape**: Clear current input
 - **Ctrl+C**: Interrupt current operation
 
+### Mouse and Selection
+- Mouse wheel scrolls terminal scrollback when running inside the tiling manager (and the focused tile has no GUI client)
+- The input line supports selection visuals for improved editing ergonomics
+
 ## Built-in Commands
 
 ### System Commands

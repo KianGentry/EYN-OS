@@ -3,20 +3,31 @@ EYN-OS Command Help
 
 Essential Commands:
 ------------------
+  assertfail      - Trigger an assertion failure (ASSERT).
   clear           - Clears the screen and resets the shell display.
   exit            - Exits the kernel and shuts down the system.
   help            - Display this message and show all available commands with descriptions and examples.
   init            - Initialize full system services (ATA drives, etc.).
   memory          - Memory management and testing.
+  panic           - Trigger a kernel panic to test diagnostics.
   portable        - Display portability optimizations and memory usage.
 
 Streaming Commands:
 ------------------
   catram          - Display contents of a file from RAM disk (FAT32).
+  clearbg         - Clear background image for the focused tile.
   error           - Display system error statistics and status.
   fatfix          - Scan and repair FAT32 entries incorrectly marked as directories.
   lsram           - List files in the RAM disk (FAT32) with directory tree.
+  memory_stats    - Show predictive memory statistics
+  mmap            - Memory map a file for zero-copy access
+  msync           - Synchronize memory-mapped file to disk
+  munmap          - Unmap a memory-mapped file
+  pagingguards    - Install optional paging guards (null-page, .text/.rodata RO).
+  predict         - Predictive memory management
   rect            - Draw a rectangle.
+  serialtest      - Write a test line to COM1 to verify serial output.
+  setbg           - Set a REI image as background for the focused tile (shows Tile/Scale/Center chooser).
   size            - Show the size of a file in bytes.
   stats           - Graphical system performance monitor with CPU, memory, disk pies and sortable table
   tiling          - Launch the tiling front-end manager.

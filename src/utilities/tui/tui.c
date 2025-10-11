@@ -15,13 +15,11 @@ static int tui_cur_y = 0;
 // exported flag, updated by tui_read_key
 int tui_alt_pressed = 0;
 
-// Helper to set the global cursor position for drawText
+// Helper to compute pixel position for cell coords (kept for potential future use)
 static void tui_set_cursor(int x, int y) {
     tui_cur_x = x;
     tui_cur_y = y;
-    extern int width, height;
-    width = x * 8;
-    height = y * 8;
+    // Intentionally avoid touching global VGA cursor (width/height) to prevent side effects.
 }
 
 void tui_init(int screen_width, int screen_height) {
@@ -38,20 +36,18 @@ void tui_refresh() {
 }
 
 void tui_draw_text(int x, int y, const char* text, tui_style_t style) {
-    tui_set_cursor(x, y);
-    int r = 0, g = 0, b = 0;
+    int rr = 0, gg = 0, bb = 0;
     switch (style.fg_color) {
-        case TUI_COLOR_YELLOW: r = 255; g = 255; b = 0; break;
-        case TUI_COLOR_RED:    r = 255; g = 0;   b = 0; break;
-        case TUI_COLOR_MAGENTA:r = 255; g = 0;   b = 255; break;
-        case TUI_COLOR_WHITE:  r = 255; g = 255; b = 255; break;
-        case TUI_COLOR_BLACK:  r = 0;   g = 0;   b = 0; break;
-        case TUI_COLOR_GRAY:   r = 192; g = 192; b = 192; break;
-        default:               r = 255; g = 255; b = 255; break;
+        case TUI_COLOR_YELLOW: rr = 255; gg = 255; bb = 0; break;
+        case TUI_COLOR_RED:    rr = 255; gg = 0;   bb = 0; break;
+        case TUI_COLOR_MAGENTA:rr = 255; gg = 0;   bb = 255; break;
+        case TUI_COLOR_WHITE:  rr = 255; gg = 255; bb = 255; break;
+        case TUI_COLOR_BLACK:  rr = 0;   gg = 0;   bb = 0; break;
+        case TUI_COLOR_GRAY:   rr = 192; gg = 192; bb = 192; break;
+        default:               rr = 255; gg = 255; bb = 255; break;
     }
-    for (size_t i = 0; text[i] != '\0'; ++i) {
-        drawText(text[i], r, g, b);
-    }
+    // Use side-effect-free pixel-based text to avoid console cursor side effects
+    drawTextAt(x * 8, y * 8, text, rr, gg, bb);
 }
 
 void tui_draw_window(const tui_window_t* win) {
@@ -107,11 +103,22 @@ void tui_draw_text_area(const tui_window_t* win, const char* text, int scroll_of
     int line = 0, col = 0;
     for (int i = 0; text[i] != '\0' && line < max_lines + scroll_offset; ++i) {
         if (line >= scroll_offset) {
-            if (col == 0) {
-                tui_set_cursor(x, y + line - scroll_offset);
-            }
+            // Draw this character at the appropriate pixel position directly to avoid
+            // any global console cursor side effects.
             char ch[2] = {text[i], '\0'};
-            tui_draw_text(x + col, y + line - scroll_offset, ch, style);
+            int px = (x + col) * 8;
+            int py = (y + line - scroll_offset) * 8;
+            int rr = 255, gg = 255, bb = 255;
+            switch (style.fg_color) {
+                case TUI_COLOR_YELLOW: rr = 255; gg = 255; bb = 0; break;
+                case TUI_COLOR_RED:    rr = 255; gg = 0;   bb = 0; break;
+                case TUI_COLOR_MAGENTA:rr = 255; gg = 0;   bb = 255; break;
+                case TUI_COLOR_WHITE:  rr = 255; gg = 255; bb = 255; break;
+                case TUI_COLOR_BLACK:  rr = 0;   gg = 0;   bb = 0; break;
+                case TUI_COLOR_GRAY:   rr = 192; gg = 192; bb = 192; break;
+                default:               rr = 255; gg = 255; bb = 255; break;
+            }
+            drawTextAt(px, py, ch, rr, gg, bb);
         }
         if (text[i] == '\n' || col >= win->width - 3) {
             line++;
@@ -124,33 +131,34 @@ void tui_draw_text_area(const tui_window_t* win, const char* text, int scroll_of
 
 void tui_draw_status_bar(const tui_window_t* win, const char* text, tui_style_t style) {
     // If a window is provided, draw the status bar just below the window; otherwise, draw at the screen bottom.
-    int y = (win == NULL) ? (tui_screen_height) : (win->y + win->height);
+    // Clamp to last visible row (0-based). Previous code used height itself, which is off-by-one.
+    int y = (win == NULL) ? (tui_screen_height - 1) : (win->y + win->height - 1);
     int x = (win == NULL) ? 0 : win->x;
-    int width = (win == NULL) ? tui_screen_width : win->width;
+    int bar_width = (win == NULL) ? tui_screen_width : win->width;
     // Map style to RGB
-    int r = 255, g = 255, b = 255;
+    int rr = 255, gg = 255, bb = 255;
     switch (style.fg_color) {
-        case TUI_COLOR_YELLOW: r = 255; g = 255; b = 0; break;
-        case TUI_COLOR_RED:    r = 255; g = 0;   b = 0; break;
-        case TUI_COLOR_MAGENTA:r = 255; g = 0;   b = 255; break;
-        case TUI_COLOR_WHITE:  r = 255; g = 255; b = 255; break;
-        case TUI_COLOR_BLACK:  r = 0;   g = 0;   b = 0; break;
-        case TUI_COLOR_GRAY:   r = 192; g = 192; b = 192; break;
-        default:               r = 255; g = 255; b = 255; break;
+        case TUI_COLOR_YELLOW: rr = 255; gg = 255; bb = 0; break;
+        case TUI_COLOR_RED:    rr = 255; gg = 0;   bb = 0; break;
+        case TUI_COLOR_MAGENTA:rr = 255; gg = 0;   bb = 255; break;
+        case TUI_COLOR_WHITE:  rr = 255; gg = 255; bb = 255; break;
+        case TUI_COLOR_BLACK:  rr = 0;   gg = 0;   bb = 0; break;
+        case TUI_COLOR_GRAY:   rr = 192; gg = 192; bb = 192; break;
+        default:               rr = 255; gg = 255; bb = 255; break;
     }
 
     // Convert TUI grid coords to pixel coords
     int px = x * 8;
     int py = y * 8;
     int clip_min = px;
-    int clip_max = (x + width) * 8 - 8; // last character must fit 8 pixels
+    int clip_max = (x + bar_width) * 8 - 8; // last character must fit 8 pixels
 
     // Draw characters one-by-one clipped to the provided window area
     for (int i = 0; text && text[i]; ++i) {
         int cx = px + i * 8;
         if (cx + 7 > clip_max) break;
         if (cx < clip_min) continue; // should not happen for left-aligned, but safe
-        drawCharAt(cx, py, (int)(unsigned char)text[i], r, g, b);
+        drawCharAt(cx, py, (int)(unsigned char)text[i], rr, gg, bb);
     }
 }
 

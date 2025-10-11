@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2025-10-06 01:16:58
+This document is auto-generated from the source code. Last updated: 2025-10-11 15:19:37
 
-**Total Commands:** 44
+**Total Commands:** 55
 
 ## Table of Contents
 
@@ -14,6 +14,25 @@ This document is auto-generated from the source code. Last updated: 2025-10-06 0
 - [Development Commands](#development-commands)
 
 ## Essential Commands
+
+### assertfail
+
+**Handler:** `assertfail_cmd`
+
+**Type:** CMD_ESSENTIAL
+
+**File:** `shell_commands.c`
+
+**Description:**
+Trigger an assertion failure (ASSERT).
+Usage: assertfail
+
+**Example:**
+```bash
+assertfail
+```
+
+---
 
 ### clear
 
@@ -110,6 +129,25 @@ memory stats
 
 ---
 
+### panic
+
+**Handler:** `panic_cmd`
+
+**Type:** CMD_ESSENTIAL
+
+**File:** `shell_commands.c`
+
+**Description:**
+Trigger a kernel panic to test diagnostics.
+Usage: panic
+
+**Example:**
+```bash
+panic
+```
+
+---
+
 ### portable
 
 **Handler:** `portable_cmd`
@@ -146,6 +184,24 @@ Usage: catram <filename>
 **Example:**
 ```bash
 catram test.txt
+```
+
+---
+
+### clearbg
+
+**Handler:** `clearbg_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `shell_commands.c`
+
+**Description:**
+Clear background image for the focused tile.
+
+**Example:**
+```bash
+clearbg
 ```
 
 ---
@@ -207,6 +263,115 @@ lsram
 
 ---
 
+### memory_stats
+
+**Handler:** `memory_stats_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `predictive_commands.c`
+
+**Description:**
+Show predictive memory statistics
+
+**Example:**
+```bash
+memory_stats
+```
+
+---
+
+### mmap
+
+**Handler:** `mmap_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `predictive_commands.c`
+
+**Description:**
+Memory map a file for zero-copy access
+
+**Example:**
+```bash
+mmap <filename>
+```
+
+---
+
+### msync
+
+**Handler:** `msync_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `predictive_commands.c`
+
+**Description:**
+Synchronize memory-mapped file to disk
+
+**Example:**
+```bash
+msync <address>
+```
+
+---
+
+### munmap
+
+**Handler:** `munmap_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `predictive_commands.c`
+
+**Description:**
+Unmap a memory-mapped file
+
+**Example:**
+```bash
+munmap <address>
+```
+
+---
+
+### pagingguards
+
+**Handler:** `pagingguards_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `shell_commands.c`
+
+**Description:**
+Install optional paging guards (null-page, .text/.rodata RO).
+Usage: pagingguards
+
+**Example:**
+```bash
+pagingguards
+```
+
+---
+
+### predict
+
+**Handler:** `predict_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `predictive_commands.c`
+
+**Description:**
+Predictive memory management
+
+**Example:**
+```bash
+predict [stats|reset|optimize]
+```
+
+---
+
 ### rect
 
 **Handler:** `draw_cmd_handler`
@@ -223,6 +388,44 @@ Example: rect 10 20 100 50 255 0 0 draws a red rectangle.
 **Example:**
 ```bash
 rect 10 20 100 50 255 0 0
+```
+
+---
+
+### serialtest
+
+**Handler:** `serialtest_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `shell_commands.c`
+
+**Description:**
+Write a test line to COM1 to verify serial output.
+Usage: serialtest
+
+**Example:**
+```bash
+serialtest
+```
+
+---
+
+### setbg
+
+**Handler:** `setbg_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `shell_commands.c`
+
+**Description:**
+Set a REI image as background for the focused tile (shows Tile/Scale/Center chooser).
+Usage: setbg <file.rei>
+
+**Example:**
+```bash
+setbg eynos.rei
 ```
 
 ---
@@ -869,8 +1072,8 @@ run test.eyn
 
 | Category | Count |
 |----------|-------|
-| Essential Commands | 6 |
-| Streaming Commands | 12 |
+| Essential Commands | 8 |
+| Streaming Commands | 21 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |

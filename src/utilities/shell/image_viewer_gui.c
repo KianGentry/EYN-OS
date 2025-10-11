@@ -52,8 +52,21 @@ static void viewer_draw_image() {
     for (int y = start_y; y < end_y; ++y) {
         for (int x = start_x; x < end_x; ++x) {
             int off = rei_get_pixel_offset(&g_view.img.header, x, y);
-            if (off < 0 || off + 2 >= (int)g_view.img.data_size) continue;
-            uint8 r = g_view.img.data[off+0]; uint8 g = g_view.img.data[off+1]; uint8 b = g_view.img.data[off+2];
+            if (off < 0) continue;
+            uint8 r = 0, g = 0, b = 0;
+            if (g_view.img.header.depth == REI_DEPTH_MONO) {
+                if (off >= (int)g_view.img.data_size) continue;
+                uint8 gray = g_view.img.data[off];
+                r = g = b = gray;
+            } else if (g_view.img.header.depth == REI_DEPTH_RGB || g_view.img.header.depth == REI_DEPTH_RGBA) {
+                if (off + 2 >= (int)g_view.img.data_size) continue;
+                r = g_view.img.data[off+0];
+                g = g_view.img.data[off+1];
+                b = g_view.img.data[off+2];
+            } else {
+                // Unsupported depth
+                continue;
+            }
             for (int zy=0; zy<g_view.zoom; ++zy) for (int zx=0; zx<g_view.zoom; ++zx) {
                 int px = ox + x*g_view.zoom + zx;
                 int py = oy + y*g_view.zoom + zy;

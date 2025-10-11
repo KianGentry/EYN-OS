@@ -11,21 +11,12 @@ void munmap_cmd(string arg);
 void msync_cmd(string arg);
 void memory_stats_cmd(string arg);
 
-// Register commands with the shell system
-REGISTER_SHELL_COMMAND(predict_cmd_info, "predict", predict_cmd, CMD_STREAMING, 
-                       "Predictive memory management", "predict [stats|reset|optimize]");
-
-REGISTER_SHELL_COMMAND(mmap_cmd_info, "mmap", mmap_cmd, CMD_STREAMING,
-                       "Memory map a file for zero-copy access", "mmap <filename>");
-
-REGISTER_SHELL_COMMAND(munmap_cmd_info, "munmap", munmap_cmd, CMD_STREAMING,
-                       "Unmap a memory-mapped file", "munmap <address>");
-
-REGISTER_SHELL_COMMAND(msync_cmd_info, "msync", msync_cmd, CMD_STREAMING,
-                       "Synchronize memory-mapped file to disk", "msync <address>");
-
-REGISTER_SHELL_COMMAND(memory_stats_cmd_info, "memory_stats", memory_stats_cmd, CMD_STREAMING,
-                       "Show predictive memory statistics", "memory_stats");
+// Register commands
+REGISTER_SHELL_COMMAND(predict_cmd_info, "predict", predict_cmd, CMD_STREAMING, "Predictive memory management", "predict [stats|reset|optimize]");
+REGISTER_SHELL_COMMAND(mmap_cmd_info, "mmap", mmap_cmd, CMD_STREAMING, "Memory map a file for zero-copy access", "mmap <filename>");
+REGISTER_SHELL_COMMAND(munmap_cmd_info, "munmap", munmap_cmd, CMD_STREAMING, "Unmap a memory-mapped file", "munmap <address>");
+REGISTER_SHELL_COMMAND(msync_cmd_info, "msync", msync_cmd, CMD_STREAMING, "Synchronize memory-mapped file to disk", "msync <address>");
+REGISTER_SHELL_COMMAND(memory_stats_cmd_info, "memory_stats", memory_stats_cmd, CMD_STREAMING, "Show predictive memory statistics", "memory_stats");
 
 // Predictive memory command
 void predict_cmd(string arg) {

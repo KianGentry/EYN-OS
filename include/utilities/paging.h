@@ -67,6 +67,10 @@ int is_page_present(uint32 virtual_addr);
 int is_page_user(uint32 virtual_addr);
 int is_page_writable(uint32 virtual_addr);
 
+// Optional guards (safe no-ops until paging enabled)
+void paging_install_null_guard(void);
+void paging_protect_kernel_text_ro(void);
+
 // Global page directory
 extern page_directory_t* current_directory;
 

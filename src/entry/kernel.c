@@ -15,6 +15,8 @@
 #include <sched.h>
 #include <irq.h>
 #include <tile_manager.h>
+#include <serial.h>
+#include <watchdog.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
@@ -32,6 +34,8 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     }
     
     g_mbi = mbi;
+    // Initialize serial early for logging (COM1 @ 115200). Safe even if absent.
+    serial_init(SERIAL_COM1, 115200);
     if (mbi->flags & MULTIBOOT_INFO_MODS && mbi->mods_count > 0) {
         multiboot_module_t* mods = (multiboot_module_t*)mbi->mods_addr;
         if (mods) { // Add null check
@@ -66,6 +70,10 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     
     // Initialize IRQs and PIT timer (enables IRQ0 dispatch)
     irq_init();
+    // Initialize watchdog with a sensitive default (~500ms)
+    uint32 hz = sched_get_tick_hz();
+    uint32 to = (hz ? (hz/4) : 12); // ~0.25s
+    watchdog_init(to);
     
     // Initialize native execution system
     native_exec_init();

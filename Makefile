@@ -1,24 +1,43 @@
 COMPILER = gcc
 LINKER = ld
 ASSEMBLER = nasm
-CFLAGS = -m32 -c -ffreestanding -fcommon -Oz -fno-stack-protector -I include/ \
-		 -I include/cpu -I include/drivers -I include/misc -I include/graphics -I include/network -I include/utilities -I include/utilities/shell \
-         -Wall -Wextra -Werror=implicit-function-declaration \
-         -Wno-unused-parameter -Wno-unused-variable \
-         -fno-strict-overflow -fwrapv \
-         -D_FORTIFY_SOURCE=0 -fno-builtin \
-		 -fstack-protector-strong -D_FORTIFY_SOURCE=1
+
+# Prefer grub2-mkrescue if available; fall back to grub-mkrescue
+# Path is resolved at parse time; if neither exists, we'll stop in the build rule with a friendly message
+GRUB_MKRESCUE := $(shell command -v grub2-mkrescue 2>/dev/null || command -v grub-mkrescue 2>/dev/null)
+
+# Kernel (freestanding) compiler flags
+# Note: keep frame pointers for stack traces; avoid stack protector & fortify in freestanding kernel
+KERNEL_CFLAGS = -m32 -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-common \
+		 -Os -fno-strict-overflow -fwrapv \
+		 -I include/ -I include/cpu -I include/drivers -I include/misc -I include/graphics -I include/network -I include/utilities -I include/utilities/shell \
+		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \
+		 -Wno-unused-parameter -Wno-unused-variable \
+		 -Wnull-dereference -Wmissing-prototypes -Wstrict-prototypes -Wold-style-definition \
+		 -Wpointer-arith -Wshadow -Wundef -Wredundant-decls -Wswitch-enum -Wswitch-default
+
+# Map legacy CFLAGS to kernel flags to avoid touching all compile rules below
+CFLAGS = $(KERNEL_CFLAGS)
+
+# Use a more aggressive optimization level for GUI-heavy compilation units
+# Flip -Os to -O2 only for these files to speed up inner pixel loops
+GUI_CFLAGS = $(KERNEL_CFLAGS:-Os=-O2)
+
+# Host (tooling) compiler/linker flags (for eynfs_format, tests, etc.)
+HOST_CFLAGS = -O2 -g -Wall -Wextra -Wformat=2 -Wformat-security -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+		 -I include -I include/misc -I include/drivers -I include/cpu -I include/utilities -I include/graphics -I include/network
+HOST_LDFLAGS = -Wl,-z,relro,-z,now
 		
 
-# Debug flags for development
-DEBUG_CFLAGS = $(CFLAGS) -g -O0 -DDEBUG -D_DEBUG
-RELEASE_CFLAGS = $(CFLAGS) -O2 -DNDEBUG
+# Optional toggles (not wired to rules by default)
+DEBUG_CFLAGS = $(KERNEL_CFLAGS) -g -O0 -DDEBUG -D_DEBUG
+RELEASE_CFLAGS = $(KERNEL_CFLAGS) -O2 -DNDEBUG
 ASFLAGS = -f elf32
 LDFLAGS = -m elf_i386 -T src/boot/link.ld
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o
+OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o
 
 OBJS += obj/tiling_manager.o obj/tiling_cmd.o
 OBJS += obj/terminals.o
@@ -78,6 +97,17 @@ obj/vga.o:src/drivers/vga.c
 obj/mouse.o:src/drivers/mouse.c
 	$(COMPILER) $(CFLAGS) src/drivers/mouse.c -o obj/mouse.o
 
+obj/serial.o:src/drivers/serial.c
+	$(COMPILER) $(CFLAGS) src/drivers/serial.c -o obj/serial.o
+
+obj/panic.o:src/misc/panic.c
+	$(COMPILER) $(CFLAGS) src/misc/panic.c -o obj/panic.o
+
+obj/watchdog.o:src/misc/watchdog.c
+	$(COMPILER) $(CFLAGS) src/misc/watchdog.c -o obj/watchdog.o
+
+## QR renderer disabled (no longer used by panic screen)
+
 obj/fat32.o:src/drivers/fat32.c
 	$(COMPILER) $(CFLAGS) src/drivers/fat32.c -o obj/fat32.o
 
@@ -118,12 +148,12 @@ obj/compile_command.o:src/utilities/shell/compile_command.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/compile_command.c -o obj/compile_command.o
 
 obj/tui.o:src/utilities/tui/tui.c
-	$(COMPILER) $(CFLAGS) src/utilities/tui/tui.c -o obj/tui.o
+	$(COMPILER) $(GUI_CFLAGS) src/utilities/tui/tui.c -o obj/tui.o
 obj/tiling_manager.o:src/utilities/tui/tiling_manager.c
-	$(COMPILER) $(CFLAGS) src/utilities/tui/tiling_manager.c -o obj/tiling_manager.o
+	$(COMPILER) $(GUI_CFLAGS) src/utilities/tui/tiling_manager.c -o obj/tiling_manager.o
 
 obj/terminals.o:src/utilities/tui/terminals.c
-	$(COMPILER) $(CFLAGS) src/utilities/tui/terminals.c -o obj/terminals.o
+	$(COMPILER) $(GUI_CFLAGS) src/utilities/tui/terminals.c -o obj/terminals.o
 
 obj/tiling_cmd.o:src/utilities/shell/tiling_cmd.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/tiling_cmd.c -o obj/tiling_cmd.o
@@ -132,10 +162,10 @@ obj/help_tui.o:src/utilities/shell/help_tui.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/help_tui.c -o obj/help_tui.o
 
 obj/draw_gui.o:src/utilities/shell/draw_gui.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/draw_gui.c -o obj/draw_gui.o
+	$(COMPILER) $(GUI_CFLAGS) src/utilities/shell/draw_gui.c -o obj/draw_gui.o
 
 obj/image_viewer_gui.o:src/utilities/shell/image_viewer_gui.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/image_viewer_gui.c -o obj/image_viewer_gui.o
+	$(COMPILER) $(GUI_CFLAGS) src/utilities/shell/image_viewer_gui.c -o obj/image_viewer_gui.o
 
 obj/window_test.o:src/utilities/shell/window_test.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/window_test.c -o obj/window_test.o
@@ -193,7 +223,10 @@ obj/irq.o:src/cpu/irq.c include/cpu/irq.h
 # Actually building the OS (The stuff you should actually run, i.e. make run, make build, etc.)
 
 build: all eynfsimg docs
-	mkdir -p tmp/grub_ultra_minimal/boot/grub
+	# Clean staging dir to avoid leftover permissions/ownership from prior runs
+	rm -rf tmp/grub_ultra_minimal
+	# Recreate with sane permissions
+	install -d -m 0755 tmp/grub_ultra_minimal/boot/grub
 	cp tmp/boot/kernel.bin tmp/grub_ultra_minimal/boot/
 	@echo 'set default=0' > tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo 'set timeout=0' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
@@ -206,7 +239,11 @@ build: all eynfsimg docs
 	@echo '    multiboot /boot/kernel.bin' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo '    boot' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
 	@echo '}' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	grub2-mkrescue --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o EYNOS.iso tmp/grub_ultra_minimal/
+	@if [ -z "$(GRUB_MKRESCUE)" ]; then \
+		echo "grub-mkrescue not found. Install grub2 (grub2-mkrescue) or grub-pc-bin (grub-mkrescue)."; \
+		exit 1; \
+	fi
+	$(GRUB_MKRESCUE) --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o EYNOS.iso tmp/grub_ultra_minimal/
 	@echo "Ultra-minimal ISO created: EYNOS.iso"
 	@ls -lh EYNOS.iso
 	@echo "Attempting to strip EFI content (optional)..."
@@ -239,14 +276,14 @@ clear: clean
 
 # Build the userland EYNFS format tool
 eynfs_format: eynfs_format.c
-	$(COMPILER) -I include -I include/misc -I include/drivers -I include/cpu -I include/utilities -I include/graphics -I include/network -o eynfs_format eynfs_format.c
+	$(COMPILER) $(HOST_CFLAGS) -o eynfs_format eynfs_format.c $(HOST_LDFLAGS)
 
 # Create and format a 10MB EYNFS disk image
 eynfsimg:
 	rm -f eynfs.img
 	# Create a 10MB image (20,480 sectors at 512 bytes)
 	dd if=/dev/zero of=eynfs.img bs=1M count=10
-	$(COMPILER) -I include -I include/misc -I include/drivers -I include/cpu -I include/utilities -I include/graphics -I include/network -o eynfs_format eynfs_format.c
+	$(COMPILER) $(HOST_CFLAGS) -o eynfs_format eynfs_format.c $(HOST_LDFLAGS)
 	# Pass explicit sector count to avoid defaulting to 500MB in the formatter
 	./eynfs_format eynfs.img 20480
 	python3 devtools/copy_testdir_to_eynfs.py testdir/
@@ -255,7 +292,7 @@ eynfsimg:
 testimg: eynfs_format
 	rm -f testimg.img
 	dd if=/dev/zero of=testimg.img bs=1M count=10
-	$(COMPILER) -I include -I include/misc -I include/drivers -I include/cpu -I include/utilities -I include/graphics -I include/network -o eynfs_format eynfs_format.c
+	$(COMPILER) $(HOST_CFLAGS) -o eynfs_format eynfs_format.c $(HOST_LDFLAGS)
 	./eynfs_format testimg.img 20480
 
 # Rebuilds and runs the OS
@@ -264,7 +301,28 @@ run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
 	-boot d \
-	-m 8M
+	-m 4M
+
+# Debug run with serial logging and detailed CPU/interrupt logs
+.PHONY: qemu-debug
+qemu-debug: build
+	qemu-system-i386 -cdrom EYNOS.iso \
+	-hda eynfs.img \
+	-boot d \
+	-serial stdio \
+	-d int,cpu_reset \
+	-no-reboot -no-shutdown \
+	-m 64M
+
+# Halt at start for GDB attach on tcp:1234 (target remote :1234)
+.PHONY: qemu-gdb
+qemu-gdb: build
+	qemu-system-i386 -cdrom EYNOS.iso \
+	-hda eynfs.img \
+	-boot d \
+	-S -s \
+	-serial stdio \
+	-m 64M
 # Just runs the OS, no rebuilding.
 
 test: testimg
@@ -282,7 +340,7 @@ fat32img:
 		mkfs.vfat -F 32 -n EYNOS fat32.img; \
 		echo "FAT32 image created: fat32.img"; \
 	else \
-		echo "mkfs.vfat not found. Please install 'dosfstools' (e.g., sudo apt-get install dosfstools)."; \
+		echo "mkfs.vfat not found. Please install 'dosfstools' (e.g., sudo apt install dosfstools)."; \
 		exit 1; \
 	fi
 
@@ -302,3 +360,16 @@ runfat32: build fat32img
 	-hdb fat32.img \
 	-boot d \
 	-m 64M
+
+.PHONY: fsck_eynfs
+fsck_eynfs: eynfsimg
+	python3 devtools/fsck_eynfs.py eynfs.img || true
+
+.PHONY: checkfs
+checkfs: fsck_eynfs
+
+# Static analysis (GCC -fanalyzer) over all kernel sources
+.PHONY: analyze
+analyze:
+	@echo "Running GCC static analyzer over src/**/*.c ..."
+	@find src -name "*.c" -print0 | xargs -0 -n1 -I{} sh -c 'echo Analyzing {}; $(COMPILER) $(KERNEL_CFLAGS) -fanalyzer -c {} -o /dev/null' || true
