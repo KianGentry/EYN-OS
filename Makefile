@@ -10,6 +10,7 @@ GRUB_MKRESCUE := $(shell command -v grub2-mkrescue 2>/dev/null || command -v gru
 # Note: keep frame pointers for stack traces; avoid stack protector & fortify in freestanding kernel
 KERNEL_CFLAGS = -m32 -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-common \
 		 -Os -fno-strict-overflow -fwrapv \
+		 -fdata-sections -ffunction-sections \
 		 -I include/ -I include/cpu -I include/drivers -I include/misc -I include/graphics -I include/network -I include/utilities -I include/utilities/shell \
 		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \
 		 -Wno-unused-parameter -Wno-unused-variable \
@@ -33,7 +34,8 @@ HOST_LDFLAGS = -Wl,-z,relro,-z,now
 DEBUG_CFLAGS = $(KERNEL_CFLAGS) -g -O0 -DDEBUG -D_DEBUG
 RELEASE_CFLAGS = $(KERNEL_CFLAGS) -O2 -DNDEBUG
 ASFLAGS = -f elf32
-LDFLAGS = -m elf_i386 -T src/boot/link.ld
+## Linker flags: target i386 linker script, enable section GC, strip symbols, and emit a map
+LDFLAGS = -m elf_i386 -T src/boot/link.ld --gc-sections -Map tmp/boot/kernel.map -s
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
@@ -301,7 +303,7 @@ run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
 	-boot d \
-	-m 8M
+	-m 9M
 
 # Debug run with serial logging and detailed CPU/interrupt logs
 .PHONY: qemu-debug
@@ -312,7 +314,7 @@ qemu-debug: build
 	-serial stdio \
 	-d int,cpu_reset \
 	-no-reboot -no-shutdown \
-	-m 64M
+	-m 9M
 
 # Halt at start for GDB attach on tcp:1234 (target remote :1234)
 .PHONY: qemu-gdb

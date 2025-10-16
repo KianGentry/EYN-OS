@@ -5,6 +5,7 @@
 #include <kernel_api.h>
 #include <vga.h>
 #include <kb.h>
+#include <drivers/flat_exe_format.h>
 
 // Process management
 #define MAX_NATIVE_PROCESSES 8
@@ -68,101 +69,204 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
         return EXEC_ERROR_INVALID_FORMAT;
     }
     
-    // Parse EYN executable header
-    if (size < sizeof(struct eyn_exe_header)) {
-        // File too small to be a valid EYN executable
-        free(buf);
-        return EXEC_ERROR_INVALID_FORMAT;
-    }
-    
-    struct eyn_exe_header* hdr = (struct eyn_exe_header*)buf;
-    if (hdr->magic[0] != 'E' || hdr->magic[1] != 'Y' || hdr->magic[2] != 'N' || hdr->magic[3] != '\0') {
-        // Invalid EYN executable magic
-        free(buf);
-        return EXEC_ERROR_INVALID_FORMAT;
-    }
-    
-    // EYN executable loaded
-    printf("[native_exec] Loaded '%s' (code=%u, data=%u, entry_off=%u)\n", filename, hdr->code_size, hdr->data_size, hdr->entry_point);
-    
-    // Initialize process structure
-    memset(process, 0, sizeof(native_process_t));
-    process->pid = g_next_pid++;
-    
-    // Allocate memory for code and data sections
-    process->code_start = (uint32_t)malloc(hdr->code_size);
-    if (!process->code_start) {
-        // Failed to allocate memory for code section
-        free(buf);
-        return EXEC_ERROR_MEMORY_ALLOC;
-    }
-    process->code_size = hdr->code_size;
-    
-    process->data_start = (uint32_t)malloc(hdr->data_size + 0x1000); // Extra space for safety
-    if (!process->data_start) {
-        // Failed to allocate memory for data section
-        free((void*)process->code_start);
-        free(buf);
-        return EXEC_ERROR_MEMORY_ALLOC;
-    }
-    process->data_size = hdr->data_size;
-    
-    process->stack_start = (uint32_t)malloc(0x10000); // 64KB stack
-    if (!process->stack_start) {
-        // Failed to allocate memory for stack
-        free((void*)process->code_start);
-        free((void*)process->data_start);
-        free(buf);
-        return EXEC_ERROR_MEMORY_ALLOC;
-    }
-    process->stack_size = 0x10000;
-    
-    process->entry_point = process->code_start + hdr->entry_point;
-    
-    // Memory allocated and entry point calculated
-    process->esp = process->stack_start + process->stack_size - 4; // Start at top of stack
-    process->eip = process->entry_point;
-    process->active = 1;
-    
-    safe_strcpy(process->name, filename, sizeof(process->name));
-    
-    // Copy code section
-    if (hdr->code_size > 0) {
-        uint8_t* code = (uint8_t*)(buf + sizeof(struct eyn_exe_header));
-        memcpy((void*)process->code_start, code, hdr->code_size);
-        // Tiny dump of first bytes for sanity
-        uint32_t preview = hdr->code_size < 8 ? hdr->code_size : 8;
-        printf("[native_exec] Code preview:");
-        for (uint32_t i = 0; i < preview; i++) { printf(" %02X", code[i]); }
-        printf("\n");
-    }
-    
-    // Copy data section
-    if (hdr->data_size > 0) {
-        uint8_t* data = (uint8_t*)(buf + sizeof(struct eyn_exe_header) + hdr->code_size);
-        memcpy((void*)process->data_start, data, hdr->data_size);
-        
-        // Fix up data references in code section
-        // The assembler generates addresses like 0x02001001, 0x02001002, etc.
-        // We need to patch these references to point to the actual data_start
-        uint32_t actual_data_addr = process->data_start;
-        
-        // Search through code section for data references and patch them
-        uint8_t* code_ptr = (uint8_t*)process->code_start;
-        for (uint32_t i = 0; i < process->code_size - 4; i++) {
-            uint32_t* addr_ptr = (uint32_t*)(code_ptr + i);
-            uint32_t addr = *addr_ptr;
-            
-            // Check if this looks like a data address (0x02001000 + offset)
-            if (addr >= 0x02001000 && addr < 0x02002000) {
-                // Calculate the offset from the base data address
-                uint32_t offset = addr - 0x02001000;
-                // Patch to point to actual data_start + offset
-                *addr_ptr = actual_data_addr + offset;
+    // Try to parse EYN executable header first
+    if (size >= sizeof(struct eyn_exe_header)) {
+        struct eyn_exe_header* hdr = (struct eyn_exe_header*)buf;
+        if (hdr->magic[0] == 'E' && hdr->magic[1] == 'Y' && hdr->magic[2] == 'N' && hdr->magic[3] == '\0') {
+            // EYN executable loaded
+            printf("[native_exec] Loaded '%s' (code=%d, data=%d, entry_off=%d)\n", filename, hdr->code_size, hdr->data_size, hdr->entry_point);
+
+            // Basic sanity checks to avoid malformed headers
+            const uint32_t MAX_CODE = 1024 * 1024; // 1MB
+            const uint32_t MAX_DATA = 1024 * 1024; // 1MB
+            if (hdr->code_size == 0 || hdr->code_size > MAX_CODE) { free(buf); return EXEC_ERROR_INVALID_FORMAT; }
+            if (hdr->data_size > MAX_DATA) { free(buf); return EXEC_ERROR_INVALID_FORMAT; }
+
+            // Initialize process structure
+            memset(process, 0, sizeof(native_process_t));
+            process->pid = g_next_pid++;
+
+            // Allocate memory for code and data sections
+            process->code_start = (uint32_t)malloc(hdr->code_size);
+            if (!process->code_start) {
+                free(buf);
+                return EXEC_ERROR_MEMORY_ALLOC;
             }
+            process->code_size = hdr->code_size;
+
+            process->data_start = (uint32_t)malloc(hdr->data_size + 0x1000); // Extra space for safety
+            if (!process->data_start) {
+                free((void*)process->code_start);
+                free(buf);
+                return EXEC_ERROR_MEMORY_ALLOC;
+            }
+            process->data_size = hdr->data_size;
+
+            process->stack_start = (uint32_t)malloc(0x10000); // 64KB stack
+            if (!process->stack_start) {
+                free((void*)process->code_start);
+                free((void*)process->data_start);
+                free(buf);
+                return EXEC_ERROR_MEMORY_ALLOC;
+            }
+            process->stack_size = 0x10000;
+
+            process->entry_point = process->code_start + hdr->entry_point;
+
+            // Memory allocated and entry point calculated
+            process->esp = process->stack_start + process->stack_size - 4; // Start at top of stack
+            process->eip = process->entry_point;
+            process->active = 1;
+
+            safe_strcpy(process->name, filename, sizeof(process->name));
+
+            // Copy code section
+            if (hdr->code_size > 0) {
+                uint8_t* code = (uint8_t*)(buf + sizeof(struct eyn_exe_header));
+                memcpy((void*)process->code_start, code, hdr->code_size);
+                // Tiny dump of first bytes for sanity
+                uint32_t preview = hdr->code_size < 8 ? hdr->code_size : 8;
+                printf("[native_exec] Code preview:");
+                for (uint32_t i = 0; i < preview; i++) { printf(" %02d", code[i]); }
+                printf("\n");
+            }
+
+            // Copy data section and perform EYN-specific relocations
+            if (hdr->data_size > 0) {
+                uint8_t* data = (uint8_t*)(buf + sizeof(struct eyn_exe_header) + hdr->code_size);
+                memcpy((void*)process->data_start, data, hdr->data_size);
+
+                // Fix up 32-bit immediates inside the code that look like addresses/offsets.
+                // Two common patterns are:
+                // 1) assembler-emitted data addresses in the 0x02001000 range
+                // 2) linker-emitted offsets when the binary was linked at base 0 (small values)
+                uint32_t actual_data_addr = process->data_start;
+                uint8_t* code_ptr = (uint8_t*)process->code_start;
+                for (uint32_t i = 0; i < process->code_size - 4; i++) {
+                    uint32_t* addr_ptr = (uint32_t*)(code_ptr + i);
+                    uint32_t addr = *addr_ptr;
+                    // assembler convention: 0x02001000 + offset (always safe to rebase)
+                    if (addr >= 0x02001000 && addr < 0x02002000) {
+                        uint32_t offset = addr - 0x02001000;
+                        *addr_ptr = actual_data_addr + offset;
+                    } else {
+                        /* Conservative rebase for small offsets:
+                           - Only rebase if the dword is 4-byte aligned within the code
+                           - And avoid the initial crt0 prologue (first 64 bytes) where relative
+                             call/jmp immediates are common and should not be rewritten.
+                           This avoids corrupting instruction immediates such as call rel32. */
+                        if ((i % 4) == 0 && i >= 64 && addr < process->code_size) {
+                            *addr_ptr = (uint32_t)process->code_start + addr;
+                        }
+                    }
+                }
+            }
+
+            free(buf);
+            return EXEC_SUCCESS;
         }
     }
-    
+
+    // If we reach here, file is not a valid EYN executable. Try FLAT header then raw binary.
+    // Check for FLAT header
+    if (size >= sizeof(struct flat_exe_header)) {
+        struct flat_exe_header* fh = (struct flat_exe_header*)buf;
+        if (fh->magic[0] == 'F' && fh->magic[1] == 'L' && fh->magic[2] == 'A' && fh->magic[3] == 'T') {
+            // Sanity checks for FLAT
+            const uint32_t MAX_CODE_F = 1024 * 1024;
+            const uint32_t MAX_DATA_F = 1024 * 1024;
+            if (fh->code_size == 0 || fh->code_size > MAX_CODE_F) { free(buf); return EXEC_ERROR_INVALID_FORMAT; }
+            if (fh->data_size > MAX_DATA_F) { free(buf); return EXEC_ERROR_INVALID_FORMAT; }
+            printf("[native_exec] Loaded FLAT binary '%s' (code=%d, data=%d, entry_off=%d)\n", filename, fh->code_size, fh->data_size, fh->entry_point);
+
+            memset(process, 0, sizeof(native_process_t));
+            process->pid = g_next_pid++;
+
+            // Allocate code and data sections
+            process->code_start = (uint32_t)malloc(fh->code_size);
+            if (!process->code_start) { free(buf); return EXEC_ERROR_MEMORY_ALLOC; }
+            process->code_size = fh->code_size;
+
+            process->data_start = 0;
+            process->data_size = 0;
+            if (fh->data_size > 0) {
+                process->data_start = (uint32_t)malloc(fh->data_size + 0x1000);
+                if (!process->data_start) { free((void*)process->code_start); free(buf); return EXEC_ERROR_MEMORY_ALLOC; }
+                process->data_size = fh->data_size;
+            }
+
+            process->stack_start = (uint32_t)malloc(0x10000);
+            if (!process->stack_start) { if (process->data_start) free((void*)process->data_start); free((void*)process->code_start); free(buf); return EXEC_ERROR_MEMORY_ALLOC; }
+            process->stack_size = 0x10000;
+
+            // Copy code and data from file buffer
+            uint8_t* code = (uint8_t*)(buf + sizeof(struct flat_exe_header));
+            memcpy((void*)process->code_start, code, fh->code_size);
+            if (fh->data_size > 0) {
+                uint8_t* data = (uint8_t*)(buf + sizeof(struct flat_exe_header) + fh->code_size);
+                memcpy((void*)process->data_start, data, fh->data_size);
+
+                // Patch 32-bit immediates inside code which may reference assembler/data
+                uint32_t actual_data_addr = process->data_start;
+                uint8_t* code_ptr = (uint8_t*)process->code_start;
+                for (uint32_t i = 0; i < process->code_size - 4; i++) {
+                    uint32_t* addr_ptr = (uint32_t*)(code_ptr + i);
+                    uint32_t addr = *addr_ptr;
+                    if (addr >= 0x02001000 && addr < 0x02002000) {
+                        uint32_t offset = addr - 0x02001000;
+                        *addr_ptr = actual_data_addr + offset;
+                    } else {
+                        if ((i % 4) == 0 && i >= 64 && addr < process->code_size) {
+                            *addr_ptr = (uint32_t)process->code_start + addr;
+                        }
+                    }
+                }
+            }
+
+            process->entry_point = process->code_start + fh->entry_point;
+            process->esp = process->stack_start + process->stack_size - 4;
+            process->eip = process->entry_point;
+            process->active = 1;
+            safe_strcpy(process->name, filename, sizeof(process->name));
+
+         // Diagnostic: print memory layout for the loaded process
+         printf("[native_exec] proc layout: code=%d..%d data=%d..%d stack=%d..%d entry=%d\n",
+             process->code_start, process->code_start + process->code_size,
+             process->data_start, process->data_start + process->data_size,
+             process->stack_start, process->stack_start + process->stack_size,
+             process->entry_point - process->code_start);
+
+            free(buf);
+            return EXEC_SUCCESS;
+        }
+    }
+
+    // Fallback: treat as raw flat binary with no header
+    printf("[native_exec] File '%s' is not EYN/FLAT format - treating as raw flat i386 binary (size=%u bytes)\n", filename, size);
+
+    // Initialize process structure for raw flat binary
+    memset(process, 0, sizeof(native_process_t));
+    process->pid = g_next_pid++;
+
+    process->code_start = (uint32_t)malloc(size);
+    if (!process->code_start) { free(buf); return EXEC_ERROR_MEMORY_ALLOC; }
+    process->code_size = size;
+
+    process->data_start = 0;
+    process->data_size = 0;
+
+    process->stack_start = (uint32_t)malloc(0x10000); // 64KB stack
+    if (!process->stack_start) { free((void*)process->code_start); free(buf); return EXEC_ERROR_MEMORY_ALLOC; }
+    process->stack_size = 0x10000;
+
+    memcpy((void*)process->code_start, buf, size);
+
+    process->entry_point = process->code_start;
+    process->esp = process->stack_start + process->stack_size - 4;
+    process->eip = process->entry_point;
+    process->active = 1;
+    safe_strcpy(process->name, filename, sizeof(process->name));
+
     free(buf);
     return EXEC_SUCCESS;
 }
@@ -205,6 +309,9 @@ exec_result_t native_run_process(native_process_t* process) {
     uint8_t* code_ptr = (uint8_t*)process->code_start;
     uint32_t pc = 0;
     uint32_t regs[8] = {0}; // eax, ecx, edx, ebx, esp, ebp, esi, edi
+
+    // Initialize emulated stack pointer from process allocation so user code has a valid stack
+    regs[4] = process->esp;
     
     // Simple instruction simulation for basic instructions
     uint32_t __max_steps = process->code_size * 16 + 1024;
@@ -212,6 +319,10 @@ exec_result_t native_run_process(native_process_t* process) {
     uint32_t __steps = 0;
     while (pc < process->code_size && __steps++ < __max_steps) { // Limit to prevent infinite loops
         uint8_t opcode = code_ptr[pc];
+        /* Lightweight trace for initial steps to help debug why programs exit immediately */
+        if (__steps < 200) {
+            printf("[native_exec:trace] step=%d pc=%d opcode=%d\n", __steps, pc, opcode);
+        }
         
         // Debug output removed for clean program execution
         
@@ -236,30 +347,51 @@ exec_result_t native_run_process(native_process_t* process) {
                 
                 if (imm == 0x80) {
                     // Handle syscall
+                    // Diagnostic: log syscall registers for debugging
+                    printf("[native_exec:syscall] eax=%d ebx=%d ecx=%d edx=%d esp=%d\n", regs[0], regs[3], regs[1], regs[2], regs[4]);
+
                     if (regs[0] == 1) { // WRITE
                         if (regs[3] == 1 && regs[2] > 0 && regs[2] <= 512) {
-                            // stdout, reasonable length
+                            /* stdout, reasonable length
+                               Accept buffers located in the process code, data or stack
+                               regions. Many freestanding binaries place string literals
+                               in the code section or use stack buffers for I/O. */
                             uint32_t buffer_addr = regs[1];
-                            if (buffer_addr >= process->data_start && 
-                                buffer_addr < process->data_start + process->data_size) {
-                                // Address is in data section - print the string
-                                char* buffer = (char*)buffer_addr;
+                            uint32_t len = regs[2];
+
+                            uint8_t* buffer = NULL;
+                            uint32_t region_end = 0;
+                            if (process->data_size > 0 && buffer_addr >= process->data_start && buffer_addr + len <= process->data_start + process->data_size) {
+                                buffer = (uint8_t*)buffer_addr;
+                                region_end = process->data_start + process->data_size;
+                            } else if (buffer_addr >= process->code_start && buffer_addr + len <= process->code_start + process->code_size) {
+                                buffer = (uint8_t*)buffer_addr;
+                                region_end = process->code_start + process->code_size;
+                            } else if (buffer_addr >= process->stack_start && buffer_addr + len <= process->stack_start + process->stack_size) {
+                                buffer = (uint8_t*)buffer_addr;
+                                region_end = process->stack_start + process->stack_size;
+                            }
+
+                            if (buffer) {
                                 char output_buffer[101];
                                 uint32_t output_pos = 0;
-                                
-                                for (uint32_t i = 0; i < regs[2] && output_pos < 100; i++) {
-                                    if (buffer[i] >= 32 && buffer[i] <= 126) {
-                                        output_buffer[output_pos++] = buffer[i];
-                                    } else if (buffer[i] == '\n') {
+                                for (uint32_t i = 0; i < len && output_pos < 100; i++) {
+                                    unsigned char ch = buffer[i];
+                                    if (ch >= 32 && ch <= 126) {
+                                        output_buffer[output_pos++] = (char)ch;
+                                    } else if (ch == '\n') {
                                         output_buffer[output_pos++] = '\n';
                                     }
                                 }
                                 output_buffer[output_pos] = '\0';
-                                
-                                // Print the complete string
                                 printf("%s", output_buffer);
-                                regs[0] = regs[2]; // Return bytes written
+                                regs[0] = len; // Return bytes written
                             } else {
+                    printf("[native_exec:syscall] WRITE buffer %d not in code/data/stack (code=%d..%d data=%d..%d stack=%d..%d)\n",
+                        buffer_addr,
+                        process->code_start, process->code_start + process->code_size,
+                        process->data_start, process->data_start + process->data_size,
+                        process->stack_start, process->stack_start + process->stack_size);
                                 regs[0] = -1;
                             }
                         } else {
@@ -276,14 +408,36 @@ exec_result_t native_run_process(native_process_t* process) {
                                 int maxcpy = (int)regs[2];
                                 int n = slen;
                                 if (n > maxcpy - 1) n = maxcpy - 1;
-                                // Only allow writes into data section for safety
                                 uint32_t buffer_addr = regs[1];
-                                if (buffer_addr >= process->data_start && 
-                                    buffer_addr < process->data_start + process->data_size && n >= 0) {
+
+                                /* Allow the destination buffer to be in data or stack
+                                   (and also code, though writing into code is uncommon).
+                                   Ensure the copy stays within bounds. */
+                                int wrote = 0;
+                                if (process->data_size > 0 && buffer_addr >= process->data_start && buffer_addr + n + 1 <= process->data_start + process->data_size && n >= 0) {
                                     memcpy((void*)buffer_addr, s, n);
                                     ((char*)buffer_addr)[n] = '\0';
                                     regs[0] = n;
-                                } else {
+                                    wrote = 1;
+                                } else if (buffer_addr >= process->stack_start && buffer_addr + n + 1 <= process->stack_start + process->stack_size && n >= 0) {
+                                    memcpy((void*)buffer_addr, s, n);
+                                    ((char*)buffer_addr)[n] = '\0';
+                                    regs[0] = n;
+                                    wrote = 1;
+                                } else if (buffer_addr >= process->code_start && buffer_addr + n + 1 <= process->code_start + process->code_size && n >= 0) {
+                                    /* Writing into code is allowed but unusual; permit for simple programs. */
+                                    memcpy((void*)buffer_addr, s, n);
+                                    ((char*)buffer_addr)[n] = '\0';
+                                    regs[0] = n;
+                                    wrote = 1;
+                                }
+
+                                if (!wrote) {
+                     printf("[native_exec:syscall] READ destination %d not in data/stack/code (code=%d..%d data=%d..%d stack=%d..%d)\n",
+                         buffer_addr,
+                         process->code_start, process->code_start + process->code_size,
+                         process->data_start, process->data_start + process->data_size,
+                         process->stack_start, process->stack_start + process->stack_size);
                                     regs[0] = -1;
                                 }
                                 free(s);
@@ -391,9 +545,6 @@ exec_result_t native_run_process(native_process_t* process) {
             } else {
                 pc++;
             }
-        } else if (opcode == 0xC3) {
-            // ret
-            break;
         } else if (opcode == 0x89) {
             // mov r/m32, r32 (handle reg,reg)
             if (pc + 1 < process->code_size) {
@@ -484,6 +635,112 @@ exec_result_t native_run_process(native_process_t* process) {
                 pc += 2;
             } else {
                 pc++;
+            }
+        } else if ((opcode >= 0x50 && opcode <= 0x57) || (opcode >= 0x58 && opcode <= 0x5F) || opcode == 0xE8 || opcode == 0xE9 || opcode == 0xC3 || opcode == 0x39 || opcode == 0x3B || opcode == 0x74 || opcode == 0x75) {
+            // push/pop/call/jmp/ret/cmp/je/jne support
+                if (opcode >= 0x50 && opcode <= 0x57) {
+                // push r32
+                uint8_t reg = opcode - 0x50;
+                regs[4] -= 4;
+                /* Allow writes to the process stack allocation regardless of global USER_* ranges */
+                if (regs[4] >= process->stack_start && regs[4] + 4 <= process->stack_start + process->stack_size) {
+                    *(uint32_t*)regs[4] = regs[reg];
+                }
+                pc++;
+            } else if (opcode >= 0x58 && opcode <= 0x5F) {
+                // pop r32
+                uint8_t reg = opcode - 0x58;
+                if (regs[4] >= process->stack_start && regs[4] + 4 <= process->stack_start + process->stack_size) {
+                    regs[reg] = *(uint32_t*)regs[4];
+                }
+                regs[4] += 4;
+                pc++;
+            } else if (opcode == 0xE8) {
+                // call rel32
+                if (pc + 4 < process->code_size) {
+                    int32_t rel = *(int32_t*)(code_ptr + pc + 1);
+                    uint32_t ret = pc + 5;
+                    regs[4] -= 4;
+                    if (regs[4] >= process->stack_start && regs[4] + 4 <= process->stack_start + process->stack_size) *(uint32_t*)regs[4] = ret;
+                    uint32_t new_pc = (uint32_t)((int32_t)(pc + 5) + rel);
+                    uint32_t memv = 0;
+                    unsigned char b0=0,b1=0,b2=0,b3=0;
+                    if (regs[4] >= process->stack_start && regs[4] + 4 <= process->stack_start + process->stack_size) {
+                        memv = *(uint32_t*)regs[4];
+                        unsigned char* bp = (unsigned char*)regs[4];
+                        b0 = bp[0]; b1 = bp[1]; b2 = bp[2]; b3 = bp[3];
+                    }
+                    printf("[native_exec:trace] CALL rel=%d -> new_pc=%d (ret=%d) sp=%d mem_at_sp=%d bytes=%d,%d,%d,%d\n", rel, new_pc, ret, regs[4], memv, b0, b1, b2, b3);
+                    pc = new_pc;
+                } else pc++;
+            } else if (opcode == 0xE9) {
+                // jmp rel32
+                if (pc + 4 < process->code_size) {
+                    int32_t rel = *(int32_t*)(code_ptr + pc + 1);
+                    pc = (uint32_t)((int32_t)(pc + 5) + rel);
+                } else pc++;
+            } else if (opcode == 0xC9) {
+                // leave: mov esp, ebp; pop ebp
+                // Set esp to ebp, then pop ebp from stack
+                regs[4] = regs[5];
+                if (regs[4] >= process->stack_start && regs[4] + 4 <= process->stack_start + process->stack_size) {
+                    regs[5] = *(uint32_t*)regs[4];
+                    regs[4] += 4;
+                } else {
+                    break;
+                }
+                pc++;
+            } else if (opcode == 0xC3) {
+                // ret: pop return address from process stack and jump
+                uint32_t mem_before = 0;
+                unsigned char bb0=0,bb1=0,bb2=0,bb3=0;
+                if (regs[4] >= process->stack_start && regs[4] + 4 <= process->stack_start + process->stack_size) {
+                    unsigned char* bp = (unsigned char*)regs[4];
+                    bb0 = bp[0]; bb1 = bp[1]; bb2 = bp[2]; bb3 = bp[3];
+                    mem_before = *(uint32_t*)regs[4];
+                }
+                printf("[native_exec:trace] RET about to pop sp=%d mem_before=%d bytes=%d,%d,%d,%d\n", regs[4], mem_before, bb0, bb1, bb2, bb3);
+                if (regs[4] >= process->stack_start && regs[4] + 4 <= process->stack_start + process->stack_size) {
+                    uint32_t ret = *(uint32_t*)regs[4];
+                    regs[4] += 4;
+                    uint32_t mem_after = 0;
+                    unsigned char aa0=0,aa1=0,aa2=0,aa3=0;
+                    if (regs[4] >= process->stack_start && regs[4] + 4 <= process->stack_start + process->stack_size) {
+                        unsigned char* ap = (unsigned char*)(regs[4]-4);
+                        aa0 = ap[0]; aa1 = ap[1]; aa2 = ap[2]; aa3 = ap[3];
+                        mem_after = *(uint32_t*)(regs[4]-4);
+                    }
+                    printf("[native_exec:trace] RET popped=%d -> jumping to %d mem_after=%d bytes=%d,%d,%d,%d\n", ret, ret, mem_after, aa0, aa1, aa2, aa3);
+                    if (ret < process->code_size) pc = ret; else break;
+                } else break;
+            } else if (opcode == 0x39 || opcode == 0x3B) {
+                // cmp r/m32, r32  (0x39) or cmp r32, r/m32 (0x3B) - only reg,reg supported
+                if (pc + 1 < process->code_size) {
+                    uint8_t modrm = code_ptr[pc + 1];
+                    uint8_t mod = (modrm >> 6) & 3;
+                    uint8_t reg = (modrm >> 3) & 7;
+                    uint8_t rm  = modrm & 7;
+                    if (mod == 3) {
+                        int32_t left = (opcode == 0x39) ? (int32_t)regs[rm] : (int32_t)regs[reg];
+                        int32_t right = (opcode == 0x39) ? (int32_t)regs[reg] : (int32_t)regs[rm];
+                        int32_t res = left - right;
+                        // set flags
+                        // store flags in regs[7] low bits? Use local static-ish; simpler: store in global vars (but avoid globals)
+                        // We'll reuse regs[7] (EDI) low bits: bit0=ZF, bit1=SF
+                        regs[7] &= ~0x3;
+                        if (res == 0) regs[7] |= 0x1; // ZF
+                        if (res < 0) regs[7] |= 0x2;  // SF
+                    }
+                    pc += 2;
+                } else pc++;
+            } else if (opcode == 0x74 || opcode == 0x75) {
+                // JE (0x74) / JNE (0x75) short
+                if (pc + 1 < process->code_size) {
+                    int8_t rel = *(int8_t*)(code_ptr + pc + 1);
+                    int ZF = (regs[7] & 0x1) != 0;
+                    if ((opcode == 0x74 && ZF) || (opcode == 0x75 && !ZF)) pc = (uint32_t)((int32_t)(pc + 2) + rel);
+                    else pc += 2;
+                } else pc++;
             }
         } else {
             // Unknown opcode - skip

@@ -12,7 +12,7 @@ extern char shell_current_path[128];
 void vterm_write_char(int idx, char ch);
 
 #define TERM_COLS 80
-#define TERM_ROWS 60
+#define TERM_ROWS 24
 
 #define INPUT_BUF_LEN 200
 typedef struct {

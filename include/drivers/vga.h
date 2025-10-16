@@ -5,8 +5,10 @@
 #include <multiboot.h>
 #include <stddef.h>
 
-// Shell redirection buffer size
-#define SHELL_REDIRECT_BUF_SIZE 4096
+// Shell redirection buffer size (lowered for small-memory systems)
+// Reducing this value reduces static RAM used by the redirect buffers
+// and is safe because code already bounds copy operations.
+#define SHELL_REDIRECT_BUF_SIZE 1024
 
 // Misc
 void render_markdown(const char* content);

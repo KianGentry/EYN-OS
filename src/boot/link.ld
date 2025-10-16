@@ -26,7 +26,7 @@ SECTIONS
     .shellcmds :
     {
         __start_shellcmds = .;
-        *(.shellcmds)
+        KEEP(*(.shellcmds))
         __stop_shellcmds = .;
     }
 

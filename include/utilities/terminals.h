@@ -41,5 +41,6 @@ int vterm_get_version(int idx);
 // and optionally the line length via strlen if needed.
 
 #define TERM_COLS 80
+#define TERM_ROWS 24
 
 #endif // TERMINALS_H

@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2025-10-11 15:19:37
+This document is auto-generated from the source code. Last updated: 2025-10-16 01:38:51
 
 **Total Commands:** 55
 

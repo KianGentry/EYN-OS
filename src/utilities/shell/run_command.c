@@ -17,7 +17,7 @@ void run_command(string arg) {
     while (arg[i] && arg[i] != ' ') i++;
     while (arg[i] && arg[i] == ' ') i++;
     if (!arg[i]) {
-        printf("Usage: run <program.eyn|script.shell>\n");
+        printf("Usage: run <program.eyn|program.flat|program.bin|script.shell>\n");
         return;
     }
     char filename[64];
@@ -25,22 +25,18 @@ void run_command(string arg) {
     while (arg[i] && arg[i] != ' ' && j < 63) filename[j++] = arg[i++];
     filename[j] = 0;
 
-    // check file extension to determine execution method
+    // check file extension to determine execution method; if missing, treat as flat binary
     const char* ext = strrchr(filename, '.');
-    if (!ext) {
-        printf("Error: File must have .eyn or .shell extension\n");
-        return;
-    }
     
     exec_result_t result;
     // Resolve relative paths against current shell directory so subdirectories work
     char abspath[128];
     resolve_path(filename, shell_current_path, abspath, sizeof(abspath));
     
-    if (strcmp(ext, ".shell") == 0) {
+    if (ext && strcmp(ext, ".shell") == 0) {
         // execute as shell script
         result = execute_shell_script(abspath);
-    } else if (strcmp(ext, ".eyn") == 0) {
+    } else if ((ext && strcmp(ext, ".eyn") == 0) || (ext && strcmp(ext, ".bin") == 0) || (ext && strcmp(ext, ".flat") == 0) || !ext) {
         // execute as native program
         result = native_execute_program(abspath);
     } else {
