@@ -717,8 +717,17 @@ void help_gui_key(int tile_idx, int key, void* userdata) {
         g_help_running = 0;
     } else if (key == '\n' || key == 13) {
         if (has_subcommands(g_sorted_cmds[g_selected]->name)) {
-            if (g_expanded_commands) {
-                g_expanded_commands[g_selected] = !g_expanded_commands[g_selected];
+            /* Ensure g_selected is within valid bounds before toggling. If the
+             * expanded array is missing, allocate it so toggles are safe. */
+            if (g_selected >= 0 && g_selected < g_cmd_count && g_cmd_count > 0) {
+                if (!g_expanded_commands) {
+                    g_expanded_commands = (int*) calloc(g_cmd_count, sizeof(int));
+                }
+                if (g_expanded_commands) {
+                    g_expanded_commands[g_selected] = !g_expanded_commands[g_selected];
+                }
+            } else {
+                // Out-of-range selection or no commands: ignore toggle safely.
             }
             g_selected_sub = 0;
         }
