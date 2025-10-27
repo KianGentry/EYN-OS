@@ -1,6 +1,6 @@
 # What's New on dev (since origin/main)
 
-Date: 2025-09-29
+Date: 2025-10-27
 
 This document summarizes notable changes on the dev branch compared to origin/main, following the style of the existing EYN-OS docs. It highlights UI additions, new commands, graphics improvements, input/mouse updates, codebase refactors, build tweaks, and developer APIs.
 

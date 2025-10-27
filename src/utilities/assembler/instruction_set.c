@@ -333,8 +333,8 @@ int get_register8_encoding(const char* reg_name) {
             return i;
         }
     }
-            return -1;
-    }
+    return -1;
+}
     
 // Function to get segment register encoding
 int get_seg_reg_encoding(const char* reg_name) {

@@ -1035,14 +1035,14 @@ void read_image_cmd(string ch) {
     }
     rei_image_t rei_image;
     if (rei_parse_image(buffer, bytes_read, &rei_image) == 0) {
-        printf("%cDisplaying REI image: %dx%d pixels\n", 0, 255, 0, rei_image.header.width, rei_image.header.height);
+        printf("Displaying REI image: %dx%d pixels\n", rei_image.header.width, rei_image.header.height);
         rei_display_image_centered(&rei_image);
         rei_free_image(&rei_image);
+        if ((uint32)bytes_read < st.size) {
+            printf("[File truncated - showing first %d bytes of %d total]\n", bytes_read, st.size);
+        }
     } else {
-        printf("%cError: Invalid REI file format.\n", 255, 0, 0);
-    }
-    if ((uint32)bytes_read < st.size) {
-        printf("%c[File truncated - showing first %d bytes of %d total]\n", 255, 165, 0, bytes_read, st.size);
+        printf("Error: Invalid REI file format.\n");
     }
     free(buffer);
 } 

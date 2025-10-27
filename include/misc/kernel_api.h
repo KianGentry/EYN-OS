@@ -39,13 +39,34 @@ typedef struct {
 // Global kernel API pointer - will be set by kernel initialization
 extern eynos_kernel_api_t* g_kernel_api;
 
-// Convenience macros for user programs to call kernel functions
-#define eyn_output(str, len) g_kernel_api->output(str, len)
-#define eyn_input() g_kernel_api->input()
-#define eyn_system(func, var1, var2) g_kernel_api->system(func, var1, var2)
-#define eyn_delay(us) g_kernel_api->delay(us)
-#define eyn_yield() g_kernel_api->yield()
-#define eyn_sleep_us(us) g_kernel_api->sleep_us(us)
+// Convenience inline wrappers for user programs to call kernel functions.
+// These check g_kernel_api before dereferencing to avoid NULL pointer
+// dereferences when used from early init or test environments.
+static inline void eyn_output(const char* str, uint32 len) {
+    if (g_kernel_api && g_kernel_api->output) g_kernel_api->output(str, len);
+}
+
+static inline uint8 eyn_input(void) {
+    if (g_kernel_api && g_kernel_api->input) return g_kernel_api->input();
+    return 0;
+}
+
+static inline uint32 eyn_system(uint32 func, uint32 var1, uint32 var2) {
+    if (g_kernel_api && g_kernel_api->system) return g_kernel_api->system(func, var1, var2);
+    return 0;
+}
+
+static inline void eyn_delay(uint32 us) {
+    if (g_kernel_api && g_kernel_api->delay) g_kernel_api->delay(us);
+}
+
+static inline void eyn_yield(void) {
+    if (g_kernel_api && g_kernel_api->yield) g_kernel_api->yield();
+}
+
+static inline void eyn_sleep_us(uint32 us) {
+    if (g_kernel_api && g_kernel_api->sleep_us) g_kernel_api->sleep_us(us);
+}
 
 // Function declarations for kernel implementation
 void eyn_kernel_output(const char* str, uint32 len);

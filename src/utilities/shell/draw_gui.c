@@ -361,7 +361,7 @@ void draw_cmd(string arg) {
     const char* filename_arg = NULL;
     if (tok2[0] && (strcmp(tok1, "draw") == 0)) filename_arg = tok2; else if (tok1[0]) filename_arg = tok1;
     if (!filename_arg || !filename_arg[0]) {
-        printf("%cUsage: draw <filename.rei>\n", 255,255,255);
+        printf("Usage: draw <filename.rei>\n");
         return;
     }
     // Resolve absolute path and disk

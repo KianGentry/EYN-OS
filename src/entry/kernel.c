@@ -71,7 +71,7 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     
     // Initialize IRQs and PIT timer (enables IRQ0 dispatch)
     irq_init();
-    // Initialize watchdog with a sensitive default (~500ms)
+    // Initialize watchdog with a sensitive default (~250ms)
     uint32 hz = sched_get_tick_hz();
     uint32 to = (hz ? (hz/4) : 12); // ~0.25s
     watchdog_init(to);

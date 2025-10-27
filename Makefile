@@ -178,9 +178,8 @@ obj/stats_gui.o:src/utilities/shell/stats_gui.c
 obj/vfs.o:src/fs/vfs.c
 	$(COMPILER) $(CFLAGS) src/fs/vfs.c -o obj/vfs.o
 
-obj/assemble.o:src/utilities/assembler/assemble.c src/utilities/assembler/instruction_set.c
-	$(COMPILER) $(CFLAGS) src/utilities/assembler/assemble.c -o obj/assemble.o 
-	$(COMPILER) $(CFLAGS) src/utilities/assembler/instruction_set.c -o obj/instruction_set.o 
+obj/assemble.o: src/utilities/assembler/assemble.c obj/instruction_set.o
+	$(COMPILER) $(CFLAGS) src/utilities/assembler/assemble.c -o obj/assemble.o
 
 # Provide an explicit rule so parallel builds can make this target independently
 obj/instruction_set.o:src/utilities/assembler/instruction_set.c

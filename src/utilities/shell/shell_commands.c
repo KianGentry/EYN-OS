@@ -17,6 +17,7 @@
 #include <panic.h>
 #include <serial.h>
 #include <paging.h>
+// vfs is used by some commands; include at top-level
 #include <fs/vfs.h>
 #include <tile_manager.h>
 #include <rei.h>
@@ -714,14 +715,32 @@ REGISTER_SHELL_COMMAND(init, "init", init_cmd, CMD_ESSENTIAL, "Initialize full s
 // Diagnostics/testing command implementations
 void panic_cmd(string ch) {
     // Intentionally trigger a kernel panic to test panic/backtrace and serial mirroring
-    (void)ch; // unused
-    PANIC("manual panic via shell");
+    // Skip the command name and any following spaces to get the actual argument
+    if (ch) {
+        uint8 i = 0;
+        while (ch[i] && ch[i] != ' ') i++;
+        while (ch[i] && ch[i] == ' ') i++;
+        if (ch[i] && strcmp(&ch[i], "yes") == 0) {
+            PANIC("manual panic via shell");
+            return;
+        }
+    }
+    printf("%cThis will trigger a kernel panic and stop the system. To proceed run: panic yes\n", 255, 0, 0);
 }
 
 void assertfail_cmd(string ch) {
     // Intentionally trigger an assertion failure
-    (void)ch; // unused
-    ASSERT(0 && "manual assert failure via shell");
+    // Require explicit confirmation to avoid accidental triggering
+    if (ch) {
+        uint8 i = 0;
+        while (ch[i] && ch[i] != ' ') i++;
+        while (ch[i] && ch[i] == ' ') i++;
+        if (ch[i] && strcmp(&ch[i], "yes") == 0) {
+            ASSERT(0 && "manual assert failure via shell");
+            return;
+        }
+    }
+    printf("%cThis will trigger an assertion failure and may halt the system. To proceed, run: assertfail yes\n", 255, 0, 0);
 }
 
 void serialtest_cmd(string ch) {
@@ -744,8 +763,8 @@ void pagingguards_cmd(string ch) {
 }
 
 // Register diagnostics/testing commands
-REGISTER_SHELL_COMMAND(panic_cmd_info, "panic", panic_cmd, CMD_ESSENTIAL, "Trigger a kernel panic to test diagnostics.\nUsage: panic", "panic");
-REGISTER_SHELL_COMMAND(assertfail_cmd_info, "assertfail", assertfail_cmd, CMD_ESSENTIAL, "Trigger an assertion failure (ASSERT).\nUsage: assertfail", "assertfail");
+REGISTER_SHELL_COMMAND(panic_cmd_info, "panic", panic_cmd, CMD_DIAGNOSTIC, "Trigger a kernel panic to test diagnostics.\nUsage: panic yes", "panic yes");
+REGISTER_SHELL_COMMAND(assertfail_cmd_info, "assertfail", assertfail_cmd, CMD_DIAGNOSTIC, "Trigger an assertion failure (ASSERT).\nUsage: assertfail yes", "assertfail yes");
 REGISTER_SHELL_COMMAND(serialtest_cmd_info, "serialtest", serialtest_cmd, CMD_STREAMING, "Write a test line to COM1 to verify serial output.\nUsage: serialtest", "serialtest");
 REGISTER_SHELL_COMMAND(pagingguards_cmd_info, "pagingguards", pagingguards_cmd, CMD_STREAMING, "Install optional paging guards (null-page, .text/.rodata RO).\nUsage: pagingguards", "pagingguards");
 

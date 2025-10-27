@@ -4,7 +4,6 @@
 #include <util.h>
 #include <string.h>
 #include <serial.h>
-#include <string.h>
 #include <tile_manager.h>
 
 #define HELP_TUI_WIDTH 80
@@ -441,9 +440,22 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
     tui_style_t sel_style = {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1};
     tui_style_t sub_style = {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0};
 
-    // Prepare names array
-    static char* cmd_names[128];
-    for (int i = 0; i < g_cmd_count; ++i) cmd_names[i] = (char*)g_sorted_cmds[i]->name;
+    // Prepare names array (allocate once and grow as needed)
+    static char** cmd_names = NULL;
+    static int cmd_names_cap = 0;
+    if (g_cmd_count > cmd_names_cap) {
+        if (cmd_names) free(cmd_names);
+        cmd_names = (char**)malloc(g_cmd_count * sizeof(char*));
+        if (!cmd_names) {
+            // Allocation failed; fall back to using pointers directly from g_sorted_cmds
+            cmd_names_cap = 0;
+        } else {
+            cmd_names_cap = g_cmd_count;
+        }
+    }
+    if (cmd_names) {
+        for (int i = 0; i < g_cmd_count; ++i) cmd_names[i] = (char*)g_sorted_cmds[i]->name;
+    }
 
     int max_visible = (left_win.height > 3) ? (left_win.height - 3) : 0;
     // Update the global max visible rows so key handler logic matches the drawn height
@@ -464,21 +476,22 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
 
     for (int i = g_scroll; i < g_cmd_count && display_y < max_visible; ++i) {
         int y_pos = left_win.y + 2 + display_y;
+        const char* cname = (cmd_names ? cmd_names[i] : g_sorted_cmds[i]->name);
         if (i == g_selected && g_selected_sub == 0) {
             tui_draw_text(left_win.x + 1, y_pos, "!", sel_style);
-            tui_draw_text(left_win.x + 2, y_pos, cmd_names[i], norm_style);
-            if (has_subcommands(cmd_names[i])) {
-                tui_draw_text(left_win.x + 2 + strlen(cmd_names[i]), y_pos, " *", sel_style);
+            tui_draw_text(left_win.x + 2, y_pos, cname, norm_style);
+            if (has_subcommands(cname)) {
+                tui_draw_text(left_win.x + 2 + strlen(cname), y_pos, " *", sel_style);
             }
         } else {
-            tui_draw_text(left_win.x + 1, y_pos, cmd_names[i], norm_style);
-            if (has_subcommands(cmd_names[i])) {
-                tui_draw_text(left_win.x + 1 + strlen(cmd_names[i]), y_pos, " *", norm_style);
+            tui_draw_text(left_win.x + 1, y_pos, cname, norm_style);
+            if (has_subcommands(cname)) {
+                tui_draw_text(left_win.x + 1 + strlen(cname), y_pos, " *", norm_style);
             }
         }
         display_y++;
-        if (g_expanded_commands[i] && has_subcommands(cmd_names[i])) {
-            const subcommand_info_t* subcmds = get_subcommands(cmd_names[i]);
+        if (g_expanded_commands && i < g_cmd_count && g_expanded_commands[i] && has_subcommands(cname)) {
+            const subcommand_info_t* subcmds = get_subcommands(cname);
             if (subcmds) {
                 int subcmd_count = count_subcommands(subcmds);
                 for (int j = 0; j < subcmd_count && display_y < max_visible; ++j) {
@@ -502,7 +515,7 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
 
     // Build description buffer based on selection
     char desc_buf[512] = "";
-    if (g_selected_sub > 0 && g_expanded_commands[g_selected] && has_subcommands(g_sorted_cmds[g_selected]->name)) {
+    if (g_selected_sub > 0 && g_expanded_commands && g_expanded_commands[g_selected] && has_subcommands(g_sorted_cmds[g_selected]->name)) {
         const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[g_selected]->name);
         if (subcmds && g_selected_sub <= count_subcommands(subcmds)) {
             const subcommand_info_t* s = &subcmds[g_selected_sub - 1];
@@ -524,7 +537,7 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
         }
         if (has_subcommands(g_sorted_cmds[g_selected]->name)) {
             strncat(desc_buf, "\n\n", sizeof(desc_buf) - strlen(desc_buf) - 1);
-            if (g_expanded_commands[g_selected]) {
+            if (g_expanded_commands && g_expanded_commands[g_selected]) {
                 strncat(desc_buf, "Sub-commands are expanded.\n", sizeof(desc_buf) - strlen(desc_buf) - 1);
                 strncat(desc_buf, "Press Enter to collapse.", sizeof(desc_buf) - strlen(desc_buf) - 1);
             } else {
@@ -677,7 +690,7 @@ void help_gui_key(int tile_idx, int key, void* userdata) {
             if (g_selected < g_scroll) g_scroll = g_selected;
         }
     } else if (key == 0x1002) { // Down
-        if (g_expanded_commands[g_selected] && has_subcommands(g_sorted_cmds[g_selected]->name)) {
+        if (g_expanded_commands && g_expanded_commands[g_selected] && has_subcommands(g_sorted_cmds[g_selected]->name)) {
             const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[g_selected]->name);
             if (subcmds && g_selected_sub < count_subcommands(subcmds)) {
                 g_selected_sub++;
@@ -704,7 +717,9 @@ void help_gui_key(int tile_idx, int key, void* userdata) {
         g_help_running = 0;
     } else if (key == '\n' || key == 13) {
         if (has_subcommands(g_sorted_cmds[g_selected]->name)) {
-            g_expanded_commands[g_selected] = !g_expanded_commands[g_selected];
+            if (g_expanded_commands) {
+                g_expanded_commands[g_selected] = !g_expanded_commands[g_selected];
+            }
             g_selected_sub = 0;
         }
     }

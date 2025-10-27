@@ -50,6 +50,11 @@ int rei_calculate_data_size(const rei_header_t* header) {
     return header->width * header->height * header->depth;
 }
 
+/* Forward-declare internal RLE decompressor (static implementation below). */
+static int rei_decompress_rle(const uint8_t* in, size_t in_size,
+                              uint8_t* out, size_t out_size,
+                              uint8_t pixel_size);
+
 // Parse complete REI image
 int rei_parse_image(const uint8_t* data, size_t size, rei_image_t* image) {
     if (!data || !image || size < sizeof(rei_header_t)) {
@@ -113,6 +118,8 @@ int rei_parse_image(const uint8_t* data, size_t size, rei_image_t* image) {
 
     return 0;
 }
+
+/* Note: rei_decompress_rle is forward-declared once above and implemented below. */
 
 // Free REI image memory
 void rei_free_image(rei_image_t* image) {
@@ -323,7 +330,7 @@ int rei_display_image_centered(const rei_image_t* image) {
 //      n in [0..127]  : literal run of (n+1) pixels follows
 //      n in [-127..-1]: replicate next single pixel (1) for (1 - n) times
 //      n == -128      : no-op (skip)
-int rei_decompress_rle(const uint8_t* in, size_t in_size,
+static int rei_decompress_rle(const uint8_t* in, size_t in_size,
                        uint8_t* out, size_t out_size,
                        uint8_t pixel_size) {
     if (!in || !out || pixel_size == 0) return -1;

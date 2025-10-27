@@ -20,11 +20,14 @@ string readStr() {
     
     while(reading)
     {
-                if(inportb(0x64) & 0x1)
                 {
                         uint8 status = inportb(0x64);
+                        if (!(status & 0x1)) {
+                                /* no data available */
+                                continue;
+                        }
                         if (status & 0x20) {
-                                // AUX (mouse) data present; let mouse handler consume it
+                                /* AUX (mouse) data present; let mouse handler consume it */
                                 continue;
                         }
                         uint8 scancode = inportb(0x60);
@@ -57,14 +60,15 @@ string readStr() {
             }
             
             // Check for Ctrl+C
-            if(ctrl_pressed && scancode == 46) {  // 'c' key
-                g_user_interrupt = 1;
-                buffstr[0] = '\0';  // Clear the buffer
-                reading = 0;        // Exit the reading loop
-                printf("%c^C\n", 255, 255, 255);  // Print ^C in white
-                free(buffstr);   // Clean up memory
-                return buffstr;
-            }
+                        if(ctrl_pressed && scancode == 46) {  // 'c' key
+                                g_user_interrupt = 1;
+                                buffstr[0] = '\0';  // Clear the buffer
+                                reading = 0;        // Exit the reading loop
+                                /* Print ^C without color formatting (kernel printf doesn't accept RGB args here) */
+                                printf("^C\n");
+                                /* Return the (cleared) buffer to the caller; caller is responsible for freeing */
+                                return buffstr;
+                        }
             
             // Determine if we should use uppercase (shift XOR caps lock)
             uint8 use_uppercase = shift_pressed ^ caps_lock;
@@ -625,18 +629,17 @@ string readStr() {
 
 void poll_keyboard_for_ctrl_c() {
     static uint8 ctrl_pressed = 0;
-        if (inportb(0x64) & 0x1) {
+        {
                 uint8 status = inportb(0x64);
-                if (status & 0x20) {
-                        return; // mouse data; ignore in keyboard code
-                }
+                if (!(status & 0x1)) return; /* no data */
+                if (status & 0x20) return; /* mouse data */
                 uint8 scancode = inportb(0x60);
-        if (scancode == 29) { // Ctrl press
-            ctrl_pressed = 1;
-        } else if (scancode == 157) { // Ctrl release
-            ctrl_pressed = 0;
-        } else if (ctrl_pressed && scancode == 46) { // 'c' key
-            g_user_interrupt = 1;
+                if (scancode == 29) { // Ctrl press
+                        ctrl_pressed = 1;
+                } else if (scancode == 157) { // Ctrl release
+                        ctrl_pressed = 0;
+                } else if (ctrl_pressed && scancode == 46) { // 'c' key
+                        g_user_interrupt = 1;
+                }
         }
-    }
 }

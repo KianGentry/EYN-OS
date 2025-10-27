@@ -12,17 +12,17 @@ section .text
 
 _start:
     ; write prompt
-    mov eax, 1        ; write
+    mov eax, 4        ; sys_write
     mov ebx, 1        ; fd=1
     lea ecx, [prompt]
-    mov edx, 25
+    mov edx, 27
     int 0x80
 
     ; read line
-    mov eax, 3        ; read
+    mov eax, 3        ; sys_read
     mov ebx, 0        ; fd=0
     lea ecx, [inbuf]
-    mov edx, 64
+    mov edx, 48
     int 0x80          ; eax = nbytes
 
     ; parse: <int><op><int> ; skip spaces
@@ -183,11 +183,11 @@ _start:
     mov eax, 1
     mov ebx, 1
     mov ecx, esi
-    mov edx, 64
+    mov edx, 48
     int 0x80
     pop eax
 
 .done:
-    mov eax, 2
+    mov eax, 1
     xor ebx, ebx
     int 0x80

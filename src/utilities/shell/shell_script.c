@@ -356,6 +356,9 @@ static void set_var(shell_script_context_t* ctx, const char* key, const char* va
         safe_strcpy(ctx->vars[ctx->var_count].key, key, sizeof(ctx->vars[ctx->var_count].key));
         safe_strcpy(ctx->vars[ctx->var_count].val, val, sizeof(ctx->vars[ctx->var_count].val));
         ctx->var_count++;
+    } else {
+        /* Script-visible error: variable store full */
+        printf("%cWarning: variable table full, cannot store '%s'\n", 255, 255, 0, key);
     }
 }
 

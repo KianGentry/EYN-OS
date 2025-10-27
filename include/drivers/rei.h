@@ -52,9 +52,8 @@ int rei_parse_image(const uint8_t* data, size_t size, rei_image_t* image);
 void rei_free_image(rei_image_t* image);
 
 // Decompression (internal helpers)
-int rei_decompress_rle(const uint8_t* in, size_t in_size,
-                       uint8_t* out, size_t out_size,
-                       uint8_t pixel_size);
+// rei_decompress_rle is an internal implementation detail of rei.c and is
+// intentionally not exposed in the public header.
 
 // Display functions
 int rei_display_image(const rei_image_t* image, int x, int y);

@@ -741,8 +741,15 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                     addr += CODE_BASE;
                 }
                 if (is_data && addr < DATA_BASE) {
-                    // Map to DATA_BASE, not CODE_BASE
-                    addr = DATA_BASE + (addr - DATA_BASE);
+                    /* If stored as a data-section-relative offset, preserve the offset
+                     * while mapping to the runtime DATA_BASE. For example, if addr was
+                     * 0x1000 (meaning start of data), and DATA_BASE is 0x20001000,
+                     * the resulting address should be DATA_BASE + (addr - DATA_SECTION_BASE)
+                     * where addr is offset within the data section. Here we assume
+                     * that previously-stored data addresses are offsets relative to 0
+                     * (i.e., an offset), so just add DATA_BASE.
+                     */
+                    addr = DATA_BASE + addr;
                 }
                 if (reg >= 0) {
                     (*code)[code_pos-1] = 0xB8 + reg;

@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2025-10-27 19:38:50
+This document is auto-generated from the source code. Last updated: 2025-10-27 21:50:13
 
 **Total Commands:** 55
 
@@ -14,25 +14,6 @@ This document is auto-generated from the source code. Last updated: 2025-10-27 1
 - [Development Commands](#development-commands)
 
 ## Essential Commands
-
-### assertfail
-
-**Handler:** `assertfail_cmd`
-
-**Type:** CMD_ESSENTIAL
-
-**File:** `shell_commands.c`
-
-**Description:**
-Trigger an assertion failure (ASSERT).
-Usage: assertfail
-
-**Example:**
-```bash
-assertfail
-```
-
----
 
 ### clear
 
@@ -129,25 +110,6 @@ memory stats
 
 ---
 
-### panic
-
-**Handler:** `panic_cmd`
-
-**Type:** CMD_ESSENTIAL
-
-**File:** `shell_commands.c`
-
-**Description:**
-Trigger a kernel panic to test diagnostics.
-Usage: panic
-
-**Example:**
-```bash
-panic
-```
-
----
-
 ### portable
 
 **Handler:** `portable_cmd`
@@ -168,6 +130,25 @@ portable
 ---
 
 ## Streaming Commands
+
+### assertfail
+
+**Handler:** `assertfail_cmd`
+
+**Type:** CMD_DIAGNOSTIC
+
+**File:** `shell_commands.c`
+
+**Description:**
+Trigger an assertion failure (ASSERT).
+Usage: assertfail yes
+
+**Example:**
+```bash
+assertfail yes
+```
+
+---
 
 ### catram
 
@@ -350,6 +331,25 @@ Usage: pagingguards
 **Example:**
 ```bash
 pagingguards
+```
+
+---
+
+### panic
+
+**Handler:** `panic_cmd`
+
+**Type:** CMD_DIAGNOSTIC
+
+**File:** `shell_commands.c`
+
+**Description:**
+Trigger a kernel panic to test diagnostics.
+Usage: panic yes
+
+**Example:**
+```bash
+panic yes
 ```
 
 ---
@@ -1072,8 +1072,8 @@ run test.eyn
 
 | Category | Count |
 |----------|-------|
-| Essential Commands | 8 |
-| Streaming Commands | 21 |
+| Essential Commands | 6 |
+| Streaming Commands | 23 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |

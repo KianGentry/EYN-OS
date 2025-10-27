@@ -3,6 +3,7 @@
 #include <vga.h>
 #include <string.h>
 #include <shell_command_info.h>
+#include <stdlib.h>
 
 static void test_draw(int tile_idx, int cx, int cy, int cw, int ch, void* ud) {
     (void)tile_idx; (void)ud;
@@ -21,6 +22,10 @@ static void test_key(int tile_idx, int key, void* ud) {
     if (key == 0x2101 || key == 0x2002) { // Ctrl+Q or Ctrl+X closes the window
         int* pwid = (int*)ud;
         if (pwid && *pwid >= 0) wm_close_window(*pwid);
+
+        if (pwid) {
+            free(pwid);
+        }
     }
 }
 
@@ -34,7 +39,13 @@ void win_test_cmd(string ch) {
     static char status[] = "Ctrl+X: Close";
     int wid = wm_create_window("Window Test", x, y, w, h, status);
     if (wid >= 0) {
-        wm_register_gui_client2(wid, test_draw, test_key, test_mouse, (void*)&wid);
+        int* pwid = (int*)malloc(sizeof(int));
+        if (pwid) {
+            *pwid = wid;
+            wm_register_gui_client2(wid, test_draw, test_key, test_mouse, (void*)pwid);
+        } else {
+            wm_register_gui_client2(wid, test_draw, test_key, test_mouse, NULL);
+        }
         wm_invalidate_window(wid);
     }
 }

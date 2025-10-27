@@ -7,7 +7,8 @@
 typedef enum {
     CMD_ESSENTIAL = 0,    // Always in RAM
     CMD_STREAMING = 1,    // Loaded on demand
-    CMD_DISABLED = 2      // Not available
+    CMD_DISABLED = 2,     // Not available
+    CMD_DIAGNOSTIC = 3    // Dangerous/diagnostic commands (require confirmation)
 } command_type_t;
 
 // Command handler function type
