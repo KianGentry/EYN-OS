@@ -17,6 +17,7 @@
 #include <tile_manager.h>
 #include <serial.h>
 #include <watchdog.h>
+#include <help_tui.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
@@ -80,6 +81,12 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     
     // Launch tiling manager by default; it provides the graphical shell UI
     start_tiling_manager();
+
+    // Pre-initialize help UI state (build sorted command list) so the help UI
+    // can be shown later without rebuilding and to avoid runtime recomputation
+    // that may expose memory layout differences.
+    extern void help_tui_init_state(void);
+    help_tui_init_state();
 
     // If tiling manager exits (e.g., user closes it), fall back to classic shell
     launch_shell(0);

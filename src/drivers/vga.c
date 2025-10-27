@@ -48,6 +48,10 @@ unsigned char shell_redirect_r[SHELL_REDIRECT_BUF_SIZE];
 unsigned char shell_redirect_g[SHELL_REDIRECT_BUF_SIZE];
 unsigned char shell_redirect_b[SHELL_REDIRECT_BUF_SIZE];
 
+// Icon markers recorded during shell redirect
+shell_redirect_icon_t shell_redirect_icons[SHELL_REDIRECT_ICON_MAX];
+int shell_redirect_icon_count = 0;
+
 // Dynamic buffer sizing based on available memory
 char* shell_log_buf = NULL;
 int shell_log_buf_size = 0;
@@ -729,6 +733,46 @@ void vga_drawPixel_bb(int x, int y, int rr, int gg, int bb)
 	if (bpp >= 4) p[3] = 0xFF;
 }
 
+// Blend an RGBA pixel into the backbuffer. Alpha 0..255 where 0 is transparent.
+void vga_blendPixel_bb(int x, int y, int rr, int gg, int bb, int aa)
+{
+	if (!g_mbi) return;
+	int sw = (int)g_mbi->framebuffer_width;
+	int sh = (int)g_mbi->framebuffer_height;
+	if (x < 0 || y < 0 || x >= sw || y >= sh) return;
+
+	if (g_backbuffer && g_backbuffer_w >= sw && g_backbuffer_h >= sh) {
+		uint8_t* p = g_backbuffer + ((size_t)y * g_backbuffer_w + x) * 4;
+		// backbuffer layout: B, G, R, A
+		uint8_t dst_b = p[0]; uint8_t dst_g = p[1]; uint8_t dst_r = p[2]; uint8_t dst_a = p[3];
+		// Normalize alpha to 0..255
+		int a = aa; if (a < 0) a = 0; if (a > 255) a = 255;
+	// Composite: out = src * (a/255) + dst * (1 - a/255)
+	// backbuffer layout is B, G, R so map src channels accordingly
+	p[0] = (uint8_t)((bb * a + dst_b * (255 - a)) / 255);
+	p[1] = (uint8_t)((gg * a + dst_g * (255 - a)) / 255);
+	p[2] = (uint8_t)((rr * a + dst_r * (255 - a)) / 255);
+		// keep alpha as fully opaque for now
+		p[3] = 0xFF;
+		vga_mark_dirty_rect(x, y, 1, 1);
+		return;
+	}
+
+	// Fallback: composite directly into framebuffer
+	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8; if (bpp < 3) bpp = 3;
+	unsigned char* dst = video + y * pitch + x * bpp;
+	// dst layout likely B G R
+	int a = aa; if (a < 0) a = 0; if (a > 255) a = 255;
+	uint8_t dst_b = dst[0], dst_g = dst[1], dst_r = dst[2];
+	// framebuffer layout assumed B,G,R so write mapped channels
+	dst[0] = (uint8_t)((bb * a + dst_b * (255 - a)) / 255);
+	dst[1] = (uint8_t)((gg * a + dst_g * (255 - a)) / 255);
+	dst[2] = (uint8_t)((rr * a + dst_r * (255 - a)) / 255);
+	if (bpp >= 4) dst[3] = 0xFF;
+}
+
 void drawLine(int x1, int y1, int x2, int y2, int r, int g, int b)
 {
 
@@ -1237,6 +1281,8 @@ void start_shell_redirect() {
 	shell_redirect_color_r = 0;
 	shell_redirect_color_g = 0;
 	shell_redirect_color_b = 0;
+	// clear any previously recorded icons for this redirect session
+	shell_redirect_icon_count = 0;
 }
 
 // Stop redirection
@@ -1247,6 +1293,16 @@ void stop_shell_redirect() {
 	shell_redirect_color_r = 0;
 	shell_redirect_color_g = 0;
 	shell_redirect_color_b = 0;
+}
+
+// Register an icon to be associated with the current output position in shell_redirect_buf.
+void shell_register_redirect_icon(const char* ext) {
+    if (!ext) return;
+    if (shell_redirect_icon_count >= SHELL_REDIRECT_ICON_MAX) return;
+    int p = shell_redirect_pos;
+    shell_redirect_icons[shell_redirect_icon_count].pos = p;
+    safe_strcpy(shell_redirect_icons[shell_redirect_icon_count].ext, ext, sizeof(shell_redirect_icons[shell_redirect_icon_count].ext));
+    shell_redirect_icon_count++;
 }
 
 // Minimal snprintf for kernel shell (supports %s, %u, %d, %c)

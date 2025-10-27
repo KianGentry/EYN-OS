@@ -149,10 +149,43 @@ void eynfs_ls_depth(uint8 disk, uint32_t dir_block, int depth, int max_depth, in
 
 // Helper callback for VFS-based ls
 static int vfs_ls_print_cb(const char* name, int is_dir, uint32 size, void* user) {
+    // When shell output is being redirected (e.g., listing inside a tiled vterm), we record an icon
+    // marker for the filename so the tiler can render a small .rei icon to the left of the text.
+    extern int shell_redirect_active;
     if (is_dir) {
-        printf("%c%s/\n", 120, 120, 255, name);
+        if (shell_redirect_active) {
+            // Emit two-space padding first (so shell_redirect_pos advances to where the
+            // filename will start), then register an icon for that upcoming filename
+            // and finally print the filename. Keep color information on both prints so
+            // the redirected per-char color is set correctly.
+            printf("%c  ", 120, 120, 255);
+            shell_register_redirect_icon("dir");
+            printf("%c%s/\n", 120, 120, 255, name);
+        } else {
+            printf("%c%s/\n", 120, 120, 255, name);
+        }
     } else {
-        printf("%c%s\n", 255, 255, 255, name);
+        if (shell_redirect_active) {
+            // map extension to a small icon name (without leading dot)
+            const char* dot = strrchr(name, '.');
+            const char* ext = dot ? dot + 1 : "none";
+            // normalize some common extensions
+            if (strcmp(ext, "rei") == 0) ext = "rei";
+            else if (strcmp(ext, "txt") == 0) ext = "txt";
+            else if (strcmp(ext, "md") == 0) ext = "md";
+            else if (strcmp(ext, "asm") == 0) ext = "asm";
+            else if (strcmp(ext, "bin") == 0) ext = "bin";
+            else if (strcmp(ext, "sh") == 0) ext = "shell";
+            else if (strcmp(ext, "eyn") == 0) ext = "eyn";
+            else ext = "none";
+            // Print padding first so the registered icon position points to the
+            // first character of the filename that will follow.
+            printf("%c  ", 255, 255, 255);
+            shell_register_redirect_icon(ext);
+            printf("%c%s\n", 255, 255, 255, name);
+        } else {
+            printf("%c%s\n", 255, 255, 255, name);
+        }
     }
     return 0;
 }

@@ -34,6 +34,9 @@ void drawLine(int x1, int y1, int x2, int y2, int r, int g, int b);
 void drawPixel(int x, int y, int r, int g, int b);
 // Draw to backbuffer only (no dirty mark). Call vga_mark_dirty_rect separately.
 void vga_drawPixel_bb(int x, int y, int r, int g, int b);
+// Blend an RGBA pixel into the backbuffer (or framebuffer fallback).
+// alpha 0..255 where 0 is transparent and 255 is opaque.
+void vga_blendPixel_bb(int x, int y, int r, int g, int b, int a);
 void clearScreen(void);
 
 // windowing (viewport) api - up to 4 windows in a 2x2 grid
@@ -55,6 +58,15 @@ extern int shell_redirect_color_b;
 extern unsigned char shell_redirect_r[SHELL_REDIRECT_BUF_SIZE];
 extern unsigned char shell_redirect_g[SHELL_REDIRECT_BUF_SIZE];
 extern unsigned char shell_redirect_b[SHELL_REDIRECT_BUF_SIZE];
+
+// Icon markers recorded during shell redirect: used by shell utilities (ls) to mark
+// where an icon should be drawn for a filename printed into the redirect buffer.
+#define SHELL_REDIRECT_ICON_MAX 128
+typedef struct { int pos; char ext[16]; } shell_redirect_icon_t;
+extern shell_redirect_icon_t shell_redirect_icons[SHELL_REDIRECT_ICON_MAX];
+extern int shell_redirect_icon_count;
+// Register an icon for the next bytes to be emitted into shell_redirect_buf.
+void shell_register_redirect_icon(const char* ext);
 
 // Shell logging variables
 extern char* shell_log_buf;

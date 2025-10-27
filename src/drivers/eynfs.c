@@ -273,6 +273,10 @@ int eynfs_read_dir_table(uint8 drive, uint32 lba, eynfs_dir_entry_t *entries, si
         size_t entries_to_copy = entry_count;
         if (max_entries - total_entries < entry_count) entries_to_copy = max_entries - total_entries;
         memcpy(&entries[total_entries], buf + 4, entries_to_copy * sizeof(eynfs_dir_entry_t));
+        // Ensure all names are null-terminated
+        for (size_t j = 0; j < entries_to_copy; ++j) {
+            entries[total_entries + j].name[EYNFS_NAME_MAX - 1] = '\0';
+        }
         total_entries += entries_to_copy;
         if (total_entries >= max_entries) break;
         current_block = next_block;

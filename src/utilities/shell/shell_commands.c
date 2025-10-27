@@ -677,7 +677,15 @@ void help()
 }
 
 void help_cmd(string ch) {
-    // Use the TUI help system
+    // Initialize help state (if not already) and show precomputed GUI when tiling
+    extern void help_tui_init_state(void);
+    extern void help_tui_show(void);
+    help_tui_init_state();
+    if (tile_is_tiling_active()) {
+        help_tui_show();
+        return;
+    }
+    // Fallback for non-tiling mode
     help_tui();
 }
 

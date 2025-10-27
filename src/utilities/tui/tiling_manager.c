@@ -230,6 +230,124 @@ static void load_close_icon_unf_try_paths(uint8 disk);
 static void load_min_icon_unf_try_paths(uint8 disk);
 static void load_max_icon_unf_try_paths(uint8 disk);
 
+// ---------------- Icon cache for small file icons ----------------
+#define ICON_CACHE_MAX 64
+typedef struct {
+    char ext[16];
+    rei_image_t img;
+    int loaded;
+} icon_cache_entry_t;
+
+static icon_cache_entry_t g_icon_cache[ICON_CACHE_MAX];
+static int g_icon_cache_count = 0;
+
+// Try a few candidate paths for an icon with given extension and load into cache entry
+static rei_image_t* load_icon_for_ext(const char* ext) {
+    if (!ext) return NULL;
+    // Check cache first
+    for (int i = 0; i < g_icon_cache_count; ++i) {
+        if (strcmp(g_icon_cache[i].ext, ext) == 0) {
+            return g_icon_cache[i].loaded ? &g_icon_cache[i].img : NULL;
+        }
+    }
+    if (g_icon_cache_count >= ICON_CACHE_MAX) return NULL;
+
+    // Candidate filename patterns. Try several patterns used in the project/testdir
+    const char* patterns[] = {
+        "/testdir/icons/file_%s.rei",
+        "/icons/file_%s.rei",
+        "/testdir/icons/%s.rei",
+        "/icons/%s.rei",
+        "/testdir/icons/%s_icon.rei",
+        "/icons/%s_icon.rei",
+        NULL
+    };
+
+    char pathbuf[256];
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(0, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) {
+        return NULL;
+    }
+
+    rei_image_t tmp;
+    int found = 0;
+    for (int pi = 0; patterns[pi]; ++pi) {
+        snprintf(pathbuf, sizeof(pathbuf), patterns[pi], ext);
+        eynfs_dir_entry_t entry;
+        if (eynfs_traverse_path(0, &sb, pathbuf, &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+            int size = entry.size;
+            uint8_t* buf = (uint8_t*)malloc(size);
+            if (!buf) break;
+            int n = eynfs_read_file(0, &sb, &entry, (char*)buf, size, 0);
+            if (n == size) {
+                if (rei_parse_image(buf, size, &tmp) == 0) {
+                    found = 1;
+                }
+            }
+            free(buf);
+            if (found) break;
+        }
+    }
+    if (!found) {
+        // also try some generic dir icons
+        const char* alt_dir_paths[] = { "/testdir/icons/dir_full.rei", "/icons/dir_full.rei", "/testdir/icons/dir.rei", "/icons/dir.rei", NULL };
+        for (int pi = 0; alt_dir_paths[pi]; ++pi) {
+            eynfs_dir_entry_t entry;
+            if (eynfs_traverse_path(0, &sb, alt_dir_paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+                int size = entry.size;
+                uint8_t* buf = (uint8_t*)malloc(size);
+                if (!buf) break;
+                int n = eynfs_read_file(0, &sb, &entry, (char*)buf, size, 0);
+                if (n == size) {
+                    if (rei_parse_image(buf, size, &tmp) == 0) { found = 1; }
+                }
+                free(buf);
+                if (found) break;
+            }
+        }
+    }
+
+    // Add to cache entry regardless (to avoid repeated failed lookups)
+    int idx = g_icon_cache_count++;
+    memset(&g_icon_cache[idx], 0, sizeof(g_icon_cache[idx]));
+    strncpy(g_icon_cache[idx].ext, ext, sizeof(g_icon_cache[idx].ext)-1);
+    if (found) {
+        g_icon_cache[idx].img = tmp; // struct copy (contains allocated data)
+        g_icon_cache[idx].loaded = 1;
+        return &g_icon_cache[idx].img;
+    }
+    g_icon_cache[idx].loaded = 0;
+    return NULL;
+}
+
+// Draw an REI image into the backbuffer at (x,y). Honor alpha for RGBA and use blending.
+static void draw_rei_at(const rei_image_t* im, int x, int y) {
+    if (!im || !im->data) return;
+    int w = im->header.width;
+    int h = im->header.height;
+    int depth = im->header.depth;
+    if (w <= 0 || h <= 0) return;
+    for (int py = 0; py < h; ++py) {
+        for (int px = 0; px < w; ++px) {
+            int off = (py * w + px) * depth;
+            if (off < 0 || (size_t)(off + depth) > (size_t)im->data_size) continue;
+            uint8_t sr = 0, sg = 0, sb = 0, sa = 255;
+            if (depth == REI_DEPTH_MONO) { sr = sg = sb = im->data[off]; }
+            else if (depth == REI_DEPTH_RGB) { sr = im->data[off]; sg = im->data[off+1]; sb = im->data[off+2]; }
+            else if (depth == REI_DEPTH_RGBA) { sr = im->data[off]; sg = im->data[off+1]; sb = im->data[off+2]; sa = im->data[off+3]; }
+            if (depth == REI_DEPTH_RGBA) {
+                if (sa == 0) continue; // fully transparent
+                // Blend using vga_blendPixel_bb
+                vga_blendPixel_bb(x + px, y + py, sr, sg, sb, (int)sa);
+            } else {
+                // opaque
+                vga_drawPixel_bb(x + px, y + py, sr, sg, sb);
+            }
+        }
+    }
+    vga_mark_dirty_rect(x, y, w, h);
+}
+
 // Forward declarations for icon loaders (must appear before start_tiling_manager)
 static void load_close_icon_try_paths(uint8 disk);
 static void load_min_icon_try_paths(uint8 disk);
@@ -1199,6 +1317,14 @@ static void draw_tile_content(const tile_t* t) {
     if (content_w > 0 && content_h > 0) {
         // Always start with a clean content area to avoid any residuals around centered/scaled images
         drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
+        // Debug: show number of registered redirect icons (non-invasive onscreen feedback)
+        extern int shell_redirect_icon_count;
+        if (shell_redirect_icon_count > 0) {
+            char label[8];
+            int n = (shell_redirect_icon_count > 9) ? 9 : shell_redirect_icon_count;
+            label[0] = 'I'; label[1] = 'c'; label[2] = ':'; label[3] = '0' + n; label[4] = '\0';
+            for (int i = 0; label[i]; ++i) drawCharAt(content_x + i*8, content_y, (int)(unsigned char)label[i], 255, 200, 0);
+        }
         // Draw configured background (if any); else clear to black
         int ti_bg = t - tiles;
         tile_bg_t* bg = (ti_bg >= 0 && ti_bg < MAX_TILES) ? &g_tile_bg[ti_bg] : NULL;
@@ -1338,6 +1464,24 @@ static void draw_tile_content(const tile_t* t) {
                         // 1px down-right shadow
                         drawCharAt(px + 1, py + 1, (int)(unsigned char)ch, sr, sg, sb);
                     }
+                    // Before drawing main character, check for a registered redirect icon that maps to this cell.
+                    // If present, draw the icon 8px to the left (one char cell) and shift the glyph remains painted as usual.
+                    // Prefer per-cell icon index (set when redirect output was copied into the vterm)
+                    int icon_idx = vterm_get_char_icon_index(t->term_idx, abs_row, src_col);
+                    if (icon_idx >= 0) {
+                        extern shell_redirect_icon_t shell_redirect_icons[];
+                        if (icon_idx < SHELL_REDIRECT_ICON_MAX) {
+                            rei_image_t* ic = load_icon_for_ext(shell_redirect_icons[icon_idx].ext);
+                            if (ic && ic->data) {
+                                int icon_w = ic->header.width;
+                                int icon_h = ic->header.height;
+                                int draw_x = px - icon_w - 4; // 4px padding
+                                int draw_y = py + (8 - icon_h) / 2; if (draw_y < py) draw_y = py;
+                                draw_rei_at(ic, draw_x, draw_y);
+                            }
+                        }
+                    }
+
                     // Draw main character
                     drawCharAt(px, py, (int)(unsigned char)ch, rr, gg, bb);
                     // Then overlay underscore cursor at the logical caret position

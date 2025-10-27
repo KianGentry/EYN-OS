@@ -226,7 +226,8 @@ obj/irq.o:src/cpu/irq.c include/cpu/irq.h
 
 build: all eynfsimg docs
 	# Clean staging dir to avoid leftover permissions/ownership from prior runs
-	rm -rf tmp/grub_ultra_minimal
+	-chmod -R u+w tmp/grub_ultra_minimal 2>/dev/null || true
+	-rm -rf tmp/grub_ultra_minimal || true
 	# Recreate with sane permissions
 	install -d -m 0755 tmp/grub_ultra_minimal/boot/grub
 	cp tmp/boot/kernel.bin tmp/grub_ultra_minimal/boot/
@@ -303,7 +304,7 @@ run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
 	-boot d \
-	-m 9M
+	-m 64M
 
 # Debug run with serial logging and detailed CPU/interrupt logs
 .PHONY: qemu-debug

@@ -3,6 +3,7 @@
 #include <vga.h>
 #include <util.h>
 #include <string.h>
+#include <serial.h>
 #include <string.h>
 #include <tile_manager.h>
 
@@ -83,13 +84,22 @@ static int g_selected = 0;
 static int g_selected_sub = 0;
 static int g_scroll = 0;
 static int g_max_visible = MAX_VISIBLE;
-static int g_expanded_commands[128] = {0};
+// dynamic expanded flags (allocated to g_cmd_count)
+static int* g_expanded_commands = NULL;
+// persistent copies of command metadata and strings. These are allocated by
+// help_tui_init_state() and freed when the GUI exits. Keeping copies avoids
+// relying on pointers into other sections that might be transient.
+static shell_command_info_t* g_copied_cmds = NULL;
+static char* g_cmd_string_pool = NULL;
 static volatile int g_help_running = 0;
 
 // Forward declarations for GUI callbacks
-static void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata);
-static void help_gui_key(int tile_idx, int key, void* userdata);
-static void help_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata);
+void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata);
+void help_gui_key(int tile_idx, int key, void* userdata);
+void help_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata);
+// Forward declarations for init/show helpers
+void help_tui_init_state(void);
+void help_tui_show(void);
 
 // Remember last content rect for mouse hit-testing
 static int g_last_cx = 0, g_last_cy = 0, g_last_cw = 0, g_last_ch = 0;
@@ -97,89 +107,88 @@ static int g_last_cx = 0, g_last_cy = 0, g_last_cw = 0, g_last_ch = 0;
 void help_tui() {
     extern const shell_command_info_t __start_shellcmds[];
     extern const shell_command_info_t __stop_shellcmds[];
-    
-    // Count commands
-    int cmd_count = 0;
-    for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
-        cmd_count++;
+    // Debug: dump the first bytes of each registered shell command name to serial
+    // This helps detect corruption of the command table (non-invasive, serial-only).
+    {
+        char tmp[160];
+        int idx = 0;
+        for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
+            // build a safe preview of the name (printable or '.' placeholder)
+            const char* s = cmd->name ? cmd->name : "(null)";
+            int i; int max = 48;
+            for (i = 0; i < max && s[i]; ++i) {
+                char c = s[i];
+                if (c < 32 || c > 126) tmp[i] = '.'; else tmp[i] = c;
+            }
+            tmp[i] = '\0';
+            // print address and preview via serial (avoid using printf to keep this low-impact)
+            char line[200];
+            int n = snprintf(line, sizeof(line), "CMD[%d] name_ptr=%u preview='%s'\n", idx, (unsigned int)(uintptr_t)s, tmp);
+            for (int j = 0; j < n; ++j) serial_write_char(SERIAL_COM1, line[j]);
+            idx++;
+        }
     }
+    // Defensive: ensure no shell redirection/capture is active before switching to GUI mode.
+    // Some commands (like ls/read) run with redirect active in terminals; if a GUI opens mid-state,
+    // guarantee a clean slate so GUI drawing is never captured or influenced by shell IO modes.
+    extern int g_shell_capture_mode; // from vga.c
+    extern int shell_redirect_active; // from vga.c
+    extern void stop_shell_redirect(void);
+    if (shell_redirect_active) stop_shell_redirect();
+    g_shell_capture_mode = 0;
     
-    if (cmd_count == 0) {
+    // Use or prepare the global, persistent help state (copies of command strings)
+    help_tui_init_state();
+    if (!g_sorted_cmds || g_cmd_count == 0) {
         printf("No commands available.\n");
         return;
     }
-    
-    // Create sorted array of command pointers
-    const shell_command_info_t** sorted_cmds = (const shell_command_info_t**) malloc(cmd_count * sizeof(const shell_command_info_t*));
-    if (!sorted_cmds) {
-        printf("Error: Memory allocation failed.\n");
-        return;
-    }
-    
-    // Fill array with command pointers
-    int idx = 0;
-    for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
-        sorted_cmds[idx++] = cmd;
-    }
-    
-    // Sort commands alphabetically by name
-    if (cmd_count > 1) {
-        for (int i = 0; i < cmd_count - 1; i++) {
-            for (int j = 0; j < cmd_count - i - 1; j++) {
-                if (strcmp(sorted_cmds[j]->name, sorted_cmds[j + 1]->name) > 0) {
-                    const shell_command_info_t* temp = sorted_cmds[j];
-                    sorted_cmds[j] = sorted_cmds[j + 1];
-                    sorted_cmds[j + 1] = temp;
-                }
-            }
-        }
-    }
-    
-    int selected = 0;
-    int scroll = 0;
+
+    // Use global values for selection and window geometry
+    int selected = g_selected;
+    int scroll = g_scroll;
+    int selected_sub = g_selected_sub; // local selection for non-tiling
     int max_visible = MAX_VISIBLE;
     int win_height = max_visible + 3; // title + separator + list + bottom border
 
     tui_window_t left_win = {0, 0, CMD_LIST_WIDTH, win_height, "Commands", {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1}, {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0}, {TUI_COLOR_BLACK, TUI_COLOR_BLACK, 0}};
     tui_window_t right_win = {CMD_LIST_WIDTH + 2, 0, DESC_WIDTH, win_height, "Description", {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1}, {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0}, {TUI_COLOR_BLACK, TUI_COLOR_BLACK, 0}};
 
-    // Track which commands are expanded
-    static int expanded_commands[128] = {0};
-    
-    // Track selection state (0 = main command, 1+ = sub-command index)
-    int selected_sub = 0;
-
     // If tiling is active, run in GUI mode: register a GUI client for the focused tile
     if (tile_is_tiling_active()) {
-        // Publish shared arrays for GUI callbacks
-        g_sorted_cmds = sorted_cmds;
-        g_cmd_count = cmd_count;
+        // Publish shared arrays for GUI callbacks (they're prepared by init)
         g_selected = selected;
         g_selected_sub = 0;
         g_scroll = scroll;
         g_max_visible = max_visible;
-        for (int i = 0; i < 128; ++i) g_expanded_commands[i] = 0;
+        if (!g_expanded_commands) {
+            g_expanded_commands = (int*)calloc(g_cmd_count, sizeof(int));
+        }
+        for (int i = 0; i < g_cmd_count; ++i) g_expanded_commands[i] = 0;
         g_help_running = 1;
 
         int focused = tile_get_focused();
-        // Set the tile title so the tile shows it's the Help UI. Do NOT set a tile-level status
-        // because the GUI will draw its own bottom status bar inside the content area.
         tile_set_title_status(focused, "EYN-OS Help", NULL, NULL);
         tile_register_gui_client2(focused, help_gui_draw, help_gui_key, help_gui_mouse, NULL);
-        // Return immediately; the tiling manager will drive drawing and input via our callbacks.
         return;
     }
 
     // Fallback: non-tiling behavior (existing code path)
+    char** cmd_names = NULL;
     while (1) {
         tui_clear();
         tui_draw_window(&left_win);
         tui_draw_window(&right_win);
 
         // Create command names with asterisks for those with sub-commands
-        static char* cmd_names[128];
-        for (int i = 0; i < cmd_count; ++i) {
-            cmd_names[i] = (char*)sorted_cmds[i]->name;
+        // Build transient view arrays for non-tiling TUI
+        cmd_names = (char**)malloc(g_cmd_count * sizeof(char*));
+        if (!cmd_names) {
+            printf("Error: Memory allocation failed.\n");
+            return;
+        }
+        for (int i = 0; i < g_cmd_count; ++i) {
+            cmd_names[i] = (char*)g_sorted_cmds[i]->name;
         }
 
         tui_style_t norm_style = {TUI_COLOR_WHITE, TUI_COLOR_BLACK, 0};
@@ -187,14 +196,14 @@ void help_tui() {
         tui_style_t sub_style = {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0};
 
         // Custom list drawing with collapsible sub-commands
-        int max_visible = left_win.height - 3;
+    int max_visible = left_win.height - 3;
         int display_y = 0;
         int items_above_scroll = 0;
 
         // First pass: count items above scroll position
         for (int i = 0; i < scroll; ++i) {
             items_above_scroll++;
-            if (expanded_commands[i] && has_subcommands(cmd_names[i])) {
+            if (g_expanded_commands && g_expanded_commands[i] && has_subcommands(cmd_names[i])) {
                 const subcommand_info_t* subcmds = get_subcommands(cmd_names[i]);
                 if (subcmds) {
                     items_above_scroll += count_subcommands(subcmds);
@@ -203,7 +212,7 @@ void help_tui() {
         }
 
         // Second pass: draw visible items
-        for (int i = scroll; i < cmd_count && display_y < max_visible; ++i) {
+    for (int i = scroll; i < g_cmd_count && display_y < max_visible; ++i) {
             int y_pos = left_win.y + 2 + display_y;
             
             // Draw main command
@@ -224,8 +233,8 @@ void help_tui() {
             display_y++;
             
             // Draw sub-commands if expanded
-            if (expanded_commands[i] && has_subcommands(cmd_names[i])) {
-                const subcommand_info_t* subcmds = get_subcommands(cmd_names[i]);
+                if (g_expanded_commands && g_expanded_commands[i] && has_subcommands(cmd_names[i])) {
+                    const subcommand_info_t* subcmds = get_subcommands(cmd_names[i]);
                 if (subcmds) {
                     int subcmd_count = count_subcommands(subcmds);
                     for (int j = 0; j < subcmd_count && display_y < max_visible; ++j) {
@@ -249,8 +258,8 @@ void help_tui() {
         char desc_buf[256] = "";
         
         // Check if we're selecting a sub-command
-        if (selected_sub > 0 && expanded_commands[selected] && has_subcommands(sorted_cmds[selected]->name)) {
-            const subcommand_info_t* subcmds = get_subcommands(sorted_cmds[selected]->name);
+        if (selected_sub > 0 && g_expanded_commands && g_expanded_commands[selected] && has_subcommands(g_sorted_cmds[selected]->name)) {
+            const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[selected]->name);
             if (subcmds && selected_sub <= count_subcommands(subcmds)) {
                 const subcommand_info_t* selected_subcmd = &subcmds[selected_sub - 1];
                 strncat(desc_buf, selected_subcmd->description ? selected_subcmd->description : "No description available", sizeof(desc_buf) - strlen(desc_buf) - 1);
@@ -262,19 +271,19 @@ void help_tui() {
             }
         } else {
             // Show main command description
-            if (sorted_cmds[selected]->description && sorted_cmds[selected]->description[0]) {
-                strncat(desc_buf, sorted_cmds[selected]->description, sizeof(desc_buf) - strlen(desc_buf) - 1);
+            if (g_sorted_cmds[selected]->description && g_sorted_cmds[selected]->description[0]) {
+                strncat(desc_buf, g_sorted_cmds[selected]->description, sizeof(desc_buf) - strlen(desc_buf) - 1);
                 strncat(desc_buf, "\n", sizeof(desc_buf) - strlen(desc_buf) - 1);
             }
-            if (sorted_cmds[selected]->example && sorted_cmds[selected]->example[0]) {
+            if (g_sorted_cmds[selected]->example && g_sorted_cmds[selected]->example[0]) {
                 strncat(desc_buf, "Example: ", sizeof(desc_buf) - strlen(desc_buf) - 1);
-                strncat(desc_buf, sorted_cmds[selected]->example, sizeof(desc_buf) - strlen(desc_buf) - 1);
+                strncat(desc_buf, g_sorted_cmds[selected]->example, sizeof(desc_buf) - strlen(desc_buf) - 1);
             }
             
             // Add sub-command information if available
-            if (has_subcommands(sorted_cmds[selected]->name)) {
+            if (has_subcommands(g_sorted_cmds[selected]->name)) {
                 strncat(desc_buf, "\n\n", sizeof(desc_buf) - strlen(desc_buf) - 1);
-                if (expanded_commands[selected]) {
+                if (g_expanded_commands && g_expanded_commands[selected]) {
                     strncat(desc_buf, "Sub-commands are expanded.\n", sizeof(desc_buf) - strlen(desc_buf) - 1);
                     strncat(desc_buf, "Press Enter to collapse.", sizeof(desc_buf) - strlen(desc_buf) - 1);
                 } else {
@@ -306,11 +315,11 @@ void help_tui() {
             }
         } else if (key == 0x1002) { // Down
             // Check if we can move down within sub-commands
-            if (expanded_commands[selected] && has_subcommands(sorted_cmds[selected]->name)) {
-                const subcommand_info_t* subcmds = get_subcommands(sorted_cmds[selected]->name);
+            if (g_expanded_commands && g_expanded_commands[selected] && has_subcommands(g_sorted_cmds[selected]->name)) {
+                const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[selected]->name);
                 if (subcmds && selected_sub < count_subcommands(subcmds)) {
                     selected_sub++;
-                } else if (selected < cmd_count - 1) {
+                } else if (selected < g_cmd_count - 1) {
                     // Move to next main command
                     selected++;
                     selected_sub = 0;
@@ -318,8 +327,8 @@ void help_tui() {
                     int total_items = 0;
                     for (int i = 0; i <= selected; ++i) {
                         total_items++;
-                        if (expanded_commands[i] && has_subcommands(sorted_cmds[i]->name)) {
-                            const subcommand_info_t* subcmds = get_subcommands(sorted_cmds[i]->name);
+                        if (g_expanded_commands && g_expanded_commands[i] && has_subcommands(g_sorted_cmds[i]->name)) {
+                            const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[i]->name);
                             if (subcmds) {
                                 total_items += count_subcommands(subcmds);
                             }
@@ -329,7 +338,7 @@ void help_tui() {
                         scroll = total_items - max_visible;
                     }
                 }
-            } else if (selected < cmd_count - 1) {
+            } else if (selected < g_cmd_count - 1) {
                 // Move to next main command
                 selected++;
                 selected_sub = 0;
@@ -337,8 +346,8 @@ void help_tui() {
                 int total_items = 0;
                 for (int i = 0; i <= selected; ++i) {
                     total_items++;
-                    if (expanded_commands[i] && has_subcommands(sorted_cmds[i]->name)) {
-                        const subcommand_info_t* subcmds = get_subcommands(sorted_cmds[i]->name);
+                    if (g_expanded_commands && g_expanded_commands[i] && has_subcommands(g_sorted_cmds[i]->name)) {
+                        const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[i]->name);
                         if (subcmds) {
                             total_items += count_subcommands(subcmds);
                         }
@@ -352,22 +361,29 @@ void help_tui() {
             break;
         } else if (key == '\n' || key == 13) {
             // Toggle sub-command expansion
-            if (has_subcommands(sorted_cmds[selected]->name)) {
-                expanded_commands[selected] = !expanded_commands[selected];
+            if (has_subcommands(g_sorted_cmds[selected]->name)) {
+                if (!g_expanded_commands) g_expanded_commands = (int*)calloc(g_cmd_count, sizeof(int));
+                g_expanded_commands[selected] = !g_expanded_commands[selected];
                 selected_sub = 0; // Reset sub-command selection when toggling
             }
         }
     }
 
-    // Clean up
-    free(sorted_cmds);
+    // Clean up transient allocations used only in non-tiling mode
+    free(cmd_names);
     printf("\n\n");
 } 
 
 // GUI draw callback: draw two panes inside the provided content rectangle (pixel coords)
-static void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
+void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
     // Stash the rect for mouse hit-testing
     g_last_cx = content_x; g_last_cy = content_y; g_last_cw = content_w; g_last_ch = content_h;
+    // Belt-and-suspenders: fully clear the content area first to avoid any residuals from prior
+    // terminal rendering when opening Help after heavy output (e.g., ls). The tiler already clears
+    // content, but double-clearing here is cheap and guarantees a clean slate inside the GUI draw.
+    if (content_w > 0 && content_h > 0) {
+        drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
+    }
     // Convert pixels -> TUI grid (strictly within content rect)
     int cell_x = content_x / 8;
     int cell_y = content_y / 8;
@@ -435,8 +451,12 @@ static void help_gui_draw(int tile_idx, int content_x, int content_y, int conten
     int display_y = 0;
     // Draw list similar to earlier behavior
     // Before drawing text rows, clear just those text rows' pixel bands.
+    // Clear the exact bands where list rows will be drawn. Our list starts at
+    // left_win.y + 2 (to mimic tui window title+separator spacing), so base the
+    // clear on left_win.y rather than raw cell_y to avoid off-by-one artifacts
+    // that left stale characters behind when help opened after prior terminal output.
     for (int r = 0; r < max_visible; ++r) {
-        int y_band = (cell_y + 2 + r) * 8;
+        int y_band = (left_win.y + 2 + r) * 8;
         if (y_band >= content_y && y_band + 8 <= content_y + content_h) {
             drawRect(content_x, y_band, content_w, 8, 0, 0, 0);
         }
@@ -514,12 +534,28 @@ static void help_gui_draw(int tile_idx, int content_x, int content_y, int conten
         }
     }
 
+    // Before drawing the description text area, clear its visible bands using the
+    // right window's geometry as the baseline, mirroring the left list clearing.
+    {
+        int max_desc = (right_win.height > 3) ? (right_win.height - 3) : 0;
+        for (int r = 0; r < max_desc; ++r) {
+            int y_band = (right_win.y + 2 + r) * 8;
+            if (y_band >= content_y && y_band + 8 <= content_y + content_h) {
+                // Clear only the right pane region
+                int rx = right_win.x * 8;
+                int rw = (right_win.width > 0 ? right_win.width * 8 : 0);
+                if (rw > 0) drawRect(rx, y_band, rw, 8, 0, 0, 0);
+            }
+        }
+    }
     tui_draw_text_area(&right_win, desc_buf, 0, norm_style);
     // Draw bottom status inside the tile content area
     const char* status_text = "^/v: Move | Enter: Toggle | Ctrl+X: Exit";
     int status_px_y = (cell_y + cell_h - 1) * 8; // bottom-most character row inside content
     int status_px_x = cell_x * 8;
     int status_px_w = cell_w * 8;
+    // Clear and redraw the background bar to avoid leftovers when switching to help
+    drawRect(status_px_x, status_px_y, status_px_w, 8, 0, 0, 0);
     // background bar
     drawRect(status_px_x, status_px_y, status_px_w, 8, 32, 32, 32);
     // draw status text clipped to content area
@@ -533,8 +569,105 @@ static void help_gui_draw(int tile_idx, int content_x, int content_y, int conten
     }
 }
 
+// Initialize help state (build sorted command pointers) without registering GUI.
+// This makes persistent copies of command metadata and strings into a single
+// string pool so help UI does not rely on pointers that could be relocated
+// or otherwise invalidated by other subsystems (e.g., filesystem buffers).
+void help_tui_init_state() {
+    if (g_sorted_cmds) return; // already initialized
+    extern const shell_command_info_t __start_shellcmds[];
+    extern const shell_command_info_t __stop_shellcmds[];
+    int cmd_count = 0;
+    for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) cmd_count++;
+    if (cmd_count == 0) return;
+
+    // Compute total string pool size
+    size_t pool_size = 0;
+    for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
+        if (cmd->name) pool_size += strlen(cmd->name) + 1;
+        if (cmd->description) pool_size += strlen(cmd->description) + 1;
+        if (cmd->example) pool_size += strlen(cmd->example) + 1;
+    }
+
+    g_cmd_string_pool = (char*) malloc(pool_size ? pool_size : 1);
+    if (!g_cmd_string_pool) return;
+
+    g_copied_cmds = (shell_command_info_t*) malloc(cmd_count * sizeof(shell_command_info_t));
+    if (!g_copied_cmds) { free(g_cmd_string_pool); g_cmd_string_pool = NULL; return; }
+
+    // Fill copied structs and string pool
+    char* cur = g_cmd_string_pool;
+    int i = 0;
+    for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
+        // copy handler and type
+        g_copied_cmds[i].handler = cmd->handler;
+        g_copied_cmds[i].type = cmd->type;
+        // name
+        if (cmd->name) {
+            size_t l = strlen(cmd->name);
+            memcpy(cur, cmd->name, l + 1);
+            g_copied_cmds[i].name = cur;
+            cur += l + 1;
+        } else {
+            g_copied_cmds[i].name = NULL;
+        }
+        // description
+        if (cmd->description) {
+            size_t l = strlen(cmd->description);
+            memcpy(cur, cmd->description, l + 1);
+            g_copied_cmds[i].description = cur;
+            cur += l + 1;
+        } else {
+            g_copied_cmds[i].description = NULL;
+        }
+        // example
+        if (cmd->example) {
+            size_t l = strlen(cmd->example);
+            memcpy(cur, cmd->example, l + 1);
+            g_copied_cmds[i].example = cur;
+            cur += l + 1;
+        } else {
+            g_copied_cmds[i].example = NULL;
+        }
+        i++;
+    }
+
+    // Create pointer array and sort it
+    g_sorted_cmds = (const shell_command_info_t**) malloc(cmd_count * sizeof(const shell_command_info_t*));
+    if (!g_sorted_cmds) {
+        free(g_copied_cmds); g_copied_cmds = NULL; free(g_cmd_string_pool); g_cmd_string_pool = NULL; return;
+    }
+    for (int k = 0; k < cmd_count; ++k) g_sorted_cmds[k] = &g_copied_cmds[k];
+
+    if (cmd_count > 1) {
+        for (int a = 0; a < cmd_count - 1; a++) {
+            for (int b = 0; b < cmd_count - a - 1; b++) {
+                if (strcmp(g_sorted_cmds[b]->name, g_sorted_cmds[b + 1]->name) > 0) {
+                    const shell_command_info_t* tmp = g_sorted_cmds[b];
+                    g_sorted_cmds[b] = g_sorted_cmds[b + 1];
+                    g_sorted_cmds[b + 1] = tmp;
+                }
+            }
+        }
+    }
+
+    g_cmd_count = cmd_count;
+    if (g_expanded_commands) free(g_expanded_commands);
+    g_expanded_commands = (int*) calloc(g_cmd_count, sizeof(int));
+}
+
+// Show the pre-initialized help UI inside the currently focused tile (tiling must be active)
+void help_tui_show() {
+    if (!g_sorted_cmds || g_cmd_count == 0) return;
+    if (!tile_is_tiling_active()) return;
+    int focused = tile_get_focused();
+    tile_set_title_status(focused, "EYN-OS Help", NULL, NULL);
+    tile_register_gui_client2(focused, help_gui_draw, help_gui_key, help_gui_mouse, NULL);
+    g_help_running = 1;
+}
+
 // GUI key handler: update selection state and stop on Ctrl+X
-static void help_gui_key(int tile_idx, int key, void* userdata) {
+void help_gui_key(int tile_idx, int key, void* userdata) {
     if (key == 0x1001) { // Up
         if (g_selected_sub > 0) {
             g_selected_sub--;
@@ -563,8 +696,10 @@ static void help_gui_key(int tile_idx, int key, void* userdata) {
         // Clean up GUI mode: unregister and free resources
         int focused = tile_get_focused();
         tile_unregister_gui_client(focused);
-        if (g_sorted_cmds) free((void*)g_sorted_cmds);
-        g_sorted_cmds = NULL;
+        if (g_sorted_cmds) { free((void*)g_sorted_cmds); g_sorted_cmds = NULL; }
+        if (g_copied_cmds) { free(g_copied_cmds); g_copied_cmds = NULL; }
+        if (g_cmd_string_pool) { free(g_cmd_string_pool); g_cmd_string_pool = NULL; }
+        if (g_expanded_commands) { free(g_expanded_commands); g_expanded_commands = NULL; }
         g_cmd_count = 0;
         g_help_running = 0;
     } else if (key == '\n' || key == 13) {
@@ -576,7 +711,7 @@ static void help_gui_key(int tile_idx, int key, void* userdata) {
 }
 
 // Mouse: wheel scrolls the left list; left-click selects a row in the left pane
-static void help_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata) {
+void help_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata) {
     (void)tile_idx; (void)userdata;
     if (!g_sorted_cmds || g_cmd_count <= 0) return;
     // Convert to cell coords
@@ -592,7 +727,7 @@ static void help_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata
     // Wheel: adjust scroll
     if (me->wheel_delta != 0) {
         int delta = me->wheel_delta;
-        int ns = g_scroll + (delta > 0 ? -1 : 1); // wheel up = scroll up
+        int ns = g_scroll + (delta < 0 ? -1 : 1); // wheel up = scroll up
         if (ns < 0) ns = 0;
         // compute a rough maximum scroll: limit so at least one item remains visible
         int max_vis = (cell_h > 3) ? (cell_h - 3) : cell_h;

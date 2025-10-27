@@ -34,6 +34,12 @@ void vterm_get_tail_char_color(int idx, int visible_index, int visible_count, in
 // Absolute helpers for rendering/wrapping
 // Get per-character color at absolute (row, col) indices
 void vterm_get_char_color_abs(int idx, int row, int col, int* r, int* g, int* b);
+// If the character at absolute (row,col) was copied from the shell redirect buffer,
+// return the index in shell_redirect_buf it maps to, otherwise return -1.
+int vterm_get_char_redirect_index(int idx, int row, int col);
+// Per-cell icon index stored in the vterm when copying redirected output.
+// Returns -1 if there's no icon for that cell.
+int vterm_get_char_icon_index(int idx, int row, int col);
 // Monotonic version counter for each vterm that increments when content changes.
 // Use to drive incremental redraws in the tiler.
 int vterm_get_version(int idx);
@@ -41,6 +47,7 @@ int vterm_get_version(int idx);
 // and optionally the line length via strlen if needed.
 
 #define TERM_COLS 80
-#define TERM_ROWS 24
+// Increase terminal buffer height so the terminal can fill tall tiles/screens (480px ~= 60 rows)
+#define TERM_ROWS 60
 
 #endif // TERMINALS_H
