@@ -39,7 +39,7 @@ LDFLAGS = -m elf_i386 -T src/boot/link.ld --gc-sections -Map tmp/boot/kernel.map
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o
+OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/linux_syscalls.o
 
 OBJS += obj/tiling_manager.o obj/tiling_cmd.o
 OBJS += obj/terminals.o
@@ -178,6 +178,9 @@ obj/stats_gui.o:src/utilities/shell/stats_gui.c
 obj/vfs.o:src/fs/vfs.c
 	$(COMPILER) $(CFLAGS) src/fs/vfs.c -o obj/vfs.o
 
+obj/linux_syscalls.o:src/cpu/linux_syscalls.c
+	$(COMPILER) $(CFLAGS) src/cpu/linux_syscalls.c -o obj/linux_syscalls.o
+
 obj/assemble.o: src/utilities/assembler/assemble.c obj/instruction_set.o
 	$(COMPILER) $(CFLAGS) src/utilities/assembler/assemble.c -o obj/assemble.o
 
@@ -223,29 +226,29 @@ obj/irq.o:src/cpu/irq.c include/cpu/irq.h
 
 # Actually building the OS (The stuff you should actually run, i.e. make run, make build, etc.)
 
+# Create a fresh staging dir for each build to avoid permission issues from prior runs
+STAGE_DIR := $(shell mktemp -d tmp/grub_ultra_minimal.XXXXXX 2>/dev/null || echo tmp/grub_ultra_minimal)
+
 build: all eynfsimg docs
-	# Clean staging dir to avoid leftover permissions/ownership from prior runs
-	-chmod -R u+w tmp/grub_ultra_minimal 2>/dev/null || true
-	-rm -rf tmp/grub_ultra_minimal || true
-	# Recreate with sane permissions
-	install -d -m 0755 tmp/grub_ultra_minimal/boot/grub
-	cp tmp/boot/kernel.bin tmp/grub_ultra_minimal/boot/
-	@echo 'set default=0' > tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	@echo 'set timeout=0' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	@echo 'set gfxmode=text' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	@echo 'set gfxpayload=text' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	@echo 'set color_normal=white/black' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	@echo 'set color_highlight=black/white' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	@echo '' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	@echo 'menuentry "EYN-OS" {' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	@echo '    multiboot /boot/kernel.bin' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	@echo '    boot' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
-	@echo '}' >> tmp/grub_ultra_minimal/boot/grub/grub.cfg
+	# Create fresh staging dir
+	install -d -m 0755 $(STAGE_DIR)/boot/grub
+	cp tmp/boot/kernel.bin $(STAGE_DIR)/boot/
+	@echo 'set default=0' > $(STAGE_DIR)/boot/grub/grub.cfg
+	@echo 'set timeout=0' >> $(STAGE_DIR)/boot/grub/grub.cfg
+	@echo 'set gfxmode=text' >> $(STAGE_DIR)/boot/grub/grub.cfg
+	@echo 'set gfxpayload=text' >> $(STAGE_DIR)/boot/grub/grub.cfg
+	@echo 'set color_normal=white/black' >> $(STAGE_DIR)/boot/grub/grub.cfg
+	@echo 'set color_highlight=black/white' >> $(STAGE_DIR)/boot/grub/grub.cfg
+	@echo '' >> $(STAGE_DIR)/boot/grub/grub.cfg
+	@echo 'menuentry "EYN-OS" {' >> $(STAGE_DIR)/boot/grub/grub.cfg
+	@echo '    multiboot /boot/kernel.bin' >> $(STAGE_DIR)/boot/grub/grub.cfg
+	@echo '    boot' >> $(STAGE_DIR)/boot/grub/grub.cfg
+	@echo '}' >> $(STAGE_DIR)/boot/grub/grub.cfg
 	@if [ -z "$(GRUB_MKRESCUE)" ]; then \
 		echo "grub-mkrescue not found. Install grub2 (grub2-mkrescue) or grub-pc-bin (grub-mkrescue)."; \
 		exit 1; \
 	fi
-	$(GRUB_MKRESCUE) --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o EYNOS.iso tmp/grub_ultra_minimal/
+	$(GRUB_MKRESCUE) --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o EYNOS.iso $(STAGE_DIR)/
 	@echo "Ultra-minimal ISO created: EYNOS.iso"
 	@ls -lh EYNOS.iso
 	@echo "Attempting to strip EFI content (optional)..."
@@ -303,7 +306,7 @@ run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
 	-boot d \
-	-m 64M
+	-m 9M
 
 # Debug run with serial logging and detailed CPU/interrupt logs
 .PHONY: qemu-debug

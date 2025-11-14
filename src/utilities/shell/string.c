@@ -474,3 +474,16 @@ int atoi(const char* s) {
     if (!s) return 0;
     return str_to_int(s);
 }
+
+// Simple freestanding implementation of case-insensitive strcmp for small paths
+int strcasecmp(const char* a, const char* b) {
+    while (*a && *b) {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = ca - 'A' + 'a';
+        if (cb >= 'A' && cb <= 'Z') cb = cb - 'A' + 'a';
+        if (ca != cb) return (int)((unsigned char)ca) - (int)((unsigned char)cb);
+        a++; b++;
+    }
+    return (int)((unsigned char)*a) - (int)((unsigned char)*b);
+}

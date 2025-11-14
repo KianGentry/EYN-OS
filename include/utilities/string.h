@@ -42,5 +42,5 @@ char *strcpy_safe(char *dest, const char *src, size_t dest_size);
 char *strncpy_safe(char *dest, const char *src, size_t n, size_t dest_size);
 char *strcat_safe(char *dest, const char *src, size_t dest_size);
 char *strncat_safe(char *dest, const char *src, size_t n, size_t dest_size);
-
+int strcasecmp(const char* a, const char* b);
 #endif

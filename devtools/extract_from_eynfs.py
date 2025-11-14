@@ -69,14 +69,20 @@ def extract_file(f, entry, out_path):
     size = entry['size']
     block = entry['first_block']
     with open(out_path, 'wb') as out:
-        while size > 0:
+        # Each filesystem block starts with a 4-byte next-block pointer, followed by payload
+        payload_size = EYNFS_BLOCK_SIZE - 4
+        while size > 0 and block != 0:
             f.seek(block * EYNFS_BLOCK_SIZE)
-            to_read = min(size, EYNFS_BLOCK_SIZE)
-            data = f.read(to_read)
-            out.write(data)
-            size -= to_read
-            # For now, assume files are contiguous (no block chaining)
-            block += 1
+            block_data = f.read(EYNFS_BLOCK_SIZE)
+            if not block_data or len(block_data) < 4:
+                break
+            next_block = struct.unpack('<I', block_data[:4])[0]
+            # read only payload (skip header)
+            to_take = min(size, payload_size)
+            payload = block_data[4:4+to_take]
+            out.write(payload)
+            size -= len(payload)
+            block = next_block
 
 def main():
     if len(sys.argv) != 4:

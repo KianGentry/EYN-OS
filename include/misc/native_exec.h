@@ -20,6 +20,20 @@ typedef struct {
     uint32 esi, edi, ebp;       // Additional registers
     uint32 eflags;              // Flags register
     uint8 active;               // Process active flag
+    uint8 owned;                // Non-zero if this process struct is owned by the global process table
+    // Per-segment mapping for ELF PT_LOAD segments
+    uint8 segment_count;
+    struct {
+        uint32 vaddr;   // ELF virtual address of segment
+        uint32 memsz;   // in-memory size (includes bss)
+        uint32 filesz;  // size present in file
+        void*  mem;     // kernel-side allocation pointer for this segment
+        uint32 flags;   // PF_* flags from program header
+    } segments[8];
+    uint32 elf_vaddr_min;       // If loaded from ELF: lowest virtual address mapped
+    uint32 elf_vaddr_max;       // If loaded from ELF: highest virtual address mapped (exclusive)
+    void*  linux_fd_table;      // optional per-process Linux-like fd table
+    uint32 brk_end;             // simple brk end pointer for malloc
     char name[64];              // Process name
 } native_process_t;
 

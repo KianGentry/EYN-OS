@@ -3,9 +3,53 @@
 #include <util.h>
 #include <string.h>
 #include <kernel_api.h>
+#include <linux_syscalls.h>
 #include <vga.h>
 #include <kb.h>
 #include <drivers/flat_exe_format.h>
+
+// Minimal ELF32 structures for parsing 32-bit little-endian ELF files
+typedef struct {
+    unsigned char e_ident[16];
+    uint16 e_type;
+    uint16 e_machine;
+    uint32 e_version;
+    uint32 e_entry;
+    uint32 e_phoff;
+    uint32 e_shoff;
+    uint32 e_flags;
+    uint16 e_ehsize;
+    uint16 e_phentsize;
+    uint16 e_phnum;
+    uint16 e_shentsize;
+    uint16 e_shnum;
+    uint16 e_shstrndx;
+} Elf32_Ehdr;
+
+typedef struct {
+    uint32 p_type;
+    uint32 p_offset;
+    uint32 p_vaddr;
+    uint32 p_paddr;
+    uint32 p_filesz;
+    uint32 p_memsz;
+    uint32 p_flags;
+    uint32 p_align;
+} Elf32_Phdr;
+
+#define EI_MAG0 0
+#define EI_MAG1 1
+#define EI_MAG2 2
+#define EI_MAG3 3
+#define EI_CLASS 4
+#define ELFMAG0 0x7f
+#define ELFMAG1 'E'
+#define ELFMAG2 'L'
+#define ELFMAG3 'F'
+#define ELFCLASS32 1
+#define ELF_DATA_LSB 1
+#define EM_386 3
+#define PT_LOAD 1
 
 // Process management
 #define MAX_NATIVE_PROCESSES 8
@@ -20,9 +64,59 @@ static native_process_t* g_current_process = NULL;
 static int g_next_pid = 1;
 static uint32 g_user_heap_ptr = USER_HEAP_BASE;
 static int g_current_index = -1;
+// Verbose tracing control (set to 1 to enable detailed trace prints)
+static int native_verbose = 0;
 
 // EYNFS constants
 #define EYNFS_SUPERBLOCK_LBA 2048
+
+// Minimal Linux i386 user stack initializer: argc=1, argv[0]=filename, envp={"TERM=eyn"}, auxv terminator
+static void prepare_linux_user_stack(native_process_t* p, const char* filename) {
+    if (!p || !p->stack_start || !p->stack_size) return;
+    uint32_t stack_top = p->stack_start + p->stack_size;
+    uint32_t sp_strings = stack_top;
+    // Place strings at the very top, growing downward
+    uint32_t argv0_addr = 0;
+    if (filename && filename[0]) {
+        size_t len = strlen(filename) + 1;
+        if (len > 200) len = 200; // cap filename length copied
+        sp_strings -= (uint32_t)len;
+        memcpy((void*)sp_strings, filename, len);
+        argv0_addr = sp_strings;
+    } else {
+        // Default name
+        const char* d = "program";
+        size_t len = strlen(d) + 1;
+        sp_strings -= (uint32_t)len;
+        memcpy((void*)sp_strings, d, len);
+        argv0_addr = sp_strings;
+    }
+    const char* env0 = "TERM=eyn";
+    uint32_t env0_addr = 0;
+    {
+        size_t len = strlen(env0) + 1;
+        sp_strings -= (uint32_t)len;
+        memcpy((void*)sp_strings, env0, len);
+        env0_addr = sp_strings;
+    }
+    // Align strings area to 16 bytes for sanity
+    sp_strings &= ~0xF;
+    // Build pointer tables just below strings area
+    uint32_t sp = sp_strings;
+    // Reserve a small guard gap
+    if (sp > p->stack_start + 256) sp -= 256;
+    // Write layout: argc, argv[0], 0, envp[0], 0, auxv(AT_NULL)
+    uint32_t* wp = (uint32_t*)sp;
+    *wp++ = 1;            // argc
+    *wp++ = argv0_addr;   // argv[0]
+    *wp++ = 0;            // argv terminator
+    *wp++ = env0_addr;    // envp[0]
+    *wp++ = 0;            // envp terminator
+    *wp++ = 0;            // auxv AT_NULL type
+    *wp++ = 0;            // auxv AT_NULL val
+    // Set ESP to point at argc
+    p->esp = (uint32_t)sp;
+}
 
 // Initialize native execution system
 void native_exec_init(void) {
@@ -67,6 +161,161 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
         // Failed to read file
         free(buf);
         return EXEC_ERROR_INVALID_FORMAT;
+    }
+
+    /* Check for ELF32 executable (little-endian). If detected, perform a
+       minimal PT_LOAD mapping into a contiguous heap buffer and set up the
+       native_process structure so the existing emulator can run it. This is a
+       conservative, user-space buffer-based loader (no paging/user-mode
+       switch) intended to allow simple statically-linked ELF32 binaries to
+       run under the current native execution model. */
+    if (size >= 16 && (uint8_t)buf[0] == ELFMAG0 && (uint8_t)buf[1] == ELFMAG1 && (uint8_t)buf[2] == ELFMAG2 && (uint8_t)buf[3] == ELFMAG3) {
+        // Candidate ELF file
+        if ((uint8_t)buf[EI_CLASS] == ELFCLASS32 && (uint8_t)buf[5] == ELF_DATA_LSB) {
+            // Parse header bounds-safely
+            if (size >= sizeof(Elf32_Ehdr)) {
+                Elf32_Ehdr* eh = (Elf32_Ehdr*)buf;
+                // Check machine
+                if (eh->e_machine == EM_386) {
+                    // Compute loadable segment bounds
+                    uint32_t min_vaddr = 0xffffffffu;
+                    uint32_t max_vaddr = 0;
+                    if (eh->e_phoff + (uint32_t)eh->e_phnum * (uint32_t)eh->e_phentsize <= size) {
+                        Elf32_Phdr* ph = (Elf32_Phdr*)(buf + eh->e_phoff);
+                        for (int i = 0; i < eh->e_phnum; i++) {
+                            if (ph->p_type == PT_LOAD) {
+                                if (ph->p_vaddr < min_vaddr) min_vaddr = ph->p_vaddr;
+                                uint32_t end = ph->p_vaddr + ph->p_memsz;
+                                if (end > max_vaddr) max_vaddr = end;
+                            }
+                            ph = (Elf32_Phdr*)((char*)ph + eh->e_phentsize);
+                        }
+                        if (min_vaddr != 0xffffffffu && max_vaddr > min_vaddr) {
+                            // Instead of a single contiguous image, allocate each PT_LOAD
+                            // segment separately. This simplifies ownership and makes
+                            // pointer translation clearer: each ELF vaddr maps into a
+                            // specific allocated buffer.
+                            memset(process, 0, sizeof(native_process_t));
+                            process->pid = g_next_pid++;
+                            process->segment_count = 0;
+
+                            ph = (Elf32_Phdr*)(buf + eh->e_phoff);
+                            uint32_t first_exec_vaddr = 0;
+                            uint32_t first_exec_mem = 0;
+                            for (int i = 0; i < eh->e_phnum; i++) {
+                                if (ph->p_type == PT_LOAD) {
+                                    if (process->segment_count >= 8) break; // limit
+                                    uint32_t memsz = ph->p_memsz;
+                                    uint32_t filesz = ph->p_filesz;
+                                    void* segmem = malloc(memsz);
+                                    if (!segmem) {
+                                        // Free already allocated segments
+                                        for (int j = 0; j < process->segment_count; j++) {
+                                            free(process->segments[j].mem);
+                                            process->segments[j].mem = NULL;
+                                        }
+                                        free(buf);
+                                        return EXEC_ERROR_MEMORY_ALLOC;
+                                    }
+                                    memset(segmem, 0, memsz);
+                                    if (ph->p_offset + filesz <= (uint32_t)size && filesz > 0) {
+                                        memcpy(segmem, buf + ph->p_offset, filesz);
+                                    }
+
+                                    process->segments[process->segment_count].vaddr = ph->p_vaddr;
+                                    process->segments[process->segment_count].memsz = memsz;
+                                    process->segments[process->segment_count].filesz = filesz;
+                                    process->segments[process->segment_count].mem = segmem;
+                                    process->segments[process->segment_count].flags = ph->p_flags;
+                                    process->segment_count++;
+
+                                    // record first executable segment as code_start
+                                    if ((ph->p_flags & 0x1) && first_exec_vaddr == 0) {
+                                        first_exec_vaddr = ph->p_vaddr;
+                                        first_exec_mem = (uint32)segmem;
+                                    }
+                                }
+                                ph = (Elf32_Phdr*)((char*)ph + eh->e_phentsize);
+                            }
+
+                            if (process->segment_count == 0) {
+                                // No loadable segments
+                                free(buf);
+                                return EXEC_ERROR_INVALID_FORMAT;
+                            }
+
+                            // Determine ELF vaddr bounds
+                            process->elf_vaddr_min = min_vaddr;
+                            process->elf_vaddr_max = max_vaddr;
+
+                            // Choose code_start as first executable segment if found,
+                            // otherwise the lowest vaddr segment
+                            if (first_exec_vaddr != 0) {
+                                process->code_start = first_exec_mem;
+                                // determine code_size as memsz of that segment
+                                for (int s = 0; s < process->segment_count; s++) {
+                                    if (process->segments[s].vaddr == first_exec_vaddr) {
+                                        process->code_size = process->segments[s].memsz;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                // fallback: pick the lowest segment
+                                uint32_t lowv = 0xffffffffu;
+                                void* lowmem = NULL;
+                                uint32_t lowsz = 0;
+                                for (int s = 0; s < process->segment_count; s++) {
+                                    if (process->segments[s].vaddr < lowv) {
+                                        lowv = process->segments[s].vaddr;
+                                        lowmem = process->segments[s].mem;
+                                        lowsz = process->segments[s].memsz;
+                                    }
+                                }
+                                process->code_start = (uint32)lowmem;
+                                process->code_size = lowsz;
+                            }
+
+                            // Stack allocation
+                            process->stack_start = (uint32_t)malloc(0x10000); // 64KB
+                            if (!process->stack_start) {
+                                for (int j = 0; j < process->segment_count; j++) free(process->segments[j].mem);
+                                free(buf);
+                                return EXEC_ERROR_MEMORY_ALLOC;
+                            }
+                            process->stack_size = 0x10000;
+
+                            // Calculate rebased entry_point by finding which segment holds e_entry
+                            uint32_t e_entry = eh->e_entry;
+                            uint32_t entry_addr = 0;
+                            for (int s = 0; s < process->segment_count; s++) {
+                                uint32_t seg_v = process->segments[s].vaddr;
+                                uint32_t seg_m = process->segments[s].memsz;
+                                if (e_entry >= seg_v && e_entry < seg_v + seg_m) {
+                                    entry_addr = (uint32)process->segments[s].mem + (e_entry - seg_v);
+                                    break;
+                                }
+                            }
+                            if (entry_addr == 0) {
+                                // entry outside segments, use lowest segment base
+                                entry_addr = process->code_start;
+                            }
+
+                            process->entry_point = entry_addr;
+                            // Prepare argc/argv/envp for Linux C binaries
+                            prepare_linux_user_stack(process, filename);
+                            if (!process->esp) process->esp = process->stack_start + process->stack_size - 4;
+                            process->eip = process->entry_point;
+                            process->active = 1;
+                            safe_strcpy(process->name, filename, sizeof(process->name));
+
+                            free(buf);
+                            return EXEC_SUCCESS;
+                        }
+                    }
+                }
+            }
+        }
+        // If ELF detection fails to fully validate, fall through to other loaders
     }
     
     // Try to parse EYN executable header first
@@ -114,7 +363,9 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
             process->entry_point = process->code_start + hdr->entry_point;
 
             // Memory allocated and entry point calculated
-            process->esp = process->stack_start + process->stack_size - 4; // Start at top of stack
+            // Initialize Linux-like argc/argv/envp on the user stack
+            prepare_linux_user_stack(process, filename);
+            if (!process->esp) process->esp = process->stack_start + process->stack_size - 4; // fallback
             process->eip = process->entry_point;
             process->active = 1;
 
@@ -224,7 +475,8 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
             }
 
             process->entry_point = process->code_start + fh->entry_point;
-            process->esp = process->stack_start + process->stack_size - 4;
+            prepare_linux_user_stack(process, filename);
+            if (!process->esp) process->esp = process->stack_start + process->stack_size - 4;
             process->eip = process->entry_point;
             process->active = 1;
             safe_strcpy(process->name, filename, sizeof(process->name));
@@ -262,7 +514,8 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
     memcpy((void*)process->code_start, buf, size);
 
     process->entry_point = process->code_start;
-    process->esp = process->stack_start + process->stack_size - 4;
+    prepare_linux_user_stack(process, filename);
+    if (!process->esp) process->esp = process->stack_start + process->stack_size - 4;
     process->eip = process->entry_point;
     process->active = 1;
     safe_strcpy(process->name, filename, sizeof(process->name));
@@ -280,7 +533,7 @@ exec_result_t native_run_process(native_process_t* process) {
     // Starting execution (single-step emulator model)
     
     // Safety check: ensure entry point is valid
-    if (process->entry_point == 0 || process->entry_point < process->code_start) {
+    if (process->entry_point == 0) {
         process->active = 0;
         g_current_process = NULL;
         return EXEC_ERROR_INVALID_ENTRY;
@@ -308,6 +561,14 @@ exec_result_t native_run_process(native_process_t* process) {
     // Check if the code contains syscalls and handle them
     uint8_t* code_ptr = (uint8_t*)process->code_start;
     uint32_t pc = 0;
+    /* Start execution at the entry offset within the mapped image. For
+       flat/raw binaries this will be zero; for ELF executables the entry
+       point will typically be non-zero. Guard against invalid entries. */
+    if (process->entry_point >= process->code_start && process->entry_point < process->code_start + process->code_size) {
+        pc = process->entry_point - process->code_start;
+    } else {
+        pc = 0;
+    }
     uint32_t regs[8] = {0}; // eax, ecx, edx, ebx, esp, ebp, esi, edi
 
     // Initialize emulated stack pointer from process allocation so user code has a valid stack
@@ -319,9 +580,11 @@ exec_result_t native_run_process(native_process_t* process) {
     uint32_t __steps = 0;
     while (pc < process->code_size && __steps++ < __max_steps) { // Limit to prevent infinite loops
         uint8_t opcode = code_ptr[pc];
-        /* Lightweight trace for initial steps to help debug why programs exit immediately */
-        if (__steps < 200) {
-            printf("[native_exec:trace] step=%d pc=%d opcode=%d\n", __steps, pc, opcode);
+        if (native_verbose) {
+            /* Lightweight trace for initial steps to help debug why programs exit immediately */
+            if (__steps < 200) {
+                printf("[native_exec:trace] step=%d pc=%d opcode=%d\n", __steps, pc, opcode);
+            }
         }
         
         // Debug output removed for clean program execution
@@ -346,9 +609,13 @@ exec_result_t native_run_process(native_process_t* process) {
                 // int syscall executed
                 
                 if (imm == 0x80) {
-                    // Handle syscall
-                    // Diagnostic: log syscall registers for debugging
-                    printf("[native_exec:syscall] eax=%d ebx=%d ecx=%d edx=%d esp=%d\n", regs[0], regs[3], regs[1], regs[2], regs[4]);
+                    // Linux-style syscall dispatch first
+                    int dispatched = linux_syscall_dispatch(process, regs);
+                    if (dispatched != -38) { // -ENOSYS means unknown; otherwise handled
+                        pc += 2;
+                        continue;
+                    }
+                    if (native_verbose) printf("[native_exec:syscall-legacy] eax=%d ebx=%d ecx=%d edx=%d esp=%d\n", regs[0], regs[3], regs[1], regs[2], regs[4]);
 
                     if (regs[0] == 1) { // WRITE
                         if (regs[3] == 1 && regs[2] > 0 && regs[2] <= 512) {
@@ -361,13 +628,32 @@ exec_result_t native_run_process(native_process_t* process) {
 
                             uint8_t* buffer = NULL;
                             uint32_t region_end = 0;
-                            if (process->data_size > 0 && buffer_addr >= process->data_start && buffer_addr + len <= process->data_start + process->data_size) {
-                                buffer = (uint8_t*)buffer_addr;
-                                region_end = process->data_start + process->data_size;
-                            } else if (buffer_addr >= process->code_start && buffer_addr + len <= process->code_start + process->code_size) {
-                                buffer = (uint8_t*)buffer_addr;
+                            // Translate potential ELF virtual addresses into the mapped image
+                            // If the program was loaded from ELF, user-space pointers will
+                            // likely be ELF virtual addresses (e.g. 0x08049000...). Convert
+                            // those into our image region addresses before validating.
+                            uint32_t translated = buffer_addr;
+                            // If ELF-loaded, map via segment table
+                            if (process->segment_count && buffer_addr >= process->elf_vaddr_min && buffer_addr < process->elf_vaddr_max) {
+                                for (int s = 0; s < process->segment_count; s++) {
+                                    uint32_t sv = process->segments[s].vaddr;
+                                    uint32_t sm = process->segments[s].memsz;
+                                    if (buffer_addr >= sv && buffer_addr + len <= sv + sm) {
+                                        translated = (uint32_t)process->segments[s].mem + (buffer_addr - sv);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (translated >= process->code_start && translated + len <= process->code_start + process->code_size) {
+                                buffer = (uint8_t*)translated;
                                 region_end = process->code_start + process->code_size;
+                            } else if (process->data_size > 0 && translated >= process->data_start && translated + len <= process->data_start + process->data_size) {
+                                buffer = (uint8_t*)translated;
+                                region_end = process->data_start + process->data_size;
                             } else if (buffer_addr >= process->stack_start && buffer_addr + len <= process->stack_start + process->stack_size) {
+                                // stack addresses are allocated in kernel-space layout and are
+                                // already direct addresses into the process->stack_start buffer
                                 buffer = (uint8_t*)buffer_addr;
                                 region_end = process->stack_start + process->stack_size;
                             }
@@ -387,12 +673,42 @@ exec_result_t native_run_process(native_process_t* process) {
                                 printf("%s", output_buffer);
                                 regs[0] = len; // Return bytes written
                             } else {
-                    printf("[native_exec:syscall] WRITE buffer %d not in code/data/stack (code=%d..%d data=%d..%d stack=%d..%d)\n",
-                        buffer_addr,
-                        process->code_start, process->code_start + process->code_size,
-                        process->data_start, process->data_start + process->data_size,
-                        process->stack_start, process->stack_start + process->stack_size);
-                                regs[0] = -1;
+                                // Try fallback: the requested buffer may cross multiple
+                                // PT_LOAD segments. Assemble bytes by querying segments
+                                // per-address. This handles cases where the string is not
+                                // contained within a single segment allocation.
+                                if (process->elf_vaddr_min && buffer_addr >= process->elf_vaddr_min && buffer_addr + len <= process->elf_vaddr_max) {
+                                    char output_buffer[101];
+                                    uint32_t output_pos = 0;
+                                    for (uint32_t i = 0; i < len && output_pos < 100; i++) {
+                                        uint8_t b = 0;
+                                        int ok = 0;
+                                        // search segments for this byte
+                                        for (int ss = 0; ss < process->segment_count; ss++) {
+                                            uint32_t sv = process->segments[ss].vaddr;
+                                            uint32_t sm = process->segments[ss].memsz;
+                                            if (buffer_addr + i >= sv && buffer_addr + i < sv + sm) {
+                                                uint8_t* ptr = (uint8_t*)process->segments[ss].mem + (buffer_addr + i - sv);
+                                                b = *ptr;
+                                                ok = 1;
+                                                break;
+                                            }
+                                        }
+                                        if (!ok) break;
+                                        if (b >= 32 && b <= 126) output_buffer[output_pos++] = (char)b;
+                                        else if (b == '\n') output_buffer[output_pos++] = '\n';
+                                    }
+                                    output_buffer[output_pos] = '\0';
+                                    if (output_pos > 0) printf("%s", output_buffer);
+                                    regs[0] = (int)len;
+                                } else {
+                                    if (native_verbose) printf("[native_exec:syscall] WRITE buffer %d not in code/data/stack (code=%d..%d data=%d..%d stack=%d..%d)\n",
+                                        buffer_addr,
+                                        process->code_start, process->code_start + process->code_size,
+                                        process->data_start, process->data_start + process->data_size,
+                                        process->stack_start, process->stack_start + process->stack_size);
+                                    regs[0] = -1;
+                                }
                             }
                         } else {
                             regs[0] = -1;
@@ -414,9 +730,20 @@ exec_result_t native_run_process(native_process_t* process) {
                                    (and also code, though writing into code is uncommon).
                                    Ensure the copy stays within bounds. */
                                 int wrote = 0;
-                                if (process->data_size > 0 && buffer_addr >= process->data_start && buffer_addr + n + 1 <= process->data_start + process->data_size && n >= 0) {
-                                    memcpy((void*)buffer_addr, s, n);
-                                    ((char*)buffer_addr)[n] = '\0';
+                                uint32_t translated = buffer_addr;
+                                if (process->segment_count && buffer_addr >= process->elf_vaddr_min && buffer_addr < process->elf_vaddr_max) {
+                                    for (int s = 0; s < process->segment_count; s++) {
+                                        uint32_t sv = process->segments[s].vaddr;
+                                        uint32_t sm = process->segments[s].memsz;
+                                        if (buffer_addr >= sv && buffer_addr + n + 1 <= sv + sm) {
+                                            translated = (uint32_t)process->segments[s].mem + (buffer_addr - sv);
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (process->data_size > 0 && translated >= process->data_start && translated + n + 1 <= process->data_start + process->data_size && n >= 0) {
+                                    memcpy((void*)translated, s, n);
+                                    ((char*)translated)[n] = '\0';
                                     regs[0] = n;
                                     wrote = 1;
                                 } else if (buffer_addr >= process->stack_start && buffer_addr + n + 1 <= process->stack_start + process->stack_size && n >= 0) {
@@ -424,12 +751,32 @@ exec_result_t native_run_process(native_process_t* process) {
                                     ((char*)buffer_addr)[n] = '\0';
                                     regs[0] = n;
                                     wrote = 1;
-                                } else if (buffer_addr >= process->code_start && buffer_addr + n + 1 <= process->code_start + process->code_size && n >= 0) {
+                                } else if (translated >= process->code_start && translated + n + 1 <= process->code_start + process->code_size && n >= 0) {
                                     /* Writing into code is allowed but unusual; permit for simple programs. */
-                                    memcpy((void*)buffer_addr, s, n);
-                                    ((char*)buffer_addr)[n] = '\0';
+                                    memcpy((void*)translated, s, n);
+                                    ((char*)translated)[n] = '\0';
                                     regs[0] = n;
                                     wrote = 1;
+                                } else if (process->segment_count && buffer_addr >= process->elf_vaddr_min && buffer_addr + n + 1 <= process->elf_vaddr_max) {
+                                    /* Fallback: if the destination spans segments, attempt
+                                       to write per-byte into the appropriate segment
+                                       allocation. */
+                                    int ok = 1;
+                                    for (int i = 0; i < n; i++) {
+                                        uint32_t addr = buffer_addr + i;
+                                        int found = 0;
+                                        for (int ss = 0; ss < process->segment_count; ss++) {
+                                            uint32_t sv = process->segments[ss].vaddr;
+                                            uint32_t sm = process->segments[ss].memsz;
+                                            if (addr >= sv && addr < sv + sm) {
+                                                uint8_t* dst = (uint8_t*)process->segments[ss].mem + (addr - sv);
+                                                dst[0] = ((uint8_t*)s)[i];
+                                                found = 1; break;
+                                            }
+                                        }
+                                        if (!found) { ok = 0; break; }
+                                    }
+                                    if (ok) { ((char*)buffer_addr)[n] = '\0'; regs[0] = n; wrote = 1; }
                                 }
 
                                 if (!wrote) {
@@ -748,22 +1095,12 @@ exec_result_t native_run_process(native_process_t* process) {
         }
     }
     
-    // Process execution completed
-    
-    // Clean up allocated memory
-    if (process->code_start) {
-        free((void*)process->code_start);
-    }
-    if (process->data_start) {
-        free((void*)process->data_start);
-    }
-    if (process->stack_start) {
-        free((void*)process->stack_start);
-    }
-    
+    // Process execution completed. Do not free resources here; centralize
+    // cleanup in native_cleanup_process so both transient (execute_program)
+    // runs and table-owned processes (spawn) follow the same rules and avoid
+    // double-free races.
     process->active = 0;
     g_current_process = NULL;
-    
     return EXEC_SUCCESS;
 }
 
@@ -777,11 +1114,14 @@ exec_result_t native_execute_program(const char* filename) {
     if (result != EXEC_SUCCESS) {
         return result;
     }
-    
+    // Mark this stack-allocated process as not owned by the global table so
+    // cleanup will free its allocations when done.
+    process.owned = 0;
+
     // Run the process
     result = native_run_process(&process);
-    
-    // Clean up
+
+    // Clean up transient process resources
     native_cleanup_process(&process);
     
     return result;
@@ -793,13 +1133,87 @@ void native_cleanup_process(native_process_t* process) {
     
     // Cleaning up process
     
-    // In a full implementation, this would:
-    // 1. Free allocated memory
-    // 2. Clean up file handles
-    // 3. Remove from process table
-    // 4. Notify parent process
-    
+    // In a full implementation, this would also clean up file handles and
+    // notify the parent. For now, free any allocated memory belonging to the
+    // process. To avoid double-free when the process struct is owned by the
+    // global process table (shallow-copied via native_spawn), we only free
+    // memory when the process is not table-owned (owned == 0) or when the
+    // pointer was separately allocated (data_start not part of code_start image).
+
+    // Free per-segment allocations first (done below). After that, free
+    // code_start only if it was not one of the segment allocations (to avoid
+    // double-free).
+
+    // Free data section if separately allocated (and owned)
+    if (process->data_start) {
+        int data_is_offset_in_code = 0;
+        if (process->code_start && process->data_start >= process->code_start && process->data_start < process->code_start + process->code_size) {
+            data_is_offset_in_code = 1;
+        }
+        if (!data_is_offset_in_code) {
+            if (!process->owned) {
+                free((void*)process->data_start);
+                process->data_start = 0;
+            }
+        }
+    }
+
+    // Free stack if owned
+    if (process->stack_start) {
+        if (!process->owned) {
+            free((void*)process->stack_start);
+            process->stack_start = 0;
+        }
+    }
+
+    // Free any per-segment allocations for ELF-loaded processes
+    if (process->segment_count) {
+        // remember whether code_start matched any segment mem
+        int code_is_segment = 0;
+        for (int s = 0; s < process->segment_count; s++) {
+            if (process->segments[s].mem) {
+                if ((uint32)process->segments[s].mem == process->code_start) code_is_segment = 1;
+                if (!process->owned) {
+                    free(process->segments[s].mem);
+                }
+                process->segments[s].mem = NULL;
+            }
+        }
+        process->segment_count = 0;
+
+        // If code_start pointed into a segment we already freed above,
+        // avoid freeing it again. Otherwise free it now if we own it.
+        if (process->code_start && !code_is_segment) {
+            if (!process->owned) {
+                free((void*)process->code_start);
+            }
+            process->code_start = 0;
+        } else {
+            process->code_start = 0;
+        }
+    } else {
+        // No segments: free code_start normally
+        if (process->code_start) {
+            if (!process->owned) {
+                free((void*)process->code_start);
+            }
+            process->code_start = 0;
+        }
+    }
+
+    // Remove from global process table if present
+    for (int i = 0; i < MAX_NATIVE_PROCESSES; i++) {
+        if (&g_processes[i] == process) {
+            // Clear record and release ownership only when removing
+            memset(&g_processes[i], 0, sizeof(native_process_t));
+            if (g_current_index == i) g_current_index = -1;
+            break;
+        }
+    }
+
     process->active = 0;
+    process->owned = 0;
+    g_current_process = NULL;
 }
 
 // Process management functions
@@ -847,6 +1261,7 @@ exec_result_t native_spawn(const char* filename, uint32* out_pid) {
     if (r != EXEC_SUCCESS) return r;
 
     g_processes[slot] = temp; // shallow copy ok: pointers now owned by table
+    g_processes[slot].owned = 1;
     if (out_pid) *out_pid = g_processes[slot].pid;
     if (g_current_index == -1) g_current_index = slot;
     return EXEC_SUCCESS;
@@ -856,6 +1271,9 @@ void native_exit(int code) {
     (void)code;
     if (!g_current_process) return;
     // free resources
+    // Cleanup will free resources if this process record is transient. For
+    // table-owned processes, native_cleanup_process will clear the table entry
+    // as well. Ensure pid is cleared to indicate termination.
     native_cleanup_process(g_current_process);
     g_current_process->pid = 0;
 }

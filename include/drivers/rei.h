@@ -19,8 +19,8 @@
 #define REI_COMP_MASK 0x0F
 
 // Maximum dimensions (VGA text mode limits)
-#define REI_MAX_WIDTH 320
-#define REI_MAX_HEIGHT 200
+#define REI_MAX_WIDTH 640
+#define REI_MAX_HEIGHT 480
 
 // Color depth constants
 #define REI_DEPTH_MONO  1

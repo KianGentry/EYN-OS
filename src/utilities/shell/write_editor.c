@@ -9,6 +9,8 @@
 #include <util.h>
 #include <stdint.h>
 #include <string.h>
+#include <ctype.h>
+#include <string.h>
 #include <tui.h>
 #include <tile_manager.h>
 #include <vga.h>
@@ -149,17 +151,53 @@ int load_file_to_write_editor(const char* path, uint8 disk) {
     int n = vfs_read_file(disk, path, buf, max_bytes);
     if (n <= 0) { free(buf); return 0; }
 
-    int line = 0, pos = 0;
-    for (int i = 0; i < n && line < MAX_LINES; ++i) {
-        if (buf[i] == '\n' || pos >= MAX_LINE_LENGTH) {
-            write_editor_buffer[line][pos] = '\0';
-            line++; pos = 0;
-            if (buf[i] == '\n') continue;
-        }
-        if (pos < MAX_LINE_LENGTH) write_editor_buffer[line][pos++] = buf[i];
+    // Helper: detect binary-like extensions we should present as editable hex
+    int is_binary_edit = 0;
+    const char* ext = strrchr(path, '.');
+    if (ext) {
+        if (strcasecmp(ext, ".eyn") == 0 || strcasecmp(ext, ".bin") == 0 || strcasecmp(ext, ".flat") == 0) is_binary_edit = 1;
     }
-    if (pos > 0 && line < MAX_LINES) { write_editor_buffer[line][pos] = '\0'; line++; }
-    write_editor_num_lines = (line > 0) ? line : 1;
+
+    if (!is_binary_edit) {
+        int line = 0, pos = 0;
+        for (int i = 0; i < n && line < MAX_LINES; ++i) {
+            if (buf[i] == '\n' || pos >= MAX_LINE_LENGTH) {
+                write_editor_buffer[line][pos] = '\0';
+                line++; pos = 0;
+                if (buf[i] == '\n') continue;
+            }
+            if (pos < MAX_LINE_LENGTH) write_editor_buffer[line][pos++] = buf[i];
+        }
+        if (pos > 0 && line < MAX_LINES) { write_editor_buffer[line][pos] = '\0'; line++; }
+        write_editor_num_lines = (line > 0) ? line : 1;
+    } else {
+        // Convert binary data into human-readable hex lines. Use 16 bytes per line for readability.
+        int line = 0;
+        int bytes_per_line = 16;
+        for (int i = 0; i < n && line < MAX_LINES; i += bytes_per_line) {
+            int end = i + bytes_per_line; if (end > n) end = n;
+            int pos = 0;
+            for (int j = i; j < end && pos < MAX_LINE_LENGTH - 3; ++j) {
+                unsigned char b = (unsigned char)buf[j];
+                // write two hex chars and a space (except maybe last in line)
+                char hi = "0123456789ABCDEF"[(b >> 4) & 0xF];
+                char lo = "0123456789ABCDEF"[b & 0xF];
+                if (pos + 3 < MAX_LINE_LENGTH) {
+                    write_editor_buffer[line][pos++] = hi;
+                    write_editor_buffer[line][pos++] = lo;
+                    write_editor_buffer[line][pos++] = ' ';
+                } else if (pos + 2 < MAX_LINE_LENGTH) {
+                    write_editor_buffer[line][pos++] = hi;
+                    write_editor_buffer[line][pos++] = lo;
+                }
+            }
+            // trim trailing space
+            if (pos > 0 && write_editor_buffer[line][pos - 1] == ' ') pos--;
+            write_editor_buffer[line][pos] = '\0';
+            line++;
+        }
+        write_editor_num_lines = (line > 0) ? line : 1;
+    }
     free(buf);
     return 0;
 }
@@ -175,25 +213,67 @@ int save_write_editor_buffer(const char* path, uint8 disk) {
         }
     }
     
-    // Allocate buffer for the entire file content
-    char* data = (char*)malloc(total_size + 1);
-    if (!data) return -1;
-    
-    int data_pos = 0;
-    for (int i = 0; i < write_editor_num_lines; i++) {
-        int line_len = strlength(write_editor_buffer[i]);
-        for (int j = 0; j < line_len; j++) {
-            data[data_pos++] = write_editor_buffer[i][j];
-        }
-        if (i < write_editor_num_lines - 1) {
-            data[data_pos++] = '\n';
-        }
+    // Helper: detect binary-like extensions we should save by converting from hex to raw bytes
+    int is_binary_edit = 0;
+    const char* ext = strrchr(path, '.');
+    if (ext) {
+        if (strcasecmp(ext, ".eyn") == 0 || strcasecmp(ext, ".bin") == 0 || strcasecmp(ext, ".flat") == 0) is_binary_edit = 1;
     }
-    data[data_pos] = '\0';
-    int written = vfs_write_file(disk, path, data, (uint32)data_pos);
-    free(data);
-    if (written < 0 || written != data_pos) return -1;
-    return 0;
+
+    if (!is_binary_edit) {
+        // Allocate buffer for the entire file content
+        char* data = (char*)malloc(total_size + 1);
+        if (!data) return -1;
+        
+        int data_pos = 0;
+        for (int i = 0; i < write_editor_num_lines; i++) {
+            int line_len = strlength(write_editor_buffer[i]);
+            for (int j = 0; j < line_len; j++) {
+                data[data_pos++] = write_editor_buffer[i][j];
+            }
+            if (i < write_editor_num_lines - 1) {
+                data[data_pos++] = '\n';
+            }
+        }
+        data[data_pos] = '\0';
+        int written = vfs_write_file(disk, path, data, (uint32)data_pos);
+        free(data);
+        if (written < 0 || written != data_pos) return -1;
+        return 0;
+    } else {
+        // Convert hex representation back into raw bytes.
+        // Estimate max bytes: each line may contain up to MAX_LINE_LENGTH chars, so max hex digits per line is MAX_LINE_LENGTH
+        int max_bytes = (MAX_LINES * (MAX_LINE_LENGTH / 2)) + 16;
+        unsigned char* out = (unsigned char*)malloc(max_bytes);
+        if (!out) return -1;
+        int out_pos = 0;
+        for (int i = 0; i < write_editor_num_lines; ++i) {
+            const char* s = write_editor_buffer[i];
+            int len = strlength(write_editor_buffer[i]);
+            int hi_nibble = -1;
+            for (int j = 0; j < len; ++j) {
+                char c = s[j];
+                // simple ASCII whitespace check (space, tab, CR, LF, VT, FF)
+                if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f') continue;
+                int v = -1;
+                if (c >= '0' && c <= '9') v = c - '0';
+                else if (c >= 'a' && c <= 'f') v = 10 + (c - 'a');
+                else if (c >= 'A' && c <= 'F') v = 10 + (c - 'A');
+                else continue; // ignore non-hex chars
+                if (hi_nibble < 0) { hi_nibble = v; }
+                else {
+                    int byte = (hi_nibble << 4) | v;
+                    if (out_pos < max_bytes) out[out_pos++] = (unsigned char)byte;
+                    hi_nibble = -1;
+                }
+            }
+            // If there's a dangling hi nibble (odd count), ignore it.
+        }
+        int written = vfs_write_file(disk, path, (char*)out, (uint32)out_pos);
+        free(out);
+        if (written < 0 || written != out_pos) return -1;
+        return 0;
+    }
 }
 
 // Draw the editor screen
@@ -671,7 +751,7 @@ static void write_editor_gui_mouse(int tile_idx, const mouse_event_t* me, void* 
     // Wheel scroll vertical
     if (me->wheel_delta != 0) {
         int delta = me->wheel_delta; // up positive
-        int new_scroll = write_editor_scroll_y + (delta > 0 ? -1 : 1);
+        int new_scroll = write_editor_scroll_y + (delta < 0 ? -1 : 1);
         if (new_scroll < 0) new_scroll = 0;
         int max_scroll = write_editor_num_lines - 1;
         if (max_scroll < 0) max_scroll = 0;
