@@ -43,16 +43,16 @@ The TUI system consists of several key components:
 ```
 ┌─────────────────────────────────────┐
 │           Applications              │
-│    (write_editor, help_tui)        │
+│    (write_editor, help_tui)         │
 ├─────────────────────────────────────┤
 │           TUI Framework             │
-│    (windows, lists, text areas)    │
+│    (windows, lists, text areas)     │
 ├─────────────────────────────────────┤
 │           VGA Driver                │
-│    (text rendering, colors)        │
+│    (text rendering, colors)         │
 ├─────────────────────────────────────┤
 │           Hardware                  │
-│    (VGA controller, keyboard)      │
+│    (VGA controller, keyboard)       │
 └─────────────────────────────────────┘
 ```
 

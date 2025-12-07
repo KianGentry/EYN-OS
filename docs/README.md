@@ -71,4 +71,3 @@ When adding new features to EYN-OS, please:
 - `Makefile` - Build system documentation
 - `src/` - Source code with inline documentation
 - `include/` - Header files with function documentation
-- `docs/whats-new-dev.md` - Summary of recent changes on dev
