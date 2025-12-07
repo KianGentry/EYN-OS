@@ -1,10 +1,23 @@
-# EYN-OS Text User Interface (TUI) System
+# EYN-OS Text User Interface System (LEGACY)
+
+> **DEPRECATION NOTICE**: This system has been superseded by the **Tiling Manager** and **GUI Framework**. New applications should use the Tiling API (`include/utilities/tile_manager.h`) instead of this legacy TUI framework.
 
 The EYN-OS Text User Interface (TUI) system provides a comprehensive framework for creating text-based user interfaces within the operating system. Built on top of the VGA graphics driver, the TUI system offers consistent, professional-looking interfaces for applications while maintaining the simplicity and efficiency that EYN-OS is known for.
+
+Be warned that this is no longer supported, and may not be compatible with future EYN-OS updates.
 
 ## Overview
 
 The TUI system is designed with the philosophy of "reinventing the wheel" - building everything from scratch to understand and control every aspect of the user interface. It provides a consistent framework for applications while allowing developers to create custom interfaces tailored to their specific needs.
+
+### Modern Replacement: Tiling Manager
+The new Tiling Manager provides:
+- **Multiple Windows**: Run multiple apps side-by-side.
+- **Virtual Terminals**: Standard shell I/O in each tile.
+- **GUI Support**: Pixel-perfect graphics mixed with text.
+- **Mouse Integration**: Full mouse support for window management.
+
+See `docs/ui/tiling-manager.md` for the new system.
 
 ### Design Principles
 

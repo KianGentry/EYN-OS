@@ -4,12 +4,42 @@ EYN-OS is a freestanding x86 operating system designed with the philosophy of "r
 
 ## Architecture Overview
 
+### Beginner's Guide: How EYN-OS Works
+Think of EYN-OS as a custom-built house. Instead of buying pre-made rooms (libraries like `libc`), we built every brick ourselves.
+- **The Foundation (Kernel)**: The core program that talks to the hardware.
+- **The Butler (Shell)**: Takes your commands and tells the Kernel what to do.
+- **The Rooms (Memory)**: Where programs live and work.
+
+### System Architecture Diagram
+```
+┌──────────────────────────────────────────────────────────────┐
+│                       User Applications                      │
+│           (Shell, Text Editor, Games, Utilities)             │
+└──────────────┬──────────────────────────────┬────────────────┘
+               │                              │
+┌──────────────▼──────────────┐┌──────────────▼────────────────┐
+│      System Call API        ││      Tiling / GUI Manager     │
+└──────────────┬──────────────┘└──────────────┬────────────────┘
+               │                              │
+┌──────────────▼──────────────────────────────▼────────────────┐
+│                        Kernel Core                           │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────────────┐  │
+│  │  Scheduler  │  │     VMM     │  │  Filesystem (VFS)    │  │
+│  └─────────────┘  └─────────────┘  └──────────────────────┘  │
+└──────────────┬──────────────────────────────┬────────────────┘
+               │                              │
+┌──────────────▼──────────────────────────────▼────────────────┐
+│                      Hardware Drivers                        │
+│    (VGA, Keyboard, ATA Disk, Serial, Timer, Interrupts)      │
+└──────────────────────────────────────────────────────────────┘
+```
+
 ### Target Platform
 - **Architecture**: Intel x86 (32-bit)
 - **Bootloader**: GRUB (Multiboot 1.0 compliant)
-- **Memory Model**: Flat memory model (no segmentation/paging)
+- **Memory Model**: Flat memory model (Paging/Virtual Memory supported)
 - **Target Hardware**: Low-end systems (3MB RAM minimum), i386 or higher
-- **ISO Size**: 2.4MB
+- **ISO Size**: ~8MB
 
 ### Core Design Principles
 1. **Freestanding Environment**: No dependency on standard C libraries
@@ -97,11 +127,41 @@ EYN-OS/
 
 ## Memory Layout
 
+### Beginner's Guide: The Memory Map
+Imagine the computer's RAM as a long street with addresses from 0 to 4,294,967,295 (4GB).
+- **Low Addresses (0 - 1MB)**: Reserved for hardware and the Kernel code. "Restricted Area".
+- **Middle Addresses**: Where the Kernel stores its data (Heap).
+- **High Addresses**: Where User programs live (if Paging is on).
+
+### Physical Memory Map
 ```
-0x00000000 - 0x000FFFFF  # Real mode and BIOS
-0x00100000 - 0x001FFFFF  # Kernel code and data
-0x00200000 - 0x007FFFFF  # Available memory (adaptive heap)
-0x00800000 - 0x00FFFFFF  # High memory (if available)
+0xFFFFFFFF ┌──────────────────────┐
+           │                      │
+           │   Free RAM / Heap    │
+           │                      │
+0x00200000 ├──────────────────────┤
+           │   Kernel Heap Start  │
+0x00100000 ├──────────────────────┤
+           │   Kernel Code/Data   │
+0x00000000 └──────────────────────┘
+```
+
+### Virtual Memory Map (When Paging Enabled)
+```
+0xFFFFFFFF ┌──────────────────────┐
+           │   Recursive Mapping  │
+0xC0000000 ├──────────────────────┤
+           │   Kernel Space       │
+           │ (Mapped to Physical) │
+0xBFFFFFFF ├──────────────────────┤
+           │   User Stack         │
+           │      (Grows Down)    │
+           │                      │
+           │   User Heap          │
+           │      (Grows Up)      │
+0x00400000 ├──────────────────────┤
+           │   User Code          │
+0x00000000 └──────────────────────┘
 ```
 
 ## Hardware Support

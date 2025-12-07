@@ -18,6 +18,8 @@
 #include <serial.h>
 #include <watchdog.h>
 #include <help_tui.h>
+#include <mm/vmm.h>
+#include <partition.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
@@ -54,8 +56,35 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     // Initialize ATA drives immediately
     ata_init_drives();
 
-    // Initialize paging system (temporarily disabled for debugging)
-    // init_paging();
+    // Initialize partition system and auto-mount partitions
+    vdrive_init();
+    
+    // Scan drive 0 for partitions and auto-mount EYNFS partitions
+    {
+        disk_info_t disk;
+        if (partition_read_table(0, &disk) == 0 && disk.partition_count > 0) {
+            // Auto-mount first EYNFS partition as drive 0
+            for (int i = 0; i < disk.partition_count; i++) {
+                if (disk.partitions[i].type == PART_TYPE_EYNFS) {
+                    vdrive_mount(0, i, 0);  // Mount partition i from drive 0 as virtual drive 0
+                    break;
+                }
+            }
+            // Auto-initialize swap partition if present
+            for (int i = 0; i < disk.partition_count; i++) {
+                if (disk.partitions[i].type == PART_TYPE_EYNOS_SWAP) {
+                    swap_partition_init(0, i);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Paging/VMM initialization is available but disabled by default.
+    // The subsystem can be enabled later once thoroughly tested.
+    uint32 ram = detect_available_memory();
+    vmm_init(ram);
+    vmm_enable_paging();
 
     // Initialize predictive memory management system
     predictive_memory_init();

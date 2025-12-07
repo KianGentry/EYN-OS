@@ -2,7 +2,7 @@
 
 ## Overview
 
-The EYN-OS help system has been enhanced with **collapsible sub-command exploration**. Commands that have sub-commands are marked with an asterisk (*) and can be expanded inline to show their sub-commands directly below the parent command.
+The EYN-OS help system provides interactive documentation for all commands. It features **collapsible sub-command exploration** and integrates with the Tiling Manager.
 
 ## Features
 
@@ -10,6 +10,11 @@ The EYN-OS help system has been enhanced with **collapsible sub-command explorat
 - **Asterisk (*)** marks commands with sub-commands
 - **Color-coded** interface for easy navigation
 - **Status bar** with navigation instructions
+
+### Tiling Integration
+- **Runs in a Tile**: When the Tiling Manager is active, Help opens in its own tile or window.
+- **Mouse Support**: Click to select commands, scroll wheel to navigate list.
+- **Resizing**: Adapts layout to the tile size.
 
 ### Collapsible Exploration
 - **Press Enter** on commands with asterisks to expand/collapse
@@ -31,11 +36,14 @@ The EYN-OS help system has been enhanced with **collapsible sub-command explorat
 ```bash
 help
 ```
+- **Tiling Mode**: Opens in a new tile or floating window.
+- **Text Mode**: Opens full-screen legacy TUI.
 
 ### 2. Navigate Commands
-- **Arrow keys** (↑/↓): Move through command list and sub-commands
-- **Enter**: Toggle sub-command expansion for selected command
-- **Ctrl+X**: Exit help system
+- **Arrow keys** (↑/↓): Move through command list and sub-commands.
+- **Mouse**: Click to select, scroll to move.
+- **Enter**: Toggle sub-command expansion for selected command.
+- **Ctrl+X**: Close the help window/tile.
 
 ### 3. Explore Sub-Commands
 When you press **Enter** on a command with an asterisk (*), the sub-commands appear directly below:

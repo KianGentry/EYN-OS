@@ -1,22 +1,22 @@
 # EYN-OS Shell System
 
-The EYN-OS shell provides a command-line interface for interacting with the operating system. It features command history, tab completion, and a rich set of built-in commands with an innovative streaming architecture for memory efficiency.
+The EYN-OS shell provides a command-line interface for interacting with the operating system. In the modern EYN-OS environment, the shell runs inside **Virtual Terminals** managed by the **Tiling Manager**.
 
 ## Shell Architecture
 
 ### Core Components
-- **Command Parser**: Processes user input and dispatches commands
-- **History System**: Stores and retrieves previous commands
-- **Input Handler**: Manages keyboard input and special keys
-- **Streaming Command System**: Dynamic command loading for memory efficiency
-- **Command Registry**: Maintains list of available commands
+- **Virtual Terminal Integration**: Runs inside a tile or window, supporting standard I/O.
+- **Command Parser**: Processes user input and dispatches commands.
+- **History System**: Stores and retrieves previous commands.
+- **Streaming Command System**: Dynamic command loading for memory efficiency.
+- **Command Registry**: Maintains list of available commands.
 
 ### Design Philosophy
-- **Simple and Fast**: Minimal overhead for quick response
-- **User-Friendly**: Clear error messages and helpful feedback
-- **Extensible**: Easy to add new commands
-- **Consistent**: Uniform command interface
-- **Memory Efficient**: Streaming architecture for low-end systems
+- **Integrated**: Works seamlessly with the GUI/Tiling environment.
+- **Simple and Fast**: Minimal overhead for quick response.
+- **User-Friendly**: Clear error messages and helpful feedback.
+- **Extensible**: Easy to add new commands.
+- **Memory Efficient**: Streaming architecture for low-end systems.
 
 ## Streaming Command Architecture
 
@@ -44,6 +44,12 @@ status          # Show which commands are currently loaded
 
 ## User Interface
 
+### Tiling Environment
+The shell typically runs in one of the 4 tiles managed by the Tiling Manager.
+- **Focus**: Click a tile to focus it. Keyboard input goes to the focused tile.
+- **Scrolling**: Use the mouse wheel to scroll the terminal history.
+- **Selection**: You can select text on the input line for editing.
+
 ### Prompt Format
 ```
 <drive>:/<path>! 
@@ -60,15 +66,12 @@ RAM:/!         # RAM disk (special drive)
 ```
 
 ### Special Keys
-- **Arrow Keys**: Navigate command history
-- **Backspace**: Delete character
-- **Enter**: Execute command
-- **Escape**: Clear current input
-- **Ctrl+C**: Interrupt current operation
-
-### Mouse and Selection
-- Mouse wheel scrolls terminal scrollback when running inside the tiling manager (and the focused tile has no GUI client)
-- The input line supports selection visuals for improved editing ergonomics
+- **Arrow Keys**: Navigate command history.
+- **Backspace**: Delete character.
+- **Enter**: Execute command.
+- **Escape**: Clear current input.
+- **Ctrl+C**: Interrupt current operation.
+- **Ctrl+L**: Clear screen (in some contexts).
 
 ## Built-in Commands
 
@@ -81,21 +84,23 @@ init            # Initialize all system services
 ```
 
 #### `exit`
-Exit the shell and return to kernel.
+Exit the shell (or close the current tile/window).
 ```bash
-exit            # Exit EYN-OS
+exit            # Exit shell session
 ```
 
 #### `clear`
-Clear the screen.
+Clear the terminal screen.
 ```bash
 clear           # Clear terminal screen
 ```
 
 #### `help`
-Show interactive help system.
+Launch the interactive Help Viewer.
+- In Tiling Mode: Opens a graphical help viewer in a new tile/window.
+- In Text Mode: Opens the legacy TUI help browser.
 ```bash
-help            # Launch TUI help system
+help            # Launch Help Viewer
 ```
 
 ### Memory Management

@@ -4,17 +4,39 @@ The EYN-OS GUI layer now includes a tiling front-end and an experimental floatin
 
 ## Overview
 
-- Up to 4 tiles arranged in a grid, each with a title, optional status bar, and border
-- One virtual terminal per tile for shell interaction and text apps
-- Optional GUI client per tile to draw custom content and handle input
-- Floating windows stack above tiles with their own decorations and buttons
+### Beginner's Guide: The Screen Layout
+EYN-OS uses a "Tiling" window manager. This means windows don't overlap randomly like papers on a messy desk. Instead, they are arranged in a neat grid, like tiles on a floor.
+- **Tiles**: The main work areas. They split the screen evenly.
+- **Floating Windows**: Special windows (like pop-ups) that sit *on top* of the tiles.
+- **Virtual Terminals**: Each tile acts like its own separate computer screen.
+
+### Screen Layout Diagram
+```
+┌───────────────────────────────┬───────────────────────────────┐
+│ Tile 1 (Top Left)             │ Tile 2 (Top Right)            │
+│                               │                               │
+│   ┌───────────────────────┐   │                               │
+│   │ Floating Window       │   │                               │
+│   │ (Sits on top)         │   │                               │
+│   └───────────────────────┘   │                               │
+│                               │                               │
+├───────────────────────────────┼───────────────────────────────┤
+│ Tile 3 (Bottom Left)          │ Tile 4 (Bottom Right)         │
+│                               │                               │
+│                               │                               │
+│                               │                               │
+│                               │                               │
+│                               │                               │
+└───────────────────────────────┴───────────────────────────────┘
+```
 
 ## Architecture
 
+### System Diagram
 ```
 ┌───────────────────────────────┐
 │            Apps               │
-│  (viewer, draw, write, help) │
+│  (viewer, draw, write, help)  │ 
 ├───────────────────────────────┤
 │  Tile/Window Manager (GUI)    │
 │  (tiling_manager.c)           │

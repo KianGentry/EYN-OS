@@ -13,32 +13,60 @@ EYNFS is a simple, block-based filesystem that supports:
 
 ## Filesystem Structure
 
-### Superblock
-Located at LBA 2048, contains:
-- Magic number (EYNF)
-- Version information
-- Block size (512 bytes)
-- Total blocks
-- Root directory block
-- Free block bitmap location
-- Name table location
+### Beginner's Guide: How EYNFS is Organized
+Think of the hard drive as a giant notebook with numbered pages (Blocks).
+- **The Cover (Superblock)**: Page 2048. It tells you the title (EYNFS), how many pages there are, and where the Table of Contents starts.
+- **Table of Contents (Root Directory)**: Lists the files and folders.
+- **Chapters (Files)**: The actual data.
+- **Page Numbers (LBA)**: "Logical Block Address". A unique number for every 512-byte chunk of the disk.
 
-### Directory Entries
-Each directory entry is 52 bytes:
-- 32 bytes: Null-terminated filename
-- 1 byte: Entry type (file/directory)
-- 1 byte: Flags
-- 2 bytes: Reserved
-- 4 bytes: File size
-- 4 bytes: First block
-- 8 bytes: Reserved for future use
+### Disk Layout Diagram
+```
+LBA 0       LBA 2048    LBA 2049    LBA 2050...
+┌───────────┬───────────┬───────────┬───────────────────────┐
+│   MBR     │Superblock │ Root Dir  │     Data Blocks       │
+│ Partition │  (Info)   │  (Start)  │   (Files & Dirs)      │
+└───────────┴───────────┴───────────┴───────────────────────┘
+```
 
-### Directory Structure
-Directories are stored as chains of blocks:
-- Each block can hold up to 9 directory entries (508 bytes / 52 bytes per entry)
-- Blocks are linked with next_block pointers
-- Directory reading supports up to 128 entries across multiple blocks
-- Automatic block allocation for large directories
+### Superblock Structure
+Located at LBA 2048 (start of partition).
+```c
+struct eynfs_superblock {
+    char magic[4];      // "EYNF"
+    uint32 version;     // Filesystem version
+    uint32 block_size;  // 512 bytes
+    uint32 total_blocks;// Partition size
+    uint32 root_block;  // LBA of root directory
+    // ...
+};
+```
+
+### Directory Entry Structure
+Each file or folder is described by a 52-byte entry.
+```
+ 0                   32  33  34      36          40          44          52
+ ┌───────────────────┬───┬───┬───────┬───────────┬───────────┬───────────┐
+ │     Filename      │Typ│Flg│ Rsvd  │ File Size │Start Block│ Reserved  │
+ │    (32 bytes)     │ e │ s │       │ (4 bytes) │ (4 bytes) │ (8 bytes) │
+ └───────────────────┴───┴───┴───────┴───────────┴───────────┴───────────┘
+```
+- **Type**: 1=File, 2=Directory
+- **Start Block**: Where the file's data begins.
+
+### Directory Block Chaining
+Directories can grow larger than one block. They form a linked list.
+```
+Block N (Directory)        Block N+1 (Directory)
+┌──────────────────┐      ┌──────────────────┐
+│ Entry 1          │      │ Entry 10         │
+│ Entry 2          │      │ Entry 11         │
+│ ...              │      │ ...              │
+│ Entry 9          │      │ Entry 18         │
+├──────────────────┤      ├──────────────────┤
+│ Next Block: N+1  │─────►│ Next Block: 0    │ (End)
+└──────────────────┘      └──────────────────┘
+```
 
 ## Key Features
 

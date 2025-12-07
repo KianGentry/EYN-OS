@@ -77,6 +77,10 @@ int eynfs_open(const char* path, int mode);
 int eynfs_seek(int fd, size_t offset, int whence);
 int eynfs_close(int fd);
 
+int read(int fd, void* buf, int size);
+int close(int fd);
+int open(const char* path, int mode);
+
 // File operation modes
 #define EYNFS_READ  0
 #define EYNFS_WRITE 1
@@ -113,4 +117,4 @@ int eynfs_stream_write(eynfs_stream_t* s, const void* buf, size_t size);
 // Finalize and update directory entry
 int eynfs_stream_end(eynfs_stream_t* s);
 
-#endif // EYNFS_H 
+#endif // EYNFS_H

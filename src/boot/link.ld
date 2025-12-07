@@ -3,6 +3,9 @@ ENTRY(start)
 
 SECTIONS
 {
+    /* Kernel is loaded at 1MB by GRUB/Multiboot */
+    . = 0x100000;
+
     __kernel_start = .;
     .text :
     {
@@ -20,7 +23,8 @@ SECTIONS
 
     .data : 
     {
-        *(.data) 
+        *(.data)
+        *(.data.*)
     }
 
     .shellcmds :
@@ -32,7 +36,9 @@ SECTIONS
 
     .bss  : 
     {
-        *(.bss)  
+        *(.bss)
+        *(.bss.*)
+        *(COMMON)
     }
     __kernel_end = .;
 }

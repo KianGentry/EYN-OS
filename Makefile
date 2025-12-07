@@ -39,10 +39,11 @@ LDFLAGS = -m elf_i386 -T src/boot/link.ld --gc-sections -Map tmp/boot/kernel.map
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/paging.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/linux_syscalls.o
+OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/vmm.o obj/paging_compat.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/linux_syscalls.o
 
 OBJS += obj/tiling_manager.o obj/tiling_cmd.o
 OBJS += obj/terminals.o
+OBJS += obj/partition.o obj/diskmgr.o
 OUTPUT = tmp/boot/kernel.bin
 
 # Source files to object files
@@ -119,6 +120,9 @@ obj/ata.o:src/drivers/ata.c
 obj/eynfs.o:src/drivers/eynfs.c
 	$(COMPILER) $(CFLAGS) src/drivers/eynfs.c -o obj/eynfs.o
 
+obj/partition.o:src/drivers/partition.c
+	$(COMPILER) $(CFLAGS) src/drivers/partition.c -o obj/partition.o
+
 obj/rei.o:src/drivers/rei.c
 	$(COMPILER) $(CFLAGS) src/drivers/rei.c -o obj/rei.o
 
@@ -130,6 +134,9 @@ obj/fs_commands.o:src/utilities/shell/fs_commands.c
 
 obj/fdisk_commands.o:src/utilities/shell/fdisk_commands.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/fdisk_commands.c -o obj/fdisk_commands.o
+
+obj/diskmgr.o:src/utilities/shell/diskmgr.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/diskmgr.c -o obj/diskmgr.o
 
 obj/format_command.o:src/utilities/shell/format_command.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/format_command.c -o obj/format_command.o
@@ -203,8 +210,11 @@ obj/zero_copy.o:src/utilities/zero_copy.c
 obj/zero_copy_commands.o:src/utilities/shell/zero_copy_commands.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/zero_copy_commands.c -o obj/zero_copy_commands.o
 
-obj/paging.o:src/cpu/paging.c
-	$(COMPILER) $(CFLAGS) src/cpu/paging.c -o obj/paging.o
+obj/vmm.o:src/mm/vmm.c
+	$(COMPILER) $(CFLAGS) -I include/mm src/mm/vmm.c -o obj/vmm.o
+
+obj/paging_compat.o:src/mm/paging_compat.c
+	$(COMPILER) $(CFLAGS) -I include/mm src/mm/paging_compat.c -o obj/paging_compat.o
 
 obj/pipeline.o:src/utilities/shell/pipeline.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/pipeline.c -o obj/pipeline.o
@@ -283,8 +293,15 @@ clear: clean
 eynfs_format: eynfs_format.c
 	$(COMPILER) $(HOST_CFLAGS) -o eynfs_format eynfs_format.c $(HOST_LDFLAGS)
 
-# Create and format a 10MB EYNFS disk image
+# Create and format a 10MB partitioned EYNFS disk image
+# Layout: 5MB EYNFS (user files) + 5MB Swap
 eynfsimg:
+	rm -f eynfs.img
+	python3 devtools/create_partitioned_disk.py eynfs.img
+	python3 devtools/copy_testdir_to_eynfs.py testdir/
+
+# Legacy non-partitioned disk image (for testing/compatibility)
+eynfsimg-legacy:
 	rm -f eynfs.img
 	# Create a 10MB image (20,480 sectors at 512 bytes)
 	dd if=/dev/zero of=eynfs.img bs=1M count=10

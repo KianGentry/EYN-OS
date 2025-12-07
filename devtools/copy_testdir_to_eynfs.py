@@ -8,6 +8,10 @@ EYNFS_TYPE_FILE = 1
 EYNFS_TYPE_DIR = 2
 SUPERBLOCK_LBA = 2048
 
+# Partition support
+PART_TYPE_EYNFS = 0xEF
+MBR_PARTITION_TABLE_OFFSET = 0x1BE
+
 # EYNFS superblock structure
 SUPERBLOCK_STRUCT = '<IIIIIII8s'
 # EYNFS directory entry structure
@@ -19,8 +23,36 @@ DEFAULT_TESTDIR = 'testdir/'
 DEFAULT_IMG = 'eynfs.img'
 
 
-def read_superblock(f):
-    f.seek(SUPERBLOCK_LBA * EYNFS_BLOCK_SIZE)
+def find_eynfs_partition(f):
+    """Find the first EYNFS partition in the MBR and return its start LBA."""
+    f.seek(0)
+    mbr = f.read(512)
+    
+    # Check MBR signature
+    if mbr[510] != 0x55 or mbr[511] != 0xAA:
+        # No valid MBR, assume old-style image with superblock at sector 2048
+        return SUPERBLOCK_LBA
+    
+    # Parse partition table
+    for i in range(4):
+        offset = MBR_PARTITION_TABLE_OFFSET + i * 16
+        part_type = mbr[offset + 4]
+        lba_start = struct.unpack('<I', mbr[offset + 8:offset + 12])[0]
+        sectors = struct.unpack('<I', mbr[offset + 12:offset + 16])[0]
+        
+        if part_type == PART_TYPE_EYNFS and sectors > 0:
+            print(f"Found EYNFS partition {i+1} at LBA {lba_start}")
+            return lba_start
+    
+    # No EYNFS partition found, assume old-style
+    print("No EYNFS partition found, using default superblock location")
+    return SUPERBLOCK_LBA
+
+
+def read_superblock(f, partition_start=None):
+    if partition_start is None:
+        partition_start = find_eynfs_partition(f)
+    f.seek(partition_start * EYNFS_BLOCK_SIZE)
     data = f.read(struct.calcsize(SUPERBLOCK_STRUCT))
     fields = struct.unpack(SUPERBLOCK_STRUCT, data)
     return {

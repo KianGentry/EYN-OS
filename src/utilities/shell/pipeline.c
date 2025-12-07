@@ -426,7 +426,7 @@ char* read_file_for_input_redirection(const char* filename) {
     if (!filename) return NULL;
     
     // Try to read the file using the filesystem
-    int fd = eynfs_open(filename, EYNFS_READ);
+    int fd = open(filename, EYNFS_READ);
     if (fd == -1) {
         printf("Error: Cannot open file '%s' for input redirection.\n", filename);
         return NULL;
@@ -464,7 +464,6 @@ int execute_simple_command(command_t* cmd) {
             input_data = read_file_for_input_redirection(cmd->fds[i].filename);
             if (input_data) {
                 // Store input data for command to use
-                extern char* g_pipeline_input_data;
                 g_pipeline_input_data = input_data;
             }
             break;
@@ -537,7 +536,6 @@ int execute_simple_command(command_t* cmd) {
     // Clean up input data
     if (input_data) {
         free(input_data);
-        extern char* g_pipeline_input_data;
         g_pipeline_input_data = NULL;
     }
     
@@ -651,7 +649,6 @@ int execute_pipeline(pipeline_t* pipeline) {
             strcat(second_cmd_str, " --filter");
             
             // Store the input data for the search command to use
-            extern char* g_pipeline_input_data;
             g_pipeline_input_data = output;
             
             // Execute second command
@@ -748,7 +745,6 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
             if (strcmp(cmd->name, "search") == 0) {
                 strcat(cmd_str, " --filter");
                 // Store input data for the command to use
-                extern char* g_pipeline_input_data;
                 g_pipeline_input_data = current_input;
             } else {
                 // For other commands, append input as arguments
@@ -799,7 +795,6 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
         }
         
         // Clear pipeline input data if it was set
-        extern char* g_pipeline_input_data;
         if (g_pipeline_input_data) {
             g_pipeline_input_data = NULL;
         }
