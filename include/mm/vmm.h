@@ -10,7 +10,7 @@
 
 #include <types.h>
 
-/*============================================================================
+/*
  * i386 PAGING MODEL — BIT DEFINITIONS
  *
  *  31              12 11  9  8   7   6   5   4   3   2   1   0
@@ -29,9 +29,9 @@
  * G      (8) — Global: don't flush from TLB on CR3 switch (PTE only)
  * AVL  (9-11)— Available for OS use (we use for COW, swap, etc.)
  *
- * CR3 holds physical address of page directory (bits 31:12), plus
- * PCD/PWT bits. CR0.PG (bit 31) enables paging when set.
- *============================================================================*/
+ * CR3 holds physical address of the page directory (bits 31:12) plus PCD/PWT
+ * bits. CR0.PG (bit 31) enables paging when set.
+ */
 
 /* Page/frame sizes and counts */
 #define PAGE_SIZE           4096
@@ -50,9 +50,7 @@
 /* Build address from indices */
 #define VA_FROM_INDICES(pdi, pti) (((pdi) << 22) | ((pti) << 12))
 
-/*============================================================================
- * PDE/PTE BIT FLAGS
- *============================================================================*/
+// PDE/PTE BIT FLAGS
 #define PTE_PRESENT         (1 << 0)
 #define PTE_RW              (1 << 1)
 #define PTE_USER            (1 << 2)
@@ -74,7 +72,7 @@
 /* Mask to extract physical frame address from PDE/PTE */
 #define PTE_FRAME_MASK      0xFFFFF000
 
-/*============================================================================
+/*
  * VIRTUAL ADDRESS SPACE LAYOUT — HIGH-HALF KERNEL (3GB split)
  *
  *  0x00000000 – 0x3FFFFFFF  User code/data          (1 GB)
@@ -86,7 +84,7 @@
  *      0xD0000000 – kernel heap
  *      0xFF800000 – recursive page directory mapping
  *      0xFFC00000 – page tables (via recursive mapping)
- *============================================================================*/
+ */
 
 /* User space boundaries */
 #define USER_BASE           0x00000000
@@ -114,9 +112,7 @@
 /* Get virtual address of page table for a given PDE index */
 #define PT_VA(pdi)          (RECURSIVE_PT_BASE + ((pdi) << PAGE_SHIFT))
 
-/*============================================================================
- * DATA STRUCTURES
- *============================================================================*/
+// DATA STRUCTURES
 
 /* Raw PDE/PTE are just uint32 with bitfields */
 typedef uint32 pde_t;
@@ -132,12 +128,11 @@ typedef struct page_table {
     pte_t entries[ENTRIES_PER_TABLE];
 } __attribute__((aligned(PAGE_SIZE))) page_table_t;
 
-/*============================================================================
+/*
  * PHYSICAL FRAME ALLOCATOR
- * 
- * Simple bitmap allocator — one bit per 4KB frame.
- * 128MB addressable = 32768 frames = 1024 uint32 words = 4KB bitmap.
- *============================================================================*/
+ * Simple bitmap allocator — one bit per 4KB frame. With a 128MB cap we track
+ * 32768 frames (1024 uint32 words) for a 4KB bitmap footprint.
+ */
 
 #define MAX_PHYSICAL_MB     128
 #define MAX_FRAMES          (MAX_PHYSICAL_MB * 1024 * 1024 / PAGE_SIZE)
@@ -151,12 +146,11 @@ typedef struct frame_allocator {
     uint32 search_hint;                /* Bitmap word to start searching from */
 } frame_allocator_t;
 
-/*============================================================================
+/*
  * ADDRESS SPACE DESCRIPTOR
- *
  * Per-process virtual memory state. Kernel has a single global address space;
  * each user process gets its own with shared kernel mappings.
- *============================================================================*/
+ */
 
 typedef struct address_space {
     page_directory_t* pd;           /* Page directory (virtual address) */
@@ -171,7 +165,7 @@ typedef struct address_space {
     uint32 last_fault_tick;         /* Timestamp of last fault */
 } address_space_t;
 
-/*============================================================================
+/*
  * PAGE FAULT ERROR CODE (pushed by CPU on #PF, INT 14)
  *
  *  Bit 0 (P): 0 = non-present page, 1 = protection violation
@@ -179,7 +173,7 @@ typedef struct address_space {
  *  Bit 2 (U): 0 = supervisor mode, 1 = user mode
  *  Bit 3 (R): 1 = reserved bit violation
  *  Bit 4 (I): 1 = instruction fetch (NX violation, not on i386)
- *============================================================================*/
+ */
 
 #define PF_ERR_PRESENT      (1 << 0)
 #define PF_ERR_WRITE        (1 << 1)
@@ -187,12 +181,11 @@ typedef struct address_space {
 #define PF_ERR_RESERVED     (1 << 3)
 #define PF_ERR_IFETCH       (1 << 4)
 
-/*============================================================================
+/*
  * SWAP SUBSYSTEM
- *
- * Simple slot-based swap. Each slot holds one 4KB page.
- * Swap device is abstracted; could be disk partition or file.
- *============================================================================*/
+ * Slot-based swap; each slot holds one 4KB page. The backing device can be a
+ * disk partition or file.
+ */
 
 #define SWAP_SLOT_NONE      0xFFFFFFFF
 #define MAX_SWAP_SLOTS      4096  /* 16MB swap space */
@@ -203,12 +196,11 @@ typedef struct swap_state {
     uint32 free_slots;
 } swap_state_t;
 
-/*============================================================================
+/*
  * PAGE REPLACEMENT — CLOCK ALGORITHM
- *
- * Circular buffer of (physical frame, owning PTE pointer) pairs.
- * Clock hand advances on allocation; pages with A=1 get second chance.
- *============================================================================*/
+ * Circular buffer of (physical frame, owning PTE pointer) pairs. The hand
+ * advances on allocation; pages with A=1 get a second chance.
+ */
 
 typedef struct clock_entry {
     uint32 frame;       /* Physical frame number */
@@ -225,9 +217,7 @@ typedef struct clock_state {
     uint32 count;       /* Number of entries in use */
 } clock_state_t;
 
-/*============================================================================
- * CORE VMM API
- *============================================================================*/
+// CORE VMM API
 
 /* Initialization */
 void vmm_init(uint32 total_ram_bytes);

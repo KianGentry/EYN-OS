@@ -15,9 +15,7 @@
 extern int ata_read_sector(uint8 drive, uint32 lba, uint8 *buf);
 extern int ata_write_sector(uint8 drive, uint32 lba, const uint8 *buf);
 
-/*============================================================================
- * GLOBAL STATE
- *============================================================================*/
+// GLOBAL STATE
 
 /* Virtual drive table */
 static virtual_drive_t g_vdrives[MAX_VIRTUAL_DRIVES];
@@ -26,9 +24,7 @@ static int g_vdrives_initialized = 0;
 /* Swap partition state */
 static swap_partition_t g_swap_partition;
 
-/*============================================================================
- * PARTITION TABLE OPERATIONS
- *============================================================================*/
+// PARTITION TABLE OPERATIONS
 
 int partition_read_table(uint8 drive, disk_info_t *info) {
     if (!info) return -1;
@@ -214,9 +210,7 @@ int partition_set_bootable(uint8 drive, uint8 partition_num) {
     return partition_write_table(drive, &disk);
 }
 
-/*============================================================================
- * VIRTUAL DRIVE OPERATIONS
- *============================================================================*/
+// VIRTUAL DRIVE OPERATIONS
 
 int vdrive_init(void) {
     memset(g_vdrives, 0, sizeof(g_vdrives));
@@ -302,9 +296,7 @@ int vdrive_translate_lba(uint8 vdrive, uint32 lba, uint8 *phys_drive, uint32 *ph
     return 0;
 }
 
-/*============================================================================
- * SWAP PARTITION OPERATIONS
- *============================================================================*/
+// SWAP PARTITION OPERATIONS
 
 int swap_partition_init(uint8 drive, uint8 partition_num) {
     memset(&g_swap_partition, 0, sizeof(g_swap_partition));
@@ -379,9 +371,7 @@ swap_partition_t* swap_partition_get_info(void) {
     return g_swap_partition.active ? &g_swap_partition : 0;
 }
 
-/*============================================================================
- * UTILITY FUNCTIONS
- *============================================================================*/
+// UTILITY FUNCTIONS
 
 const char* partition_type_name(uint8 type) {
     switch (type) {

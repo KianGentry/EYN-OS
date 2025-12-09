@@ -26,9 +26,7 @@ extern uint32 __kernel_end;
 extern uint32 __kernel_text_start;
 extern uint32 __kernel_text_end;
 
-/*============================================================================
- * GLOBAL STATE
- *============================================================================*/
+// GLOBAL STATE
 
 /* Frame allocator instance */
 static frame_allocator_t g_frame_alloc;
@@ -49,9 +47,7 @@ address_space_t* vmm_current_as = &vmm_kernel_as;
 static uint32 early_heap_ptr = 0;
 static int paging_enabled = 0;
 
-/*============================================================================
- * LOW-LEVEL CR REGISTER ACCESS
- *============================================================================*/
+// LOW-LEVEL CR REGISTER ACCESS
 
 static inline uint32 read_cr0(void) {
     uint32 val;
@@ -79,9 +75,7 @@ static inline void write_cr3(uint32 val) {
     asm volatile("mov %0, %%cr3" :: "r"(val));
 }
 
-/*============================================================================
- * TLB MANAGEMENT
- *============================================================================*/
+// TLB MANAGEMENT
 
 void invalidate_tlb_entry(uint32 va) {
     asm volatile("invlpg (%0)" :: "r"(va) : "memory");
@@ -92,13 +86,12 @@ void invalidate_tlb_all(void) {
     write_cr3(read_cr3());
 }
 
-/*============================================================================
+/*
  * FRAME ALLOCATOR — BITMAP-BASED
- *
  * Each bit represents one 4KB frame. We scan for zeros to find free frames.
- * search_hint accelerates sequential allocations by remembering where we
- * last found a free frame.
- *============================================================================*/
+ * search_hint accelerates sequential allocations by remembering where we last
+ * found a free frame.
+ */
 
 /* Mark a frame as used */
 static inline void frame_set(uint32 frame_num) {
@@ -246,12 +239,11 @@ uint32 vmm_get_total_frames(void) {
     return g_frame_alloc.total_frames;
 }
 
-/*============================================================================
+/*
  * EARLY BOOT ALLOCATION
- *
- * Before paging is enabled, we need to allocate page directories/tables
- * from a simple bump allocator placed after the kernel.
- *============================================================================*/
+ * Before paging is enabled, use a bump allocator after the kernel to carve
+ * page directories/tables and mark the backing frames as busy.
+ */
 
 static void* early_alloc(uint32 size, uint32 alignment) {
     /* Align up */
@@ -275,12 +267,11 @@ static void* early_alloc(uint32 size, uint32 alignment) {
     return ptr;
 }
 
-/*============================================================================
+/*
  * PAGE TABLE WALKING AND MANIPULATION
- *
- * walk_page_tables traverses PD→PT hierarchy, optionally creating tables.
- * Returns pointer to the PTE for a given virtual address.
- *============================================================================*/
+ * walk_page_tables traverses the PD→PT hierarchy, optionally creating tables,
+ * and returns the PTE for a given virtual address.
+ */
 
 pte_t* vmm_walk_page_tables(address_space_t* as, uint32 va, int create) {
     if (!as || !as->pd) {
@@ -336,9 +327,7 @@ pte_t* vmm_walk_page_tables(address_space_t* as, uint32 va, int create) {
     return &pt->entries[pti];
 }
 
-/*============================================================================
- * PAGE MAPPING/UNMAPPING
- *============================================================================*/
+// PAGE MAPPING/UNMAPPING
 
 int vmm_map_page(address_space_t* as, uint32 va, uint32 pa, uint32 flags) {
     pte_t* pte = vmm_walk_page_tables(as, va, 1);
@@ -385,9 +374,7 @@ int vmm_unmap_page(address_space_t* as, uint32 va) {
     return 0;
 }
 
-/*============================================================================
- * ADDRESS SPACE MANAGEMENT
- *============================================================================*/
+// ADDRESS SPACE MANAGEMENT
 
 address_space_t* create_address_space(void) {
     address_space_t* as = (address_space_t*)vmm_kmalloc_page();
@@ -536,14 +523,12 @@ void switch_address_space(address_space_t* as) {
     write_cr3(as->pd_phys);
 }
 
-/*============================================================================
+/*
  * PAGE FAULT HANDLER
- *
- * Decodes error code to determine fault type:
- * - Non-present page: demand paging or swap-in
- * - Protection violation on write: COW handling
- * - Other: segmentation fault (kill process)
- *============================================================================*/
+ * Decodes the fault cause: demand paging/swap-in for non-present pages,
+ * copy-on-write resolution for write faults, or process termination on
+ * unrecoverable access.
+ */
 
 void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
     address_space_t* as = vmm_current_as;
@@ -661,9 +646,7 @@ segfault:
     }
 }
 
-/*============================================================================
- * COPY-ON-WRITE HANDLING
- *============================================================================*/
+// COPY-ON-WRITE HANDLING
 
 int vmm_handle_cow_fault(address_space_t* as, uint32 va, pte_t* pte) {
     pte_t entry = *pte;
@@ -706,12 +689,11 @@ void vmm_mark_region_cow(address_space_t* as, uint32 start, uint32 end) {
     invalidate_tlb_all();
 }
 
-/*============================================================================
+/*
  * SWAP SUBSYSTEM
- *
- * Simple slot allocator. Actual I/O would go to a swap partition/file.
- * For now, we just track slots; real swap I/O is stubbed.
- *============================================================================*/
+ * Tracks swap slots and delegates paging I/O to a swap partition when
+ * available; otherwise falls back to stubbed-in memory placeholders.
+ */
 
 static uint32 swap_alloc_slot(void) {
     if (g_swap.free_slots == 0) {
@@ -839,16 +821,11 @@ int swap_in_page(address_space_t* as, uint32 va, uint32 swap_slot) {
     return 0;
 }
 
-/*============================================================================
+/*
  * CLOCK PAGE REPLACEMENT ALGORITHM
- *
- * Maintains circular buffer of (frame, PTE*, VA, AS) tuples.
- * On eviction request:
- *   1. Check page at hand position
- *   2. If Accessed bit set: clear it, advance hand (second chance)
- *   3. If Accessed bit clear: evict this page, return frame
- *   4. Repeat until victim found or full circle (all accessed = OOM)
- *============================================================================*/
+ * Circular buffer of (frame, PTE*, VA, AS) tuples. Second-chance eviction:
+ * clear Accessed on first pass, evict on next pass if still unused.
+ */
 
 void clock_add_page(uint32 frame, pte_t* pte, uint32 va, address_space_t* as) {
     if (g_clock.count >= CLOCK_SIZE) {
@@ -940,12 +917,11 @@ uint32 clock_evict_page(void) {
     return 0;
 }
 
-/*============================================================================
+/*
  * WORKING SET TRACKING & THRASHING AVOIDANCE
- *
- * Simple heuristic: if fault rate exceeds threshold, process is thrashing.
- * Scheduler should suspend thrashing processes to let others make progress.
- *============================================================================*/
+ * Simple heuristic: if faults cross a threshold within a window, treat the
+ * process as thrashing so the scheduler can throttle it.
+ */
 
 #define FAULT_WINDOW_TICKS  100   /* ~1 second at 100Hz */
 #define THRASH_THRESHOLD    50    /* >50 faults/second = thrashing */
@@ -982,9 +958,7 @@ int vmm_should_throttle(address_space_t* as) {
     return 0;
 }
 
-/*============================================================================
- * USER MEMORY OPERATIONS (sbrk, mmap)
- *============================================================================*/
+// USER MEMORY OPERATIONS (sbrk, mmap)
 
 int vmm_brk(address_space_t* as, uint32 new_break) {
     if (new_break < USER_HEAP_BASE || new_break >= USER_HEAP_END) {
@@ -1039,9 +1013,7 @@ int vmm_munmap(address_space_t* as, uint32 va, uint32 size) {
     return 0;
 }
 
-/*============================================================================
- * KERNEL MEMORY HELPERS
- *============================================================================*/
+// KERNEL MEMORY HELPERS
 
 void* vmm_kmalloc_page(void) {
     uint32 frame = frame_alloc();
@@ -1072,9 +1044,7 @@ void* vmm_kmalloc_aligned(uint32 size) {
     return (void*)(KERNEL_BASE + phys);
 }
 
-/*============================================================================
- * QUERY FUNCTIONS
- *============================================================================*/
+// QUERY FUNCTIONS
 
 int vmm_is_page_present(address_space_t* as, uint32 va) {
     pte_t* pte = vmm_walk_page_tables(as, va, 0);
@@ -1094,16 +1064,15 @@ uint32 vmm_virt_to_phys(address_space_t* as, uint32 va) {
     return (*pte & PTE_FRAME_MASK) | PAGE_OFFSET(va);
 }
 
-/*============================================================================
+/*
  * BOOT SEQUENCE INITIALIZATION
- *
- * Called early from kmain() before most subsystems are up.
+ * Called early from kmain():
  * 1. Initialize frame allocator based on detected RAM
  * 2. Create kernel page directory with identity mapping
  * 3. Set up recursive mapping for easy PT access
  * 4. Load CR3 and enable paging
  * 5. Optionally protect kernel .text as read-only
- *============================================================================*/
+ */
 
 void vmm_init(uint32 total_ram_bytes) {
     /* Initialize swap state */

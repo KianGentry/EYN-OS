@@ -1,18 +1,9 @@
-/*
- * partition.h — Disk Partition Management for EYN-OS
- *
- * Supports MBR-style partition tables with up to 4 primary partitions.
- * Each partition can be treated as a separate "drive" for filesystem access.
- */
-
 #ifndef PARTITION_H
 #define PARTITION_H
 
 #include <types.h>
 
-/*============================================================================
- * PARTITION TABLE DEFINITIONS
- *============================================================================*/
+// PARTITION TABLE DEFINITIONS
 
 /* MBR partition entry offsets */
 #define MBR_PARTITION_TABLE_OFFSET  0x1BE
@@ -74,13 +65,9 @@ typedef struct {
     uint8  has_valid_mbr;    /* MBR signature present */
 } disk_info_t;
 
-/*============================================================================
- * VIRTUAL DRIVE MAPPING
- *
- * Maps logical "drives" (A:, B:, C:, etc.) to partitions.
- * Drive 0 = physical drive 0 (raw)
- * Drive 1+ = partitions
- *============================================================================*/
+// VIRTUAL DRIVE MAPPING
+// Maps logical "drives" (A:, B:, C:, etc.) to partitions. Drive 0 is the raw
+// physical drive; drives 1+ are the exposed partitions.
 
 #define MAX_VIRTUAL_DRIVES  8
 
@@ -94,9 +81,7 @@ typedef struct {
     char   mount_point[8];   /* e.g., "A:", "B:", "SWAP" */
 } virtual_drive_t;
 
-/*============================================================================
- * SWAP PARTITION
- *============================================================================*/
+// SWAP PARTITION
 
 typedef struct {
     uint8  active;           /* Swap partition is active */
@@ -107,9 +92,7 @@ typedef struct {
     uint32 used_pages;       /* Currently used pages */
 } swap_partition_t;
 
-/*============================================================================
- * FUNCTION PROTOTYPES
- *============================================================================*/
+// FUNCTION PROTOTYPES
 
 /* Partition table operations */
 int partition_read_table(uint8 drive, disk_info_t *info);

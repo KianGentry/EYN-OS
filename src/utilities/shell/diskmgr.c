@@ -17,9 +17,7 @@
 extern int ata_read_sector(uint8 drive, uint32 lba, uint8 *buf);
 extern void ata_identify_drive(uint8 drive, char *model, uint32 *sectors);
 
-/*============================================================================
- * DISK MANAGER COMMAND
- *============================================================================*/
+// DISK MANAGER COMMAND
 
 static void diskmgr_show_help(void) {
     printf("Disk Manager Commands:\n");

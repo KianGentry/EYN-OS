@@ -12,9 +12,7 @@
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
 
-// ============================================================================
 // SEARCH SUB-COMMANDS
-// ============================================================================
 
 // Search criteria structure
 typedef struct {
@@ -354,9 +352,7 @@ void search_depth_cmd(string ch) {
     search_depth_recursive(g_current_drive, &sb, sb.root_dir_block, "/", 0, max_depth, pattern);
 } 
 
-// ============================================================================
 // LS SUB-COMMANDS
-// ============================================================================
 
 // Tree view for ls
 void ls_tree_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
@@ -579,9 +575,7 @@ void ls_detail_cmd(string ch) {
     ls_detail_recursive(g_current_drive, &sb, sb.root_dir_block, "/", 0, max_depth);
 }
 
-// ============================================================================
 // FILESYSTEM UTILITY SUB-COMMANDS
-// ============================================================================
 
 // Filesystem status command
 void fsstat_cmd(string ch) {
@@ -802,9 +796,7 @@ void debug_directory_cmd(string ch) {
     }
 }
 
-// ============================================================================
 // READ SUB-COMMANDS
-// ============================================================================
 
 // read_raw command implementation - dynamic buffer system
 void read_raw_cmd(string ch) {
