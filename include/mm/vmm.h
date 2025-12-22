@@ -233,6 +233,12 @@ void vmm_enable_paging(void);
 /* Frame allocator */
 uint32 frame_alloc(void);                    /* Returns physical address or 0 */
 void frame_free(uint32 phys_addr);
+
+/* Reserve a physical address range (page-aligned internally) so the frame
+ * allocator will never hand these frames out. Useful for the legacy heap
+ * which lives in a fixed physical region.
+ */
+void vmm_reserve_phys_range(uint32 phys_start, uint32 phys_end);
 uint32 frame_alloc_contiguous(uint32 count); /* For DMA buffers */
 
 /* Page mapping */

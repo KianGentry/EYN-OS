@@ -12,8 +12,17 @@ mkdir -p tmp
 ldscript="devtools/user_elf32.ld"
 crt0="userland/crt0.S"
 
+incdir="userland/include"
+libc_dir="userland/libc"
+
 obj_app="tmp/user_app.o"
 obj_crt="tmp/user_crt0.o"
+obj_libc_unistd="tmp/user_libc_unistd.o"
+obj_libc_string="tmp/user_libc_string.o"
+obj_libc_stdio="tmp/user_libc_stdio.o"
+obj_libc_fcntl="tmp/user_libc_fcntl.o"
+obj_libc_dirent="tmp/user_libc_dirent.o"
+lib_archive="tmp/libeync.a"
 
 # Prefer a cross-compiler if available.
 if command -v i686-elf-gcc >/dev/null 2>&1; then
@@ -38,6 +47,7 @@ CFLAGS=(
   -fno-omit-frame-pointer
   -nostdlib
   -nostartfiles
+  -I"$incdir"
   -Wall -Wextra
   -O2
 )
@@ -51,9 +61,18 @@ if [[ "$CC" == "gcc" ]]; then
 fi
 
 "$CC" "${CFLAGS[@]}" -c "$crt0" -o "$obj_crt"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/unistd.c" -o "$obj_libc_unistd"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/string.c" -o "$obj_libc_string"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/stdio.c" -o "$obj_libc_stdio"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/fcntl.c" -o "$obj_libc_fcntl"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/dirent.c" -o "$obj_libc_dirent"
+
+rm -f "$lib_archive"
+ar rcs "$lib_archive" "$obj_libc_unistd" "$obj_libc_string" "$obj_libc_stdio" "$obj_libc_fcntl" "$obj_libc_dirent"
+
 "$CC" "${CFLAGS[@]}" -c "$src" -o "$obj_app"
 
 # Link a simple ELF32 ET_EXEC at 0x00400000.
-"$CC" -m32 -nostdlib -nostartfiles -Wl,-m,elf_i386 -Wl,-nostdlib -Wl,-e,_start -Wl,-T,"$ldscript" -o "$out" "$obj_crt" "$obj_app"
+"$CC" -m32 -nostdlib -nostartfiles -Wl,-m,elf_i386 -Wl,-nostdlib -Wl,-e,_start -Wl,-T,"$ldscript" -o "$out" "$obj_crt" "$obj_app" "$lib_archive"
 
 echo "Built $out"

@@ -13,6 +13,8 @@
 #include <tile_manager.h>
 #include <terminals.h>
 #include <mm/user_access.h>
+#include <fs/vfs.h>
+#include <fs_commands.h>
 extern multiboot_info_t *g_mbi;
 
 // Global error tracking
@@ -247,6 +249,122 @@ uint32 get_last_error_eip() {
 #define SYSCALL_OPEN  4
 #define SYSCALL_CLOSE 5
 #define SYSCALL_GETKEY 6
+#define SYSCALL_GETDENTS 7
+
+typedef struct {
+    int used;
+    int is_dir;
+    uint32 offset;
+    uint32 dir_pos;
+    uint32 size;
+    uint8 drive;
+    char path[128];
+} user_fd_t;
+
+#define USER_FD_MAX 16
+static user_fd_t g_user_fds[USER_FD_MAX];
+
+void syscall_reset_user_fds(void) {
+    for (int i = 0; i < USER_FD_MAX; ++i) {
+        g_user_fds[i].used = 0;
+        g_user_fds[i].is_dir = 0;
+        g_user_fds[i].offset = 0;
+        g_user_fds[i].dir_pos = 0;
+        g_user_fds[i].size = 0;
+        g_user_fds[i].drive = 0;
+        g_user_fds[i].path[0] = '\0';
+    }
+}
+
+static int copyin_cstr(char* dst, size_t dstsz, const char* user_src) {
+    if (!dst || dstsz == 0 || !user_src) return -1;
+    for (size_t i = 0; i < dstsz; ++i) {
+        char ch = 0;
+        if (copyin(&ch, user_src + i, 1) != 0) return -1;
+        dst[i] = ch;
+        if (ch == '\0') return 0;
+    }
+    dst[dstsz - 1] = '\0';
+    return -1;
+}
+
+static void trim_trailing_crlf(char* s) {
+    if (!s) return;
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r')) {
+        s[n - 1] = '\0';
+        n--;
+    }
+}
+
+static int user_fd_alloc(void) {
+    for (int i = 3; i < USER_FD_MAX; ++i) {
+        if (!g_user_fds[i].used) {
+            g_user_fds[i].used = 1;
+            g_user_fds[i].is_dir = 0;
+            g_user_fds[i].offset = 0;
+            g_user_fds[i].dir_pos = 0;
+            g_user_fds[i].size = 0;
+            g_user_fds[i].drive = 0;
+            g_user_fds[i].path[0] = '\0';
+            return i;
+        }
+    }
+    return -1;
+}
+
+static user_fd_t* user_fd_get(int fd) {
+    if (fd < 0 || fd >= USER_FD_MAX) return NULL;
+    if (!g_user_fds[fd].used) return NULL;
+    return &g_user_fds[fd];
+}
+
+typedef struct {
+    uint8 is_dir;
+    uint8 _pad[3];
+    uint32 size;
+    char name[56];
+} eyn_dirent_t;
+
+typedef struct {
+    user_fd_t* ufd;
+    uint32 cur_index;
+    int written;
+    int max_entries;
+    eyn_dirent_t* user_out;
+} syscall_getdents_ctx_t;
+
+static int syscall_getdents_cb(const char* name, int is_dir, uint32 size, void* user) {
+    syscall_getdents_ctx_t* c = (syscall_getdents_ctx_t*)user;
+    if (!c || !c->ufd) return 1;
+
+    if (c->cur_index < c->ufd->dir_pos) {
+        c->cur_index++;
+        return 0;
+    }
+
+    if (c->written >= c->max_entries) {
+        return 1;
+    }
+
+    eyn_dirent_t ent;
+    memset(&ent, 0, sizeof(ent));
+    ent.is_dir = (uint8)(is_dir ? 1 : 0);
+    ent.size = size;
+    if (name) {
+        strncpy(ent.name, name, sizeof(ent.name) - 1);
+        ent.name[sizeof(ent.name) - 1] = '\0';
+    }
+
+    if (copyout(&c->user_out[c->written], &ent, sizeof(ent)) != 0) {
+        return 1;
+    }
+
+    c->written++;
+    c->ufd->dir_pos++;
+    c->cur_index++;
+    return 0;
+}
 
 // When the tiling manager is active, user-mode programs should print into the
 // focused virtual terminal so output is visible in the graphical shell.
@@ -288,6 +406,11 @@ static void syscall_maybe_render_ui(void) {
 
 // Upper bound to keep syscall I/O bounded (protects kernel stack/time).
 #define SYSCALL_IO_MAX (64 * 1024)
+
+// Set to 1 to enable verbose syscall I/O debugging on serial.
+#ifndef SYSCALL_DEBUG
+#define SYSCALL_DEBUG 0
+#endif
 
 // C dispatcher called by the assembly stub. Returns value in EAX to user.
 uint32 syscall_dispatch(regs_t* regs) {
@@ -339,34 +462,237 @@ uint32 syscall_dispatch(regs_t* regs) {
         case SYSCALL_READ: {
             // read(fd=0, buf=arg2, len=arg3)
             if (arg3 == 0) { regs->eax = 0; break; }
-            if (arg1 != 0 || arg2 == 0) { regs->eax = (uint32)-1; break; }
-            // Use keyboard driver to read a line (echoed by driver); returns malloc'd buffer
-            string s = readStr();
-            if (!s) { regs->eax = (uint32)-1; break; }
-            int slen = (int)strlen(s);
-            int maxcpy = (int)arg3;
-            if (maxcpy <= 0) { free(s); regs->eax = 0; break; }
-            // Copy up to len-1 bytes and NUL-terminate for convenience
-            int n = slen;
-            if (n > maxcpy - 1) n = maxcpy - 1;
-            if (n < 0) n = 0;
+            if (arg2 == 0) { regs->eax = (uint32)-1; break; }
+            int fd = (int)arg1;
+            int maxlen = (int)arg3;
+            if (maxlen < 0) { regs->eax = (uint32)-1; break; }
+            if (maxlen > SYSCALL_IO_MAX) maxlen = SYSCALL_IO_MAX;
 
+            // stdin: line read (NUL-terminated for convenience)
+            if (fd == 0) {
+                static int s_stdin_debug_once = 0;
+                if (!s_stdin_debug_once) {
+                    s_stdin_debug_once = 1;
+                    printf("%c[SYSCALL:READ] fd=0 buf=0x%X len=%d useresp=0x%X\n",
+                           255, 255, 0, (unsigned)arg2, maxlen, (unsigned)regs->useresp);
+                }
+
+                // When tiling is active, use the vterm stdin buffer instead of
+                // polling the keyboard directly. The TUI routes input to this buffer.
+                const char* s = NULL;
+                int slen = 0;
+                
+                if (tile_is_tiling_active() && g_user_task_term >= 0) {
+                    int term = g_user_task_term;  // Cache to avoid race conditions
+                    
+                    // Wait for a complete line in the stdin buffer.
+                    // This is a busy-wait but the PIT IRQ will feed the buffer
+                    // and can also set g_user_interrupt for Ctrl+C.
+                    // Enable interrupts so the PIT can fire and process keyboard input.
+                    __asm__ __volatile__("sti");
+                    while (!vterm_stdin_ready(term)) {
+                        if (g_user_interrupt) {
+                            // User pressed Ctrl+C - return error
+                            regs->eax = (uint32)-1;
+                            goto stdin_done;
+                        }
+                        // Yield to allow IRQ processing (PIT feeds the buffer)
+                        __asm__ __volatile__("hlt");
+                    }
+                    
+                    // Disable interrupts while reading buffer to prevent races
+                    __asm__ __volatile__("cli");
+                    s = vterm_stdin_data(term);
+                    slen = vterm_stdin_len(term);
+                    
+                    if (SYSCALL_DEBUG) {
+                        printf("[stdin] len=%d data='%s'\n", slen, s ? s : "(null)");
+                    }
+                    
+                    // Re-enable interrupts
+                    __asm__ __volatile__("sti");
+                } else {
+                    // Non-tiling mode: use direct keyboard polling
+                    s = readStr();
+                    if (!s) { regs->eax = (uint32)-1; break; }
+                    slen = (int)strlen(s);
+                }
+                
+                if (maxlen <= 0) { regs->eax = 0; goto stdin_cleanup; }
+
+                int n = slen;
+                if (n > maxlen - 1) n = maxlen - 1;
+                if (n < 0) n = 0;
+
+                char* user_dst = (char*)arg2;
+                if (copyout(user_dst, s, (size_t)n) != 0) {
+                    if (SYSCALL_DEBUG) {
+                        printf("[stdin] copyout failed\n");
+                    }
+                    regs->eax = (uint32)-1;
+                    goto stdin_cleanup;
+                }
+                if (copyout(user_dst + n, "\0", 1) != 0) {
+                    if (SYSCALL_DEBUG) {
+                        printf("[stdin] copyout NUL failed\n");
+                    }
+                    regs->eax = (uint32)-1;
+                    goto stdin_cleanup;
+                }
+
+                if (SYSCALL_DEBUG) {
+                    printf("[stdin] returning %d bytes to user\n", n);
+                }
+                regs->eax = (uint32)n;
+                
+            stdin_cleanup:
+                // Clear the stdin buffer after consuming
+                if (tile_is_tiling_active() && g_user_task_term >= 0) {
+                    vterm_stdin_consume(g_user_task_term);
+                }
+            stdin_done:
+                break;
+            }
+
+            // file read
+            user_fd_t* ufd = user_fd_get(fd);
+            if (!ufd || ufd->is_dir) { regs->eax = (uint32)-1; break; }
+
+            if (ufd->offset == 0) {
+                if (SYSCALL_DEBUG) {
+                    printf("[SYSCALL:READ file] fd=%d drive=%d path='%s' size=%d max=%d\n",
+                           fd, (int)ufd->drive, ufd->path, (int)ufd->size, maxlen);
+                }
+            }
+
+            char tmp[256];
+            int remaining = maxlen;
+            int total = 0;
             char* user_dst = (char*)arg2;
-            // Ensure user buffer is writable for the bytes we will touch.
-            if (copyout(user_dst, s, (size_t)n) != 0) {
-                free(s);
-                regs->eax = (uint32)-1;
-                break;
+            while (remaining > 0) {
+                int chunk = remaining;
+                if (chunk > (int)sizeof(tmp)) chunk = (int)sizeof(tmp);
+                int n = vfs_read_file_at(ufd->drive, ufd->path, tmp, chunk, ufd->offset);
+                if (n < 0) { regs->eax = (uint32)-1; return regs->eax; }
+                if (n == 0) {
+                    if (total == 0) {
+                        if (SYSCALL_DEBUG) {
+                            printf("[SYSCALL:READ file] EOF at off=%d (size=%d)\n",
+                                   (int)ufd->offset, (int)ufd->size);
+                        }
+                    }
+                    break;
+                }
+                if (copyout(user_dst + total, tmp, (size_t)n) != 0) { regs->eax = (uint32)-1; return regs->eax; }
+                ufd->offset += (uint32)n;
+                total += n;
+                remaining -= n;
+                if (n < chunk) break;
             }
-            // Write NUL terminator if possible.
-            if (copyout(user_dst + n, "\0", 1) != 0) {
-                free(s);
+            regs->eax = (uint32)total;
+            break;
+        }
+        case SYSCALL_OPEN: {
+            const char* user_path = (const char*)arg1;
+            if (!user_path) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) {
+                if (SYSCALL_DEBUG) {
+                    printf("[SYSCALL:OPEN] copyin_cstr failed (user_path=0x%X)\n", (unsigned)arg1);
+                }
                 regs->eax = (uint32)-1;
                 break;
             }
 
-            regs->eax = (uint32)n;
-            free(s);
+            // Be tolerant of user programs that pass newline-terminated paths.
+            // This commonly happens when reading a line from stdin.
+            trim_trailing_crlf(path);
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                cwd = vterm_get_cwd(g_user_task_term);
+            }
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            extern uint8 g_current_drive;
+            uint8 drive = g_current_drive;
+
+                 // Log the open request even on failure (stdout goes to vterm, but
+                 // these diagnostics go to serial so we can see what's happening).
+                 vfs_fs_type_t fs = vfs_detect(drive);
+                     if (SYSCALL_DEBUG) {
+                      printf("[SYSCALL:OPEN] req='%s' cwd='%s' => '%s' drive=%d fs=%d\n",
+                          path,
+                          cwd ? cwd : "(null)",
+                          abspath,
+                          (int)drive,
+                          (int)fs);
+                     }
+
+            vfs_stat_t st;
+            int st_rc = vfs_stat(drive, abspath, &st);
+            if (st_rc != 0) {
+                if (SYSCALL_DEBUG) {
+                    printf("[SYSCALL:OPEN] vfs_stat failed rc=%d for '%s' (drive=%d fs=%d)\n",
+                           st_rc, abspath, (int)drive, (int)fs);
+                }
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            int fd = user_fd_alloc();
+            if (fd < 0) { regs->eax = (uint32)-1; break; }
+
+            user_fd_t* ufd = &g_user_fds[fd];
+            ufd->drive = drive;
+            strncpy(ufd->path, abspath, sizeof(ufd->path) - 1);
+            ufd->path[sizeof(ufd->path) - 1] = '\0';
+            ufd->offset = 0;
+            ufd->dir_pos = 0;
+            ufd->is_dir = (st.type == VFS_NODE_DIR);
+            ufd->size = st.size;
+
+                     if (SYSCALL_DEBUG) {
+                      printf("[SYSCALL:OPEN] path='%s' cwd='%s' => '%s' drive=%d fd=%d type=%d size=%d\n",
+                          path, cwd ? cwd : "(null)", abspath, (int)drive, fd, (int)st.type, (int)st.size);
+                     }
+
+            regs->eax = (uint32)fd;
+            break;
+        }
+        case SYSCALL_CLOSE: {
+            int fd = (int)arg1;
+            if (fd < 0 || fd >= USER_FD_MAX) { regs->eax = (uint32)-1; break; }
+            if (fd <= 2) { regs->eax = 0; break; }
+            g_user_fds[fd].used = 0;
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_GETDENTS: {
+            int fd = (int)arg1;
+            void* user_buf = (void*)arg2;
+            int buflen = (int)arg3;
+            if (!user_buf || buflen <= 0) { regs->eax = 0; break; }
+            if (buflen > SYSCALL_IO_MAX) buflen = SYSCALL_IO_MAX;
+
+            user_fd_t* ufd = user_fd_get(fd);
+            if (!ufd || !ufd->is_dir) { regs->eax = (uint32)-1; break; }
+
+            int max_entries = buflen / (int)sizeof(eyn_dirent_t);
+            if (max_entries <= 0) { regs->eax = 0; break; }
+
+            syscall_getdents_ctx_t ctx;
+            ctx.ufd = ufd;
+            ctx.cur_index = 0;
+            ctx.written = 0;
+            ctx.max_entries = max_entries;
+            ctx.user_out = (eyn_dirent_t*)user_buf;
+
+            int rc = vfs_listdir(ufd->drive, ufd->path, syscall_getdents_cb, &ctx);
+            if (rc < 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)(ctx.written * (int)sizeof(eyn_dirent_t));
             break;
         }
         case SYSCALL_EXIT: {
@@ -378,6 +704,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             g_user_task_term = -1;
             g_user_interrupt = 0;
             g_abort_to_shell = 1;
+            syscall_reset_user_fds();
             regs->eax = 0;
             break;
         }

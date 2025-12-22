@@ -69,8 +69,11 @@ int kb_getchar_nonblocking() {
 }
 
 string readStr() {
-    string buffstr = (string) malloc(200);
-    uint8 i = 0;
+        // Avoid heap usage: stdin reads can occur while the heap is unhealthy.
+        // Single-core kernel: a single static buffer is sufficient here.
+        static char buffstr_storage[200];
+        string buffstr = buffstr_storage;
+        uint32 i = 0;
     uint8 reading = 1;
     uint8 shift_pressed = 0;  // Track shift key state
     uint8 caps_lock = 0;      // Track caps lock state
@@ -127,14 +130,20 @@ string readStr() {
                                 reading = 0;        // Exit the reading loop
                                 /* Print ^C without color formatting (kernel printf doesn't accept RGB args here) */
                                 printf("^C\n");
-                                /* Return the (cleared) buffer to the caller; caller is responsible for freeing */
+                                /* Return the (cleared) buffer to the caller */
                                 return buffstr;
                         }
             
             // Determine if we should use uppercase (shift XOR caps lock)
             uint8 use_uppercase = shift_pressed ^ caps_lock;
             
-            switch(scancode)
+                        // Hard cap input length to avoid heap corruption.
+                        // Leave room for NUL terminator.
+                        if (i >= 199 && scancode != 14 && scancode != 28) {
+                                continue;
+                        }
+
+                        switch(scancode)
             {
                 case 1:  // Escape
                         drawText((char)27, 255, 255, 255);  // white

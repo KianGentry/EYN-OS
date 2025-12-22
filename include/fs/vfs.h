@@ -31,6 +31,9 @@ vfs_fs_type_t vfs_detect(uint8 drive);
 // Paths are resolved in the caller before passing here when needed.
 int vfs_read_file(uint8 drive, const char* path, void* buf, int bufsize);
 
+// Read a file starting at byte offset into buf. Returns bytes read or <0 on error.
+int vfs_read_file_at(uint8 drive, const char* path, void* buf, int bufsize, uint32 offset);
+
 // Get file size for a path. Returns 0 on success and fills out_size; <0 on error.
 int vfs_get_file_size(uint8 drive, const char* path, uint32* out_size);
 

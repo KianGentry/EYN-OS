@@ -51,9 +51,20 @@ typedef struct {
     // input editing render anchors
     int input_row;        // row where current input is being edited (same as cur_y at prompt)
     int input_start_col;  // column where input begins (after the prompt)
+
+    // Stdin buffer for ring3 user tasks: when a user task is waiting for stdin input,
+    // the TUI routes keyboard characters here. The syscall handler consumes from this buffer.
+    char stdin_buf[256];
+    volatile int stdin_len;        // current bytes in stdin_buf
+    volatile int stdin_ready;      // 1 when line is complete (Enter pressed), 0 otherwise
 } vterm_t;
 
 static vterm_t vterms[4];
+
+const char* vterm_get_cwd(int idx) {
+    if (idx < 0 || idx >= 4) return "/";
+    return vterms[idx].cwd;
+}
 
 void vterm_init_all() {
     for (int i = 0; i < 4; ++i) {
@@ -87,6 +98,10 @@ void vterm_init_all() {
         vterms[i].sel_end_col = 0;
         vterms[i].input_row = 0;
         vterms[i].input_start_col = 0;
+        // Initialize stdin buffer for user tasks
+        vterms[i].stdin_buf[0] = '\0';
+        vterms[i].stdin_len = 0;
+        vterms[i].stdin_ready = 0;
     }
 }
 
@@ -783,3 +798,79 @@ int vterm_is_selected(int idx, int row, int col) {
     int abs_b = t->input_start_col + b;
     return (col >= abs_a && col < abs_b);
 }
+
+// -----------------------------------------------------------------------------
+// User task stdin buffer API
+// When a ring3 user task is active and waiting for input, the TUI routes
+// keyboard characters to this buffer. The syscall READ (fd=0) consumes from here.
+// -----------------------------------------------------------------------------
+
+// Clear the stdin buffer for a vterm (called when starting a new user task)
+void vterm_stdin_clear(int idx) {
+    if (idx < 0 || idx >= 4) return;
+    vterm_t* t = &vterms[idx];
+    t->stdin_buf[0] = '\0';
+    t->stdin_len = 0;
+    t->stdin_ready = 0;
+}
+
+// Append a character to the stdin buffer (called from TUI input handler).
+// Returns 1 if the character was a newline (line is complete), 0 otherwise.
+int vterm_stdin_putchar(int idx, char ch) {
+    if (idx < 0 || idx >= 4) return 0;
+    vterm_t* t = &vterms[idx];
+    
+    // Handle backspace
+    if (ch == '\b' || ch == 127) {
+        if (t->stdin_len > 0) {
+            t->stdin_len--;
+            t->stdin_buf[t->stdin_len] = '\0';
+        }
+        return 0;
+    }
+    
+    // Handle newline - mark line as ready
+    if (ch == '\n' || ch == '\r') {
+        if (t->stdin_len < (int)sizeof(t->stdin_buf) - 1) {
+            t->stdin_buf[t->stdin_len++] = '\n';
+            t->stdin_buf[t->stdin_len] = '\0';
+        }
+        t->stdin_ready = 1;
+        return 1;
+    }
+    
+    // Append printable character
+    if (t->stdin_len < (int)sizeof(t->stdin_buf) - 2) {  // Leave room for \n and \0
+        t->stdin_buf[t->stdin_len++] = ch;
+        t->stdin_buf[t->stdin_len] = '\0';
+    }
+    return 0;
+}
+
+// Check if a complete line is ready in the stdin buffer
+int vterm_stdin_ready(int idx) {
+    if (idx < 0 || idx >= 4) return 0;
+    return vterms[idx].stdin_ready;
+}
+
+// Get pointer to stdin buffer data (for copying to user space)
+const char* vterm_stdin_data(int idx) {
+    if (idx < 0 || idx >= 4) return "";
+    return vterms[idx].stdin_buf;
+}
+
+// Get length of data in stdin buffer
+int vterm_stdin_len(int idx) {
+    if (idx < 0 || idx >= 4) return 0;
+    return vterms[idx].stdin_len;
+}
+
+// Consume/clear the stdin buffer after the syscall has read the data
+void vterm_stdin_consume(int idx) {
+    if (idx < 0 || idx >= 4) return;
+    vterm_t* t = &vterms[idx];
+    t->stdin_buf[0] = '\0';
+    t->stdin_len = 0;
+    t->stdin_ready = 0;
+}
+

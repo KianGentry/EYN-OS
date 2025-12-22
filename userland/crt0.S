@@ -1,15 +1,15 @@
 .global _start
 .extern main
+.extern _exit
 
-; Minimal C runtime entry for EYN-OS ring3 programs.
-; Kernel enters at ELF e_entry with a valid user stack.
+# Minimal C runtime entry for EYN-OS ring3 programs.
+# Calls main(), then _exit(main_return).
 _start:
     call main
 
-    ; exit(main_return)
-    mov %eax, %ebx
-    mov $2, %eax
-    int $0x80
+    # _exit(main_return)
+    push %eax
+    call _exit
 
 .hang:
     jmp .hang

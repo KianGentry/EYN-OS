@@ -194,6 +194,74 @@ int vfs_read_file(uint8 drive, const char* path, void* buf, int bufsize) {
     return (int)bytes_read;
 }
 
+int vfs_read_file_at(uint8 drive, const char* path, void* buf, int bufsize, uint32 offset) {
+    if (!path || !buf || bufsize <= 0) return -1;
+
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
+        eynfs_dir_entry_t ent; uint32_t pb, idx;
+        if (eynfs_traverse_path(drive, &sb, path, &ent, &pb, &idx) != 0 || ent.type != EYNFS_TYPE_FILE) return -2;
+        if (offset >= ent.size) return 0;
+        uint32 remaining = ent.size - offset;
+        int to_read = (remaining < (uint32)bufsize) ? (int)remaining : bufsize;
+        return eynfs_read_file(drive, &sb, &ent, buf, to_read, offset);
+    }
+
+    // FAT32 path
+    uint32 part_lba = fat32_get_partition_lba_start(drive);
+    struct fat32_bpb bpb;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -3;
+    struct fat32_dir_entry dent; uint32 file_first;
+    if (fat32_path_to_entry(drive, &bpb, path, &dent, &file_first) != 0) return -4;
+    if (dent.Attr & 0x10) return -5;
+
+    uint32 file_size = dent.FileSize;
+    if (offset >= file_size) return 0;
+    uint32 remaining = file_size - offset;
+    uint32 want = (remaining < (uint32)bufsize) ? remaining : (uint32)bufsize;
+
+    uint32 byts_per_sec = bpb.BytsPerSec;
+    uint32 sec_per_clus = bpb.SecPerClus;
+    uint32 first_data_sec = bpb.RsvdSecCnt + (bpb.NumFATs * bpb.FATSz32);
+    uint32 bytes_per_clus = byts_per_sec * sec_per_clus;
+
+    // Seek to the cluster containing the offset.
+    uint32 cur = file_first;
+    uint32 skip = offset;
+    while (cur < 0x0FFFFFF8 && skip >= bytes_per_clus) {
+        skip -= bytes_per_clus;
+        cur = fat32_next_cluster_sector(drive, part_lba, &bpb, cur);
+    }
+    if (cur >= 0x0FFFFFF8) return 0;
+
+    uint32 bytes_read = 0;
+    uint8 sector[512];
+    while (cur < 0x0FFFFFF8 && bytes_read < want) {
+        uint32 data_sec = first_data_sec + ((cur - 2) * sec_per_clus);
+        for (uint32 s = 0; s < sec_per_clus && bytes_read < want; ++s) {
+            if (ata_read_sector(drive, part_lba + data_sec + s, sector) != 0) return -6;
+
+            uint32 sec_off = 0;
+            if (skip) {
+                if (skip >= byts_per_sec) {
+                    skip -= byts_per_sec;
+                    continue;
+                }
+                sec_off = skip;
+                skip = 0;
+            }
+
+            uint32 avail = byts_per_sec - sec_off;
+            uint32 to_copy = avail;
+            if (bytes_read + to_copy > want) to_copy = want - bytes_read;
+            memcpy((char*)buf + bytes_read, sector + sec_off, to_copy);
+            bytes_read += to_copy;
+        }
+        cur = fat32_next_cluster_sector(drive, part_lba, &bpb, cur);
+    }
+    return (int)bytes_read;
+}
+
 int vfs_stat(uint8 drive, const char* path, vfs_stat_t* st) {
     if (!path || !st) return -1;
     eynfs_superblock_t sb;

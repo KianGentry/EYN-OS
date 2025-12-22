@@ -923,9 +923,8 @@ void ring3_cmd(string ch) {
     invalidate_tlb_entry(user_stack_page);
 
     printf("%c[ring3] entering user mode...\n", 0, 255, 0);
-    uint32 kesp;
-    asm volatile("mov %%esp, %0" : "=r"(kesp));
-    tss_set_kernel_stack(kesp);
+    extern uint32 stack_space;
+    tss_set_kernel_stack((uint32)&stack_space);
     enter_user_mode(user_code_va, user_stack_top);
 }
 
@@ -1038,9 +1037,8 @@ void userrun_cmd(string ch) {
     free(buf);
 
     printf("%c[userrun] entering user mode: %s (%d bytes)\n", 0, 255, 0, abspath, (int)size);
-    uint32 kesp;
-    asm volatile("mov %%esp, %0" : "=r"(kesp));
-    tss_set_kernel_stack(kesp);
+    extern uint32 stack_space;
+    tss_set_kernel_stack((uint32)&stack_space);
     enter_user_mode(user_code_va, user_stack_top);
 }
 

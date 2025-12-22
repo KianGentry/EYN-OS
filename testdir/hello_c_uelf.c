@@ -1,15 +1,16 @@
-#include "../userland/eynos_syscall.h"
+#include <stdio.h>
+#include <unistd.h>
 
 int main(void) {
-    eyn_write_str("Hello from C (.uelf)!\n");
-    eyn_write_str("Press q to quit.\n");
+    printf("Hello from C (.uelf)!\n");
+    printf("Press q to quit.\n");
 
     for (;;) {
-        int ch = eyn_sys_getkey();
+        int ch = getkey();
         if (ch == 'q') {
             break;
         }
     }
 
-    eyn_sys_exit(0);
+    _exit(0);
 }

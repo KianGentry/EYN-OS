@@ -7,26 +7,37 @@ extern syscall_dispatch
 extern g_abort_to_shell
 extern g_user_task_active
 extern stack_space
+extern stack_bottom
 extern ui_return_from_user_task
 
 section .text
 syscall_entry:
-    ; Save segments
-    push ds
-    push es
-    push fs
-    push gs
+    ; Ensure kernel data segments while running the handler.
+    ; Preserve EAX: user passes syscall number in EAX.
+    push eax
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    pop eax
 
-    ; Save general registers
-    pusha
-
-    ; Push synthetic error code and int number (0 for errcode, 0x80 int)
+    ; Build a regs_t compatible frame (see include/cpu/isr.h)
+    ; Layout from &EDI: edi..eax, int_no, err_code, then CPU iret frame.
     push dword 0            ; err_code
     push dword 0x80         ; int_no
+    pusha
 
-    ; Saved EDI is at [esp + 8]
+    ; Stack overflow tripwire: if the kernel stack underflowed, bail out
+    ; to the shell immediately on a known-good stack.
+    cmp esp, stack_bottom
+    jae .stack_ok
+    mov dword [g_abort_to_shell], 1
+    jmp .do_abort
+.stack_ok:
+
+    ; pass &regs_t (starts at saved EDI)
     mov eax, esp
-    add eax, 8 ; eax = &saved EDI (start of regs_t)
     push eax
     call syscall_dispatch
     add esp, 4
@@ -34,6 +45,7 @@ syscall_entry:
     ; If requested, abandon return-to-user and jump back into the shell.
     cmp dword [g_abort_to_shell], 0
     je .no_abort
+.do_abort:
     mov dword [g_abort_to_shell], 0
     mov dword [g_user_task_active], 0
     mov ax, 0x10
@@ -50,17 +62,35 @@ syscall_entry:
     jmp .halt
 .no_abort:
 
-    mov [esp + 36], eax
+    ; Stash return value into saved EAX within the pusha frame.
+    mov [esp + 28], eax
 
-    ; Pop our synthetic fields
-    add esp, 8 ; discard int_no, err_code
-
-    ; Restore registers and segments
+    ; Restore registers
     popa
-    pop gs
-    pop fs
-    pop es
-    pop ds
 
+    ; Discard int_no and err_code
+    add esp, 8
+
+    ; Restore data segments appropriate for the return privilege level.
+    ; After the add above, the iret frame starts at [esp]: eip, cs, eflags, useresp, ss
+    ; Preserve EAX: holds syscall return value.
+    push eax
+    mov ax, [esp + 8]
+    test ax, 3
+    jz .ret_kernel
+    mov ax, 0x23
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    jmp .seg_done
+.ret_kernel:
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+.seg_done:
+    pop eax
     iretd
 

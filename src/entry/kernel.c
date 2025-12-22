@@ -56,6 +56,15 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     
     printf("EYN-OS Release 14\n");
     printf("Type 'help' for a list of commands.\n\n");
+
+    // Initialize VMM/paging as early as possible so any subsequent malloc()
+    // picks a heap start *after* VMM boot allocations (page tables, etc.).
+    // If malloc() runs before vmm_init(), the heap falls back to a low
+    // address and can be overwritten by early_alloc(), corrupting heap
+    // metadata and later causing copyout/page faults in user mode.
+    uint32 ram = detect_available_memory();
+    vmm_init(ram);
+    vmm_enable_paging();
     
     // Initialize ATA drives immediately
     ata_init_drives();
@@ -83,12 +92,6 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
             }
         }
     }
-
-    // Paging/VMM initialization is available but disabled by default.
-    // The subsystem can be enabled later once thoroughly tested.
-    uint32 ram = detect_available_memory();
-    vmm_init(ram);
-    vmm_enable_paging();
 
     // Initialize predictive memory management system
     predictive_memory_init();

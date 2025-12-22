@@ -59,7 +59,6 @@ static int sys_read(native_process_t* proc, uint32 fd, void* buf, uint32 count) 
         uint32 n = (uint32)strlen(s);
         if (n > count) n = count;
         memcpy(buf, s, n);
-        free(s);
         return (int)n;
     }
     linux_fd* tbl = get_fd_table(proc);

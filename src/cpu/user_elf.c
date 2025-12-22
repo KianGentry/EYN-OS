@@ -8,6 +8,11 @@
 #include <mm/vmm.h>
 #include <cpu/gdt.h>
 #include <tile_manager.h>
+#include <terminals.h>
+#include <isr.h>
+
+// Defined in src/boot/kernel.asm; this is the top of the kernel stack.
+extern uint32 stack_space;
 
 // Minimal ELF32 structures for parsing 32-bit little-endian ELF files
 typedef struct {
@@ -160,11 +165,17 @@ int user_elf_run(uint8 drive, const char* abspath) {
     // Clean up any previous user-task mappings first.
     user_task_cleanup_mappings();
 
+    // Reset per-task syscall state.
+    syscall_reset_user_fds();
+
     g_user_interrupt = 0;
     g_user_task_active = 1;
     g_user_task_term = tile_is_tiling_active() ? tile_get_focused() : -1;
     if (g_user_task_term < 0) g_user_task_term = 0;
     g_user_task_ui_dirty = 1;
+    
+    // Clear the stdin buffer for this terminal so the user task starts fresh
+    vterm_stdin_clear(g_user_task_term);
 
     // Map code/data region pages.
     for (uint32 pi = 0; pi < pages; ++pi) {
@@ -240,9 +251,7 @@ int user_elf_run(uint8 drive, const char* abspath) {
 
     // Enter ring3 at ELF entry.
     printf("%c[elfrun] entering user mode: %s (entry=0x%X)\n", 0, 255, 0, abspath, (unsigned)entry);
-    uint32 kesp;
-    asm volatile("mov %%esp, %0" : "=r"(kesp));
-    tss_set_kernel_stack(kesp);
+    tss_set_kernel_stack((uint32)&stack_space);
     enter_user_mode(entry, user_stack_top);
 
     return 0;

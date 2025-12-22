@@ -199,6 +199,28 @@ void frame_free(uint32 phys_addr) {
     }
 }
 
+void vmm_reserve_phys_range(uint32 phys_start, uint32 phys_end) {
+    if (phys_end <= phys_start) {
+        return;
+    }
+
+    uint32 start = phys_start & PAGE_MASK;
+    uint32 end = (phys_end + PAGE_SIZE - 1) & PAGE_MASK;
+
+    for (uint32 pa = start; pa < end; pa += PAGE_SIZE) {
+        uint32 frame_num = pa / PAGE_SIZE;
+        if (frame_num >= g_frame_alloc.total_frames) {
+            break;
+        }
+        if (!frame_test(frame_num)) {
+            frame_set(frame_num);
+            if (g_frame_alloc.free_frames) {
+                g_frame_alloc.free_frames--;
+            }
+        }
+    }
+}
+
 /* Allocate contiguous frames for DMA (returns start physical address) */
 uint32 frame_alloc_contiguous(uint32 count) {
     if (count == 0 || count > g_frame_alloc.free_frames) {
@@ -1100,6 +1122,7 @@ void vmm_init(uint32 total_ram_bytes) {
     
     /* Set early heap pointer to right after kernel */
     early_heap_ptr = ((uint32)&__kernel_end + PAGE_SIZE) & PAGE_MASK;
+    uint32 boot_alloc_start = early_heap_ptr;
     
     /* Allocate kernel page directory */
     page_directory_t* kernel_pd = (page_directory_t*)early_alloc(sizeof(page_directory_t), PAGE_SIZE);
@@ -1175,6 +1198,25 @@ void vmm_init(uint32 total_ram_bytes) {
     /* Set null page as not-present (null pointer guard) */
     page_table_t* pt0 = (page_table_t*)(kernel_pd->entries[0] & PTE_FRAME_MASK);
     pt0->entries[0] = 0;  /* First page not present — dereferencing NULL faults */
+
+    /* IMPORTANT: Reserve all boot-time early_alloc() memory in the frame bitmap.
+     * frame_alloc_init() only reserves up through __kernel_end; without this,
+     * frame_alloc() can hand out frames that overlap page tables or the heap,
+     * leading to silent corruption (e.g., broken user PTEs and failing copyout).
+     */
+    uint32 boot_alloc_end = (early_heap_ptr + PAGE_SIZE - 1) & PAGE_MASK;
+    for (uint32 pa = boot_alloc_start; pa < boot_alloc_end; pa += PAGE_SIZE) {
+        uint32 frame_num = pa / PAGE_SIZE;
+        if (frame_num >= g_frame_alloc.total_frames) {
+            break;
+        }
+        if (!frame_test(frame_num)) {
+            frame_set(frame_num);
+            if (g_frame_alloc.free_frames) {
+                g_frame_alloc.free_frames--;
+            }
+        }
+    }
     
     printf("VMM: Initialized with %d MB RAM, %d free frames\n",
            total_ram_bytes / (1024 * 1024),

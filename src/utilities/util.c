@@ -7,6 +7,7 @@
 #include <tile_manager.h>
 #include <shell.h>
 #include <mm/vmm.h>
+#include <isr.h>
 
 volatile int g_user_interrupt = 0;
 volatile int g_user_task_active = 0;
@@ -36,6 +37,8 @@ void user_task_cleanup_mappings(void) {
     g_user_code_base = 0;
     g_user_code_pages = 0;
     g_user_stack_page = 0;
+
+    syscall_reset_user_fds();
 }
 
 void ui_return_from_user_task(void) {
@@ -197,7 +200,6 @@ extern uint8 __kernel_end;
 #define HEAP_SIZE_DEFAULT 0x100000    // 1MB default heap size (increased for assembler)
 #define HEAP_SIZE_MIN 0x40000         // 256KB minimum heap size
 #define HEAP_SIZE_MAX 0x1000000       // 16MB maximum heap size
-#define BLOCK_HEADER_SIZE 12  // Reduced from 24 for memory savings
 #define MIN_BLOCK_SIZE 16     // Reduced from 32
 #define NO_BLOCK 0xFFFFFFFF
 #define MAGIC_NUMBER 0xDEADBEEF
@@ -208,6 +210,10 @@ typedef struct {
     uint32 next;        // Offset to next block (NO_BLOCK if last)
     uint32 magic;       // Magic number for corruption detection
 } block_header_t;
+
+// Must match block_header_t layout. If this is smaller than sizeof(block_header_t),
+// malloc() will hand out pointers into the header and corrupt allocator metadata.
+#define BLOCK_HEADER_SIZE ((uint32)sizeof(block_header_t))
 
 static uint8* heap_start = (uint8*)0;
 static uint32 heap_size = HEAP_SIZE_DEFAULT;  // Dynamic heap size
@@ -349,9 +355,39 @@ static int validate_block(block_header_t* block, uint32 offset) {
         memory_errors++;
         return 0;
     }
+
+    // Validate heap_start/heap_size before touching any block fields.
+    uint32 heap_begin = (uint32)heap_start;
+    if (!heap_begin || heap_begin < 0x100000 || heap_size < HEAP_SIZE_MIN) {
+        printf("%c[MEMORY] Heap base corrupt (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
+        memory_errors++;
+        return 0;
+    }
+    uint32 heap_end = heap_begin + heap_size;
+    if (heap_end <= heap_begin) {
+        printf("%c[MEMORY] Heap bounds overflow (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
+        memory_errors++;
+        return 0;
+    }
+
+    // Ensure the block pointer itself is within the heap before dereferencing.
+    uint32 block_addr = (uint32)block;
+    if (block_addr < heap_begin || block_addr + sizeof(block_header_t) > heap_end) {
+        printf("%c[MEMORY] Block pointer out of heap (block=0x%X heap=[0x%X..0x%X))\n", 255, 0, 0, block_addr, heap_begin, heap_end);
+        memory_errors++;
+        return 0;
+    }
+
+    // Sanity: offset should match the pointer.
+    if (block_addr != heap_begin + offset) {
+        printf("%c[MEMORY] Block pointer mismatch (offset=0x%X block=0x%X expected=0x%X)\n", 255, 0, 0, offset, block_addr, heap_begin + offset);
+        memory_errors++;
+        return 0;
+    }
     
     // Check if block is within heap bounds first
-    if (offset >= heap_size || offset + block->size > heap_size) {
+    // (safe now that block pointer is validated)
+    if (offset >= heap_size || offset + BLOCK_HEADER_SIZE > heap_size || offset + block->size > heap_size) {
         printf("%c[MEMORY] Block out of bounds at offset 0x%X (size: %d, heap: %d)\n", 255, 0, 0, offset, block->size, heap_size);
         memory_errors++;
         return 0;
@@ -413,6 +449,10 @@ void init_memory_manager() {
     }
     
     // Initialize heap with calculated size
+    // Reserve this region in the VMM frame allocator so paging/frame_alloc
+    // will never hand out frames that overlap the heap.
+    vmm_reserve_phys_range((uint32)heap_start, (uint32)heap_start + heap_size);
+
     memset(heap_start, 0, heap_size);
     
     // Verify the memory was set properly
@@ -459,11 +499,11 @@ static uint32 find_free_block(uint32 size) {
         block_header_t* block = (block_header_t*)(heap_start + current);
         blocks_checked++;
         
-        // Validate block integrity (but don't fail if validation is disabled)
+        // Validate block integrity. If this fails, the heap metadata is unsafe
+        // to traverse (we cannot safely read block->next), so fail fast.
         if (!validate_block(block, current)) {
-            // Since validation is disabled, just continue instead of failing
-            current = block->next;
-            continue;
+            printf("%c[MEMORY] Heap traversal aborted (corruption near offset 0x%X)\n", 255, 0, 0, current);
+            return NO_BLOCK;
         }
         
         if (!block->used && block->size >= size) {
@@ -691,6 +731,8 @@ void print_memory_stats() {
         
         if (!validate_block(block, current)) {
             corrupted_blocks++;
+            // Heap is unsafe to traverse further.
+            break;
         } else {
             if (block->used) {
                 total_used += block->size;

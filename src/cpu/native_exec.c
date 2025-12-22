@@ -787,7 +787,6 @@ exec_result_t native_run_process(native_process_t* process) {
                          process->stack_start, process->stack_start + process->stack_size);
                                     regs[0] = -1;
                                 }
-                                free(s);
                             } else {
                                 regs[0] = -1;
                             }

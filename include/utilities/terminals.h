@@ -46,8 +46,30 @@ void vterm_get_char_color_abs(int idx, int row, int col, int* out_r, int* out_g,
 // Use to drive incremental redraws in the tiler.
 int vterm_get_version(int idx);
 
+// Get per-vterm current working directory (read-only pointer).
+const char* vterm_get_cwd(int idx);
+
 #define TERM_COLS 80
 // Increase terminal buffer height so the terminal can fill tall tiles/screens (480px ~= 60 rows)
 #define TERM_ROWS 60
+
+// -----------------------------------------------------------------------------
+// User task stdin buffer API
+// When a ring3 user task is active and waiting for input, the TUI routes
+// keyboard characters to this buffer. The syscall READ (fd=0) consumes from here.
+// -----------------------------------------------------------------------------
+
+// Clear the stdin buffer for a vterm (called when starting a new user task)
+void vterm_stdin_clear(int idx);
+// Append a character to the stdin buffer. Returns 1 if newline (line complete), 0 otherwise.
+int vterm_stdin_putchar(int idx, char ch);
+// Check if a complete line is ready in the stdin buffer
+int vterm_stdin_ready(int idx);
+// Get pointer to stdin buffer data
+const char* vterm_stdin_data(int idx);
+// Get length of data in stdin buffer
+int vterm_stdin_len(int idx);
+// Consume/clear the stdin buffer after the syscall has read the data
+void vterm_stdin_consume(int idx);
 
 #endif // TERMINALS_H

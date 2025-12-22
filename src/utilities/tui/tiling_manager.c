@@ -1817,6 +1817,44 @@ int tile_pump_input_once(void) {
         return 1;
     }
 
+    // When a ring3 user task is active and waiting for stdin input,
+    // route printable characters, backspace, and Enter to the stdin buffer
+    // instead of the normal vterm command handling.
+    if (g_user_task_active && g_user_task_term >= 0) {
+        int term = g_user_task_term;
+        // Skip Super-modified keys (they go to tiler hotkeys below)
+        if (!(key & 0x4000)) {
+            char ch = 0;
+            // Printable ASCII
+            if (key >= 32 && key <= 126) {
+                ch = (char)key;
+            }
+            // Enter/newline (scancode 28 returns '\n' = 10)
+            else if (key == 10) {
+                ch = '\n';
+            }
+            // Backspace (scancode 14 returns '\b' = 8)
+            else if (key == 8) {
+                ch = '\b';
+            }
+            
+            if (ch) {
+                // Echo the character to the vterm display
+                if (ch == '\b') {
+                    // For backspace, we could implement echo but for now just update stdin buffer
+                } else if (ch == '\n') {
+                    vterm_write_char(term, '\n');
+                } else {
+                    vterm_write_char(term, ch);
+                }
+                // Add to stdin buffer
+                vterm_stdin_putchar(term, ch);
+                g_user_task_ui_dirty = 1;
+                return 1;
+            }
+        }
+    }
+
     // If modal is active, handle it first.
     if (g_bg_modal.active) {
         (void)handle_bg_modal_key(key);

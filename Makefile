@@ -278,6 +278,8 @@ build: all eynfsimg docs
 		echo "grub-mkrescue not found. Install grub2 (grub2-mkrescue) or grub-pc-bin (grub-mkrescue)."; \
 		exit 1; \
 	fi
+	@# Ensure ISO creation is non-interactive (some xorriso/grub wrappers may prompt on overwrite)
+	rm -f EYNOS.iso
 	$(GRUB_MKRESCUE) --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o EYNOS.iso $(STAGE_DIR)/
 	@echo "Ultra-minimal ISO created: EYNOS.iso"
 	@ls -lh EYNOS.iso
@@ -293,6 +295,7 @@ build: all eynfsimg docs
 		rm -rf /tmp/iso_clean/boot/grub/i386-efi; \
 		rm -rf /tmp/iso_clean/boot/grub/x86_64-efi; \
 		sudo umount /tmp/iso_edit; \
+		rm -f EYNOS.iso; \
 		xorriso -as mkisofs -o EYNOS.iso -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img -r -V "EYN-OS" -iso-level 3 -joliet-long /tmp/iso_clean; \
 		rm -rf /tmp/iso_clean; \
 		echo "EFI content stripped from ISO."; \
