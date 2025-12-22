@@ -1,9 +1,9 @@
 #include <types.h>
 #include <vga.h>
 #include <string.h>
-#include <stdlib.h>
 #include <shell.h>
 #include <stdint.h>
+#include <util.h>
 // Use the shared terminal API/definitions so TERM_ROWS/TERM_COLS stay consistent
 #include <terminals.h>
 
@@ -36,11 +36,13 @@ typedef struct {
     uint8_t char_r[TERM_ROWS][TERM_COLS];
     uint8_t char_g[TERM_ROWS][TERM_COLS];
     uint8_t char_b[TERM_ROWS][TERM_COLS];
-    // If this character was populated from the shell redirect buffer, this
-    // stores the index into shell_redirect_buf it corresponds to, otherwise -1.
-    int char_redirect_idx[TERM_ROWS][TERM_COLS];
-    // If this character corresponds to a recorded icon (index into shell_redirect_icons), -1 otherwise
-    int char_icon_idx[TERM_ROWS][TERM_COLS];
+
+    // Per-line icon metadata (used by tiler to draw small file/dir icons)
+    // icon_key: base icon name without extension, e.g. "file_txt" or "dir_full"
+    char line_icon_key[TERM_ROWS][16];
+    uint8_t line_indent_px[TERM_ROWS];
+    uint8_t line_icon_anchor_col[TERM_ROWS];
+
     unsigned int version; // increments when content changes
     // Simple selection for current input line: active flag and [start,end) columns
     int sel_active;
@@ -70,12 +72,13 @@ void vterm_init_all() {
             vterms[i].line_r[r] = 200;
             vterms[i].line_g[r] = 200;
             vterms[i].line_b[r] = 200;
+            vterms[i].line_icon_key[r][0] = '\0';
+            vterms[i].line_indent_px[r] = 0;
+            vterms[i].line_icon_anchor_col[r] = 0;
             for (int c = 0; c < TERM_COLS; ++c) {
                 vterms[i].char_r[r][c] = 200;
                 vterms[i].char_g[r][c] = 200;
                 vterms[i].char_b[r][c] = 200;
-                vterms[i].char_redirect_idx[r][c] = -1;
-                vterms[i].char_icon_idx[r][c] = -1;
             }
         }
         vterms[i].version = 1;
@@ -183,12 +186,16 @@ void vterm_write_char(int idx, char ch) {
                     t->char_r[r-1][c] = t->char_r[r][c];
                     t->char_g[r-1][c] = t->char_g[r][c];
                     t->char_b[r-1][c] = t->char_b[r][c];
-                        t->char_redirect_idx[r-1][c] = t->char_redirect_idx[r][c];
-                        t->char_icon_idx[r-1][c] = t->char_icon_idx[r][c];
                 }
                 t->line_r[r-1] = t->line_r[r];
                 t->line_g[r-1] = t->line_g[r];
                 t->line_b[r-1] = t->line_b[r];
+
+                // shift per-line icon metadata
+                strncpy(t->line_icon_key[r-1], t->line_icon_key[r], sizeof(t->line_icon_key[r-1]) - 1);
+                t->line_icon_key[r-1][sizeof(t->line_icon_key[r-1]) - 1] = '\0';
+                t->line_indent_px[r-1] = t->line_indent_px[r];
+                t->line_icon_anchor_col[r-1] = t->line_icon_anchor_col[r];
             }
             // clear last line
             t->buf[TERM_ROWS-1][0] = '\0';
@@ -196,18 +203,23 @@ void vterm_write_char(int idx, char ch) {
                 t->char_r[TERM_ROWS-1][c] = 200;
                 t->char_g[TERM_ROWS-1][c] = 200;
                 t->char_b[TERM_ROWS-1][c] = 200;
-                    t->char_redirect_idx[TERM_ROWS-1][c] = -1;
-                    t->char_icon_idx[TERM_ROWS-1][c] = -1;
             }
             t->line_r[TERM_ROWS-1] = 200;
             t->line_g[TERM_ROWS-1] = 200;
             t->line_b[TERM_ROWS-1] = 200;
+            t->line_icon_key[TERM_ROWS-1][0] = '\0';
+            t->line_indent_px[TERM_ROWS-1] = 0;
+            t->line_icon_anchor_col[TERM_ROWS-1] = 0;
             t->cur_y = TERM_ROWS-1;
         }
         /* mark the new (now-current) line with default color */
         t->line_r[t->cur_y] = 200;
         t->line_g[t->cur_y] = 200;
         t->line_b[t->cur_y] = 200;
+        // default: no icon metadata for the new line
+        t->line_icon_key[t->cur_y][0] = '\0';
+        t->line_indent_px[t->cur_y] = 0;
+        t->line_icon_anchor_col[t->cur_y] = 0;
         t->version++;
         return;
     }
@@ -222,24 +234,28 @@ void vterm_write_char(int idx, char ch) {
                     t->char_r[r-1][c] = t->char_r[r][c];
                     t->char_g[r-1][c] = t->char_g[r][c];
                     t->char_b[r-1][c] = t->char_b[r][c];
-                        t->char_redirect_idx[r-1][c] = t->char_redirect_idx[r][c];
-                        t->char_icon_idx[r-1][c] = t->char_icon_idx[r][c];
                 }
                 t->line_r[r-1] = t->line_r[r];
                 t->line_g[r-1] = t->line_g[r];
                 t->line_b[r-1] = t->line_b[r];
+
+                strncpy(t->line_icon_key[r-1], t->line_icon_key[r], sizeof(t->line_icon_key[r-1]) - 1);
+                t->line_icon_key[r-1][sizeof(t->line_icon_key[r-1]) - 1] = '\0';
+                t->line_indent_px[r-1] = t->line_indent_px[r];
+                t->line_icon_anchor_col[r-1] = t->line_icon_anchor_col[r];
             }
             t->buf[TERM_ROWS-1][0] = '\0';
             for (int c=0;c<TERM_COLS;++c) {
                 t->char_r[TERM_ROWS-1][c] = 200;
                 t->char_g[TERM_ROWS-1][c] = 200;
                 t->char_b[TERM_ROWS-1][c] = 200;
-                    t->char_redirect_idx[TERM_ROWS-1][c] = -1;
-                    t->char_icon_idx[TERM_ROWS-1][c] = -1;
             }
             t->line_r[TERM_ROWS-1] = 200;
             t->line_g[TERM_ROWS-1] = 200;
             t->line_b[TERM_ROWS-1] = 200;
+            t->line_icon_key[TERM_ROWS-1][0] = '\0';
+            t->line_indent_px[TERM_ROWS-1] = 0;
+            t->line_icon_anchor_col[TERM_ROWS-1] = 0;
             t->cur_y = TERM_ROWS-1;
         }
     }
@@ -257,8 +273,6 @@ void vterm_write_char(int idx, char ch) {
     t->char_r[t->cur_y][t->cur_x] = use_r;
     t->char_g[t->cur_y][t->cur_x] = use_g;
     t->char_b[t->cur_y][t->cur_x] = use_b;
-    // This character wasn't copied from the shell redirect buffer path.
-    t->char_redirect_idx[t->cur_y][t->cur_x] = -1;
     t->cur_x++;
     /* ensure this line has a sensible default color if not already set */
     if (t->line_r[t->cur_y] == 0 && t->line_g[t->cur_y] == 0 && t->line_b[t->cur_y] == 0) {
@@ -267,6 +281,11 @@ void vterm_write_char(int idx, char ch) {
         t->line_b[t->cur_y] = 200;
     }
     t->version++;
+
+    // If a ring3 task is active, mark UI dirty so IRQ0 will repaint all tiles.
+    if (g_user_task_active) {
+        g_user_task_ui_dirty = 1;
+    }
 }
 
 const char* vterm_get_line(int idx, int row) {
@@ -313,15 +332,11 @@ static void vterm_append_line(int idx, const char* line) {
             t->char_r[t->cur_y][c] = rr;
             t->char_g[t->cur_y][c] = gg;
             t->char_b[t->cur_y][c] = bb;
-            t->char_redirect_idx[t->cur_y][c] = -1;
-            t->char_icon_idx[t->cur_y][c] = -1;
         }
         for (int c = copy; c < TERM_COLS; ++c) {
             t->char_r[t->cur_y][c] = 200;
             t->char_g[t->cur_y][c] = 200;
             t->char_b[t->cur_y][c] = 200;
-            t->char_redirect_idx[t->cur_y][c] = -1;
-            t->char_icon_idx[t->cur_y][c] = -1;
         }
         t->cur_x = copy;
         t->cur_y++;
@@ -330,12 +345,25 @@ static void vterm_append_line(int idx, const char* line) {
     t->version++;
 }
 
+const char* vterm_get_line_icon_key(int idx, int row, int* out_indent_px, int* out_anchor_col) {
+    if (idx < 0 || idx >= 4) return NULL;
+    if (row < 0 || row >= TERM_ROWS) return NULL;
+    vterm_t* t = &vterms[idx];
+    if (out_indent_px) *out_indent_px = (int)t->line_indent_px[row];
+    if (out_anchor_col) *out_anchor_col = (int)t->line_icon_anchor_col[row];
+    if (t->line_icon_key[row][0] == '\0') return NULL;
+    return t->line_icon_key[row];
+}
+
     void vterm_clear(int idx) {
         if (idx < 0 || idx >= 4) return;
         vterm_t* t = &vterms[idx];
         for (int r = 0; r < TERM_ROWS; ++r) {
             t->buf[r][0] = '\0';
             t->line_r[r] = 200; t->line_g[r] = 200; t->line_b[r] = 200;
+            t->line_icon_key[r][0] = '\0';
+            t->line_indent_px[r] = 0;
+            t->line_icon_anchor_col[r] = 0;
             for (int c = 0; c < TERM_COLS; ++c) {
                 t->char_r[r][c] = 200; t->char_g[r][c] = 200; t->char_b[r][c] = 200;
             }
@@ -514,6 +542,8 @@ void vterm_handle_key(int idx, int key) {
             extern unsigned char shell_redirect_r[];
             extern unsigned char shell_redirect_g[];
             extern unsigned char shell_redirect_b[];
+            extern shell_redirect_icon_t shell_redirect_icons[];
+            extern int shell_redirect_icon_count;
             // Swap global shell_current_path into this vterm's cwd so commands (like cd) operate per-vterm
             extern char shell_current_path[]; // global
             char saved_global_cwd[128];
@@ -556,7 +586,6 @@ void vterm_handle_key(int idx, int key) {
                     while (*p) {
                         if (*p == '\n') {
                             int len = p - start;
-                            char tmp[TERM_COLS + 1];
                             // Clamp to available redirect data first, then to TERM_COLS
                             int base = start - shell_redirect_buf;
                             int available = captured_redirect_pos - base;
@@ -564,12 +593,26 @@ void vterm_handle_key(int idx, int key) {
                             if (len > available) len = available;
                             if (len > TERM_COLS) len = TERM_COLS;
                             if (len < 0) len = 0;
-                            strncpy(tmp, start, len);
-                            tmp[len] = '\0';
-                            // map colors for this chunk from shell_redirect_* arrays
-                            // write characters and set per-char colors
+
+                            // If any icon marker falls within this output line, record it on this vterm row.
+                            // We store the icon key and shift the line by +10px when rendered.
+                            int out_row = t->cur_y;
+                            int out_start_col = t->cur_x;
+                            const char* icon_key = NULL;
+                            for (int ii = 0; ii < shell_redirect_icon_count; ++ii) {
+                                int ip = shell_redirect_icons[ii].pos;
+                                if (ip >= base && ip < base + len) { icon_key = shell_redirect_icons[ii].ext; break; }
+                            }
+                            if (icon_key && out_row >= 0 && out_row < TERM_ROWS) {
+                                strncpy(t->line_icon_key[out_row], icon_key, sizeof(t->line_icon_key[out_row]) - 1);
+                                t->line_icon_key[out_row][sizeof(t->line_icon_key[out_row]) - 1] = '\0';
+                                t->line_indent_px[out_row] = 10;
+                                t->line_icon_anchor_col[out_row] = (uint8_t)out_start_col;
+                            }
+
+                            // write characters with per-char colors
                             for (int i = 0; i < len; ++i) {
-                                vterm_write_char(idx, tmp[i]);
+                                vterm_write_char(idx, start[i]);
                                 int wr = shell_redirect_r[base + i] ? shell_redirect_r[base + i] : 200;
                                 int wg = shell_redirect_g[base + i] ? shell_redirect_g[base + i] : 200;
                                 int wb = shell_redirect_b[base + i] ? shell_redirect_b[base + i] : 200;
@@ -579,14 +622,6 @@ void vterm_handle_key(int idx, int key) {
                                     t->char_r[rr][cc] = wr;
                                     t->char_g[rr][cc] = wg;
                                     t->char_b[rr][cc] = wb;
-                                    t->char_redirect_idx[rr][cc] = base + i;
-                                    // find an icon marker matching this redirect index and store it per-cell
-                                    t->char_icon_idx[rr][cc] = -1;
-                                    extern shell_redirect_icon_t shell_redirect_icons[];
-                                    extern int shell_redirect_icon_count;
-                                    for (int s = 0; s < shell_redirect_icon_count; ++s) {
-                                        if (shell_redirect_icons[s].pos == base + i) { t->char_icon_idx[rr][cc] = s; break; }
-                                    }
                                 }
                             }
                             // append newline
@@ -598,18 +633,29 @@ void vterm_handle_key(int idx, int key) {
                     // If any remaining text after last newline
                     if (start < p) {
                         int len = p - start;
-                        char tmp[TERM_COLS + 1];
                         int base = start - shell_redirect_buf;
-                        // Clamp len so base+len never exceeds the recorded redirect length, then to TERM_COLS
                         int available = captured_redirect_pos - base;
                         if (available < 0) available = 0;
                         if (len > available) len = available;
                         if (len > TERM_COLS) len = TERM_COLS;
                         if (len < 0) len = 0;
-                        strncpy(tmp, start, len);
-                        tmp[len] = '\0';
+
+                        int out_row = t->cur_y;
+                        int out_start_col = t->cur_x;
+                        const char* icon_key = NULL;
+                        for (int ii = 0; ii < shell_redirect_icon_count; ++ii) {
+                            int ip = shell_redirect_icons[ii].pos;
+                            if (ip >= base && ip < base + len) { icon_key = shell_redirect_icons[ii].ext; break; }
+                        }
+                        if (icon_key && out_row >= 0 && out_row < TERM_ROWS) {
+                            strncpy(t->line_icon_key[out_row], icon_key, sizeof(t->line_icon_key[out_row]) - 1);
+                            t->line_icon_key[out_row][sizeof(t->line_icon_key[out_row]) - 1] = '\0';
+                            t->line_indent_px[out_row] = 10;
+                            t->line_icon_anchor_col[out_row] = (uint8_t)out_start_col;
+                        }
+
                         for (int i = 0; i < len; ++i) {
-                            vterm_write_char(idx, tmp[i]);
+                            vterm_write_char(idx, start[i]);
                             int wr = shell_redirect_r[base + i] ? shell_redirect_r[base + i] : 200;
                             int wg = shell_redirect_g[base + i] ? shell_redirect_g[base + i] : 200;
                             int wb = shell_redirect_b[base + i] ? shell_redirect_b[base + i] : 200;
@@ -619,19 +665,13 @@ void vterm_handle_key(int idx, int key) {
                                 t->char_r[rr][cc] = wr;
                                 t->char_g[rr][cc] = wg;
                                 t->char_b[rr][cc] = wb;
-                                t->char_redirect_idx[rr][cc] = base + i;
-                                t->char_icon_idx[rr][cc] = -1;
-                                extern shell_redirect_icon_t shell_redirect_icons[];
-                                extern int shell_redirect_icon_count;
-                                for (int s = 0; s < shell_redirect_icon_count; ++s) {
-                                    if (shell_redirect_icons[s].pos == base + i) { t->char_icon_idx[rr][cc] = s; break; }
-                                }
                             }
                         }
                     }
                     // reset redirect buffer
                     shell_redirect_pos = 0;
                     shell_redirect_buf[0] = '\0';
+                    shell_redirect_icon_count = 0;
                 }
             // add to global history
             add_to_history(&g_command_history, t->input_buf);
@@ -728,20 +768,6 @@ void vterm_get_char_color_abs(int idx, int row, int col, int* r, int* g, int* b)
 int vterm_get_cursor_col(int idx) {
     if (idx < 0 || idx >= 4) return 0;
     return vterms[idx].cur_x;
-}
-
-int vterm_get_char_redirect_index(int idx, int row, int col) {
-    if (idx < 0 || idx >= 4) return -1;
-    if (row < 0 || row >= TERM_ROWS) return -1;
-    if (col < 0 || col >= TERM_COLS) return -1;
-    return vterms[idx].char_redirect_idx[row][col];
-}
-
-int vterm_get_char_icon_index(int idx, int row, int col) {
-    if (idx < 0 || idx >= 4) return -1;
-    if (row < 0 || row >= TERM_ROWS) return -1;
-    if (col < 0 || col >= TERM_COLS) return -1;
-    return vterms[idx].char_icon_idx[row][col];
 }
 
 void vterm_clear_selection(int idx) {

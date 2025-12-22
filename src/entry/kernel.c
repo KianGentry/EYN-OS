@@ -20,6 +20,7 @@
 #include <help_tui.h>
 #include <mm/vmm.h>
 #include <partition.h>
+#include <gdt.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
@@ -39,6 +40,9 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     g_mbi = mbi;
     // Initialize serial early for logging (COM1 @ 115200). Safe even if absent.
     serial_init(SERIAL_COM1, 115200);
+
+    // Install our own GDT (kernel/user segments) + TSS before setting up IDT gates.
+    gdt_init();
     if (mbi->flags & MULTIBOOT_INFO_MODS && mbi->mods_count > 0) {
         multiboot_module_t* mods = (multiboot_module_t*)mbi->mods_addr;
         if (mods) { // Add null check

@@ -69,4 +69,7 @@ typedef struct regs_t {
 // Syscall C dispatcher
 uint32 syscall_dispatch(regs_t* r);
 
+// CPU exception C dispatcher (called from src/cpu/isr.asm)
+void isr_dispatch(regs_t* regs);
+
 #endif

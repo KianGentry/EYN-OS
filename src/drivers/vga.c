@@ -435,6 +435,87 @@ void drawText(int charnum, int r, int g, int b)
 	}
 }
 
+// Minimal formatter for kernel printf.
+// Supports: %s %d %c %% %x %X and zero-padded widths like %08X.
+static int vga_format_to_buffer(char* out, int out_cap, const char* fmt, va_list ap_in) {
+	if (!out || out_cap <= 0) return 0;
+	int pos = 0;
+	va_list ap;
+	va_copy(ap, ap_in);
+	for (const char* p = fmt; p && *p && pos < out_cap - 1; ++p) {
+		if (*p != '%') {
+			out[pos++] = *p;
+			continue;
+		}
+		++p;
+		if (!*p) break;
+
+		int zero_pad = 0;
+		int width = 0;
+		if (*p == '0') {
+			zero_pad = 1;
+			++p;
+		}
+		while (*p >= '0' && *p <= '9') {
+			width = (width * 10) + (*p - '0');
+			++p;
+		}
+		if (!*p) break;
+
+		switch (*p) {
+			case 's': {
+				char* str = va_arg(ap, char*);
+				if (!str) str = "(null)";
+				while (*str && pos < out_cap - 1) out[pos++] = *str++;
+				break;
+			}
+			case 'd': {
+				char* num_str = int_to_string(va_arg(ap, int));
+				while (num_str && *num_str && pos < out_cap - 1) out[pos++] = *num_str++;
+				break;
+			}
+			case 'c': {
+				out[pos++] = (char)va_arg(ap, int);
+				break;
+			}
+			case '%': {
+				out[pos++] = '%';
+				break;
+			}
+			case 'x':
+			case 'X': {
+				unsigned int v = va_arg(ap, unsigned int);
+				char tmp[9];
+				int nd = 0;
+				do {
+					unsigned int d = v & 0xF;
+					char c;
+					if (d < 10) c = (char)('0' + d);
+					else c = (char)((*p == 'X' ? 'A' : 'a') + (d - 10));
+					tmp[nd++] = c;
+					v >>= 4;
+				} while (v != 0 && nd < 8);
+
+				if (width > 8) width = 8;
+				int pad = width - nd;
+				if (!zero_pad) pad = 0;
+				while (pad-- > 0 && pos < out_cap - 1) out[pos++] = '0';
+				while (nd-- > 0 && pos < out_cap - 1) out[pos++] = tmp[nd];
+				break;
+			}
+			default: {
+				// Unknown specifier: preserve it literally to aid debugging.
+				out[pos++] = '%';
+				if (pos < out_cap - 1) out[pos++] = *p;
+				break;
+			}
+		}
+	}
+	out[pos] = '\0';
+	va_end(ap);
+	return pos;
+}
+
 void printf(const char* format, ...) 
 {
 	va_list ap;
@@ -458,41 +539,8 @@ void printf(const char* format, ...)
 
 	// Redirection/capture logic
 	if (shell_redirect_active || g_shell_capture_mode) {
-		// We'll use a local buffer to format the output
 		char temp[512];
-		int temp_pos = 0;
-		for (ptr = (uint8*)format; *ptr != '\0' && temp_pos < 511; ptr++) {
-			if (*ptr == '%') {
-				ptr++;
-				switch (*ptr) {
-					case 's': {
-						char* str = va_arg(ap, char*);
-						while (*str && temp_pos < 511) {
-							temp[temp_pos++] = *str++;
-						}
-						break;
-					}
-					case 'd': {
-						char* num_str = int_to_string(va_arg(ap, int));
-						while (*num_str && temp_pos < 511) {
-							temp[temp_pos++] = *num_str++;
-						}
-						break;
-					}
-					case '%':
-						temp[temp_pos++] = '%';
-						break;
-					case 'c':
-						temp[temp_pos++] = (char)va_arg(ap, int);
-						break;
-				}
-			} else if (*ptr == '\n') {
-				temp[temp_pos++] = '\n';
-			} else {
-				temp[temp_pos++] = *ptr;
-			}
-		}
-		temp[temp_pos] = '\0';
+		int temp_pos = vga_format_to_buffer(temp, (int)sizeof(temp), format, ap);
 		
 		// record color for redirected output so callers can render it with the same color
 		shell_redirect_color_r = r;
@@ -525,42 +573,8 @@ void printf(const char* format, ...)
 	if (shell_log_active) {
 		va_list ap_log;
 		va_copy(ap_log, ap);
-		// We'll use a local buffer to format the output
 		char temp[512];
-		int temp_pos = 0;
-		const uint8* log_ptr = (const uint8*)format;
-		for (; *log_ptr != '\0' && temp_pos < 511; log_ptr++) {
-			if (*log_ptr == '%') {
-				log_ptr++;
-				switch (*log_ptr) {
-					case 's': {
-						char* str = va_arg(ap_log, char*);
-						while (*str && temp_pos < 511) {
-							temp[temp_pos++] = *str++;
-						}
-						break;
-					}
-					case 'd': {
-						char* num_str = int_to_string(va_arg(ap_log, int));
-						while (*num_str && temp_pos < 511) {
-							temp[temp_pos++] = *num_str++;
-						}
-						break;
-					}
-					case '%':
-						temp[temp_pos++] = '%';
-						break;
-					case 'c':
-						temp[temp_pos++] = (char)va_arg(ap_log, int);
-						break;
-				}
-			} else if (*log_ptr == '\n') {
-				temp[temp_pos++] = '\n';
-			} else {
-				temp[temp_pos++] = *log_ptr;
-			}
-		}
-		temp[temp_pos] = '\0';
+		int temp_pos = vga_format_to_buffer(temp, (int)sizeof(temp), format, ap_log);
 		// Append to the log buffer
 		for (int i = 0; i < temp_pos; ++i) {
 			if (shell_log_pos < shell_log_buf_size - 1) {
@@ -609,71 +623,25 @@ void printf(const char* format, ...)
 		va_list ap_serial;
 		va_copy(ap_serial, ap);
 		char temp[512];
-		int temp_pos = 0;
-		for (ptr = (uint8*)format; *ptr != '\0' && temp_pos < 511; ptr++) {
-			if (*ptr == '%') {
-				ptr++;
-				switch (*ptr) {
-					case 's': {
-						char* str = va_arg(ap_serial, char*);
-						while (*str && temp_pos < 511) temp[temp_pos++] = *str++;
-						break;
-					}
-					case 'd': {
-						char* num_str = int_to_string(va_arg(ap_serial, int));
-						while (*num_str && temp_pos < 511) temp[temp_pos++] = *num_str++;
-						break;
-					}
-					case '%': temp[temp_pos++] = '%'; break;
-					case 'c': temp[temp_pos++] = (char)va_arg(ap_serial, int); break;
-				}
-			} else if (*ptr == '\n') {
-				temp[temp_pos++] = '\n';
-			} else {
-				temp[temp_pos++] = *ptr;
-			}
-		}
-		temp[temp_pos] = '\0';
+		int temp_pos = vga_format_to_buffer(temp, (int)sizeof(temp), format, ap_serial);
 		for (int i = 0; i < temp_pos; ++i) {
 			serial_write_char(SERIAL_COM1, temp[i]);
 		}
 		va_end(ap_serial);
 	}
 
-	for (ptr = (uint8*)format; *ptr != '\0'; ptr++) 
-    {
-		if (*ptr == '%') {
-			ptr++;
-			switch (*ptr) {
-				case 's': {
-					char* str = va_arg(ap, char*);
-					while (*str) {
-						drawText(*str, r, g, b);
-						str++;
-					}
-					break;
-				}
-				case 'd': {
-					char* num_str = int_to_string(va_arg(ap, int));
-					while (*num_str) {
-						drawText(*num_str, r, g, b);
-						num_str++;
-					}
-					break;
-				}
-				case '%':
-					drawText('%', r, g, b);
-					break;
-				case 'c':
-					drawText(va_arg(ap, int), r, g, b);
-					break;
+	// Render to VGA
+	{
+		char temp[512];
+		int temp_pos = vga_format_to_buffer(temp, (int)sizeof(temp), format, ap);
+		for (int i = 0; i < temp_pos; ++i) {
+			char ch = temp[i];
+			if (ch == '\n') {
+				width = 0;
+				height = height + 8;
+			} else {
+				drawText(ch, r, g, b);
 			}
-		} else if (*ptr == '\n') {
-			// Handle newline without drawing a character
-			width = 0;
-			height = height + 8;
-		} else {
-			drawText(*ptr, r, g, b);
 		}
 	}
 

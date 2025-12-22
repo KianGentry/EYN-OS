@@ -118,96 +118,123 @@ void cd(string input) {
     printf("%cDirectory not found: %s\n", 255, 0, 0, abspath);
 }
 
-// Helper: recursive ls with depth, indentation, and color
-void eynfs_ls_depth(uint8 disk, uint32_t dir_block, int depth, int max_depth, int indent) {
-    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(sizeof(eynfs_dir_entry_t) * MAX_ENTRIES);
-    if (!entries) {
-        printf("%cOut of memory for directory listing\n", 255, 0, 0);
-        return;
-    }
-    int count = eynfs_read_dir_table(disk, dir_block, entries, MAX_ENTRIES);
-    int valid_count = 0;
-    for (int i = 0; i < count; ++i) {
-        if (entries[i].name[0] == '\0') {
-            continue; // Skip empty entries
-        }
-        valid_count++;
-        // Print indentation in blue
-        for (int d = 0; d < indent; ++d);
-        if (indent > 0) printf("%c || ", 120, 120, 255);
-        if (entries[i].type == EYNFS_TYPE_DIR) {
-            printf("%c%s/\n", 120, 120, 255, entries[i].name);
-            if (depth < max_depth) {
-                eynfs_ls_depth(disk, entries[i].first_block, depth+1, max_depth, indent+1);
-            }
-        } else {
-            printf("%c%s\n", 255, 255, 255, entries[i].name);
-        }
-    }
-    free(entries);
+typedef struct {
+    uint8 disk;
+    char dir_path[128];
+} ls_ctx_t;
+
+static int ls_any_cb(const char* name, int is_dir, uint32 size, void* user) {
+    (void)name; (void)is_dir; (void)size;
+    int* found = (int*)user;
+    *found = 1;
+    return 1; // stop
 }
 
-// Helper callback for VFS-based ls
-static int vfs_ls_print_cb(const char* name, int is_dir, uint32 size, void* user) {
-    // When shell output is being redirected (e.g., listing inside a tiled vterm), we record an icon
-    // marker for the filename so the tiler can render a small .rei icon to the left of the text.
-    extern int shell_redirect_active;
-    if (is_dir) {
-        if (shell_redirect_active) {
-            // Emit two-space padding first (so shell_redirect_pos advances to where the
-            // filename will start), then register an icon for that upcoming filename
-            // and finally print the filename. Keep color information on both prints so
-            // the redirected per-char color is set correctly.
-            printf("%c  ", 120, 120, 255);
-            shell_register_redirect_icon("dir");
-            printf("%c%s/\n", 120, 120, 255, name);
-        } else {
-            printf("%c%s/\n", 120, 120, 255, name);
-        }
+static int ls_dir_is_empty(uint8 disk, const char* abspath) {
+    int found = 0;
+    if (vfs_listdir(disk, abspath, ls_any_cb, &found) != 0) {
+        // If we can't read the directory, treat as non-empty to avoid lying.
+        return 0;
+    }
+    return found ? 0 : 1;
+}
+
+static void ls_build_child_path(const char* parent, const char* name, char* out, size_t out_sz) {
+    if (!out || out_sz == 0) return;
+    if (!parent || !name) { out[0] = '\0'; return; }
+    if (strcmp(parent, "/") == 0) {
+        snprintf(out, out_sz, "/%s", name);
     } else {
-        if (shell_redirect_active) {
-            // map extension to a small icon name (without leading dot)
-            const char* dot = strrchr(name, '.');
-            const char* ext = dot ? dot + 1 : "none";
-            // normalize some common extensions
-            if (strcmp(ext, "rei") == 0) ext = "rei";
-            else if (strcmp(ext, "txt") == 0) ext = "txt";
-            else if (strcmp(ext, "md") == 0) ext = "md";
-            else if (strcmp(ext, "asm") == 0) ext = "asm";
-            else if (strcmp(ext, "bin") == 0) ext = "bin";
-            else if (strcmp(ext, "sh") == 0) ext = "shell";
-            else if (strcmp(ext, "eyn") == 0) ext = "eyn";
-            else ext = "none";
-            // Print padding first so the registered icon position points to the
-            // first character of the filename that will follow.
-            printf("%c  ", 255, 255, 255);
-            shell_register_redirect_icon(ext);
-            printf("%c%s\n", 255, 255, 255, name);
-        } else {
-            printf("%c%s\n", 255, 255, 255, name);
-        }
+        snprintf(out, out_sz, "%s/%s", parent, name);
+    }
+    out[out_sz - 1] = '\0';
+}
+
+static void ls_icon_key_for_entry(uint8 disk, const char* parent_dir, const char* name, int is_dir, char out_key[16]) {
+    if (!out_key) return;
+    out_key[0] = '\0';
+
+    if (is_dir) {
+        char child[192];
+        ls_build_child_path(parent_dir, name, child, sizeof(child));
+        int empty = ls_dir_is_empty(disk, child);
+        safe_strcpy(out_key, empty ? "dir_empty" : "dir_full", 16);
+        return;
+    }
+
+    // File: choose icon by extension -> file_<ext>, else file_none
+    const char* dot = NULL;
+    for (const char* p = name; *p; ++p) if (*p == '.') dot = p;
+    if (!dot || dot[1] == '\0') { safe_strcpy(out_key, "file_none", 16); return; }
+
+    char ext[9];
+    int ei = 0;
+    for (const char* p = dot + 1; *p && ei < 8; ++p) {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        ext[ei++] = c;
+    }
+    ext[ei] = '\0';
+    if (ei == 0) { safe_strcpy(out_key, "file_none", 16); return; }
+
+    char key[16];
+    snprintf(key, sizeof(key), "file_%s", ext);
+    key[sizeof(key) - 1] = '\0';
+    safe_strcpy(out_key, key, 16);
+}
+
+// VFS-based ls: prints name and registers per-line icon marker for GUI rendering
+static int vfs_ls_print_cb(const char* name, int is_dir, uint32 size, void* user) {
+    (void)size;
+    ls_ctx_t* ctx = (ls_ctx_t*)user;
+    char icon_key[16];
+    ls_icon_key_for_entry(ctx ? ctx->disk : 0, ctx ? ctx->dir_path : "/", name, is_dir, icon_key);
+    // Tell the shell redirect pipeline which icon to draw for this output line.
+    shell_register_redirect_icon(icon_key);
+
+    if (is_dir) {
+        printf("%c%s/\n", 120, 120, 255, name);
+    } else {
+        printf("%c%s\n", 255, 255, 255, name);
     }
     return 0;
 }
 
-// Refactor ls to use VFS (works for EYNFS and FAT32)
+// Simple ls command using VFS (works for EYNFS and FAT32)
 void ls(string input) {
     uint8 disk = g_current_drive;
-    int max_depth = 0;
+    
+    // Skip command name to get to argument
     uint8 i = 0;
     while (input[i] && input[i] != ' ') i++;
     while (input[i] && input[i] == ' ') i++;
-    if (input[i]) { max_depth = str_to_uint(&input[i]); if (max_depth > 10) max_depth = 10; }
+    
+    // Resolve path (use argument if provided, otherwise current directory)
     char abspath[128];
-    resolve_path("", shell_current_path, abspath, sizeof(abspath));
+    if (input[i]) {
+        resolve_path(&input[i], shell_current_path, abspath, sizeof(abspath));
+    } else {
+        resolve_path("", shell_current_path, abspath, sizeof(abspath));
+    }
 
+    // Check if it's a valid directory
     vfs_stat_t st;
-    if (vfs_stat(disk, abspath, &st) == 0 && st.type == VFS_NODE_DIR) {
-        vfs_listdir(disk, abspath, vfs_ls_print_cb, NULL);
-        // Optional recursion for future: respect max_depth > 1
+    if (vfs_stat(disk, abspath, &st) != 0) {
+        printf("%cPath not found: %s\n", 255, 0, 0, abspath);
         return;
     }
-    printf("%cDirectory not found: %s\n", 255, 0, 0, abspath);
+    if (st.type != VFS_NODE_DIR) {
+        printf("%cNot a directory: %s\n", 255, 0, 0, abspath);
+        return;
+    }
+    
+    // List directory contents
+    ls_ctx_t ctx;
+    ctx.disk = disk;
+    safe_strcpy(ctx.dir_path, abspath, sizeof(ctx.dir_path));
+    if (vfs_listdir(disk, abspath, vfs_ls_print_cb, &ctx) != 0) {
+        printf("%cFailed to list directory: %s\n", 255, 0, 0, abspath);
+    }
 }
 
 // Main read command implementation with smart detection

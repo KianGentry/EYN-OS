@@ -7,6 +7,29 @@
 // Global interrupt flag
 extern volatile int g_user_interrupt;
 
+// Minimal user-task control (prototype)
+extern volatile int g_user_task_active;
+extern volatile int g_abort_to_shell;
+
+// When a ring3 user task is active under the tiling manager, pin its stdout to
+// the virtual terminal that launched it (so output doesn't follow focus).
+extern volatile int g_user_task_term;
+
+// While a ring3 task is active, IRQ0 drives a limited UI loop. This flag is set
+// when something changes (user stdout, keypress, focus) and a repaint is needed.
+extern volatile int g_user_task_ui_dirty;
+
+// Last user-task mapping info (for cleanup on exit/abort)
+extern volatile uint32 g_user_code_base;
+extern volatile uint32 g_user_code_pages;
+extern volatile uint32 g_user_stack_page;
+
+void user_task_cleanup_mappings(void);
+
+// Return control to the interactive UI after aborting a user task.
+// Chooses the tiling-manager UI when available; otherwise falls back to the classic shell.
+void ui_return_from_user_task(void);
+
 // Memory management (standardized names, standard signatures)
 void *malloc(size_t nbytes);
 void free(void *ptr);

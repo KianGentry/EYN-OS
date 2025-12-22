@@ -4,8 +4,60 @@
 #include <vga.h>
 #include <stdint.h>
 #include <multiboot.h>
+#include <tile_manager.h>
+#include <shell.h>
+#include <mm/vmm.h>
 
 volatile int g_user_interrupt = 0;
+volatile int g_user_task_active = 0;
+volatile int g_abort_to_shell = 0;
+volatile int g_user_task_term = -1;
+volatile int g_user_task_ui_dirty = 0;
+
+volatile uint32 g_user_code_base = 0;
+volatile uint32 g_user_code_pages = 0;
+volatile uint32 g_user_stack_page = 0;
+
+void user_task_cleanup_mappings(void) {
+    // Best-effort cleanup; safe to call repeatedly.
+    uint32 base = g_user_code_base;
+    uint32 pages = g_user_code_pages;
+    uint32 stack_page = g_user_stack_page;
+
+    if (base && pages) {
+        for (uint32 i = 0; i < pages; ++i) {
+            (void)vmm_unmap_page(&vmm_kernel_as, base + i * PAGE_SIZE);
+        }
+    }
+    if (stack_page) {
+        (void)vmm_unmap_page(&vmm_kernel_as, stack_page);
+    }
+
+    g_user_code_base = 0;
+    g_user_code_pages = 0;
+    g_user_stack_page = 0;
+}
+
+void ui_return_from_user_task(void) {
+    // Best-effort cleanup and clear state before re-entering the UI.
+    user_task_cleanup_mappings();
+    g_abort_to_shell = 0;
+    g_user_task_active = 0;
+    g_user_task_term = -1;
+    g_user_task_ui_dirty = 0;
+
+    // Prefer the graphical tiling-manager shell when it's been initialized.
+    if (tile_is_tiling_active()) {
+        start_tiling_manager();
+    } else {
+        launch_shell(0);
+    }
+
+    // Shouldn't return; if it does, stop safely.
+    for (;;) {
+        __asm__ __volatile__("hlt");
+    }
+}
 
 uint32_t __stack_chk_fail(){
     return 0;
@@ -104,17 +156,17 @@ void *memmove(void *dest, const void *src, size_t n) {
     // If source and destination overlap and source is before destination,
     // we need to copy backwards to avoid overwriting source data
     if (src < dest && (char*)src + n > (char*)dest) {
-        char *d = (char*)dest + n - 1;
-        const char *s = (const char*)src + n - 1;
-        for (size_t i = 0; i < n; i++) {
-            d[i] = s[i];
+        // Copy backwards for overlapping ranges.
+        char *d = (char*)dest;
+        const char *s = (const char*)src;
+        for (size_t i = n; i > 0; --i) {
+            d[i - 1] = s[i - 1];
         }
-    } else {
-        // Use memcpy for non-overlapping or forward copy
-        return memcpy(dest, src, n);
+        return dest;
     }
-    
-    return dest;
+
+    // Use memcpy for non-overlapping or forward copy.
+    return memcpy(dest, src, n);
 }
 
 /**
@@ -139,7 +191,9 @@ string int_to_ascii(int n, char str[]) {
 // String validation functions moved to string.c for standardization
 
 // --- Robust Memory Manager with Enhanced Error Handling ---
-#define HEAP_START 0x200000   // 2MB - start after kernel and initial data
+// Heap start must be after the kernel image (.text/.rodata/.data/.bss).
+// Using a fixed address (like 0x200000) breaks as soon as .bss grows.
+extern uint8 __kernel_end;
 #define HEAP_SIZE_DEFAULT 0x100000    // 1MB default heap size (increased for assembler)
 #define HEAP_SIZE_MIN 0x40000         // 256KB minimum heap size
 #define HEAP_SIZE_MAX 0x1000000       // 16MB maximum heap size
@@ -155,13 +209,18 @@ typedef struct {
     uint32 magic;       // Magic number for corruption detection
 } block_header_t;
 
-static uint8* heap_start = (uint8*)HEAP_START;
+static uint8* heap_start = (uint8*)0;
 static uint32 heap_size = HEAP_SIZE_DEFAULT;  // Dynamic heap size
 static uint32 first_block = 0;
 static int memory_initialized = 0;
 static uint32 memory_errors = 0;
 static uint32 allocation_count = 0;
 static uint32 free_count = 0;
+
+static inline uint32 align_up_u32(uint32 v, uint32 align) {
+    if (align == 0) return v;
+    return (v + align - 1) & ~(align - 1);
+}
 
 // Stack overflow protection - ultra lightweight
 static volatile int stack_overflow_detected = 0;
@@ -326,6 +385,21 @@ void check_stack_overflow() {
 
 void init_memory_manager() {
     if (memory_initialized) return;
+
+    // Pick a heap start that cannot overlap the kernel image OR the VMM's
+    // boot-time allocations (page tables, etc.). The VMM uses a bump allocator
+    // starting right after __kernel_end; starting our heap there would clobber
+    // paging structures and crash immediately.
+    if (!heap_start || heap_start == (uint8*)0) {
+        uint32 boot_end = vmm_get_boot_alloc_end();
+        if (boot_end != 0) {
+            heap_start = (uint8*)boot_end;
+        } else {
+            // Fallback (should only happen if malloc is used before vmm_init())
+            uint32 end = (uint32)&__kernel_end;
+            heap_start = (uint8*)align_up_u32(end + 0x10000, 0x1000);
+        }
+    }
     
     // Try to detect available memory and adjust heap size accordingly
     uint32 available_ram = detect_available_memory();
@@ -333,8 +407,8 @@ void init_memory_manager() {
     // Use the new generous heap sizing for zero-copy operations
     calculate_optimal_heap_size();
     
-    // Verify heap start address is accessible
-    if ((uint32)heap_start < 0x200000) {
+    // Basic sanity check
+    if ((uint32)heap_start < 0x100000) {
         return;
     }
     
@@ -582,7 +656,7 @@ void* realloc(void* ptr, size_t new_size) {
     }
     void* new_ptr = malloc(new_size);
     if (!new_ptr) return NULL;
-    memcpy((char*)ptr, (char*)new_ptr, current_size);
+    memcpy((char*)new_ptr, (char*)ptr, current_size);
     free(ptr);
     return new_ptr;
 }

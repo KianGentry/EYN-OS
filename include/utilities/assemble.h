@@ -87,6 +87,9 @@ typedef struct AST {
     DataDef* data_defs;
     // If 1, nodes are allocated from an arena and freed in bulk
     int arena_backed;
+    // Optional backing store for the arena (owned by AST when non-NULL)
+    void* arena_buf;
+    size_t arena_size;
 } AST;
 
 // Symbol table entry
@@ -128,6 +131,8 @@ typedef struct {
 typedef struct {
     const char *src;
     size_t pos;
+    int has_pushback;
+    Token pushback;
 } Lexer;
 
 void lexer_init(Lexer *lexer, const char *src);

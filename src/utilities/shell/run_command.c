@@ -7,6 +7,9 @@
 #include <shell_command_info.h>
 #include <string.h>
 #include <fs_commands.h> // resolve_path, shell_current_path
+#include <cpu/user_elf.h>
+
+extern uint8 g_current_drive;
 
 // Function declarations
 void run_cmd(string arg);
@@ -36,11 +39,15 @@ void run_command(string arg) {
     if (ext && strcmp(ext, ".shell") == 0) {
         // execute as shell script
         result = execute_shell_script(abspath);
+    } else if (ext && strcmp(ext, ".uelf") == 0) {
+        // execute as ring3 ELF using the EYN-OS syscall ABI
+        (void)user_elf_run(g_current_drive, abspath);
+        return;
     } else if ((ext && strcmp(ext, ".eyn") == 0) || (ext && strcmp(ext, ".bin") == 0) || (ext && strcmp(ext, ".flat") == 0) || !ext) {
         // execute as native program
         result = native_execute_program(abspath);
     } else {
-        printf("Error: Unsupported file format. Use .eyn for programs or .shell for scripts\n");
+        printf("Error: Unsupported file format. Use .eyn/.bin/.flat for native programs, .uelf for ring3 ELF, or .shell for scripts\n");
         return;
     }
     
@@ -93,4 +100,4 @@ void* user_malloc(uint32 size) {
     return malloc(size); // Use standard malloc
 }
 
-REGISTER_SHELL_COMMAND(run, "run", run_cmd, CMD_STREAMING, "Run a .eyn executable or .shell script.\nUsage: run <program.eyn|script.shell>", "run test.eyn");
+REGISTER_SHELL_COMMAND(run, "run", run_cmd, CMD_STREAMING, "Run a native program, ring3 ELF, or a shell script.\nUsage: run <program.eyn|program.bin|program.flat|program.uelf|script.shell>", "run user_hello.uelf");

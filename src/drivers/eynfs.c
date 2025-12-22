@@ -619,33 +619,21 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
     if (!name || !name[0]) return -1;
     if (type != EYNFS_TYPE_FILE && type != EYNFS_TYPE_DIR) return -1;
     
-    // Count entries first, then allocate exactly what we need
+    // Use stack-local buffer to avoid heap allocations (heap may be unavailable/corrupt)
+    enum { CREATE_MAX_ENTRIES = 64 };
+    eynfs_dir_entry_t entries[CREATE_MAX_ENTRIES];
+    memset(entries, 0, sizeof(entries));
+    
     int entry_count = eynfs_count_dir_entries(drive, parent_block);
     if (entry_count < 0) return -1;
-    
-    // Allocate exactly the number of entries we need
-    size_t allocation_size = sizeof(eynfs_dir_entry_t) * entry_count;
-    
-    // Safety check: limit allocation to prevent memory exhaustion
-    if (allocation_size > 4096) { // 4KB limit for directory operations
-        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 4KB\n", 255, 165, 0, allocation_size);
-        entry_count = 4096 / sizeof(eynfs_dir_entry_t);
-        allocation_size = 4096;
-    }
-    
-    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(allocation_size);
-    if (!entries) return -1;
-    
-    // Initialize all entries to zero to ensure clean state
-    memset(entries, 0, allocation_size);
+    if (entry_count > CREATE_MAX_ENTRIES) entry_count = CREATE_MAX_ENTRIES;
     
     int count = eynfs_read_dir_table(drive, parent_block, entries, entry_count);
-    if (count < 0) { free(entries); return -1; }
+    if (count < 0) return -1;
     
     // Check if entry already exists
     for (int i = 0; i < count; ++i) {
         if (entries[i].name[0] != '\0' && strncmp(entries[i].name, name, EYNFS_NAME_MAX) == 0) {
-            free(entries);
             return -1; // Entry already exists
         }
     }
@@ -658,35 +646,16 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
         }
     }
     if (free_idx == -1) {
-        // Need to add a new entry - check if we can safely reallocate
-        size_t new_allocation_size = sizeof(eynfs_dir_entry_t) * (entry_count + 1);
-        if (new_allocation_size > 4096) { // 4KB limit
-            printf("%cWarning: Cannot add new entry - directory allocation would exceed 4KB limit\n", 255, 165, 0);
-            free(entries);
-            return -1;
+        // Need to add a new entry
+        if (count >= CREATE_MAX_ENTRIES) {
+            return -1; // Directory full
         }
-        
-        eynfs_dir_entry_t* new_entries = (eynfs_dir_entry_t*)malloc(new_allocation_size);
-        if (!new_entries) { free(entries); return -1; }
-        
-        // Bounds check for memory copy
-        if (entry_count * sizeof(eynfs_dir_entry_t) <= new_allocation_size) {
-            memcpy(new_entries, entries, entry_count * sizeof(eynfs_dir_entry_t));
-        } else {
-            printf("%cWarning: Memory copy bounds check failed in create_entry\n", 255, 165, 0);
-            free(new_entries);
-            free(entries);
-            return -1;
-        }
-        
-        free(entries);
-        entries = new_entries;
-        free_idx = entry_count;
-        count = entry_count + 1;
+        free_idx = count;
+        count = count + 1;
     }
     
     int new_block = eynfs_alloc_block(drive, sb);
-    if (new_block < 0) { free(entries); return -1; }
+    if (new_block < 0) return -1;
     
     memset(&entries[free_idx], 0, sizeof(eynfs_dir_entry_t));
     strncpy(entries[free_idx].name, name, EYNFS_NAME_MAX-1);
@@ -699,13 +668,11 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
         uint8 zero_block[EYNFS_BLOCK_SIZE] = {0};
         if (ata_write_sector(drive, new_block, zero_block) != 0) { 
             eynfs_free_block(drive, sb, new_block);
-            free(entries); 
             return -1; 
         }
     }
     
     int res = eynfs_write_dir_table(drive, parent_block, entries, count);
-    free(entries);
     if (res < 0) {
         eynfs_free_block(drive, sb, new_block);
         return -1;
@@ -721,28 +688,17 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
 int eynfs_delete_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_block, const char *name) {
     if (!name || !name[0]) return -1;
     
-    // Count entries first, then allocate exactly what we need
+    // Use stack-local buffer to avoid heap allocations
+    enum { DELETE_MAX_ENTRIES = 64 };
+    eynfs_dir_entry_t entries[DELETE_MAX_ENTRIES];
+    memset(entries, 0, sizeof(entries));
+    
     int entry_count = eynfs_count_dir_entries(drive, parent_block);
     if (entry_count < 0) return -1;
-    
-    // Allocate exactly the number of entries we need
-    size_t allocation_size = sizeof(eynfs_dir_entry_t) * entry_count;
-    
-    // Safety check: limit allocation to prevent memory exhaustion
-    if (allocation_size > 4096) { // 4KB limit for directory operations
-        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 4KB\n", 255, 165, 0, allocation_size);
-        entry_count = 4096 / sizeof(eynfs_dir_entry_t);
-        allocation_size = 4096;
-    }
-    
-    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(allocation_size);
-    if (!entries) return -1;
-    
-    // Initialize all entries to zero to ensure clean state
-    memset(entries, 0, allocation_size);
+    if (entry_count > DELETE_MAX_ENTRIES) entry_count = DELETE_MAX_ENTRIES;
     
     int count = eynfs_read_dir_table(drive, parent_block, entries, entry_count);
-    if (count < 0) { free(entries); return -1; }
+    if (count < 0) return -1;
     
     for (int i = 0; i < count; ++i) {
         if (entries[i].name[0] == '\0') continue;
@@ -761,7 +717,6 @@ int eynfs_delete_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
             memset(&entries[i], 0, sizeof(eynfs_dir_entry_t));
             
             int res = eynfs_write_dir_table(drive, parent_block, entries, count);
-            free(entries);
             if (res < 0) return -1;
             
             // Clear cache to ensure deleted entries are no longer visible
@@ -770,7 +725,6 @@ int eynfs_delete_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
             return 0;
         }
     }
-    free(entries);
     return -1; // Entry not found
 }
 
@@ -1068,10 +1022,12 @@ int read(int fd, void* buf, int size) {
     if (f->entry.type == EYNFS_TYPE_DIR) {
         // For directories, return directory listing
         if (f->offset == 0) {
-            // Read directory entries
-            eynfs_dir_entry_t entries[128];
-            int count = eynfs_read_dir_table(f->drive, f->entry.first_block, entries, 128);
-            if (count < 0) return -1;
+            // Read directory entries - use heap allocation (128*84=10752 bytes would overflow stack)
+            const int max_entries = 48; // Limit to ~4KB heap allocation
+            eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(max_entries * sizeof(eynfs_dir_entry_t));
+            if (!entries) return -1;
+            int count = eynfs_read_dir_table(f->drive, f->entry.first_block, entries, max_entries);
+            if (count < 0) { free(entries); return -1; }
             
             // Format as text listing
             char* text_buf = (char*)buf;
@@ -1084,6 +1040,7 @@ int read(int fd, void* buf, int size) {
                     if (len > 0) written += len;
                 }
             }
+            free(entries);
             f->offset = 1; // Mark as read
             return written;
         }
@@ -1279,18 +1236,16 @@ int eynfs_stream_end(eynfs_stream_t* s) {
     s->entry.size = s->size;
     int entry_count = eynfs_count_dir_entries(s->drive, s->parent_block);
     if (entry_count < 0) return -1;
-    size_t allocation_size = sizeof(eynfs_dir_entry_t) * entry_count;
-    if (allocation_size > 4096) {
-        entry_count = 4096 / sizeof(eynfs_dir_entry_t);
-        allocation_size = 4096;
-    }
-    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(allocation_size);
-    if (!entries) return -1;
-    int count = eynfs_read_dir_table(s->drive, s->parent_block, entries, entry_count);
-    if (count < 0) { free(entries); return -1; }
+    // Avoid heap allocations in streaming finalize.
+    enum { STREAM_END_MAX_BYTES = 4096 };
+    enum { STREAM_END_MAX_ENTRIES = STREAM_END_MAX_BYTES / (int)sizeof(eynfs_dir_entry_t) };
+    eynfs_dir_entry_t entries[STREAM_END_MAX_ENTRIES];
+    int max_entries = entry_count;
+    if (max_entries > STREAM_END_MAX_ENTRIES) max_entries = STREAM_END_MAX_ENTRIES;
+    int count = eynfs_read_dir_table(s->drive, s->parent_block, entries, max_entries);
+    if (count < 0) return -1;
     if (s->entry_index >= (uint32_t)count) s->entry_index = count - 1;
     entries[s->entry_index] = s->entry;
     int res = eynfs_write_dir_table(s->drive, s->parent_block, entries, count);
-    free(entries);
     return (res < 0) ? -1 : 0;
 }

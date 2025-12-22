@@ -28,6 +28,7 @@ global start
 extern kmain ; kernel.c
 
 global Shutdown  ; Export Shutdown function
+global stack_space
 
 start:
         cli ; clears interrupts 

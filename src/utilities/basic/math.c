@@ -3,6 +3,7 @@
 #include <util.h>
 #include <multiboot.h>
 #include <math.h>
+#include <types.h>
 
 extern multiboot_info_t *g_mbi;
 

@@ -4,6 +4,10 @@ bits 32
 
 global syscall_entry
 extern syscall_dispatch
+extern g_abort_to_shell
+extern g_user_task_active
+extern stack_space
+extern ui_return_from_user_task
 
 section .text
 syscall_entry:
@@ -26,6 +30,25 @@ syscall_entry:
     push eax
     call syscall_dispatch
     add esp, 4
+
+    ; If requested, abandon return-to-user and jump back into the shell.
+    cmp dword [g_abort_to_shell], 0
+    je .no_abort
+    mov dword [g_abort_to_shell], 0
+    mov dword [g_user_task_active], 0
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, stack_space
+    sti
+    call ui_return_from_user_task
+.halt:
+    hlt
+    jmp .halt
+.no_abort:
 
     mov [esp + 36], eax
 

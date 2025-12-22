@@ -39,6 +39,15 @@ void tile_unregister_gui_client(int tile_idx);
 // Mark a GUI client dirty so the tiler redraws it next frame
 void tile_invalidate_gui(int tile_idx);
 
+// Render a single tiler frame immediately.
+// Useful when the main tiler loop is blocked (e.g. while running a ring3 task)
+// but we still want vterm output to appear on-screen.
+void tile_render_once(void);
+
+// Poll and process at most one pending UI key event.
+// Returns 1 if a key was processed, 0 if no input was available.
+int tile_pump_input_once(void);
+
 void start_tiling_manager();
 
 // ---------------- Floating window manager (experimental) ----------------

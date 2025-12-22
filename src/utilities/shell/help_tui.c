@@ -1,10 +1,14 @@
 #include <tui.h>
 #include <shell_command_info.h>
+#include <help_tui.h>
 #include <vga.h>
 #include <util.h>
 #include <string.h>
 #include <serial.h>
 #include <tile_manager.h>
+
+extern const shell_command_info_t __start_shellcmds[];
+extern const shell_command_info_t __stop_shellcmds[];
 
 #define HELP_TUI_WIDTH 80
 #define CMD_LIST_WIDTH 22
@@ -103,41 +107,59 @@ void help_tui_show(void);
 // Remember last content rect for mouse hit-testing
 static int g_last_cx = 0, g_last_cy = 0, g_last_cw = 0, g_last_ch = 0;
 
-void help_tui() {
-    extern const shell_command_info_t __start_shellcmds[];
-    extern const shell_command_info_t __stop_shellcmds[];
-    // Debug: dump the first bytes of each registered shell command name to serial
-    // This helps detect corruption of the command table (non-invasive, serial-only).
-    {
-        char tmp[160];
-        int idx = 0;
-        for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
-            // build a safe preview of the name (printable or '.' placeholder)
-            const char* s = cmd->name ? cmd->name : "(null)";
-            int i; int max = 48;
-            for (i = 0; i < max && s[i]; ++i) {
-                char c = s[i];
-                if (c < 32 || c > 126) tmp[i] = '.'; else tmp[i] = c;
-            }
-            tmp[i] = '\0';
-            // print address and preview via serial (avoid using printf to keep this low-impact)
-            char line[200];
-            int n = snprintf(line, sizeof(line), "CMD[%d] name_ptr=%u preview='%s'\n", idx, (unsigned int)(uintptr_t)s, tmp);
-            for (int j = 0; j < n; ++j) serial_write_char(SERIAL_COM1, line[j]);
-            idx++;
-        }
+static void help_dbg(const char* s) {
+    if (!s) return;
+    // Keep this extremely low-volume: serial output can stall the UI if spammed.
+    const char* pfx = "[help] ";
+    for (const char* p = pfx; *p; ++p) serial_write_char(SERIAL_COM1, *p);
+    for (const char* p = s; *p; ++p) serial_write_char(SERIAL_COM1, *p);
+    serial_write_char(SERIAL_COM1, '\n');
+}
+
+static void help_dbg_ch(char c) {
+    serial_write_char(SERIAL_COM1, '[');
+    serial_write_char(SERIAL_COM1, 'h');
+    serial_write_char(SERIAL_COM1, ':');
+    serial_write_char(SERIAL_COM1, c);
+    serial_write_char(SERIAL_COM1, ']');
+    serial_write_char(SERIAL_COM1, '\n');
+}
+
+static int help_is_kernel_ptr(const void* p) {
+    extern uint32 __kernel_start;
+    extern uint32 __kernel_end;
+    uint32 v = (uint32)p;
+    uint32 lo = (uint32)&__kernel_start;
+    uint32 hi = (uint32)&__kernel_end;
+    return (v >= lo && v < hi);
+}
+
+static size_t help_strnlen_kernel(const char* s, size_t limit) {
+    if (!s) return 0;
+    if (!help_is_kernel_ptr(s)) return 0;
+    size_t n = 0;
+    while (n < limit) {
+        char c = s[n];
+        if (c == '\0') return n;
+        n++;
     }
+    return limit;
+}
+
+void help_tui() {
+    help_dbg_ch('E');
     // Defensive: ensure no shell redirection/capture is active before switching to GUI mode.
     // Some commands (like ls/read) run with redirect active in terminals; if a GUI opens mid-state,
     // guarantee a clean slate so GUI drawing is never captured or influenced by shell IO modes.
     extern int g_shell_capture_mode; // from vga.c
     extern int shell_redirect_active; // from vga.c
-    extern void stop_shell_redirect(void);
     if (shell_redirect_active) stop_shell_redirect();
     g_shell_capture_mode = 0;
     
     // Use or prepare the global, persistent help state (copies of command strings)
+    help_dbg_ch('I');
     help_tui_init_state();
+    help_dbg_ch('i');
     if (!g_sorted_cmds || g_cmd_count == 0) {
         printf("No commands available.\n");
         return;
@@ -155,6 +177,7 @@ void help_tui() {
 
     // If tiling is active, run in GUI mode: register a GUI client for the focused tile
     if (tile_is_tiling_active()) {
+        help_dbg_ch('G');
         // Publish shared arrays for GUI callbacks (they're prepared by init)
         g_selected = selected;
         g_selected_sub = 0;
@@ -163,12 +186,15 @@ void help_tui() {
         if (!g_expanded_commands) {
             g_expanded_commands = (int*)calloc(g_cmd_count, sizeof(int));
         }
-        for (int i = 0; i < g_cmd_count; ++i) g_expanded_commands[i] = 0;
+        if (g_expanded_commands) {
+            for (int i = 0; i < g_cmd_count; ++i) g_expanded_commands[i] = 0;
+        }
         g_help_running = 1;
 
         int focused = tile_get_focused();
         tile_set_title_status(focused, "EYN-OS Help", NULL, NULL);
         tile_register_gui_client2(focused, help_gui_draw, help_gui_key, help_gui_mouse, NULL);
+        help_dbg_ch('g');
         return;
     }
 
@@ -195,7 +221,7 @@ void help_tui() {
         tui_style_t sub_style = {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0};
 
         // Custom list drawing with collapsible sub-commands
-    int max_visible = left_win.height - 3;
+        int max_visible_rows = left_win.height - 3;
         int display_y = 0;
         int items_above_scroll = 0;
 
@@ -203,15 +229,15 @@ void help_tui() {
         for (int i = 0; i < scroll; ++i) {
             items_above_scroll++;
             if (g_expanded_commands && g_expanded_commands[i] && has_subcommands(cmd_names[i])) {
-                const subcommand_info_t* subcmds = get_subcommands(cmd_names[i]);
-                if (subcmds) {
-                    items_above_scroll += count_subcommands(subcmds);
+                const subcommand_info_t* subcmd_list = get_subcommands(cmd_names[i]);
+                if (subcmd_list) {
+                    items_above_scroll += count_subcommands(subcmd_list);
                 }
             }
         }
 
         // Second pass: draw visible items
-    for (int i = scroll; i < g_cmd_count && display_y < max_visible; ++i) {
+        for (int i = scroll; i < g_cmd_count && display_y < max_visible_rows; ++i) {
             int y_pos = left_win.y + 2 + display_y;
             
             // Draw main command
@@ -232,14 +258,14 @@ void help_tui() {
             display_y++;
             
             // Draw sub-commands if expanded
-                if (g_expanded_commands && g_expanded_commands[i] && has_subcommands(cmd_names[i])) {
-                    const subcommand_info_t* subcmds = get_subcommands(cmd_names[i]);
-                if (subcmds) {
-                    int subcmd_count = count_subcommands(subcmds);
-                    for (int j = 0; j < subcmd_count && display_y < max_visible; ++j) {
+            if (g_expanded_commands && g_expanded_commands[i] && has_subcommands(cmd_names[i])) {
+                const subcommand_info_t* subcmd_list = get_subcommands(cmd_names[i]);
+                if (subcmd_list) {
+                    int subcmd_count = count_subcommands(subcmd_list);
+                    for (int j = 0; j < subcmd_count && display_y < max_visible_rows; ++j) {
                         int sub_y_pos = left_win.y + 2 + display_y;
                         char sub_line[64];
-                        snprintf(sub_line, sizeof(sub_line), "  %s", subcmds[j].name);
+                        snprintf(sub_line, sizeof(sub_line), "  %s", subcmd_list[j].name);
                         
                         // Check if this sub-command is selected
                         if (i == selected && selected_sub == j + 1) {
@@ -258,9 +284,9 @@ void help_tui() {
         
         // Check if we're selecting a sub-command
         if (selected_sub > 0 && g_expanded_commands && g_expanded_commands[selected] && has_subcommands(g_sorted_cmds[selected]->name)) {
-            const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[selected]->name);
-            if (subcmds && selected_sub <= count_subcommands(subcmds)) {
-                const subcommand_info_t* selected_subcmd = &subcmds[selected_sub - 1];
+            const subcommand_info_t* subcmd_list = get_subcommands(g_sorted_cmds[selected]->name);
+            if (subcmd_list && selected_sub <= count_subcommands(subcmd_list)) {
+                const subcommand_info_t* selected_subcmd = &subcmd_list[selected_sub - 1];
                 strncat(desc_buf, selected_subcmd->description ? selected_subcmd->description : "No description available", sizeof(desc_buf) - strlen(desc_buf) - 1);
                 strncat(desc_buf, "\n", sizeof(desc_buf) - strlen(desc_buf) - 1);
                 if (selected_subcmd->usage) {
@@ -315,8 +341,8 @@ void help_tui() {
         } else if (key == 0x1002) { // Down
             // Check if we can move down within sub-commands
             if (g_expanded_commands && g_expanded_commands[selected] && has_subcommands(g_sorted_cmds[selected]->name)) {
-                const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[selected]->name);
-                if (subcmds && selected_sub < count_subcommands(subcmds)) {
+                const subcommand_info_t* subcmd_list = get_subcommands(g_sorted_cmds[selected]->name);
+                if (subcmd_list && selected_sub < count_subcommands(subcmd_list)) {
                     selected_sub++;
                 } else if (selected < g_cmd_count - 1) {
                     // Move to next main command
@@ -327,9 +353,9 @@ void help_tui() {
                     for (int i = 0; i <= selected; ++i) {
                         total_items++;
                         if (g_expanded_commands && g_expanded_commands[i] && has_subcommands(g_sorted_cmds[i]->name)) {
-                            const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[i]->name);
-                            if (subcmds) {
-                                total_items += count_subcommands(subcmds);
+                            const subcommand_info_t* subcmd_list2 = get_subcommands(g_sorted_cmds[i]->name);
+                            if (subcmd_list2) {
+                                total_items += count_subcommands(subcmd_list2);
                             }
                         }
                     }
@@ -346,9 +372,9 @@ void help_tui() {
                 for (int i = 0; i <= selected; ++i) {
                     total_items++;
                     if (g_expanded_commands && g_expanded_commands[i] && has_subcommands(g_sorted_cmds[i]->name)) {
-                        const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[i]->name);
-                        if (subcmds) {
-                            total_items += count_subcommands(subcmds);
+                        const subcommand_info_t* subcmd_list3 = get_subcommands(g_sorted_cmds[i]->name);
+                        if (subcmd_list3) {
+                            total_items += count_subcommands(subcmd_list3);
                         }
                     }
                 }
@@ -467,8 +493,8 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
     // left_win.y + 2 (to mimic tui window title+separator spacing), so base the
     // clear on left_win.y rather than raw cell_y to avoid off-by-one artifacts
     // that left stale characters behind when help opened after prior terminal output.
-    for (int r = 0; r < max_visible; ++r) {
-        int y_band = (left_win.y + 2 + r) * 8;
+    for (int row_idx = 0; row_idx < max_visible; ++row_idx) {
+        int y_band = (left_win.y + 2 + row_idx) * 8;
         if (y_band >= content_y && y_band + 8 <= content_y + content_h) {
             drawRect(content_x, y_band, content_w, 8, 0, 0, 0);
         }
@@ -491,16 +517,16 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
         }
         display_y++;
         if (g_expanded_commands && i < g_cmd_count && g_expanded_commands[i] && has_subcommands(cname)) {
-            const subcommand_info_t* subcmds = get_subcommands(cname);
-            if (subcmds) {
-                int subcmd_count = count_subcommands(subcmds);
+            const subcommand_info_t* subcmd_list = get_subcommands(cname);
+            if (subcmd_list) {
+                int subcmd_count = count_subcommands(subcmd_list);
                 for (int j = 0; j < subcmd_count && display_y < max_visible; ++j) {
                     int sub_y_pos = left_win.y + 2 + display_y;
                     // Clear just this sub-row band before drawing
                     int py = sub_y_pos * 8;
                     if (py >= content_y && py + 8 <= content_y + content_h) drawRect(content_x, py, content_w, 8, 0, 0, 0);
                     char sub_line[64];
-                    snprintf(sub_line, sizeof(sub_line), "  %s", subcmds[j].name);
+                    snprintf(sub_line, sizeof(sub_line), "  %s", subcmd_list[j].name);
                     if (i == g_selected && g_selected_sub == j + 1) {
                         tui_draw_text(left_win.x + 1, sub_y_pos, "!", sel_style);
                         tui_draw_text(left_win.x + 2, sub_y_pos, sub_line, sub_style);
@@ -516,9 +542,9 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
     // Build description buffer based on selection
     char desc_buf[512] = "";
     if (g_selected_sub > 0 && g_expanded_commands && g_expanded_commands[g_selected] && has_subcommands(g_sorted_cmds[g_selected]->name)) {
-        const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[g_selected]->name);
-        if (subcmds && g_selected_sub <= count_subcommands(subcmds)) {
-            const subcommand_info_t* s = &subcmds[g_selected_sub - 1];
+        const subcommand_info_t* subcmd_list = get_subcommands(g_sorted_cmds[g_selected]->name);
+        if (subcmd_list && g_selected_sub <= count_subcommands(subcmd_list)) {
+            const subcommand_info_t* s = &subcmd_list[g_selected_sub - 1];
             strncat(desc_buf, s->description ? s->description : "No description available", sizeof(desc_buf) - strlen(desc_buf) - 1);
             strncat(desc_buf, "\n", sizeof(desc_buf) - strlen(desc_buf) - 1);
             if (s->usage) {
@@ -551,8 +577,8 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
     // right window's geometry as the baseline, mirroring the left list clearing.
     {
         int max_desc = (right_win.height > 3) ? (right_win.height - 3) : 0;
-        for (int r = 0; r < max_desc; ++r) {
-            int y_band = (right_win.y + 2 + r) * 8;
+        for (int row_idx = 0; row_idx < max_desc; ++row_idx) {
+            int y_band = (right_win.y + 2 + row_idx) * 8;
             if (y_band >= content_y && y_band + 8 <= content_y + content_h) {
                 // Clear only the right pane region
                 int rx = right_win.x * 8;
@@ -588,85 +614,111 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
 // or otherwise invalidated by other subsystems (e.g., filesystem buffers).
 void help_tui_init_state() {
     if (g_sorted_cmds) return; // already initialized
-    extern const shell_command_info_t __start_shellcmds[];
-    extern const shell_command_info_t __stop_shellcmds[];
-    int cmd_count = 0;
-    for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) cmd_count++;
-    if (cmd_count == 0) return;
+    help_dbg_ch('B');
+    int cmd_count = (int)(__stop_shellcmds - __start_shellcmds);
+    if (cmd_count <= 0) return;
+    if (cmd_count > 256) {
+        // Something is very wrong; refuse to allocate huge tables.
+        help_dbg("init_state: insane cmd_count");
+        return;
+    }
 
-    // Compute total string pool size
+    // Compute total string pool size (bounded, and only for sane kernel pointers)
     size_t pool_size = 0;
     for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
-        if (cmd->name) pool_size += strlen(cmd->name) + 1;
-        if (cmd->description) pool_size += strlen(cmd->description) + 1;
-        if (cmd->example) pool_size += strlen(cmd->example) + 1;
+        size_t ln = help_strnlen_kernel(cmd->name, 64);
+        size_t ld = help_strnlen_kernel(cmd->description, 256);
+        size_t le = help_strnlen_kernel(cmd->example, 256);
+        if (ln) pool_size += ln + 1;
+        if (ld) pool_size += ld + 1;
+        if (le) pool_size += le + 1;
     }
+
+    help_dbg_ch('P');
 
     g_cmd_string_pool = (char*) malloc(pool_size ? pool_size : 1);
     if (!g_cmd_string_pool) return;
+    help_dbg_ch('p');
 
     g_copied_cmds = (shell_command_info_t*) malloc(cmd_count * sizeof(shell_command_info_t));
     if (!g_copied_cmds) { free(g_cmd_string_pool); g_cmd_string_pool = NULL; return; }
+    help_dbg_ch('c');
 
     // Fill copied structs and string pool
     char* cur = g_cmd_string_pool;
+    char* end = g_cmd_string_pool + (pool_size ? pool_size : 1);
     int i = 0;
     for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
         // copy handler and type
         g_copied_cmds[i].handler = cmd->handler;
         g_copied_cmds[i].type = cmd->type;
         // name
-        if (cmd->name) {
-            size_t l = strlen(cmd->name);
-            memcpy(cur, cmd->name, l + 1);
-            g_copied_cmds[i].name = cur;
-            cur += l + 1;
-        } else {
-            g_copied_cmds[i].name = NULL;
+        {
+            size_t l = help_strnlen_kernel(cmd->name, 64);
+            if (l && cur + l + 1 <= end) {
+                memcpy(cur, cmd->name, l);
+                cur[l] = '\0';
+                g_copied_cmds[i].name = cur;
+                cur += l + 1;
+            } else {
+                g_copied_cmds[i].name = "(invalid)";
+            }
         }
         // description
-        if (cmd->description) {
-            size_t l = strlen(cmd->description);
-            memcpy(cur, cmd->description, l + 1);
-            g_copied_cmds[i].description = cur;
-            cur += l + 1;
-        } else {
-            g_copied_cmds[i].description = NULL;
+        {
+            size_t l = help_strnlen_kernel(cmd->description, 256);
+            if (l && cur + l + 1 <= end) {
+                memcpy(cur, cmd->description, l);
+                cur[l] = '\0';
+                g_copied_cmds[i].description = cur;
+                cur += l + 1;
+            } else {
+                g_copied_cmds[i].description = "";
+            }
         }
         // example
-        if (cmd->example) {
-            size_t l = strlen(cmd->example);
-            memcpy(cur, cmd->example, l + 1);
-            g_copied_cmds[i].example = cur;
-            cur += l + 1;
-        } else {
-            g_copied_cmds[i].example = NULL;
+        {
+            size_t l = help_strnlen_kernel(cmd->example, 256);
+            if (l && cur + l + 1 <= end) {
+                memcpy(cur, cmd->example, l);
+                cur[l] = '\0';
+                g_copied_cmds[i].example = cur;
+                cur += l + 1;
+            } else {
+                g_copied_cmds[i].example = "";
+            }
         }
         i++;
     }
+    help_dbg_ch('S');
 
     // Create pointer array and sort it
     g_sorted_cmds = (const shell_command_info_t**) malloc(cmd_count * sizeof(const shell_command_info_t*));
     if (!g_sorted_cmds) {
         free(g_copied_cmds); g_copied_cmds = NULL; free(g_cmd_string_pool); g_cmd_string_pool = NULL; return;
     }
+    help_dbg_ch('A');
     for (int k = 0; k < cmd_count; ++k) g_sorted_cmds[k] = &g_copied_cmds[k];
 
     if (cmd_count > 1) {
         for (int a = 0; a < cmd_count - 1; a++) {
-            for (int b = 0; b < cmd_count - a - 1; b++) {
-                if (strcmp(g_sorted_cmds[b]->name, g_sorted_cmds[b + 1]->name) > 0) {
-                    const shell_command_info_t* tmp = g_sorted_cmds[b];
-                    g_sorted_cmds[b] = g_sorted_cmds[b + 1];
-                    g_sorted_cmds[b + 1] = tmp;
+            for (int j = 0; j < cmd_count - a - 1; j++) {
+                const char* n0 = g_sorted_cmds[j]->name ? g_sorted_cmds[j]->name : "";
+                const char* n1 = g_sorted_cmds[j + 1]->name ? g_sorted_cmds[j + 1]->name : "";
+                if (strcmp(n0, n1) > 0) {
+                    const shell_command_info_t* tmp = g_sorted_cmds[j];
+                    g_sorted_cmds[j] = g_sorted_cmds[j + 1];
+                    g_sorted_cmds[j + 1] = tmp;
                 }
             }
         }
     }
+    help_dbg_ch('s');
 
     g_cmd_count = cmd_count;
     if (g_expanded_commands) free(g_expanded_commands);
     g_expanded_commands = (int*) calloc(g_cmd_count, sizeof(int));
+    help_dbg_ch('D');
 }
 
 // Show the pre-initialized help UI inside the currently focused tile (tiling must be active)
@@ -691,8 +743,8 @@ void help_gui_key(int tile_idx, int key, void* userdata) {
         }
     } else if (key == 0x1002) { // Down
         if (g_expanded_commands && g_expanded_commands[g_selected] && has_subcommands(g_sorted_cmds[g_selected]->name)) {
-            const subcommand_info_t* subcmds = get_subcommands(g_sorted_cmds[g_selected]->name);
-            if (subcmds && g_selected_sub < count_subcommands(subcmds)) {
+            const subcommand_info_t* subcmd_list = get_subcommands(g_sorted_cmds[g_selected]->name);
+            if (subcmd_list && g_selected_sub < count_subcommands(subcmd_list)) {
                 g_selected_sub++;
             } else if (g_selected < g_cmd_count - 1) {
                 g_selected++;

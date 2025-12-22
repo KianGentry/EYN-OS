@@ -3,6 +3,7 @@
 #include <fat32.h>
 #include <string.h>
 #include <system.h>
+#include <util.h>  // for malloc/free
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 
@@ -225,14 +226,18 @@ int vfs_listdir(uint8 drive, const char* path,
         // Resolve path to directory
         eynfs_dir_entry_t dir; if (strcmp(path, "/") == 0) { dir.type = EYNFS_TYPE_DIR; dir.first_block = sb.root_dir_block; }
         else if (eynfs_traverse_path(drive, &sb, path, &dir, NULL, NULL) != 0 || dir.type != EYNFS_TYPE_DIR) return -2;
-        eynfs_dir_entry_t entries[128];
-        int count = eynfs_read_dir_table(drive, dir.first_block, entries, 128);
-        if (count < 0) return -3;
+        // Use heap allocation instead of stack to avoid stack overflow (128 entries * 84 bytes = 10,752 bytes)
+        const int max_entries = 48; // Limit to ~4KB heap allocation
+        eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(max_entries * sizeof(eynfs_dir_entry_t));
+        if (!entries) return -3;
+        int count = eynfs_read_dir_table(drive, dir.first_block, entries, max_entries);
+        if (count < 0) { free(entries); return -3; }
         for (int i = 0; i < count; ++i) {
             if (entries[i].name[0] == '\0') continue;
             int stop = cb(entries[i].name, entries[i].type == EYNFS_TYPE_DIR, entries[i].size, user);
             if (stop) break;
         }
+        free(entries);
         return 0;
     }
     // FAT32 dir list
@@ -503,9 +508,13 @@ int vfs_rmdir(uint8 drive, const char* path) {
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; uint32_t pb, idx;
         if (eynfs_traverse_path(drive, &sb, path, &ent, &pb, &idx) != 0 || ent.type != EYNFS_TYPE_DIR) return -2;
-        // Check empty
-        eynfs_dir_entry_t entries[64]; int count = eynfs_read_dir_table(drive, ent.first_block, entries, 64);
-        for (int i=0;i<count;i++) if (entries[i].name[0] != '\0') return -3;
+        // Check empty - use heap allocation instead of stack (64*84=5376 bytes would overflow)
+        const int max_entries = 16; // Small allocation just to check if empty
+        eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(max_entries * sizeof(eynfs_dir_entry_t));
+        if (!entries) return -2;
+        int count = eynfs_read_dir_table(drive, ent.first_block, entries, max_entries);
+        for (int i=0;i<count;i++) { if (entries[i].name[0] != '\0') { free(entries); return -3; } }
+        free(entries);
         return (eynfs_delete_entry(drive, &sb, pb, ent.name) == 0) ? 0 : -4;
     }
     // FAT32

@@ -39,7 +39,7 @@ LDFLAGS = -m elf_i386 -T src/boot/link.ld --gc-sections -Map tmp/boot/kernel.map
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/idt.o obj/isr.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/vmm.o obj/paging_compat.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/linux_syscalls.o
+OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/kb.o obj/string.o obj/system.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/linker.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/linux_syscalls.o
 
 OBJS += obj/tiling_manager.o obj/tiling_cmd.o
 OBJS += obj/terminals.o
@@ -64,6 +64,10 @@ obj/syscall.o:src/cpu/syscall.asm
 	mkdir obj/ -p
 	$(ASSEMBLER) $(ASFLAGS) -o obj/syscall.o src/cpu/syscall.asm
 
+obj/isr_stubs.o:src/cpu/isr.asm
+	mkdir obj/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o obj/isr_stubs.o src/cpu/isr.asm
+
 obj/irq_stubs.o:src/cpu/irq.asm
 	mkdir obj/ -p
 	$(ASSEMBLER) $(ASFLAGS) -o obj/irq_stubs.o src/cpu/irq.asm
@@ -74,11 +78,21 @@ obj/kc.o:src/entry/kernel.c
 obj/idt.o:src/cpu/idt.c
 	$(COMPILER) $(CFLAGS) src/cpu/idt.c -o obj/idt.o 
 
+obj/gdt.o:src/cpu/gdt.c
+	$(COMPILER) $(CFLAGS) src/cpu/gdt.c -o obj/gdt.o
+
+obj/gdt_asm.o:src/cpu/gdt.asm
+	mkdir obj/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o obj/gdt_asm.o src/cpu/gdt.asm
+
 obj/kb.o:src/drivers/kb.c
 	$(COMPILER) $(CFLAGS) src/drivers/kb.c -o obj/kb.o
 
 obj/isr.o:src/cpu/isr.c
 	$(COMPILER) $(CFLAGS) src/cpu/isr.c -o obj/isr.o
+
+obj/user_elf.o:src/cpu/user_elf.c
+	$(COMPILER) $(CFLAGS) src/cpu/user_elf.c -o obj/user_elf.o
 
 obj/string.o:src/utilities/shell/string.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/string.c -o obj/string.o
@@ -188,12 +202,15 @@ obj/vfs.o:src/fs/vfs.c
 obj/linux_syscalls.o:src/cpu/linux_syscalls.c
 	$(COMPILER) $(CFLAGS) src/cpu/linux_syscalls.c -o obj/linux_syscalls.o
 
-obj/assemble.o: src/utilities/assembler/assemble.c obj/instruction_set.o
+obj/assemble.o: src/utilities/assembler/assemble.c obj/instruction_set.o obj/linker.o
 	$(COMPILER) $(CFLAGS) src/utilities/assembler/assemble.c -o obj/assemble.o
 
 # Provide an explicit rule so parallel builds can make this target independently
 obj/instruction_set.o:src/utilities/assembler/instruction_set.c
 	$(COMPILER) $(CFLAGS) src/utilities/assembler/instruction_set.c -o obj/instruction_set.o 
+
+obj/linker.o:src/utilities/linker/linker.c
+	$(COMPILER) $(CFLAGS) src/utilities/linker/linker.c -o obj/linker.o
 
 obj/subcommands.o:src/utilities/shell/subcommands.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/subcommands.c -o obj/subcommands.o
@@ -215,6 +232,9 @@ obj/vmm.o:src/mm/vmm.c
 
 obj/paging_compat.o:src/mm/paging_compat.c
 	$(COMPILER) $(CFLAGS) -I include/mm src/mm/paging_compat.c -o obj/paging_compat.o
+
+obj/user_access.o:src/mm/user_access.c include/mm/user_access.h
+	$(COMPILER) $(CFLAGS) src/mm/user_access.c -o obj/user_access.o
 
 obj/pipeline.o:src/utilities/shell/pipeline.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/pipeline.c -o obj/pipeline.o
@@ -328,11 +348,12 @@ run: build
 # Debug run with serial logging and detailed CPU/interrupt logs
 .PHONY: qemu-debug
 qemu-debug: build
+	@mkdir -p tmp
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-hda eynfs.img \
 	-boot d \
 	-serial stdio \
-	-d int,cpu_reset \
+	-d int,cpu_reset -D tmp/qemu-debug.log \
 	-no-reboot -no-shutdown \
 	-m 9M
 

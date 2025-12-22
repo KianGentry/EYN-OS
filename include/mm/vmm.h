@@ -221,6 +221,13 @@ typedef struct clock_state {
 
 /* Initialization */
 void vmm_init(uint32 total_ram_bytes);
+
+/*
+ * Returns the current end of the VMM's boot-time bump allocator (physical
+ * address, page-aligned). This is used by legacy subsystems (like util.c's
+ * malloc) to place their heap after early page tables.
+ */
+uint32 vmm_get_boot_alloc_end(void);
 void vmm_enable_paging(void);
 
 /* Frame allocator */

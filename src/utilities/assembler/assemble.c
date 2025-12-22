@@ -7,8 +7,26 @@
 #include <types.h>
 #include <eynfs.h>
 #include <assemble.h>
+#include <utilities/linker.h>
 int g_asm_verbose = 0;
 #include <shell_command_info.h>
+
+// NOTE: The kernel shell environment may not have a usable heap (malloc/free).
+// Keep the assembler heapless by using fixed static work buffers.
+// Keep sizes small to avoid .bss bloat that can conflict with heap placement.
+#define ASM_MAX_SRC_SIZE   4096u
+#define ASM_ARENA_MAX      16384u
+#define ASM_MAX_CODE_SIZE  4096u
+#define ASM_MAX_DATA_SIZE  4096u
+#define ASM_MAX_SYMBOLS    64u
+
+static char g_asm_src_buf[ASM_MAX_SRC_SIZE + 1];
+static uint8_t g_asm_ast_arena[ASM_ARENA_MAX];
+static AST g_asm_static_ast;
+static uint8_t g_asm_code_buf[ASM_MAX_CODE_SIZE];
+static uint8_t g_asm_data_buf[ASM_MAX_DATA_SIZE];
+static SymbolTableEntry g_asm_sym_pool[ASM_MAX_SYMBOLS];
+static size_t g_asm_sym_pool_used = 0;
 
 // Simple arena allocator to reduce fragmentation during assembly parsing
 typedef struct {
@@ -21,11 +39,16 @@ static void arena_init(asm_arena_t* a, uint8_t* buf, size_t size) {
     a->buf = buf; a->size = size; a->used = 0;
 }
 static void* arena_alloc(asm_arena_t* a, size_t n) {
-    if (!a || !a->buf || a->used + n > a->size) return NULL;
-    void* p = a->buf + a->used; a->used += (n + 7) & ~7; return p;
+    if (!a || !a->buf) return NULL;
+    size_t aligned = (n + 7) & ~((size_t)7);
+    if (aligned == 0) aligned = 8;
+    if (a->used + aligned > a->size) return NULL;
+    void* p = a->buf + a->used;
+    a->used += aligned;
+    return p;
 }
 
-// Helper to count bytes for a db directive value string, handling quotes and numbers
+// Helper to count bytes for a db directive value string, handling quotes, escapes, and numbers
 static int count_db_bytes(const char* s) {
     int count = 0;
     const char* p = s;
@@ -35,11 +58,17 @@ static int count_db_bytes(const char* s) {
         if (!*p) break;
 
         if (*p == '"') {
-            // String literal: count characters until closing quote
+            // String literal: count characters until closing quote, handling escapes
             p++; // skip opening quote
-            const char* start = p;
-            while (*p && *p != '"') p++;
-            count += (int)(p - start);
+            while (*p && *p != '"') {
+                if (*p == '\\' && p[1]) {
+                    // Escape sequence counts as 1 byte
+                    p += 2;
+                } else {
+                    p++;
+                }
+                count++;
+            }
             if (*p == '"') p++; // skip closing quote
         } else if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
             // Hex literal -> 1 byte
@@ -84,8 +113,12 @@ void handler_assemble(string arg);
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
 
+static int g_asm_error_count = 0;
+static int g_asm_warning_count = 0;
+
 // --- Colored error/warning printing ---
 void print_error(const char* file, int line, const char* msg, const char* line_text) {
+    g_asm_error_count++;
     // Bright red: 255,0,0
     printf("\n");
     printf("[error] %s:%d: ", file, line);
@@ -98,6 +131,7 @@ void print_error(const char* file, int line, const char* msg, const char* line_t
 }
 
 void print_warning(const char* file, int line, const char* msg, const char* line_text) {
+    g_asm_warning_count++;
     // Pink: 255,105,180
     printf("\n");
     printf("[warning] %s:%d: ", file, line);
@@ -112,9 +146,20 @@ void print_warning(const char* file, int line, const char* msg, const char* line
 void lexer_init(Lexer *lexer, const char *src) {
     lexer->src = src;
     lexer->pos = 0;
+    lexer->has_pushback = 0;
+}
+
+static void lexer_unget_token(Lexer* lexer, Token token) {
+    if (!lexer) return;
+    lexer->has_pushback = 1;
+    lexer->pushback = token;
 }
 
 Token lexer_next_token(Lexer *lexer) {
+    if (lexer->has_pushback) {
+        lexer->has_pushback = 0;
+        return lexer->pushback;
+    }
     Token token = {TOKEN_EOF, ""};
     const char* src = lexer->src;
     size_t len = strlen(src);
@@ -124,7 +169,7 @@ Token lexer_next_token(Lexer *lexer) {
     while (pos < len && (src[pos] == ' ' || src[pos] == '\t' || src[pos] == '\r')) pos++;
 
     // Skip comments
-    if (pos < len && src[pos] == ';') {
+    if (pos < len && (src[pos] == ';' || src[pos] == '#')) {
         while (pos < len && src[pos] != '\n') pos++;
     }
 
@@ -151,6 +196,27 @@ Token lexer_next_token(Lexer *lexer) {
         token.text[0] = ',';
         token.text[1] = 0;
         lexer->pos = pos + 1;
+        return token;
+    }
+
+    // String literal in double quotes: "..."
+    if (src[pos] == '"') {
+        size_t start = pos;
+        pos++; // skip opening quote
+        while (pos < len && src[pos] != '"') {
+            if (src[pos] == '\\' && pos + 1 < len) {
+                pos += 2; // skip escape sequence
+            } else {
+                pos++;
+            }
+        }
+        if (pos < len && src[pos] == '"') pos++; // include closing quote
+        size_t slen = pos - start;
+        if (slen >= sizeof(token.text)) slen = sizeof(token.text) - 1;
+        memcpy(token.text, (char*)src + start, slen);
+        token.text[slen] = 0;
+        token.type = TOKEN_IMMEDIATE; // Treat string as an immediate value for db
+        lexer->pos = pos;
         return token;
     }
 
@@ -189,9 +255,10 @@ Token lexer_next_token(Lexer *lexer) {
             lexer->pos = pos + 1;
             return token;
         }
-        // Section
-        if (strcmp(token.text, "section") == 0) {
+        // Section (also accept GAS-style .section)
+        if (strcmp(token.text, "section") == 0 || strcmp(token.text, ".section") == 0) {
             token.type = TOKEN_SECTION;
+            strcpy(token.text, "section");
             lexer->pos = pos;
             return token;
         }
@@ -207,7 +274,26 @@ Token lexer_next_token(Lexer *lexer) {
             lexer->pos = pos;
             return token;
         }
-        // Directive
+        // Directive (with minimal GAS compat)
+        if (strcmp(token.text, ".global") == 0) {
+            token.type = TOKEN_DIRECTIVE;
+            strcpy(token.text, "global");
+            lexer->pos = pos;
+            return token;
+        }
+        if (strcmp(token.text, ".ascii") == 0) {
+            token.type = TOKEN_DIRECTIVE;
+            strcpy(token.text, "db");
+            lexer->pos = pos;
+            return token;
+        }
+        if (strcmp(token.text, ".intel_syntax") == 0) {
+            token.type = TOKEN_DIRECTIVE;
+            strcpy(token.text, "intel_syntax");
+            lexer->pos = pos;
+            return token;
+        }
+
         const char* dirs[] = {"db","dw","dd","resb","resw","resd","align","global"};
         for (int i = 0; i < 8; i++) {
             if (strcmp(token.text, dirs[i]) == 0) {
@@ -223,6 +309,23 @@ Token lexer_next_token(Lexer *lexer) {
     }
 
     // Numbers (immediates)
+    if (src[pos] == '-' && (pos + 1) < len && ((src[pos+1] >= '0' && src[pos+1] <= '9'))) {
+        size_t start = pos;
+        pos++; // consume '-'
+        if (pos < len && src[pos] == '0' && (pos + 1) < len && (src[pos+1] == 'x' || src[pos+1] == 'X')) {
+            pos += 2;
+            while (pos < len && ((src[pos] >= '0' && src[pos] <= '9') || (src[pos] >= 'a' && src[pos] <= 'f') || (src[pos] >= 'A' && src[pos] <= 'F'))) pos++;
+        } else {
+            while (pos < len && (src[pos] >= '0' && src[pos] <= '9')) pos++;
+        }
+        size_t num_len = pos - start;
+        if (num_len >= sizeof(token.text)) num_len = sizeof(token.text) - 1;
+        memcpy(token.text, (char*)src + start, num_len);
+        token.text[num_len] = 0;
+        token.type = TOKEN_IMMEDIATE;
+        lexer->pos = pos;
+        return token;
+    }
     if (src[pos] >= '0' && src[pos] <= '9') {
         size_t start = pos;
         if (src[pos] == '0' && (src[pos+1] == 'x' || src[pos+1] == 'X')) {
@@ -288,8 +391,13 @@ void add_data_def(AST* ast, DataDef* def) {
 // - Data (if any) is placed at USER_CODE_ADDR + 0x1000
 // We emit absolute addresses for labels by assuming code base = 0, data base = 0x1000 relative to code base.
 // Must match run_command.c (USER_CODE_ADDR and data at code+0x1000)
-static const int CODE_BASE = 0x2000000;      // runtime code base
-static const int DATA_BASE = 0x2000000 + 0x1000; // runtime data base
+static uint32 g_asm_code_base = 0x02000000u;      // runtime code base (.eyn default)
+static uint32 g_asm_data_base = 0x02001000u;      // runtime data base (.eyn default)
+
+static inline uint32 asm_align_up_u32(uint32 v, uint32 a) {
+    if (a == 0) return v;
+    return (v + a - 1u) & ~(a - 1u);
+}
 // Helper: get register encoding (for mov/add)
 static int reg_encoding(const char* reg) {
     return get_register_encoding(reg);
@@ -313,6 +421,111 @@ static int parse_imm(const char* s) {
         return val;
     } else {
         return str_to_int((char*)s);
+    }
+}
+
+static int count_csv_values(const char* s) {
+    if (!s) return 0;
+    int count = 0;
+    const char* p = s;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        count++;
+        while (*p && *p != ',') p++;
+    }
+    return count;
+}
+
+// Compute ModR/M (+ optional SIB + displacement) bytes for a memory operand.
+// Mirrors emit_ea() decision-making.
+static int ea_encoded_bytes(int base, int index, int scale, int has_disp, int disp, int is_abs) {
+    (void)scale;
+    if (is_abs) {
+        // ModR/M + disp32
+        return 1 + 4;
+    }
+    int need_sib = (index >= 0) || (base == 4);
+    int disp_size = 0;
+    if (!has_disp) {
+        if (base == 5) {
+            // special case: [ebp] with mod=00 encodes as disp32; we use mod=01 disp8=0
+            disp_size = 1;
+        }
+    } else {
+        if (disp >= -128 && disp <= 127) disp_size = 1;
+        else disp_size = 4;
+    }
+    return 1 + (need_sib ? 1 : 0) + disp_size;
+}
+
+// Sizing-only parser for a memory token. Any unknown identifier is treated as absolute disp32.
+static void parse_memory_operand_syntax(const char* mem_token,
+                                        int* base_reg, int* index_reg, int* scale,
+                                        int* has_disp, int* disp,
+                                        int* is_abs) {
+    *base_reg = -1; *index_reg = -1; *scale = 1; *has_disp = 0; *disp = 0; *is_abs = 0;
+    if (!mem_token || mem_token[0] != '[') return;
+
+    char expr[80]; int elen = 0;
+    for (int i = 1; mem_token[i] && mem_token[i] != ']'; i++) {
+        if (elen < (int)sizeof(expr) - 1) expr[elen++] = mem_token[i];
+    }
+    expr[elen] = 0;
+
+    int sign = 1;
+    char token[40];
+    int tpos = 0;
+    for (int i = 0; ; i++) {
+        char c = expr[i];
+        if (c == ' ' || c == '\t') continue;
+        if (c == '+' || c == '-' || c == 0) {
+            if (tpos > 0) {
+                token[tpos] = 0;
+                const char* star = strchr(token, '*');
+                if (star) {
+                    char l[16]={0}, rhs[16]={0};
+                    int ln = (int)(star - token); if (ln > 15) ln = 15;
+                    memcpy(l, token, ln); l[ln] = 0;
+                    strncpy(rhs, star+1, sizeof(rhs)-1);
+                    int rcode = get_register_encoding(l);
+                    int sc = parse_imm(rhs);
+                    if (rcode >= 0) {
+                        if (sc==1||sc==2||sc==4||sc==8) { *index_reg = rcode; *scale = sc; }
+                    }
+                } else {
+                    int rcode = get_register_encoding(token);
+                    if (rcode >= 0) {
+                        if (*base_reg < 0) *base_reg = rcode;
+                        else if (*index_reg < 0 && rcode != 4) *index_reg = rcode;
+                    } else {
+                        // number or identifier; identifiers are treated as absolute disp32
+                        int is_number = 0;
+                        if ((token[0] >= '0' && token[0] <= '9') ||
+                            (token[0] == '0' && (token[1] == 'x' || token[1] == 'X')) ||
+                            (token[0] == '-' && token[1] >= '0' && token[1] <= '9') ||
+                            (token[0] == '-' && token[1] == '0' && (token[2] == 'x' || token[2] == 'X'))) {
+                            is_number = 1;
+                        }
+                        if (!is_number) {
+                            *is_abs = 1;
+                        } else {
+                            int val = parse_imm(token);
+                            *disp += sign * val; *has_disp = 1;
+                        }
+                    }
+                }
+                tpos = 0;
+            }
+            if (c == 0) break;
+            sign = (c == '+') ? 1 : -1;
+        } else {
+            if (tpos < (int)sizeof(token)-1) token[tpos++] = c;
+        }
+    }
+
+    if (*is_abs && (*base_reg >= 0 || *index_reg >= 0)) {
+        *is_abs = 0;
     }
 }
 
@@ -346,11 +559,11 @@ static void parse_memory_operand(const char* mem_token, SymbolTable* table,
                 // reg*scale or reg or number/label
                 const char* star = strchr(token, '*');
                 if (star) {
-                    char l[16]={0}, r[16]={0};
+                    char l[16]={0}, rhs[16]={0};
                     int ln=(int)(star-token); if (ln>15) ln=15; memcpy(l, token, ln); l[ln]=0;
-                    strncpy(r, star+1, sizeof(r)-1);
+                    strncpy(rhs, star+1, sizeof(rhs)-1);
                     int rcode = get_register_encoding(l);
-                    int sc = parse_imm(r);
+                    int sc = parse_imm(rhs);
                     if (rcode >= 0) {
                         if (sc==1||sc==2||sc==4||sc==8) { *index_reg = rcode; *scale = sc; }
                     }
@@ -363,6 +576,7 @@ static void parse_memory_operand(const char* mem_token, SymbolTable* table,
                         int addr = lookup_label(table, token, SECTION_DATA);
                         if (addr < 0) addr = lookup_label(table, token, SECTION_TEXT);
                         if (addr >= 0) {
+                            printf("[parse_mem] label '%s' -> addr 0x%X\n", token, addr);
                             *is_abs = 1; *abs_addr = addr;
                         } else {
                             int val = parse_imm(token);
@@ -488,34 +702,123 @@ static int check_data_overflow(int data_pos, int buffer_size) {
 // Helper: build a simple label table with byte offsets
 static int estimate_instr_size(const Instruction* inst) {
     if (!inst) return 1;
-    if (strcmp(inst->mnemonic, "mov") == 0) {
+
+    // We intentionally force fixed-size encodings for branches (always near rel32)
+    // so label address computation stays stable.
+
+    if (!strcmp(inst->mnemonic, "mov")) {
         if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_IMMEDIATE) return 5;
-        if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_REGISTER) return 2;
         if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_LABEL) return 5;
-        if ((inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_MEMORY) ||
-            (inst->operands[0].type == OPERAND_MEMORY && inst->operands[1].type == OPERAND_REGISTER)) return 6;
+        if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_REGISTER) return 2;
+        if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_MEMORY) {
+            int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0;
+            parse_memory_operand_syntax(inst->operands[1].value, &base,&index,&scale,&has_disp,&disp,&is_abs);
+            return 1 + ea_encoded_bytes(base,index,scale,has_disp,disp,is_abs);
+        }
+        if (inst->operands[0].type == OPERAND_MEMORY && inst->operands[1].type == OPERAND_REGISTER) {
+            int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0;
+            parse_memory_operand_syntax(inst->operands[0].value, &base,&index,&scale,&has_disp,&disp,&is_abs);
+            return 1 + ea_encoded_bytes(base,index,scale,has_disp,disp,is_abs);
+        }
         return 1;
     }
+
+    if (!strcmp(inst->mnemonic, "movzx") || !strcmp(inst->mnemonic, "movsx")) {
+        if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_REGISTER) return 3;
+        if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_MEMORY) {
+            int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0;
+            parse_memory_operand_syntax(inst->operands[1].value, &base,&index,&scale,&has_disp,&disp,&is_abs);
+            return 2 + ea_encoded_bytes(base,index,scale,has_disp,disp,is_abs);
+        }
+        return 1;
+    }
+
     if (!strcmp(inst->mnemonic, "lea")) {
-        // lea r32, [mem]
-        return 6;
-    }
-    if (!strcmp(inst->mnemonic, "add") || !strcmp(inst->mnemonic, "sub") || !strcmp(inst->mnemonic, "and") || !strcmp(inst->mnemonic, "or") || !strcmp(inst->mnemonic, "xor") || !strcmp(inst->mnemonic, "cmp")) {
-        if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_IMMEDIATE) return 6;
+        if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_MEMORY) {
+            int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0;
+            parse_memory_operand_syntax(inst->operands[1].value, &base,&index,&scale,&has_disp,&disp,&is_abs);
+            return 1 + ea_encoded_bytes(base,index,scale,has_disp,disp,is_abs);
+        }
         return 1;
     }
-    if (!strcmp(inst->mnemonic, "mul") || !strcmp(inst->mnemonic, "div") || !strcmp(inst->mnemonic, "idiv") || !strcmp(inst->mnemonic, "neg") || !strcmp(inst->mnemonic, "not")) {
-        return 3; // opcode + modrm (+ optional disp)
-    }
+
     if (!strcmp(inst->mnemonic, "imul")) {
-        return 6; // imul r32, r/m32 (0x0F 0xAF /r)
+        if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_REGISTER) return 3;
+        if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_MEMORY) {
+            int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0;
+            parse_memory_operand_syntax(inst->operands[1].value, &base,&index,&scale,&has_disp,&disp,&is_abs);
+            return 2 + ea_encoded_bytes(base,index,scale,has_disp,disp,is_abs);
+        }
+        return 1;
     }
+
+    if (!strcmp(inst->mnemonic, "mul") || !strcmp(inst->mnemonic, "div") || !strcmp(inst->mnemonic, "idiv") ||
+        !strcmp(inst->mnemonic, "neg") || !strcmp(inst->mnemonic, "not")) {
+        if (inst->operands[0].type == OPERAND_REGISTER) return 2;
+        if (inst->operands[0].type == OPERAND_MEMORY) {
+            int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0;
+            parse_memory_operand_syntax(inst->operands[0].value, &base,&index,&scale,&has_disp,&disp,&is_abs);
+            return 1 + ea_encoded_bytes(base,index,scale,has_disp,disp,is_abs);
+        }
+        return 1;
+    }
+
+    if (!strcmp(inst->mnemonic, "add") || !strcmp(inst->mnemonic, "sub") || !strcmp(inst->mnemonic, "and") ||
+        !strcmp(inst->mnemonic, "or")  || !strcmp(inst->mnemonic, "xor") || !strcmp(inst->mnemonic, "cmp")) {
+        if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_REGISTER) return 2;
+        if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_MEMORY) {
+            int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0;
+            parse_memory_operand_syntax(inst->operands[1].value, &base,&index,&scale,&has_disp,&disp,&is_abs);
+            return 1 + ea_encoded_bytes(base,index,scale,has_disp,disp,is_abs);
+        }
+        if (inst->operands[0].type == OPERAND_MEMORY && inst->operands[1].type == OPERAND_REGISTER) {
+            int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0;
+            parse_memory_operand_syntax(inst->operands[0].value, &base,&index,&scale,&has_disp,&disp,&is_abs);
+            return 1 + ea_encoded_bytes(base,index,scale,has_disp,disp,is_abs);
+        }
+        if ((inst->operands[0].type == OPERAND_REGISTER || inst->operands[0].type == OPERAND_MEMORY) &&
+            inst->operands[1].type == OPERAND_IMMEDIATE) {
+            int imm = parse_imm(inst->operands[1].value);
+            int use_imm8 = (imm >= -128 && imm <= 127) ? 1 : 0;
+            int ea = 0;
+            if (inst->operands[0].type == OPERAND_REGISTER) ea = 1; // ModR/M
+            else {
+                int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0;
+                parse_memory_operand_syntax(inst->operands[0].value, &base,&index,&scale,&has_disp,&disp,&is_abs);
+                ea = ea_encoded_bytes(base,index,scale,has_disp,disp,is_abs);
+            }
+            return 1 + ea + (use_imm8 ? 1 : 4);
+        }
+        return 1;
+    }
+
     if (!strcmp(inst->mnemonic, "shl") || !strcmp(inst->mnemonic, "shr")) {
         if (inst->operands[0].type == OPERAND_REGISTER && inst->operands[1].type == OPERAND_IMMEDIATE) return 3;
         return 1;
     }
-    if (!strcmp(inst->mnemonic, "jg")) return 6;
-    if (!strcmp(inst->mnemonic, "jmp") || !strcmp(inst->mnemonic, "call")) return 5;
+
+    if (!strcmp(inst->mnemonic, "jmp")) {
+        if (inst->operands[0].type == OPERAND_LABEL) return 5;
+        if (inst->operands[0].type == OPERAND_REGISTER) return 2;
+        if (inst->operands[0].type == OPERAND_MEMORY) {
+            int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0;
+            parse_memory_operand_syntax(inst->operands[0].value, &base,&index,&scale,&has_disp,&disp,&is_abs);
+            return 1 + ea_encoded_bytes(base,index,scale,has_disp,disp,is_abs);
+        }
+        return 1;
+    }
+
+    if (!strcmp(inst->mnemonic, "call")) {
+        if (inst->operands[0].type == OPERAND_LABEL) return 5;
+        if (inst->operands[0].type == OPERAND_REGISTER) return 2;
+        if (inst->operands[0].type == OPERAND_MEMORY) {
+            int base=-1,index=-1,scale=1,has_disp=0,disp=0,is_abs=0;
+            parse_memory_operand_syntax(inst->operands[0].value, &base,&index,&scale,&has_disp,&disp,&is_abs);
+            return 1 + ea_encoded_bytes(base,index,scale,has_disp,disp,is_abs);
+        }
+        return 1;
+    }
+
     if (!strcmp(inst->mnemonic, "je") || !strcmp(inst->mnemonic, "jz") ||
         !strcmp(inst->mnemonic, "jne") || !strcmp(inst->mnemonic, "jnz") ||
         !strcmp(inst->mnemonic, "ja") || !strcmp(inst->mnemonic, "jnbe") ||
@@ -529,18 +832,34 @@ static int estimate_instr_size(const Instruction* inst) {
         !strcmp(inst->mnemonic, "js") || !strcmp(inst->mnemonic, "jns") ||
         !strcmp(inst->mnemonic, "jo") || !strcmp(inst->mnemonic, "jno") ||
         !strcmp(inst->mnemonic, "jp") || !strcmp(inst->mnemonic, "jpe") ||
-        !strcmp(inst->mnemonic, "jnp") || !strcmp(inst->mnemonic, "jpo")) return 6; // near worst-case
+        !strcmp(inst->mnemonic, "jnp") || !strcmp(inst->mnemonic, "jpo")) {
+        return 6; // 0F 8x rel32
+    }
+
     if (!strcmp(inst->mnemonic, "ret")) return 1;
     if (!strcmp(inst->mnemonic, "int")) return 2;
-    if (!strcmp(inst->mnemonic, "push")) { if (inst->operands[0].type == OPERAND_REGISTER) return 1; else return 5; }
+    if (!strcmp(inst->mnemonic, "push")) {
+        if (inst->operands[0].type == OPERAND_REGISTER) return 1;
+        if (inst->operands[0].type == OPERAND_IMMEDIATE) return 5;
+        return 1;
+    }
     if (!strcmp(inst->mnemonic, "pop")) return 1;
-    if (!strcmp(inst->mnemonic, "inc") || !strcmp(inst->mnemonic, "dec") || !strcmp(inst->mnemonic, "nop") || !strcmp(inst->mnemonic, "hlt") || !strcmp(inst->mnemonic, "cli") || !strcmp(inst->mnemonic, "sti")) return 1;
+    if (!strcmp(inst->mnemonic, "inc") || !strcmp(inst->mnemonic, "dec") ||
+        !strcmp(inst->mnemonic, "nop") || !strcmp(inst->mnemonic, "hlt") ||
+        !strcmp(inst->mnemonic, "cli") || !strcmp(inst->mnemonic, "sti")) return 1;
+
     return 1;
 }
 
 static void add_symbol(SymbolTable* table, const char* name, SectionType section, int address) {
-    SymbolTableEntry* e = (SymbolTableEntry*)malloc(sizeof(SymbolTableEntry));
-    if (!e) return;
+    if (!table) return;
+    if (g_asm_sym_pool_used >= ASM_MAX_SYMBOLS) {
+        // No heap available; fail silently to avoid corrupting memory.
+        // Codegen will likely error later due to missing labels.
+        return;
+    }
+    SymbolTableEntry* e = &g_asm_sym_pool[g_asm_sym_pool_used++];
+    memset(e, 0, sizeof(*e));
     strncpy(e->name, name, sizeof(e->name)-1);
     e->name[sizeof(e->name)-1] = 0;
     e->section = section;
@@ -561,7 +880,7 @@ static void build_label_addresses(AST* ast, SymbolTable* table, int* out_text_si
             Label* lbl_it = ast->labels;
             while (lbl_it) {
                 if (lbl_it->section == SECTION_TEXT && lbl_it->instr_index == inst_index) {
-                    add_symbol(table, lbl_it->name, SECTION_TEXT, CODE_BASE + text_bytes);
+                    add_symbol(table, lbl_it->name, SECTION_TEXT, (int)g_asm_code_base + text_bytes);
                 }
                 lbl_it = lbl_it->next;
             }
@@ -574,7 +893,7 @@ static void build_label_addresses(AST* ast, SymbolTable* table, int* out_text_si
     Label* lbl_tail = ast->labels;
     while (lbl_tail) {
         if (lbl_tail->section == SECTION_TEXT && lbl_tail->instr_index == inst_index) {
-            add_symbol(table, lbl_tail->name, SECTION_TEXT, CODE_BASE + text_bytes);
+            add_symbol(table, lbl_tail->name, SECTION_TEXT, (int)g_asm_code_base + text_bytes);
         }
         lbl_tail = lbl_tail->next;
     }
@@ -583,9 +902,9 @@ static void build_label_addresses(AST* ast, SymbolTable* table, int* out_text_si
     int data_index = 0;
     while (def) {
         int added = 0;
-        if (!strcmp(def->directive, "db")) added = 1;
-        else if (!strcmp(def->directive, "dw")) added = 2;
-        else if (!strcmp(def->directive, "dd")) added = 4;
+        if (!strcmp(def->directive, "db")) added = count_db_bytes(def->value);
+        else if (!strcmp(def->directive, "dw")) { int n = count_csv_values(def->value); if (n <= 0) n = 1; added = 2 * n; }
+        else if (!strcmp(def->directive, "dd")) { int n = count_csv_values(def->value); if (n <= 0) n = 1; added = 4 * n; }
         else if (!strcmp(def->directive, "resb")) { added = parse_imm(def->value); }
         else if (!strcmp(def->directive, "resw")) { added = parse_imm(def->value) * 2; }
         else if (!strcmp(def->directive, "resd")) { added = parse_imm(def->value) * 4; }
@@ -596,7 +915,7 @@ static void build_label_addresses(AST* ast, SymbolTable* table, int* out_text_si
         Label* lbl2 = ast->labels;
         while (lbl2) {
             if (lbl2->section == SECTION_DATA && lbl2->instr_index == data_index) {
-                add_symbol(table, lbl2->name, SECTION_DATA, DATA_BASE + data_bytes);
+                add_symbol(table, lbl2->name, SECTION_DATA, (int)g_asm_data_base + data_bytes);
             }
             lbl2 = lbl2->next;
         }
@@ -629,17 +948,17 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
     
     // Note: removed previous 8KB total cap; assembler can handle larger sources now
     
-    // Allocate buffers
-    *code = (uint8_t*)malloc(text_bytes);
-    *data = (uint8_t*)malloc(data_bytes);
-    if (!*code || !*data) {
-        printf("[codegen] Out of memory for code/data buffers\n");
-        if (*code) free(*code);
-        if (*data) free(*data);
+    // Allocate buffers (static; no heap)
+    if (text_bytes < 0 || data_bytes < 0 ||
+        (uint32)text_bytes > ASM_MAX_CODE_SIZE || (uint32)data_bytes > ASM_MAX_DATA_SIZE) {
+        printf("[codegen] Output too large: text=%d data=%d (max %u/%u)\n",
+               text_bytes, data_bytes, (unsigned)ASM_MAX_CODE_SIZE, (unsigned)ASM_MAX_DATA_SIZE);
         *code = NULL;
         *data = NULL;
         return 1;
     }
+    *code = g_asm_code_buf;
+    *data = g_asm_data_buf;
     // Initialize with zeros so any unused tail is predictable (will be trimmed later)
     memset(*code, 0, text_bytes);
     memset(*data, 0, data_bytes);
@@ -737,10 +1056,10 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                 }
                 // Safety: some builds may have stored label addresses as offsets (0 for .text, 0x1000 for .data).
                 // Normalize to absolute runtime addresses based on CODE_BASE/DATA_BASE.
-                if (is_text && addr < CODE_BASE) {
-                    addr += CODE_BASE;
+                if (is_text && addr < (int)g_asm_code_base) {
+                    addr += (int)g_asm_code_base;
                 }
-                if (is_data && addr < DATA_BASE) {
+                if (is_data && addr < (int)g_asm_data_base) {
                     /* If stored as a data-section-relative offset, preserve the offset
                      * while mapping to the runtime DATA_BASE. For example, if addr was
                      * 0x1000 (meaning start of data), and DATA_BASE is 0x20001000,
@@ -749,7 +1068,7 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                      * that previously-stored data addresses are offsets relative to 0
                      * (i.e., an offset), so just add DATA_BASE.
                      */
-                    addr = DATA_BASE + addr;
+                    addr = (int)g_asm_data_base + addr;
                 }
                 if (reg >= 0) {
                     (*code)[code_pos-1] = 0xB8 + reg;
@@ -898,16 +1217,10 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
         } else if (strcmp(inst->mnemonic, "jmp") == 0) {
             if (inst->operands[0].type == OPERAND_LABEL) {
                 int target = lookup_label(table, inst->operands[0].value, SECTION_TEXT);
-                int rel32 = (target >= 0) ? (target - (CODE_BASE + code_pos + 5)) : 0;
-                // Try short if fits
-                int rel8 = (target >= 0) ? (target - (CODE_BASE + code_pos + 2)) : 0;
-                if (rel8 >= -128 && rel8 <= 127) {
-                    (*code)[code_pos-1] = 0xEB; // short
-                    (*code)[code_pos++] = (uint8_t)rel8;
-                } else {
-                    (*code)[code_pos-1] = 0xE9; // near
-                    (*code)[code_pos++] = rel32 & 0xFF; (*code)[code_pos++] = (rel32>>8)&0xFF; (*code)[code_pos++] = (rel32>>16)&0xFF; (*code)[code_pos++] = (rel32>>24)&0xFF;
-                }
+                int rel32 = (target >= 0) ? (target - ((int)g_asm_code_base + code_pos + 5)) : 0;
+                // Always emit near JMP rel32 so sizing is stable.
+                (*code)[code_pos-1] = 0xE9; // near
+                (*code)[code_pos++] = rel32 & 0xFF; (*code)[code_pos++] = (rel32>>8)&0xFF; (*code)[code_pos++] = (rel32>>16)&0xFF; (*code)[code_pos++] = (rel32>>24)&0xFF;
                 if (check_code_overflow(code_pos, text_bytes)) return 1;
             } else if (inst->operands[0].type == OPERAND_REGISTER || inst->operands[0].type == OPERAND_MEMORY) {
                 // jmp r/m32
@@ -925,7 +1238,7 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
         } else if (strcmp(inst->mnemonic, "call") == 0) {
             if (inst->operands[0].type == OPERAND_LABEL) {
                 int target = lookup_label(table, inst->operands[0].value, SECTION_TEXT);
-                int rel32 = (target >= 0) ? (target - (CODE_BASE + code_pos + 5)) : 0;
+                int rel32 = (target >= 0) ? (target - ((int)g_asm_code_base + code_pos + 5)) : 0;
                 (*code)[code_pos-1] = 0xE8; // call rel32
                 (*code)[code_pos++] = rel32 & 0xFF; (*code)[code_pos++] = (rel32>>8)&0xFF; (*code)[code_pos++] = (rel32>>16)&0xFF; (*code)[code_pos++] = (rel32>>24)&0xFF;
                 if (check_code_overflow(code_pos, text_bytes)) return 1;
@@ -1114,15 +1427,10 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
             if (inst->operands[0].type == OPERAND_LABEL) {
                 uint8_t s=0,n=0; if (!get_jcc_codes(inst->mnemonic, &s, &n)) { (*code)[code_pos-1]=0x90; }
                 int target = lookup_label(table, inst->operands[0].value, SECTION_TEXT);
-                int rel8 = (target >= 0) ? (target - (CODE_BASE + code_pos + 2)) : 0;
-                if (rel8 >= -128 && rel8 <= 127) {
-                    (*code)[code_pos-1] = s;
-                    (*code)[code_pos++] = (uint8_t)rel8;
-                } else {
-                    int rel32 = (target >= 0) ? (target - (CODE_BASE + code_pos + 6)) : 0;
-                    (*code)[code_pos-1] = 0x0F; (*code)[code_pos++] = n;
-                    (*code)[code_pos++] = rel32 & 0xFF; (*code)[code_pos++] = (rel32>>8)&0xFF; (*code)[code_pos++] = (rel32>>16)&0xFF; (*code)[code_pos++] = (rel32>>24)&0xFF;
-                }
+                int rel32 = (target >= 0) ? (target - ((int)g_asm_code_base + code_pos + 6)) : 0;
+                // Always emit near Jcc rel32 so sizing is stable.
+                (*code)[code_pos-1] = 0x0F; (*code)[code_pos++] = n;
+                (*code)[code_pos++] = rel32 & 0xFF; (*code)[code_pos++] = (rel32>>8)&0xFF; (*code)[code_pos++] = (rel32>>16)&0xFF; (*code)[code_pos++] = (rel32>>24)&0xFF;
                 if (check_code_overflow(code_pos, text_bytes)) return 1;
             }
         } else {
@@ -1137,16 +1445,7 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
         actual_code_size = code_pos;
     }
 
-    // Ensure program returns to caller if no explicit ret was emitted
-    if (!last_was_ret) {
-        // Append a RET to terminate cleanly
-        (*code)[code_pos++] = 0xC3;
-        if (check_code_overflow(code_pos, text_bytes)) {
-            return 1;
-        }
-        actual_code_size = code_pos;
-        printf("[codegen] [auto] appended ret at %d\n", code_pos - 1);
-    }
+    // Do not auto-append RET: callers/user programs must control their own termination.
     
     // Emit data
     int data_pos = 0;
@@ -1169,30 +1468,27 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                 if (!*p) break;
                 
                 if (*p == '"') {
-                    // String literal: "Hello, World!"
+                    // String literal with escape sequence support
                     p++; // Skip opening quote
-                    const char* start = p;
-                    // Found opening quote
-                    while (*p && *p != '"') {
-                        // Character processing
-                        p++;
-                    }
-                    if (*p == '"') {
-                        int len = p - start;
-                        // Found closing quote
-                        // String literal processed
-                        if (data_pos + len < data_bytes) {
-                            memcpy((*data) + data_pos, start, len);
-                            // Copied bytes to data
-                            // Bytes written
-                            for (int i = 0; i < len && i < 20; i++) {
-                                // Byte written
+                    while (*p && *p != '"' && data_pos < data_bytes) {
+                        if (*p == '\\' && p[1]) {
+                            // Handle escape sequences
+                            char c = p[1];
+                            switch (c) {
+                                case 'n': (*data)[data_pos++] = '\n'; break;
+                                case 'r': (*data)[data_pos++] = '\r'; break;
+                                case 't': (*data)[data_pos++] = '\t'; break;
+                                case '0': (*data)[data_pos++] = '\0'; break;
+                                case '\\': (*data)[data_pos++] = '\\'; break;
+                                case '"': (*data)[data_pos++] = '"'; break;
+                                default: (*data)[data_pos++] = c; break;
                             }
-                            // End of bytes
-                            data_pos += len;
+                            p += 2;
+                        } else {
+                            (*data)[data_pos++] = *p++;
                         }
-                        p++; // Skip closing quote
                     }
+                    if (*p == '"') p++; // Skip closing quote
                 } else if (strncmp(p, "0x", 2) == 0) {
                     // Hex value: 0x0A
                     int val = parse_hex(p);
@@ -1217,18 +1513,26 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
                 if (*p == ',') p++;
             }
         } else if (strcmp(def->directive, "dw") == 0) {
-            int val = parse_imm(def->value);
-            if (data_pos + 1 < data_bytes) {
+            const char* p = def->value;
+            while (*p && data_pos + 1 < data_bytes) {
+                while (*p == ' ' || *p == '\t' || *p == ',') p++;
+                if (!*p) break;
+                int val = (strncmp(p, "0x", 2) == 0) ? parse_hex(p) : parse_imm(p);
                 (*data)[data_pos++] = val & 0xFF;
                 (*data)[data_pos++] = (val >> 8) & 0xFF;
+                while (*p && *p != ',') p++;
             }
         } else if (strcmp(def->directive, "dd") == 0) {
-            int val = parse_imm(def->value);
-            if (data_pos + 3 < data_bytes) {
+            const char* p = def->value;
+            while (*p && data_pos + 3 < data_bytes) {
+                while (*p == ' ' || *p == '\t' || *p == ',') p++;
+                if (!*p) break;
+                int val = (strncmp(p, "0x", 2) == 0) ? parse_hex(p) : parse_imm(p);
                 (*data)[data_pos++] = val & 0xFF;
                 (*data)[data_pos++] = (val >> 8) & 0xFF;
                 (*data)[data_pos++] = (val >> 16) & 0xFF;
                 (*data)[data_pos++] = (val >> 24) & 0xFF;
+                while (*p && *p != ',') p++;
             }
         } else if (strcmp(def->directive, "resb") == 0) {
             int n = parse_imm(def->value); while (n-- > 0 && data_pos < data_bytes) { (*data)[data_pos++] = 0x00; }
@@ -1276,29 +1580,44 @@ char* read_file_to_buffer(const char* filename, uint32_t* out_size) {
     }
     uint32_t size = entry.size;
     
-    // Memory safety: limit file size to prevent excessive allocation
-    if (size > 32768) { // 32KB limit for source files (increased)
+    // Memory safety: limit file size to prevent excessive buffering
+    if (size > ASM_MAX_SRC_SIZE) {
         printf("[assemble] Warning: Source file too large (%d bytes), limiting to 32KB\n", size);
-        size = 32768;
+        size = ASM_MAX_SRC_SIZE;
     }
-    
-    char* buf = (char*)malloc(size + 1);
-    if (!buf) {
-        printf("[assemble] Out of memory. Requested %d bytes.\n", size + 1);
-        return 0;
-    }
-    int n = eynfs_read_file(g_current_drive, &sb, &entry, buf, size, 0);
+
+    int n = eynfs_read_file(g_current_drive, &sb, &entry, g_asm_src_buf, size, 0);
     if (n < 0) {
         printf("[assemble] Failed to read file: %s\n", filename);
-        free(buf);
         return 0;
     }
-    buf[size] = '\0';
-    if (out_size) *out_size = size;
-    return buf;
+    if (n < 0) n = 0;
+    if ((uint32_t)n > size) n = (int)size;
+    g_asm_src_buf[n] = '\0';
+    if (out_size) *out_size = (uint32_t)n;
+    return g_asm_src_buf;
+}
+
+static void symbol_table_free(SymbolTable* table) {
+    if (!table) return;
+    table->head = 0;
+    g_asm_sym_pool_used = 0;
+}
+
+static int estimate_text_size_bytes(AST* ast) {
+    int sz = 0;
+    if (!ast) return 0;
+    for (Instruction* inst = ast->instructions; inst; inst = inst->next) {
+        if (inst->section != SECTION_TEXT) continue;
+        sz += estimate_instr_size(inst);
+    }
+    return sz;
 }
 
 int assemble(const char *input_path, const char *output_path) {
+    g_asm_error_count = 0;
+    g_asm_warning_count = 0;
+
     uint32_t src_size = 0;
     char* src = read_file_to_buffer(input_path, &src_size);
     if (!src) {
@@ -1307,9 +1626,26 @@ int assemble(const char *input_path, const char *output_path) {
     }
 
     AST *ast = parse(src);
-    // Free source buffer early to reduce peak memory
-    free(src);
-    src = NULL;
+    // Source buffer is static; no free.
+
+    if (!ast) {
+        print_error(input_path, 0, "Parse failed.", NULL);
+        return 1;
+    }
+
+    // Output mode selection
+    const char* out_ext = strrchr(output_path, '.');
+    int want_uelf = (out_ext && strcmp(out_ext, ".uelf") == 0) ? 1 : 0;
+
+    if (want_uelf) {
+        // Ring3 loader expects segments in the user range starting at 0x00400000.
+        g_asm_code_base = 0x00400000u;
+        int text_est = estimate_text_size_bytes(ast);
+        g_asm_data_base = g_asm_code_base + asm_align_up_u32((uint32)text_est, 0x1000u);
+    } else {
+        g_asm_code_base = 0x02000000u;
+        g_asm_data_base = 0x02001000u;
+    }
     SymbolTable symtab;
     symbol_table_init(&symtab);
     uint8_t *code = 0;
@@ -1319,9 +1655,13 @@ int assemble(const char *input_path, const char *output_path) {
     int gen_result = generate_code(ast, &symtab, &code, &code_size, &data, &data_size, input_path);
     if (gen_result != 0) {
         print_error(input_path, 0, "Code generation failed.", NULL);
-        // Free any partially allocated structures to avoid leaks on repeated runs
-        if (code) free(code);
-        if (data) free(data);
+        free_ast(ast);
+        return 1;
+    }
+
+    if (g_asm_error_count > 0) {
+        // Avoid producing an output file when errors were reported.
+        symbol_table_free(&symtab);
         free_ast(ast);
         return 1;
     }
@@ -1329,6 +1669,89 @@ int assemble(const char *input_path, const char *output_path) {
     // We no longer need the AST; free it before allocating large buffers
     free_ast(ast);
     ast = NULL;
+
+    // Determine entry point
+    int start_addr = lookup_label(&symtab, "_start", SECTION_TEXT);
+    uint32 entry_va = (start_addr >= 0) ? (uint32)start_addr : g_asm_code_base;
+
+    if (want_uelf) {
+        if (start_addr < 0) {
+            print_error(input_path, 0, "Missing required entry label '_start' for .uelf output.", NULL);
+            symbol_table_free(&symtab);
+            return 1;
+        }
+        if (code_size == 0) {
+            print_error(input_path, 0, "No .text bytes generated (is your code in 'section .text'?).", NULL);
+            symbol_table_free(&symtab);
+            return 1;
+        }
+    }
+
+    if (want_uelf) {
+        // Use the new linker for .uelf output to produce GNU ld compatible ELF32
+        LinkConfig link_cfg;
+        link_config_init(&link_cfg);
+        
+        // Set input file name for FILE symbol
+        const char* base_name = strrchr(input_path, '/');
+        if (!base_name) base_name = input_path; else base_name++;
+        link_cfg.input_name = base_name;
+        
+        // Set addresses
+        link_cfg.text_vaddr = g_asm_code_base;
+        link_cfg.rodata_vaddr = g_asm_data_base;
+        link_cfg.entry_vaddr = entry_va;
+        
+        // Set sections
+        link_cfg.text.data = code;
+        link_cfg.text.size = code_size;
+        link_cfg.text.vaddr = g_asm_code_base;
+        link_cfg.text.align = 0x1000;
+        link_cfg.text.flags = SHF_ALLOC | SHF_EXECINSTR;
+        
+        link_cfg.rodata.data = data;
+        link_cfg.rodata.size = data_size;
+        link_cfg.rodata.vaddr = g_asm_data_base;
+        link_cfg.rodata.align = 0x1000;
+        link_cfg.rodata.flags = SHF_ALLOC;
+        
+        // Add FILE symbol (local, ABS section)
+        // Generate .o name from input path
+        char obj_name[80];
+        int olen = strlen(base_name);
+        if (olen > (int)sizeof(obj_name) - 3) olen = sizeof(obj_name) - 3;
+        memcpy(obj_name, base_name, olen);
+        // Change extension to .o
+        char* dot = strrchr(obj_name, '.');
+        if (dot && dot - obj_name < olen) {
+            strcpy(dot, ".o");
+        } else {
+            obj_name[olen] = '\0';
+            strcat(obj_name, ".o");
+        }
+        link_add_symbol(&link_cfg, obj_name, 0, 0, STB_LOCAL, STT_FILE, SHN_ABS);
+        
+        // Add data labels (local, .rodata section = 2)
+        for (SymbolTableEntry* e = symtab.head; e; e = e->next) {
+            if (e->section == SECTION_DATA) {
+                link_add_symbol(&link_cfg, e->name, e->address, 0, STB_LOCAL, STT_NOTYPE, 2);
+            }
+        }
+        
+        // Add _start as global (section 1 = .text)
+        if (start_addr >= 0) {
+            link_add_symbol(&link_cfg, "_start", start_addr, 0, STB_GLOBAL, STT_NOTYPE, 1);
+        }
+        
+        int w = link_write_uelf(&link_cfg, output_path);
+        symbol_table_free(&symtab);
+        if (w != 0) {
+            print_error(output_path, 0, "Failed to write .uelf output.", NULL);
+            return 1;
+        }
+        printf("Assembly successful: %s -> %s\n", input_path, output_path);
+        return 0;
+    }
 
     // Prepare EYN-OS header
     struct eyn_exe_header hdr;
@@ -1338,9 +1761,8 @@ int assemble(const char *input_path, const char *output_path) {
     hdr.flags = 0;  // No special flags for now
     hdr.reserved = 0;  // Reserved field
     // Look up the _start label to get the entry point
-    int start_addr = lookup_label(&symtab, "_start", SECTION_TEXT);
     if (start_addr >= 0) {
-        hdr.entry_point = start_addr - CODE_BASE;  // Convert absolute address to offset
+        hdr.entry_point = start_addr - (int)g_asm_code_base;  // Convert absolute address to offset
         // Found _start label
     } else {
         hdr.entry_point = 0;  // Default to start of code if no _start label
@@ -1393,7 +1815,6 @@ int assemble(const char *input_path, const char *output_path) {
             return 1;
         }
         printf("[assemble] wrote code bytes: %d\n", w2);
-        free(code);
     }
     if (data && data_size > 0) {
         int w3 = eynfs_stream_write(&stream, data, data_size);
@@ -1402,12 +1823,13 @@ int assemble(const char *input_path, const char *output_path) {
             return 1;
         }
         printf("[assemble] wrote data bytes: %d\n", w3);
-        free(data);
     }
     if (eynfs_stream_end(&stream) != 0) {
         printf("[assemble] Failed to finalize output file\n");
         return 1;
     }
+
+    symbol_table_free(&symtab);
 
     size_t total_size = sizeof(hdr) + code_size + data_size;
     printf("Successfully wrote %d bytes to %s\n", (int)total_size, output_path);
@@ -1427,6 +1849,7 @@ int assemble_main(int argc, char *argv[]) {
 
 void symbol_table_init(SymbolTable* table) {
     table->head = 0;
+    g_asm_sym_pool_used = 0;
 }
 
 int lookup_label(SymbolTable* table, const char* name, SectionType section) {
@@ -1450,17 +1873,25 @@ AST* parse(const char *src) {
     Lexer lexer;
     lexer_init(&lexer, src);
     Token token;
-    SectionType current_section = SECTION_NONE;
+    SectionType current_section = SECTION_TEXT; // default to text so labels/instructions without an explicit .section land in .text
     int line_num = 1;
-    // Use a modest arena (e.g., 32KB) for AST nodes to avoid many small mallocs
-    static uint8_t arena_buf[32*1024];
-    asm_arena_t arena; arena_init(&arena, arena_buf, sizeof(arena_buf));
-    AST* ast = (AST*)arena_alloc(&arena, sizeof(AST));
-    if (!ast) { printf("[parse] Out of memory for AST arena\n"); return 0; }
-    ast->instructions = 0;
-    ast->labels = 0;
-    ast->data_defs = 0;
+    // Static arena so assembly works even when the heap is unavailable.
+    size_t src_len = src ? strlen(src) : 0;
+    size_t arena_size = src_len * 4 + 4096;
+    if (arena_size > ASM_ARENA_MAX) {
+        printf("[parse] Source too complex: need arena %d bytes (max %d)\n",
+               (int)arena_size, (int)ASM_ARENA_MAX);
+        return 0;
+    }
+
+    AST* ast = &g_asm_static_ast;
+    memset(ast, 0, sizeof(*ast));
+    ast->arena_buf = g_asm_ast_arena;
+    ast->arena_size = arena_size;
     ast->arena_backed = 1;
+
+    asm_arena_t arena;
+    arena_init(&arena, (uint8_t*)ast->arena_buf, ast->arena_size);
     int text_instr_index = 0;
     int data_def_index = 0;
 
@@ -1472,7 +1903,7 @@ AST* parse(const char *src) {
             continue;
         }
         if (token.type == TOKEN_SECTION) {
-            // Expect .text or .data next
+            // Expect .text / .data next (treat .rodata as .data)
             Token next = lexer_next_token(&lexer);
             if (strcmp(next.text, ".text") == 0) {
                 current_section = SECTION_TEXT;
@@ -1480,6 +1911,9 @@ AST* parse(const char *src) {
             } else if (strcmp(next.text, ".data") == 0) {
                 current_section = SECTION_DATA;
                 if (g_asm_verbose) printf("[parse] Section: .data\n");
+            } else if (strcmp(next.text, ".rodata") == 0) {
+                current_section = SECTION_DATA;
+                if (g_asm_verbose) printf("[parse] Section: .rodata (treated as .data)\n");
             } else {
                 if (g_asm_verbose) printf("[parse] Unknown section: %s\n", next.text);
                 current_section = SECTION_NONE;
@@ -1489,7 +1923,7 @@ AST* parse(const char *src) {
         if (token.type == TOKEN_LABEL) {
             // Add label to AST
             Label* label = (Label*)arena_alloc(&arena, sizeof(Label));
-            if (!label) continue;
+            if (!label) { printf("[parse] Arena exhausted at line %d\n", line_num); free_ast(ast); return 0; }
             strncpy(label->name, token.text, sizeof(label->name)-1);
             label->name[sizeof(label->name)-1] = 0;
             label->section = current_section;
@@ -1510,7 +1944,7 @@ AST* parse(const char *src) {
         if (token.type == TOKEN_MNEMONIC) {
             // Parse instruction and operands
             Instruction* inst = (Instruction*)arena_alloc(&arena, sizeof(Instruction));
-            if (!inst) continue;
+            if (!inst) { printf("[parse] Arena exhausted at line %d\n", line_num); free_ast(ast); return 0; }
             memset(inst, 0, sizeof(Instruction));
             strncpy(inst->mnemonic, token.text, sizeof(inst->mnemonic)-1);
             inst->mnemonic[sizeof(inst->mnemonic)-1] = 0;
@@ -1538,10 +1972,16 @@ AST* parse(const char *src) {
                     inst->operands[op_index].size_hint = pending_size_hint;
                     pending_size_hint = 0;
                     op_index++;
-                    Token maybe_comma = lexer_next_token(&lexer);
-                    if (maybe_comma.type != TOKEN_COMMA) {
-                        // no pushback; ignore
+                    Token sep = lexer_next_token(&lexer);
+                    if (sep.type == TOKEN_COMMA) {
+                        continue;
                     }
+                    if (sep.type == TOKEN_NEWLINE) {
+                        line_num++;
+                        break;
+                    }
+                    lexer_unget_token(&lexer, sep);
+                    break;
                 } else if (next.type == TOKEN_REGISTER) {
                     inst->operands[op_index].type = OPERAND_REGISTER;
                     strncpy(inst->operands[op_index].value, next.text, sizeof(inst->operands[op_index].value)-1);
@@ -1549,12 +1989,16 @@ AST* parse(const char *src) {
                     inst->operands[op_index].size_hint = pending_size_hint;
                     pending_size_hint = 0;
                     op_index++;
-                    // expect optional comma after operand, consume if present
-                    Token maybe_comma = lexer_next_token(&lexer);
-                    if (maybe_comma.type != TOKEN_COMMA) {
-                        // push back not supported; just treat as next token in stream by rewinding pos one token length is complex
-                        // no-op: our lexer has no pushback, so rely on whitespace/line end
+                    Token sep = lexer_next_token(&lexer);
+                    if (sep.type == TOKEN_COMMA) {
+                        continue;
                     }
+                    if (sep.type == TOKEN_NEWLINE) {
+                        line_num++;
+                        break;
+                    }
+                    lexer_unget_token(&lexer, sep);
+                    break;
                 } else if (next.type == TOKEN_IMMEDIATE) {
                     inst->operands[op_index].type = OPERAND_IMMEDIATE;
                     strncpy(inst->operands[op_index].value, next.text, sizeof(inst->operands[op_index].value)-1);
@@ -1562,10 +2006,16 @@ AST* parse(const char *src) {
                     inst->operands[op_index].size_hint = pending_size_hint;
                     pending_size_hint = 0;
                     op_index++;
-                    Token maybe_comma = lexer_next_token(&lexer);
-                    if (maybe_comma.type != TOKEN_COMMA) {
-                        // see above
+                    Token sep = lexer_next_token(&lexer);
+                    if (sep.type == TOKEN_COMMA) {
+                        continue;
                     }
+                    if (sep.type == TOKEN_NEWLINE) {
+                        line_num++;
+                        break;
+                    }
+                    lexer_unget_token(&lexer, sep);
+                    break;
                 } else if (next.type == TOKEN_LABEL || next.type == TOKEN_UNKNOWN) {
                     inst->operands[op_index].type = OPERAND_LABEL;
                     strncpy(inst->operands[op_index].value, next.text, sizeof(inst->operands[op_index].value)-1);
@@ -1573,9 +2023,16 @@ AST* parse(const char *src) {
                     inst->operands[op_index].size_hint = pending_size_hint;
                     pending_size_hint = 0;
                     op_index++;
-                    Token maybe_comma = lexer_next_token(&lexer);
-                    if (maybe_comma.type != TOKEN_COMMA) {
+                    Token sep = lexer_next_token(&lexer);
+                    if (sep.type == TOKEN_COMMA) {
+                        continue;
                     }
+                    if (sep.type == TOKEN_NEWLINE) {
+                        line_num++;
+                        break;
+                    }
+                    lexer_unget_token(&lexer, sep);
+                    break;
                 } else {
                     break;
                 }
@@ -1594,10 +2051,18 @@ AST* parse(const char *src) {
                 Token next = lexer_next_token(&lexer);
                 if (g_asm_verbose) printf("[parse] Global: %s\n", next.text);
                 continue;
+            } else if (strcmp(token.text, "intel_syntax") == 0) {
+                // GAS: .intel_syntax noprefix -- ignore remainder of line
+                while (1) {
+                    Token skip = lexer_next_token(&lexer);
+                    if (skip.type == TOKEN_EOF) break;
+                    if (skip.type == TOKEN_NEWLINE) { line_num++; break; }
+                }
+                continue;
             } else {
                 // db, dw, dd
                 DataDef* def = (DataDef*)arena_alloc(&arena, sizeof(DataDef));
-                if (!def) continue;
+                if (!def) { printf("[parse] Arena exhausted at line %d\n", line_num); free_ast(ast); return 0; }
                 strncpy(def->directive, token.text, sizeof(def->directive)-1);
                 def->directive[sizeof(def->directive)-1] = 0;
                 
@@ -1648,16 +2113,7 @@ REGISTER_SHELL_COMMAND(assemble, "assemble", handler_assemble, CMD_STREAMING, "C
 // Free AST and all its components
 void free_ast(AST* ast) {
     if (!ast) return;
-    // If arena-backed, nothing to free per-node. Just return.
-    if (ast->arena_backed) {
-        return;
-    }
-    // Fallback path if non-arena (not expected with current code)
-    Instruction* inst = ast->instructions;
-    while (inst) { Instruction* next = inst->next; free(inst); inst = next; }
-    Label* label = ast->labels;
-    while (label) { Label* next = label->next; free(label); label = next; }
-    DataDef* data_def = ast->data_defs;
-    while (data_def) { DataDef* next = data_def->next; free(data_def); data_def = next; }
-    free(ast);
+    // Static arena: nothing to free.
+    // Clear pointers so accidental reuse is obvious.
+    memset(ast, 0, sizeof(*ast));
 }

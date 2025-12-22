@@ -15,6 +15,8 @@ int strncmp(const char *s1, const char *s2, size_t n);
 char *strchr(const char *s, int c);
 char *strrchr(const char *s, int c);
 char *strstr(const char *haystack, const char *needle);
+size_t strspn(const char *s, const char *accept);
+char *strpbrk(const char *s, const char *accept);
 char *strtok_r(char *str, const char *delim, char **saveptr);
 
 // Standard C library memory functions

@@ -1,3 +1,5 @@
+// Allow safely re-entering the tiling-manager loop after aborting a user task.
+static int g_tm_initialized = 0;
 #include <types.h>
 #include <vga.h>
 #include <tui.h>
@@ -252,14 +254,14 @@ static rei_image_t* load_icon_for_ext(const char* ext) {
     }
     if (g_icon_cache_count >= ICON_CACHE_MAX) return NULL;
 
-    // Candidate filename patterns. Try several patterns used in the project/testdir
+    // Candidate filename patterns.
+    // ext is treated as the full icon base name (without .rei), e.g. "file_txt", "file_none", "dir_empty", "dir_full".
     const char* patterns[] = {
-        "/testdir/icons/file_%s.rei",
-        "/icons/file_%s.rei",
-        "/testdir/icons/%s.rei",
         "/icons/%s.rei",
-        "/testdir/icons/%s_icon.rei",
-        "/icons/%s_icon.rei",
+        "/testdir/icons/%s.rei",
+        // Legacy fallbacks (older naming conventions)
+        "/icons/file_%s.rei",
+        "/testdir/icons/file_%s.rei",
         NULL
     };
 
@@ -288,24 +290,7 @@ static rei_image_t* load_icon_for_ext(const char* ext) {
             if (found) break;
         }
     }
-    if (!found) {
-        // also try some generic dir icons
-        const char* alt_dir_paths[] = { "/testdir/icons/dir_full.rei", "/icons/dir_full.rei", "/testdir/icons/dir.rei", "/icons/dir.rei", NULL };
-        for (int pi = 0; alt_dir_paths[pi]; ++pi) {
-            eynfs_dir_entry_t entry;
-            if (eynfs_traverse_path(0, &sb, alt_dir_paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
-                int size = entry.size;
-                uint8_t* buf = (uint8_t*)malloc(size);
-                if (!buf) break;
-                int n = eynfs_read_file(0, &sb, &entry, (char*)buf, size, 0);
-                if (n == size) {
-                    if (rei_parse_image(buf, size, &tmp) == 0) { found = 1; }
-                }
-                free(buf);
-                if (found) break;
-            }
-        }
-    }
+    // No special-case fallback needed here; callers can request "file_none" if desired.
 
     // Add to cache entry regardless (to avoid repeated failed lookups)
     int idx = g_icon_cache_count++;
@@ -1318,7 +1303,6 @@ static void draw_tile_content(const tile_t* t) {
         // Always start with a clean content area to avoid any residuals around centered/scaled images
         drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
         // Debug: show number of registered redirect icons (non-invasive onscreen feedback)
-        extern int shell_redirect_icon_count;
         if (shell_redirect_icon_count > 0) {
             char label[8];
             int n = (shell_redirect_icon_count > 9) ? 9 : shell_redirect_icon_count;
@@ -1405,8 +1389,23 @@ static void draw_tile_content(const tile_t* t) {
             int wraps = (len + cols - 1) / cols; if (wraps < 1) wraps = 1;
             for (int w = wraps - 1; w >= 0 && vis_row >= 0; --w) {
                 int start_col = w * cols;
+                int line_indent_px = 0;
+                int line_anchor_col = 0;
+                const char* line_icon_key = vterm_get_line_icon_key(t->term_idx, abs_row, &line_indent_px, &line_anchor_col);
+                if (!line_icon_key) line_indent_px = 0;
+
+                // If this wrapped segment contains the anchor column, draw the icon once on this visual row.
+                if (line_icon_key && line_anchor_col >= start_col && line_anchor_col < start_col + cols) {
+                    int py_icon = content_y + vis_row * line_h;
+                    int x_text0 = content_x + (line_anchor_col - start_col) * 8 + line_indent_px;
+                    int icon_x = x_text0 - 9;
+                    rei_image_t* icon = load_icon_for_ext(line_icon_key);
+                    if (!icon) icon = load_icon_for_ext("file_none");
+                    if (icon) draw_rei_at(icon, icon_x, py_icon);
+                }
+
                 for (int cc = 0; cc < cols; ++cc) {
-                    int px = content_x + cc * 8;
+                    int px = content_x + cc * 8 + line_indent_px;
                     int py = content_y + vis_row * line_h;
                     // Horizontal & vertical clipping
                     if (px + 7 < content_x || px >= content_x + content_w) continue;
@@ -1463,23 +1462,6 @@ static void draw_tile_content(const tile_t* t) {
                     if (use_shadow) {
                         // 1px down-right shadow
                         drawCharAt(px + 1, py + 1, (int)(unsigned char)ch, sr, sg, sb);
-                    }
-                    // Before drawing main character, check for a registered redirect icon that maps to this cell.
-                    // If present, draw the icon 8px to the left (one char cell) and shift the glyph remains painted as usual.
-                    // Prefer per-cell icon index (set when redirect output was copied into the vterm)
-                    int icon_idx = vterm_get_char_icon_index(t->term_idx, abs_row, src_col);
-                    if (icon_idx >= 0) {
-                        extern shell_redirect_icon_t shell_redirect_icons[];
-                        if (icon_idx < SHELL_REDIRECT_ICON_MAX) {
-                            rei_image_t* ic = load_icon_for_ext(shell_redirect_icons[icon_idx].ext);
-                            if (ic && ic->data) {
-                                int icon_w = ic->header.width;
-                                int icon_h = ic->header.height;
-                                int draw_x = px - icon_w - 4; // 4px padding
-                                int draw_y = py + (8 - icon_h) / 2; if (draw_y < py) draw_y = py;
-                                draw_rei_at(ic, draw_x, draw_y);
-                            }
-                        }
                     }
 
                     // Draw main character
@@ -1776,89 +1758,304 @@ void tile_invalidate_gui(int tile_idx) {
     gui_needs_redraw[term] = 1;
 }
 
+void tile_render_once(void) {
+    // This is intentionally a minimal subset of the main tiler loop: it only
+    // redraws tiles and swaps buffers. It does not poll keyboard/mouse or run
+    // modal/window interaction logic.
+    static volatile int g_in_render_once = 0;
+    if (g_in_render_once) return;
+    g_in_render_once = 1;
+    if (!g_tm_initialized) { g_in_render_once = 0; return; }
+    if (tile_count <= 0) { g_in_render_once = 0; return; }
+
+    // Best-effort: if framebuffer dimensions are unknown, avoid drawing.
+    if (screen_w <= 0 || screen_h <= 0) { g_in_render_once = 0; return; }
+
+    // Advance effects that are otherwise driven per-frame.
+    g_tile_scroll_tick++;
+
+    vga_begin_frame();
+
+    // Conservatively force a full redraw so the on-screen output is guaranteed
+    // to reflect vterm content changes while the main loop is paused.
+    g_force_full_redraw = 1;
+
+    for (int i = 0; i < tile_count; ++i) {
+        if (g_force_full_redraw) tiles[i].static_drawn = 0;
+        if (!tiles[i].static_drawn) {
+            draw_static_tile(&tiles[i], i == focused);
+        }
+        draw_tile_content(&tiles[i]);
+        tiles[i].last_drawn_version = vterm_get_version(tiles[i].term_idx);
+    }
+
+    // Ensure the swap copies something even if dirty tracking is disabled.
+    vga_mark_dirty_rect(0, 0, screen_w, screen_h);
+
+    tui_refresh();
+    // Force an immediate present. Prefer a direct backbuffer->fb blit so we
+    // don’t depend on dirty-rect bookkeeping in this one-shot path.
+    if (vga_get_vsync_enabled()) vga_wait_vblank();
+    vga_blit_backbuffer_region_to_fb(0, 0, screen_w, screen_h);
+    // Fallback when backbuffer is unavailable: drawing helpers already wrote
+    // directly to the framebuffer.
+
+    g_in_render_once = 0;
+}
+
+int tile_pump_input_once(void) {
+    if (!g_tm_initialized) return 0;
+    if (tile_count <= 0) return 0;
+
+    int key = tui_read_key();
+    if (!key) return 0;
+
+    // While a ring3 task is running, Ctrl+C is reserved as the user-task abort.
+    // Important: do NOT have a separate poller consume scancodes concurrently.
+    if (g_user_task_active && key == 0x2206) {
+        g_user_interrupt = 1;
+        return 1;
+    }
+
+    // If modal is active, handle it first.
+    if (g_bg_modal.active) {
+        (void)handle_bg_modal_key(key);
+        return 1;
+    }
+
+    // Super-modified keys (tui_read_key encodes Super by OR'ing 0x4000).
+    // Note: when a ring3 task is running, we rely on this pump path (invoked
+    // from the PIT IRQ) to keep the UI responsive; it must therefore implement
+    // the same global hotkeys as the full tiler loop.
+    if ((key & 0x4000)) {
+        int base = key & (~0x4000);
+
+        // Super+n -> new shell
+        if ((base & 0xFF) == 'n') {
+            if (tile_count < 4) {
+                int idx = tile_count++;
+                tiles[idx].type = TILE_SHELL;
+                tiles[idx].title = "EYN-OS Shell";
+                tiles[idx].status_left = NULL;
+                tiles[idx].status_right = NULL;
+                tiles[idx].term_idx = idx;
+                tiles[idx].active = 1;
+                // ensure a fresh vterm buffer so prompt isn't duplicated
+                vterm_clear(idx);
+                vterm_set_active(idx, 1);
+                // print prompt for the new vterm
+                vterm_print_prompt(idx);
+                focused = idx;
+                g_force_full_redraw = 1;
+                layout_tiles();
+                if (gui_draw_cb[tiles[idx].term_idx]) gui_needs_redraw[tiles[idx].term_idx] = 1;
+            }
+            return 1;
+        }
+
+        // Super+F toggle fullscreen for focused tile
+        if ((base & 0xFF) == 'f') {
+            if (fullscreen_tile == -1) {
+                fullscreen_tile = focused;
+            } else {
+                fullscreen_tile = -1;
+                layout_tiles();
+            }
+            g_force_full_redraw = 1;
+            if (gui_draw_cb[tiles[focused].term_idx]) gui_needs_redraw[tiles[focused].term_idx] = 1;
+            return 1;
+        }
+
+        // Super+Q to close focused tile or focused window
+        if ((base & 0xFF) == 'q') {
+            if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
+                wm_close_window(g_win_focused);
+                g_win_focused = -1;
+                g_force_full_redraw = 1;
+                return 1;
+            }
+
+            // If user task is tied to this tile, prefer abort-to-shell over closing.
+            if (g_user_task_active && g_user_task_term == tiles[focused].term_idx) {
+                g_user_interrupt = 1;
+                return 1;
+            }
+
+            if (tile_count > 1) {
+                tile_close(focused);
+                g_force_full_redraw = 1;
+                layout_tiles();
+            } else {
+                static char last_tile_msg[64];
+                snprintf(last_tile_msg, sizeof(last_tile_msg), "Last tile cannot be closed");
+                tiles[focused].status_left = last_tile_msg;
+                tiles[focused].status_visible = 1;
+                g_force_full_redraw = 1;
+            }
+            return 1;
+        }
+
+        // Super + arrows to move focus (arrow codes are 0x1001..0x1004)
+        if (base >= 0x1001 && base <= 0x1004) {
+            if (base == 0x1001) { // up
+                if (tile_count == 4) {
+                    if (focused == 2) focused = 0;
+                    else if (focused == 3) focused = 1;
+                } else if (tile_count == 3) {
+                    // layout: 0 = left tall, 1 = top-right, 2 = bottom-right
+                    if (focused == 2) focused = 1;
+                    else if (focused == 1) focused = 0;
+                } else if (tile_count == 2) focused = 0;
+            } else if (base == 0x1002) { // down
+                if (tile_count == 4) {
+                    if (focused == 0) focused = 2;
+                    else if (focused == 1) focused = 3;
+                } else if (tile_count == 3) {
+                    if (focused == 0) focused = 2;
+                    else if (focused == 1) focused = 2;
+                } else if (tile_count == 2) focused = 1;
+            } else if (base == 0x1003) { // left
+                if (tile_count >= 2) {
+                    if (focused == 1) focused = 0;
+                    else if (focused == 3) focused = 2;
+                }
+            } else if (base == 0x1004) { // right
+                if (tile_count >= 2) {
+                    if (focused == 0) focused = 1;
+                    else if (focused == 2) focused = 3;
+                    else if (tile_count == 2) focused = 1;
+                }
+            }
+
+            g_force_full_redraw = 1;
+            return 1;
+        }
+
+        // Other Super combos are ignored in this pump path.
+        return 1;
+    }
+
+    // Route input to focused window if any; else focused tile.
+    if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
+        window_t* wfocus = &g_windows[g_win_focused];
+        if (wfocus->key_cb) {
+            wfocus->key_cb(-1, key & 0xFFFF, wfocus->userdata);
+            wfocus->needs_redraw = 1;
+        }
+        return 1;
+    }
+
+    int term = tiles[focused].term_idx;
+    if (term < 0 || term >= MAX_TILES) term = 0;
+
+    if (gui_key_cb[term]) {
+        gui_key_cb[term](focused, key & 0xFFFF, gui_userdata[term]);
+        gui_needs_redraw[term] = 1;
+        return 1;
+    }
+
+    vterm_handle_key(term, key & 0xFFFF);
+    return 1;
+}
+
 void start_tiling_manager() {
-    // initialize screen dimensions from global framebuffer if available
-    if (g_mbi) {
-        screen_w = g_mbi->framebuffer_width;
-        screen_h = g_mbi->framebuffer_height;
-    }
-    // Decide low-memory/slow-CPU mode early so we can avoid loading heavy assets
-    if (g_mbi && (g_mbi->flags & MULTIBOOT_INFO_MEMORY)) {
-        uint32 total_kb = g_mbi->mem_lower + g_mbi->mem_upper; // in KB
-        if (total_kb < 8192) g_gui_low_mode = 1; // <8MB
-    }
-    // Configure pacing and drag throttle
-    if (g_gui_low_mode) {
-        g_frame_target_us = 50000; // ~20 FPS cap
-        // Keep vsync enabled to reduce tearing even on slow CPUs; can be overridden via gui command
-        vga_set_vsync_enabled(1);
-        vga_set_dirty_strategy(1); // single-rect blit to minimize tearing
+    if (!g_tm_initialized) {
+        // initialize screen dimensions from global framebuffer if available
+        if (g_mbi) {
+            screen_w = g_mbi->framebuffer_width;
+            screen_h = g_mbi->framebuffer_height;
+        }
+        // Decide low-memory/slow-CPU mode early so we can avoid loading heavy assets
+        if (g_mbi && (g_mbi->flags & MULTIBOOT_INFO_MEMORY)) {
+            uint32 total_kb = g_mbi->mem_lower + g_mbi->mem_upper; // in KB
+            if (total_kb < 8192) g_gui_low_mode = 1; // <8MB
+        }
+        // Configure pacing and drag throttle
+        if (g_gui_low_mode) {
+            g_frame_target_us = 50000; // ~20 FPS cap
+            // Keep vsync enabled to reduce tearing even on slow CPUs; can be overridden via gui command
+            vga_set_vsync_enabled(1);
+            vga_set_dirty_strategy(1); // single-rect blit to minimize tearing
+        } else {
+            g_frame_target_us = 0;     // unlimited
+            vga_set_vsync_enabled(1);
+            vga_set_dirty_strategy(0); // smart multi-rect blit for throughput
+        }
+        uint32 hz_tmp0 = sched_get_tick_hz(); if (!hz_tmp0) hz_tmp0 = 50;
+        g_drag_throttle_ticks = g_gui_low_mode ? (hz_tmp0 / 40 + 1) : (hz_tmp0 / 100 + 1);
+        g_last_frame_tick = sched_get_tick_count();
+        // initialize virtual terminals
+        vterm_init_all();
+        // prime GUI heartbeat
+        g_last_gui_heartbeat_tick = sched_get_tick_count();
+
+        // initialize simple double-buffer (best-effort)
+        vga_init_double_buffer();
+
+        // Initialize mouse and bounds to pixel space
+        mouse_init();
+        mouse_set_bounds(0, 0, screen_w - 1, screen_h - 1);
+        // Try to load UI assets unless in low mode (saves memory and draw time)
+        // Always try to load the cursor image (small asset); other window icons are skipped in low mode.
+        load_cursor_image_try_paths(0);
+        if (!g_gui_low_mode) {
+            // window button icons (focused/unfocused)
+            load_close_icon_try_paths(0);
+            load_close_icon_unf_try_paths(0);
+            load_min_icon_try_paths(0);
+            load_max_icon_try_paths(0);
+            load_min_icon_unf_try_paths(0);
+            load_max_icon_unf_try_paths(0);
+        }
+        // Allocate save-under buffer once we know cursor size
+        int cw0 = g_cursor_loaded ? g_cursor_img.header.width : cursor_w;
+        int ch0 = g_cursor_loaded ? g_cursor_img.header.height : cursor_h;
+        int bpp0 = vga_get_fb_bpp_bytes(); if (bpp0 < 3) bpp0 = 3;
+        cursor_save_w = cw0; cursor_save_h = ch0;
+        cursor_save_len = cw0 * ch0 * bpp0;
+        cursor_savebuf = (unsigned char*)malloc(cursor_save_len);
+
+        // Initialize tiles
+        tile_count = 1;
+        focused = 0;
+        for (int i = 0; i < MAX_TILES; ++i) {
+            tiles[i].type = TILE_EMPTY;
+            tiles[i].title = "";
+            tiles[i].status_left = NULL;
+            tiles[i].status_right = NULL;
+            tiles[i].static_drawn = 0;
+            tiles[i].last_drawn_version = 0;
+            tiles[i].last_cx = tiles[i].last_cy = tiles[i].last_cw = tiles[i].last_ch = -1;
+            tiles[i].term_idx = i;
+            tiles[i].active = 0;
+            gui_needs_redraw[i] = 0;
+        }
+        tiles[0].type = TILE_SHELL;
+        tiles[0].title = "EYN-OS Shell";
+        static char status_buf[64];
+        snprintf(status_buf, sizeof(status_buf), "Fb: %dx%d", screen_w, screen_h);
+        tiles[0].status_left = status_buf; // show framebuffer size for debug
+        tiles[0].active = 1;
+        vterm_set_active(0, 1);
+        // Print initial prompt into vterm 0
+        vterm_print_prompt(0);
+        layout_tiles();
+
+        g_tm_initialized = 1;
     } else {
-        g_frame_target_us = 0;     // unlimited
-        vga_set_vsync_enabled(1);
-        vga_set_dirty_strategy(0); // smart multi-rect blit for throughput
+        // Re-entry path (e.g. aborting a ring3 task): keep all UI state, just ensure
+        // a prompt is visible and force redraw so VGA updates immediately.
+        if (tile_count <= 0) tile_count = 1;
+        if (focused < 0 || focused >= tile_count) focused = 0;
+        int ti = focused;
+        int term = tiles[ti].term_idx;
+        if (term < 0 || term >= MAX_TILES) term = 0;
+        vterm_write_char(term, '\n');
+        vterm_print_prompt(term);
+        tiles[ti].static_drawn = 0;
+        tiles[ti].last_drawn_version = 0;
+        g_force_full_redraw = 1;
     }
-    uint32 hz_tmp0 = sched_get_tick_hz(); if (!hz_tmp0) hz_tmp0 = 50;
-    g_drag_throttle_ticks = g_gui_low_mode ? (hz_tmp0 / 40 + 1) : (hz_tmp0 / 100 + 1);
-    g_last_frame_tick = sched_get_tick_count();
-    // initialize virtual terminals
-    vterm_init_all();
-    // prime GUI heartbeat
-    g_last_gui_heartbeat_tick = sched_get_tick_count();
-
-    // initialize simple double-buffer (best-effort)
-    vga_init_double_buffer();
-
-    // Initialize mouse and bounds to pixel space
-    mouse_init();
-    mouse_set_bounds(0, 0, screen_w - 1, screen_h - 1);
-    // Try to load UI assets unless in low mode (saves memory and draw time)
-    // Always try to load the cursor image (small asset); other window icons are skipped in low mode.
-    load_cursor_image_try_paths(0);
-    if (!g_gui_low_mode) {
-        // window button icons (focused/unfocused)
-        load_close_icon_try_paths(0);
-        load_close_icon_unf_try_paths(0);
-        load_min_icon_try_paths(0);
-        load_max_icon_try_paths(0);
-        load_min_icon_unf_try_paths(0);
-        load_max_icon_unf_try_paths(0);
-    }
-    // Allocate save-under buffer once we know cursor size
-    int cw0 = g_cursor_loaded ? g_cursor_img.header.width : cursor_w;
-    int ch0 = g_cursor_loaded ? g_cursor_img.header.height : cursor_h;
-    int bpp0 = vga_get_fb_bpp_bytes(); if (bpp0 < 3) bpp0 = 3;
-    cursor_save_w = cw0; cursor_save_h = ch0;
-    cursor_save_len = cw0 * ch0 * bpp0;
-    cursor_savebuf = (unsigned char*)malloc(cursor_save_len);
-
-    // Low-mode detection already done above; pacing and throttle configured
-
-    // Initialize tiles
-    tile_count = 1;
-    focused = 0;
-    for (int i = 0; i < MAX_TILES; ++i) {
-        tiles[i].type = TILE_EMPTY;
-        tiles[i].title = "";
-        tiles[i].status_left = NULL;
-        tiles[i].status_right = NULL;
-        tiles[i].static_drawn = 0;
-        tiles[i].last_drawn_version = 0;
-        tiles[i].last_cx = tiles[i].last_cy = tiles[i].last_cw = tiles[i].last_ch = -1;
-        tiles[i].term_idx = i;
-        tiles[i].active = 0;
-        gui_needs_redraw[i] = 0;
-    }
-    tiles[0].type = TILE_SHELL;
-    tiles[0].title = "EYN-OS Shell";
-    static char status_buf[64];
-    snprintf(status_buf, sizeof(status_buf), "Fb: %dx%d", screen_w, screen_h);
-    tiles[0].status_left = status_buf; // show framebuffer size for debug
-    tiles[0].active = 1;
-    vterm_set_active(0, 1);
-    // Print initial prompt into vterm 0
-    vterm_print_prompt(0);
-    layout_tiles();
 
     int running = 1;
     while (running) {

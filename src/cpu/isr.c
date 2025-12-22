@@ -8,6 +8,11 @@
 #include <kb.h>
 #include <panic.h>
 
+#include <sched.h>
+
+#include <tile_manager.h>
+#include <terminals.h>
+#include <mm/user_access.h>
 extern multiboot_info_t *g_mbi;
 
 // Global error tracking
@@ -78,12 +83,13 @@ extern void isr_install()
 }
 
 // Generic ISR handler that captures context and attempts recovery
-static void generic_isr_handler(int isr_num) {
+static void generic_isr_handler(regs_t* regs) {
     error_context_t ctx;
+    int isr_num = (int)regs->int_no;
     ctx.error_code = isr_num;
-    ctx.eip = 0; // Will be set by assembly wrapper
-    ctx.eflags = 0;
-    ctx.esp = 0;
+    ctx.eip = regs->eip;
+    ctx.eflags = regs->eflags;
+    ctx.esp = ((regs->cs & 3) == 3) ? regs->useresp : 0;
     
     // Determine error severity
     if (is_recoverable_error(isr_num)) {
@@ -198,51 +204,28 @@ static void handle_error(int isr_num, error_context_t* ctx) {
         case ERROR_WARNING:
             printf("%c[WARNING] Non-critical error - continuing\n", 255, 255, 0);
             break;
+
+        default:
+            printf("%c[WARNING] Unknown error severity - continuing\n", 255, 255, 0);
+            break;
     }
 }
 
 // Individual ISR handlers - now use intelligent recovery
-void isr0() { generic_isr_handler(0); }
-void isr1() { generic_isr_handler(1); }
-void isr2() { generic_isr_handler(2); }
-void isr3() { generic_isr_handler(3); }
-void isr4() { generic_isr_handler(4); }
-void isr5() { generic_isr_handler(5); }
-void isr6() { generic_isr_handler(6); }
-void isr7() { generic_isr_handler(7); }
-void isr8() { generic_isr_handler(8); }
-void isr9() { generic_isr_handler(9); }
-void isr10() { generic_isr_handler(10); }
-void isr11() { generic_isr_handler(11); }
-void isr12() { generic_isr_handler(12); }
-void isr13() { generic_isr_handler(13); }
-void isr14() { 
-    // Call our custom page fault handler
-    extern void page_fault_handler(regs_t* r);
-    regs_t regs;
-    // Extract registers from stack (simplified)
-    asm volatile("mov %%esp, %0" : "=r" (regs.esp));
-    regs.err_code = 0; // Page fault error code
-    regs.cs = 0x08; // Kernel code segment
-    page_fault_handler(&regs);
+void isr_dispatch(regs_t* regs) {
+    if (!regs) {
+        return;
+    }
+
+    /* Page faults should be handled by the VMM (demand paging / COW / swap). */
+    if (regs->int_no == 14) {
+        extern void page_fault_handler(regs_t* r);
+        page_fault_handler(regs);
+        return;
+    }
+
+    generic_isr_handler(regs);
 }
-void isr15() { generic_isr_handler(15); }
-void isr16() { generic_isr_handler(16); }
-void isr17() { generic_isr_handler(17); }
-void isr18() { generic_isr_handler(18); }
-void isr19() { generic_isr_handler(19); }
-void isr20() { generic_isr_handler(20); }
-void isr21() { generic_isr_handler(21); }
-void isr22() { generic_isr_handler(22); }
-void isr23() { generic_isr_handler(23); }
-void isr24() { generic_isr_handler(24); }
-void isr25() { generic_isr_handler(25); }
-void isr26() { generic_isr_handler(26); }
-void isr27() { generic_isr_handler(27); }
-void isr28() { generic_isr_handler(28); }
-void isr29() { generic_isr_handler(29); }
-void isr30() { generic_isr_handler(30); }
-void isr31() { generic_isr_handler(31); }
 
 // Error status functions for shell commands
 int get_system_error_count() {
@@ -263,70 +246,153 @@ uint32 get_last_error_eip() {
 #define SYSCALL_READ  3
 #define SYSCALL_OPEN  4
 #define SYSCALL_CLOSE 5
+#define SYSCALL_GETKEY 6
+
+// When the tiling manager is active, user-mode programs should print into the
+// focused virtual terminal so output is visible in the graphical shell.
+static void syscall_console_write(const char* buf, int len) {
+    if (!buf || len <= 0) return;
+    if (tile_is_tiling_active()) {
+        int term = tile_get_focused();
+        if (g_user_task_active) {
+            term = g_user_task_term;
+        }
+        if (term < 0) term = 0;
+        for (int i = 0; i < len; ++i) {
+            vterm_write_char(term, buf[i]);
+        }
+        if (g_user_task_active) {
+            g_user_task_ui_dirty = 1;
+        }
+        return;
+    }
+    // Fallback: use kernel printf (serial/text console)
+    int pos = 0;
+    while (pos < len) {
+        int chunk = len - pos;
+        if (chunk > 120) chunk = 120;
+        char out[121];
+        memcpy(out, buf + pos, chunk);
+        out[chunk] = '\0';
+        printf("%s", out);
+        pos += chunk;
+    }
+}
+
+static void syscall_maybe_render_ui(void) {
+    // Intentionally left as a no-op.
+    // Rendering from inside the syscall handler is fragile (can be re-entrant
+    // w/ IRQ0 and does heavy GUI work while in an interrupt gate). We instead
+    // repaint from the PIT IRQ0 path while a user task is active.
+}
+
+// Upper bound to keep syscall I/O bounded (protects kernel stack/time).
+#define SYSCALL_IO_MAX (64 * 1024)
 
 // C dispatcher called by the assembly stub. Returns value in EAX to user.
-uint32 syscall_dispatch(regs_t* r) {
-    uint32 syscall_num = r->eax;
-    uint32 arg1 = r->ebx;
-    uint32 arg2 = r->ecx;
-    uint32 arg3 = r->edx;
-    printf("[SYSCALL] num=%d a1=%d a2=%d a3=%d\n", (int)syscall_num, (int)arg1, (int)arg2, (int)arg3);
+uint32 syscall_dispatch(regs_t* regs) {
+    uint32 syscall_num = regs->eax;
+    uint32 arg1 = regs->ebx;
+    uint32 arg2 = regs->ecx;
+    uint32 arg3 = regs->edx;
 
     switch (syscall_num) {
         case SYSCALL_WRITE: {
             if (arg1 == 1) {
-                char* buffer = (char*)arg2;
+                const char* user_buf = (const char*)arg2;
                 int len = (int)arg3;
-                printf("[SYSCALL] write: fd=1 buf=%d len=%d\n", (int)buffer, len);
-                // Print in chunks using %s to avoid the special color control for leading "%c"
+                if (len < 0) {
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+                if (len == 0) {
+                    regs->eax = 0;
+                    break;
+                }
+
+                if (len > SYSCALL_IO_MAX) {
+                    len = SYSCALL_IO_MAX;
+                }
+
+                // Copy user memory in small chunks to avoid faults/overruns.
                 int pos = 0;
                 while (pos < len) {
                     int chunk = len - pos;
-                    if (chunk > 120) chunk = 120; // small on-stack buffer
-                    char out[121];
-                    memcpy(out, buffer + pos, chunk);
-                    out[chunk] = '\0';
-                    printf("%s", out);
+                    if (chunk > 256) chunk = 256;
+                    char tmp[256];
+                    if (copyin(tmp, user_buf + pos, (size_t)chunk) != 0) {
+                        regs->eax = (uint32)-1;
+                        return regs->eax;
+                    }
+                    syscall_console_write(tmp, chunk);
                     pos += chunk;
                 }
-                r->eax = (uint32)len; // return bytes written
+
+                syscall_maybe_render_ui();
+
+                regs->eax = (uint32)len; // return bytes written (possibly clamped)
             } else {
-                r->eax = (uint32)-1;
+                regs->eax = (uint32)-1;
             }
             break;
         }
         case SYSCALL_READ: {
             // read(fd=0, buf=arg2, len=arg3)
-            if (arg3 == 0) { r->eax = 0; break; }
-            if (arg1 != 0 || arg2 == 0) { r->eax = (uint32)-1; break; }
+            if (arg3 == 0) { regs->eax = 0; break; }
+            if (arg1 != 0 || arg2 == 0) { regs->eax = (uint32)-1; break; }
             // Use keyboard driver to read a line (echoed by driver); returns malloc'd buffer
             string s = readStr();
-            if (!s) { r->eax = (uint32)-1; break; }
+            if (!s) { regs->eax = (uint32)-1; break; }
             int slen = (int)strlen(s);
             int maxcpy = (int)arg3;
-            if (maxcpy <= 0) { free(s); r->eax = 0; break; }
+            if (maxcpy <= 0) { free(s); regs->eax = 0; break; }
             // Copy up to len-1 bytes and NUL-terminate for convenience
             int n = slen;
             if (n > maxcpy - 1) n = maxcpy - 1;
-            memcpy((void*)arg2, s, n);
-            ((char*)arg2)[n] = '\0';
-            r->eax = (uint32)n;
+            if (n < 0) n = 0;
+
+            char* user_dst = (char*)arg2;
+            // Ensure user buffer is writable for the bytes we will touch.
+            if (copyout(user_dst, s, (size_t)n) != 0) {
+                free(s);
+                regs->eax = (uint32)-1;
+                break;
+            }
+            // Write NUL terminator if possible.
+            if (copyout(user_dst + n, "\0", 1) != 0) {
+                free(s);
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            regs->eax = (uint32)n;
             free(s);
             break;
         }
         case SYSCALL_EXIT: {
-            printf("%c[SYSCALL] Program exited with code %d\n", 0, 255, 0, arg1);
-            r->eax = 0;
+            // Keep this visible in the graphical shell too.
+            char msg[64];
+            int n = snprintf(msg, sizeof(msg), "[SYSCALL] Program exited with code %d\n", (int)arg1);
+            if (n > 0) syscall_console_write(msg, n);
+            g_user_task_active = 0;
+            g_user_task_term = -1;
+            g_user_interrupt = 0;
+            g_abort_to_shell = 1;
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_GETKEY: {
+            regs->eax = (uint32)kb_getchar_nonblocking();
             break;
         }
         default: {
             printf("%c[SYSCALL] Unknown syscall: %d\n", 255, 0, 0, syscall_num);
-            r->eax = (uint32)-1;
+            regs->eax = (uint32)-1;
             break;
         }
     }
 
-    return r->eax;
+    return regs->eax;
 }
 
 

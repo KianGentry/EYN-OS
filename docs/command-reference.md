@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2025-12-07 16:54:51
+This document is auto-generated from the source code. Last updated: 2025-12-21 23:57:43
 
-**Total Commands:** 55
+**Total Commands:** 58
 
 ## Table of Contents
 
@@ -354,6 +354,25 @@ panic yes
 
 ---
 
+### pf
+
+**Handler:** `pf_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `shell_commands.c`
+
+**Description:**
+Intentionally trigger a page fault (read/write/exec a chosen address).
+Usage: pf yes [addr] [r|w|x]
+
+**Example:**
+```bash
+pf yes 0x0 r
+```
+
+---
+
 ### predict
 
 **Handler:** `predict_cmd`
@@ -388,6 +407,25 @@ Example: rect 10 20 100 50 255 0 0 draws a red rectangle.
 **Example:**
 ```bash
 rect 10 20 100 50 255 0 0
+```
+
+---
+
+### ring3
+
+**Handler:** `ring3_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `shell_commands.c`
+
+**Description:**
+Switch to ring 3 and run a tiny user-mode stub (prints via int 0x80).
+Usage: ring3 yes
+
+**Example:**
+```bash
+ring3 yes
 ```
 
 ---
@@ -481,6 +519,26 @@ Launch the tiling front-end manager.
 **Example:**
 ```bash
 tiling
+```
+
+---
+
+### userrun
+
+**Handler:** `userrun_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `shell_commands.c`
+
+**Description:**
+Load a raw user-mode code blob from VFS into ring 3 and run it at 0x00400000.
+The program should use int 0x80 with EYN-OS syscall numbers (write=1, exit=2).
+Usage: userrun <path>
+
+**Example:**
+```bash
+userrun /testdir/user_hello.bin
 ```
 
 ---
@@ -1058,12 +1116,12 @@ assemble example.asm example.eyn
 **File:** `run_command.c`
 
 **Description:**
-Run a .eyn executable or .shell script.
-Usage: run <program.eyn|script.shell>
+Run a native program, ring3 ELF, or a shell script.
+Usage: run <program.eyn|program.bin|program.flat|program.uelf|script.shell>
 
 **Example:**
 ```bash
-run test.eyn
+run user_hello.uelf
 ```
 
 ---
@@ -1073,7 +1131,7 @@ run test.eyn
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 23 |
+| Streaming Commands | 26 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |

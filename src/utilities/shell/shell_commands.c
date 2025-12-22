@@ -17,6 +17,8 @@
 #include <panic.h>
 #include <serial.h>
 #include <paging.h>
+#include <mm/vmm.h>
+#include <gdt.h>
 // vfs is used by some commands; include at top-level
 #include <fs/vfs.h>
 #include <tile_manager.h>
@@ -50,6 +52,9 @@ void panic_cmd(string arg);
 void assertfail_cmd(string arg);
 void serialtest_cmd(string arg);
 void pagingguards_cmd(string arg);
+void pf_cmd(string arg);
+void ring3_cmd(string arg);
+void userrun_cmd(string arg);
 void setbg_cmd(string arg);
 void clearbg_cmd(string arg);
 
@@ -762,11 +767,291 @@ void pagingguards_cmd(string ch) {
     printf("%cRequested paging guards: null-page NX and .text/.rodata RO. If paging is disabled, this has no effect.\n", 255, 255, 255);
 }
 
+void pf_cmd(string ch) {
+    if (!ch) return;
+
+    // Skip command name
+    uint8 i = 0;
+    while (ch[i] && ch[i] != ' ') i++;
+    while (ch[i] && ch[i] == ' ') i++;
+
+    // Require explicit confirmation
+    if (!ch[i]) {
+        printf("%cTriggers a deliberate page fault. Confirm with: pf yes [addr] [r|w|x]\n", 255, 255, 0);
+        printf("%cExamples: pf yes | pf yes 0x0 r | pf yes 0xDEADBEEF w\n", 255, 255, 255);
+        return;
+    }
+
+    char confirm[8];
+    uint8 ci = 0;
+    while (ch[i] && ch[i] != ' ' && ci < sizeof(confirm) - 1) {
+        confirm[ci++] = ch[i++];
+    }
+    confirm[ci] = '\0';
+
+    if (strcmp(confirm, "yes") != 0) {
+        printf("%cThis will intentionally fault. To proceed: pf yes [addr] [r|w|x]\n", 255, 0, 0);
+        return;
+    }
+
+    while (ch[i] && ch[i] == ' ') i++;
+
+    // Optional address (default 0)
+    uint32 addr = 0;
+    if (ch[i]) {
+        uint32 base = 10;
+        if (ch[i] == '0' && (ch[i + 1] == 'x' || ch[i + 1] == 'X')) {
+            base = 16;
+            i += 2;
+        }
+
+        uint32 value = 0;
+        int saw_digit = 0;
+        while (ch[i] && ch[i] != ' ') {
+            char c = ch[i];
+            uint32 digit;
+            if (c >= '0' && c <= '9') digit = (uint32)(c - '0');
+            else if (base == 16 && c >= 'a' && c <= 'f') digit = 10u + (uint32)(c - 'a');
+            else if (base == 16 && c >= 'A' && c <= 'F') digit = 10u + (uint32)(c - 'A');
+            else break;
+
+            saw_digit = 1;
+            value = value * base + digit;
+            i++;
+        }
+
+        if (saw_digit) {
+            addr = value;
+        }
+
+        while (ch[i] && ch[i] != ' ') i++;
+        while (ch[i] && ch[i] == ' ') i++;
+    }
+
+    // Optional mode: r (read), w (write), x (exec)
+    char mode = 'r';
+    if (ch[i]) {
+        mode = ch[i];
+    }
+
+    printf("%c[pf] triggering mode=%c addr=0x%X\n", 255, 255, 0, mode, addr);
+
+    if (mode == 'w') {
+        *(volatile uint32*)addr = 0x12345678u;
+    } else if (mode == 'x') {
+        void (*fn)(void) = (void (*)(void))addr;
+        fn();
+    } else {
+        volatile uint32 tmp = *(volatile uint32*)addr;
+        (void)tmp;
+    }
+}
+
+void ring3_cmd(string ch) {
+    if (!ch) return;
+
+    // Skip command name
+    uint8 i = 0;
+    while (ch[i] && ch[i] != ' ') i++;
+    while (ch[i] && ch[i] == ' ') i++;
+
+    // Require explicit confirmation
+    if (!ch[i] || strcmp(&ch[i], "yes") != 0) {
+        printf("%cThis will switch the CPU to ring 3 and run a tiny user stub.\n", 255, 255, 0);
+        printf("%cTo proceed: ring3 yes\n", 255, 255, 255);
+        return;
+    }
+
+    g_user_interrupt = 0;
+    g_user_task_active = 1;
+    g_user_task_term = tile_is_tiling_active() ? tile_get_focused() : -1;
+    if (g_user_task_term < 0) g_user_task_term = 0;
+    g_user_task_ui_dirty = 1;
+
+    const uint32 user_code_va = USER_CODE_BASE;              // 0x00400000
+    const uint32 user_stack_page = USER_STACK_TOP - PAGE_SIZE; // 0xBFFFF000
+    const uint32 user_stack_top = USER_STACK_TOP - 0x10;
+
+    uint32 code_frame = frame_alloc();
+    uint32 stack_frame = frame_alloc();
+    if (code_frame == 0 || stack_frame == 0) {
+        printf("%cError: out of physical frames\n", 255, 0, 0);
+        if (code_frame) frame_free(code_frame);
+        if (stack_frame) frame_free(stack_frame);
+        return;
+    }
+
+    if (vmm_map_page(&vmm_kernel_as, user_code_va, code_frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0 ||
+        vmm_map_page(&vmm_kernel_as, user_stack_page, stack_frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
+        printf("%cError: failed to map user pages\n", 255, 0, 0);
+        frame_free(code_frame);
+        frame_free(stack_frame);
+        return;
+    }
+
+    // Record mappings for cleanup on exit/abort
+    g_user_code_base = user_code_va;
+    g_user_code_pages = 1;
+    g_user_stack_page = user_stack_page;
+
+    memset((void*)user_code_va, 0, PAGE_SIZE);
+    memset((void*)user_stack_page, 0, PAGE_SIZE);
+
+    // Build tiny ring-3 stub at user_code_va that invokes int 0x80.
+    // mov eax,1; mov ebx,1; mov ecx,msg; mov edx,len; int 0x80;
+    // mov eax,2; mov ebx,0; int 0x80; jmp $
+    uint8* code = (uint8*)user_code_va;
+    uint32 p = 0;
+    code[p++] = 0xB8; *(uint32*)&code[p] = 1; p += 4;                 // mov eax,1
+    code[p++] = 0xBB; *(uint32*)&code[p] = 1; p += 4;                 // mov ebx,1
+    code[p++] = 0xB9; uint32* msg_ptr = (uint32*)&code[p]; p += 4;    // mov ecx,imm32
+    code[p++] = 0xBA; uint32* len_ptr = (uint32*)&code[p]; p += 4;    // mov edx,imm32
+    code[p++] = 0xCD; code[p++] = 0x80;                                // int 0x80
+    code[p++] = 0xB8; *(uint32*)&code[p] = 2; p += 4;                 // mov eax,2
+    code[p++] = 0xBB; *(uint32*)&code[p] = 0; p += 4;                 // mov ebx,0
+    code[p++] = 0xCD; code[p++] = 0x80;                                // int 0x80
+    code[p++] = 0xEB; code[p++] = 0xFE;                                // jmp $
+
+    const char* msg = "Hello from ring3 via int 0x80\n";
+    const uint32 msg_off = 0x100;
+    uint32 msg_len = (uint32)strlen(msg);
+    memcpy((void*)(user_code_va + msg_off), msg, msg_len);
+    *msg_ptr = user_code_va + msg_off;
+    *len_ptr = msg_len;
+
+    invalidate_tlb_entry(user_code_va);
+    invalidate_tlb_entry(user_stack_page);
+
+    printf("%c[ring3] entering user mode...\n", 0, 255, 0);
+    uint32 kesp;
+    asm volatile("mov %%esp, %0" : "=r"(kesp));
+    tss_set_kernel_stack(kesp);
+    enter_user_mode(user_code_va, user_stack_top);
+}
+
+void userrun_cmd(string ch) {
+    if (!ch) return;
+
+    // Skip command name
+    uint8 i = 0;
+    while (ch[i] && ch[i] != ' ') i++;
+    while (ch[i] && ch[i] == ' ') i++;
+
+    if (!ch[i]) {
+        printf("%cUsage: userrun <path>\n", 255, 255, 255);
+        printf("%cExample: userrun /testdir/user_hello.bin\n", 200, 200, 200);
+        return;
+    }
+
+    char abspath[128];
+    resolve_path(&ch[i], shell_current_path, abspath, sizeof(abspath));
+
+    vfs_stat_t st;
+    if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) {
+        printf("%cError: File not found: %s\n", 255, 0, 0, abspath);
+        return;
+    }
+    if (st.size <= 0) {
+        printf("%cError: Empty file.\n", 255, 0, 0);
+        return;
+    }
+    // Keep it small for now (raw blob mapped into low user space)
+    if (st.size > 256 * 1024) {
+        printf("%cError: File too large (max 256KB for now).\n", 255, 0, 0);
+        return;
+    }
+
+    uint8* buf = (uint8*)malloc((size_t)st.size);
+    if (!buf) {
+        printf("%cError: Out of memory.\n", 255, 0, 0);
+        return;
+    }
+    int n = vfs_read_file(g_current_drive, abspath, buf, (int)st.size);
+    if (n < 0) {
+        printf("%cError: Failed to read file.\n", 255, 0, 0);
+        free(buf);
+        return;
+    }
+    uint32 size = (uint32)n;
+
+    // Clean up any previous user-task mappings first
+    user_task_cleanup_mappings();
+
+    g_user_interrupt = 0;
+    g_user_task_active = 1;
+    g_user_task_term = tile_is_tiling_active() ? tile_get_focused() : -1;
+    if (g_user_task_term < 0) g_user_task_term = 0;
+    g_user_task_ui_dirty = 1;
+
+    const uint32 user_code_va = USER_CODE_BASE;
+    const uint32 user_stack_page = USER_STACK_TOP - PAGE_SIZE;
+    const uint32 user_stack_top = USER_STACK_TOP - 0x10;
+
+    uint32 pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (pages == 0) pages = 1;
+
+    // Allocate and map code pages
+    for (uint32 pi = 0; pi < pages; ++pi) {
+        uint32 frame = frame_alloc();
+        if (frame == 0) {
+            printf("%cError: out of physical frames\n", 255, 0, 0);
+            free(buf);
+            user_task_cleanup_mappings();
+            return;
+        }
+        if (vmm_map_page(&vmm_kernel_as, user_code_va + pi * PAGE_SIZE, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
+            printf("%cError: failed to map user code page\n", 255, 0, 0);
+            frame_free(frame);
+            free(buf);
+            user_task_cleanup_mappings();
+            return;
+        }
+        invalidate_tlb_entry(user_code_va + pi * PAGE_SIZE);
+    }
+
+    // Allocate and map user stack
+    uint32 stack_frame = frame_alloc();
+    if (stack_frame == 0) {
+        printf("%cError: out of physical frames\n", 255, 0, 0);
+        free(buf);
+        user_task_cleanup_mappings();
+        return;
+    }
+    if (vmm_map_page(&vmm_kernel_as, user_stack_page, stack_frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
+        printf("%cError: failed to map user stack\n", 255, 0, 0);
+        frame_free(stack_frame);
+        free(buf);
+        user_task_cleanup_mappings();
+        return;
+    }
+    invalidate_tlb_entry(user_stack_page);
+
+    // Record mappings for cleanup on exit/abort
+    g_user_code_base = user_code_va;
+    g_user_code_pages = pages;
+    g_user_stack_page = user_stack_page;
+
+    // Copy file into mapped user code region
+    memset((void*)user_code_va, 0, pages * PAGE_SIZE);
+    memcpy((void*)user_code_va, buf, size);
+    memset((void*)user_stack_page, 0, PAGE_SIZE);
+    free(buf);
+
+    printf("%c[userrun] entering user mode: %s (%d bytes)\n", 0, 255, 0, abspath, (int)size);
+    uint32 kesp;
+    asm volatile("mov %%esp, %0" : "=r"(kesp));
+    tss_set_kernel_stack(kesp);
+    enter_user_mode(user_code_va, user_stack_top);
+}
+
 // Register diagnostics/testing commands
 REGISTER_SHELL_COMMAND(panic_cmd_info, "panic", panic_cmd, CMD_DIAGNOSTIC, "Trigger a kernel panic to test diagnostics.\nUsage: panic yes", "panic yes");
 REGISTER_SHELL_COMMAND(assertfail_cmd_info, "assertfail", assertfail_cmd, CMD_DIAGNOSTIC, "Trigger an assertion failure (ASSERT).\nUsage: assertfail yes", "assertfail yes");
 REGISTER_SHELL_COMMAND(serialtest_cmd_info, "serialtest", serialtest_cmd, CMD_STREAMING, "Write a test line to COM1 to verify serial output.\nUsage: serialtest", "serialtest");
 REGISTER_SHELL_COMMAND(pagingguards_cmd_info, "pagingguards", pagingguards_cmd, CMD_STREAMING, "Install optional paging guards (null-page, .text/.rodata RO).\nUsage: pagingguards", "pagingguards");
+REGISTER_SHELL_COMMAND(pf_cmd_info, "pf", pf_cmd, CMD_STREAMING, "Intentionally trigger a page fault (read/write/exec a chosen address).\nUsage: pf yes [addr] [r|w|x]", "pf yes 0x0 r");
+REGISTER_SHELL_COMMAND(ring3_cmd_info, "ring3", ring3_cmd, CMD_STREAMING, "Switch to ring 3 and run a tiny user-mode stub (prints via int 0x80).\nUsage: ring3 yes", "ring3 yes");
+REGISTER_SHELL_COMMAND(userrun_cmd_info, "userrun", userrun_cmd, CMD_STREAMING, "Load a raw user-mode code blob from VFS into ring 3 and run it at 0x00400000.\nThe program should use int 0x80 with EYN-OS syscall numbers (write=1, exit=2).\nUsage: userrun <path>", "userrun /testdir/user_hello.bin");
 
 
 // draw_cmd_handler implementation

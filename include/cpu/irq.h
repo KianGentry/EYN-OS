@@ -13,6 +13,9 @@ void register_interrupt_handler(int irq, irq_handler_t handler);
 // send end-of-interrupt to PIC
 void pic_send_eoi(int irq);
 
+// C-level IRQ dispatcher used by assembly stubs.
+void irq_dispatch_c(int irq_number);
+
 #endif // IRQ_H
 
 

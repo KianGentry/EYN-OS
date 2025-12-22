@@ -1,6 +1,11 @@
-#include <irq.h>
+#include <cpu/irq.h>
 #include <idt.h>
 #include <system.h>
+#include <util.h>
+#include <vga.h>
+#include <tile_manager.h>
+
+extern void poll_keyboard_for_ctrl_c();
 
 // PIC ports
 #define PIC1            0x20
@@ -117,6 +122,47 @@ void irq_dispatch_c(int irq_number) {
     if (irq_number < 0 || irq_number >= 16) {
         return;
     }
+
+    if (irq_number == 0 && g_user_task_active) {
+        // While a ring3 task runs, the main tiler loop is blocked. We do a tiny
+        // input+render pump here. Critical: do not consume scancodes from two
+        // different readers (it corrupts input and can make UI appear frozen).
+        if (tile_is_tiling_active()) {
+            int any_key = 0;
+            for (int i = 0; i < 4; ++i) {
+                if (!tile_pump_input_once()) break;
+                any_key = 1;
+            }
+            if (any_key) g_user_task_ui_dirty = 1;
+        } else {
+            // Non-tiling mode: we don't have the TUI key pump, so use the minimal poll.
+            poll_keyboard_for_ctrl_c();
+        }
+
+        if (g_user_interrupt) {
+            g_user_interrupt = 0;
+            g_user_task_active = 0;
+            g_user_task_term = -1;
+            g_user_task_ui_dirty = 0;
+            g_abort_to_shell = 1;
+            printf("^C\n");
+            pic_send_eoi(irq_number);
+            return;
+        }
+
+        // Throttle renders (PIT is 50Hz). Only render when something changed.
+        if (tile_is_tiling_active()) {
+            static uint32 ui_div = 0;
+            if (++ui_div >= 3) { // ~16 FPS max while user task active
+                ui_div = 0;
+                if (g_user_task_ui_dirty) {
+                    g_user_task_ui_dirty = 0;
+                    tile_render_once();
+                }
+            }
+        }
+    }
+
     irq_handler_t h = g_irq_handlers[irq_number];
     if (h) {
         h();

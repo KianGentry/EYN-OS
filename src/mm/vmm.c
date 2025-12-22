@@ -267,6 +267,11 @@ static void* early_alloc(uint32 size, uint32 alignment) {
     return ptr;
 }
 
+uint32 vmm_get_boot_alloc_end(void) {
+    if (early_heap_ptr == 0) return 0;
+    return (early_heap_ptr + PAGE_SIZE - 1) & PAGE_MASK;
+}
+
 /*
  * PAGE TABLE WALKING AND MANIPULATION
  * walk_page_tables traverses the PD→PT hierarchy, optionally creating tables,
@@ -333,6 +338,13 @@ int vmm_map_page(address_space_t* as, uint32 va, uint32 pa, uint32 flags) {
     pte_t* pte = vmm_walk_page_tables(as, va, 1);
     if (!pte) {
         return -1;  /* Couldn't create page table */
+    }
+
+    /* For user mappings, the PDE must also be user-accessible.
+     * If the page table already existed as supervisor-only, upgrade it. */
+    if (flags & PTE_USER) {
+        pde_t* pde = &as->pd->entries[PDE_INDEX(va)];
+        *pde |= PTE_USER;
     }
     
     /* If page already mapped, unmap first (avoids frame leak) */
