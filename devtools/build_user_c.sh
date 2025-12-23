@@ -22,6 +22,7 @@ obj_libc_string="tmp/user_libc_string.o"
 obj_libc_stdio="tmp/user_libc_stdio.o"
 obj_libc_fcntl="tmp/user_libc_fcntl.o"
 obj_libc_dirent="tmp/user_libc_dirent.o"
+obj_libc_gui="tmp/user_libc_gui.o"
 lib_archive="tmp/libeync.a"
 
 # Prefer a cross-compiler if available.
@@ -66,9 +67,10 @@ fi
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/stdio.c" -o "$obj_libc_stdio"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/fcntl.c" -o "$obj_libc_fcntl"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/dirent.c" -o "$obj_libc_dirent"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/gui.c" -o "$obj_libc_gui"
 
 rm -f "$lib_archive"
-ar rcs "$lib_archive" "$obj_libc_unistd" "$obj_libc_string" "$obj_libc_stdio" "$obj_libc_fcntl" "$obj_libc_dirent"
+ar rcs "$lib_archive" "$obj_libc_unistd" "$obj_libc_string" "$obj_libc_stdio" "$obj_libc_fcntl" "$obj_libc_dirent" "$obj_libc_gui"
 
 "$CC" "${CFLAGS[@]}" -c "$src" -o "$obj_app"
 

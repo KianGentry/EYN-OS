@@ -11,7 +11,15 @@ enum {
     EYN_SYSCALL_WRITE  = 1,
     EYN_SYSCALL_EXIT   = 2,
     EYN_SYSCALL_READ   = 3,
+    EYN_SYSCALL_OPEN   = 4,
+    EYN_SYSCALL_CLOSE  = 5,
     EYN_SYSCALL_GETKEY = 6,
+
+    EYN_SYSCALL_GETDENTS = 7,
+
+    // GUI / tiling manager integration
+    EYN_SYSCALL_GUI_CREATE    = 8,
+    EYN_SYSCALL_GUI_SET_TITLE = 9,
 };
 
 static inline int eyn_sys_write(int fd, const void* buf, int len) {

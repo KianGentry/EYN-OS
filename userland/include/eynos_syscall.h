@@ -16,6 +16,10 @@ enum {
     EYN_SYSCALL_CLOSE  = 5,
     EYN_SYSCALL_GETKEY = 6,
     EYN_SYSCALL_GETDENTS = 7,
+
+    // GUI / tiling manager integration
+    EYN_SYSCALL_GUI_CREATE    = 8,
+    EYN_SYSCALL_GUI_SET_TITLE = 9,
 };
 
 static inline int eyn_syscall3(int n, int a1, const void* a2, int a3) {

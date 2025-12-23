@@ -72,6 +72,9 @@ uint32 syscall_dispatch(regs_t* r);
 // Reset the user-task file descriptor table (used when starting/ending ring3 tasks).
 void syscall_reset_user_fds(void);
 
+// Reset/cleanup user-task GUI resources (created tiles + title strings).
+void syscall_reset_user_guis(void);
+
 // CPU exception C dispatcher (called from src/cpu/isr.asm)
 void isr_dispatch(regs_t* regs);
 

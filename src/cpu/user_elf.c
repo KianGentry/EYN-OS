@@ -167,6 +167,7 @@ int user_elf_run(uint8 drive, const char* abspath) {
 
     // Reset per-task syscall state.
     syscall_reset_user_fds();
+    syscall_reset_user_guis();
 
     g_user_interrupt = 0;
     g_user_task_active = 1;

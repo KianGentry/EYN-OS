@@ -250,6 +250,9 @@ uint32 get_last_error_eip() {
 #define SYSCALL_CLOSE 5
 #define SYSCALL_GETKEY 6
 #define SYSCALL_GETDENTS 7
+// GUI/tiler syscalls (user-mode)
+#define SYSCALL_GUI_CREATE 8
+#define SYSCALL_GUI_SET_TITLE 9
 
 typedef struct {
     int used;
@@ -276,6 +279,71 @@ void syscall_reset_user_fds(void) {
     }
 }
 
+typedef struct {
+    int used;
+    int tile_idx;
+    char* title;
+    char* status_left;
+} user_gui_t;
+
+// handle 0 is reserved for the current user task's existing tile (g_user_task_term).
+#define USER_GUI_MAX 8
+static user_gui_t g_user_guis[USER_GUI_MAX];
+static char* g_user_self_title = NULL;
+static int g_user_self_tile_idx = -1;
+
+static void user_gui_free_entry(user_gui_t* e) {
+    if (!e) return;
+    if (e->tile_idx >= 0) {
+        tile_close(e->tile_idx);
+    }
+    if (e->title) free(e->title);
+    if (e->status_left) free(e->status_left);
+    e->used = 0;
+    e->tile_idx = -1;
+    e->title = NULL;
+    e->status_left = NULL;
+}
+
+static int user_gui_alloc_handle(void) {
+    // start at 1; handle 0 reserved for "self"
+    for (int i = 1; i < USER_GUI_MAX; ++i) {
+        if (!g_user_guis[i].used) {
+            g_user_guis[i].used = 1;
+            g_user_guis[i].tile_idx = -1;
+            g_user_guis[i].title = NULL;
+            g_user_guis[i].status_left = NULL;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static user_gui_t* user_gui_get(int handle) {
+    if (handle <= 0 || handle >= USER_GUI_MAX) return NULL;
+    if (!g_user_guis[handle].used) return NULL;
+    return &g_user_guis[handle];
+}
+
+void syscall_reset_user_guis(void) {
+    // Close/free any created GUI tiles
+    for (int i = 1; i < USER_GUI_MAX; ++i) {
+        if (g_user_guis[i].used) {
+            user_gui_free_entry(&g_user_guis[i]);
+        }
+    }
+    // Restore the current tile title if the user task changed it.
+    if (g_user_self_title) {
+        free(g_user_self_title);
+        g_user_self_title = NULL;
+    }
+    if (tile_is_tiling_active() && g_user_self_tile_idx >= 0) {
+        tile_set_title_status(g_user_self_tile_idx, "EYN-OS Shell", NULL, NULL);
+        tile_invalidate_decorations(g_user_self_tile_idx);
+    }
+    g_user_self_tile_idx = -1;
+}
+
 static int copyin_cstr(char* dst, size_t dstsz, const char* user_src) {
     if (!dst || dstsz == 0 || !user_src) return -1;
     for (size_t i = 0; i < dstsz; ++i) {
@@ -295,6 +363,19 @@ static void trim_trailing_crlf(char* s) {
         s[n - 1] = '\0';
         n--;
     }
+}
+
+static char* kstrdup_bounded(const char* s, size_t max_len) {
+    if (!s) return NULL;
+    size_t n = 0;
+    while (n < max_len && s[n] != '\0') {
+        n++;
+    }
+    char* out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+    memcpy(out, s, n);
+    out[n] = '\0';
+    return out;
 }
 
 static int user_fd_alloc(void) {
@@ -695,11 +776,96 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = (uint32)(ctx.written * (int)sizeof(eyn_dirent_t));
             break;
         }
+        case SYSCALL_GUI_CREATE: {
+            // gui_create(title_ptr=arg1, status_left_ptr=arg2)
+            if (!tile_is_tiling_active() || !g_user_task_active) { regs->eax = (uint32)-1; break; }
+
+            const char* user_title = (const char*)arg1;
+            const char* user_status = (const char*)arg2;
+            if (!user_title) { regs->eax = (uint32)-1; break; }
+
+            char title_tmp[96];
+            if (copyin_cstr(title_tmp, sizeof(title_tmp), user_title) != 0) { regs->eax = (uint32)-1; break; }
+            trim_trailing_crlf(title_tmp);
+            if (!title_tmp[0]) strncpy(title_tmp, "User App", sizeof(title_tmp) - 1);
+            title_tmp[sizeof(title_tmp) - 1] = '\0';
+
+            char status_tmp[64];
+            status_tmp[0] = '\0';
+            if (user_status) {
+                if (copyin_cstr(status_tmp, sizeof(status_tmp), user_status) != 0) {
+                    status_tmp[0] = '\0';
+                }
+                trim_trailing_crlf(status_tmp);
+            }
+
+            int handle = user_gui_alloc_handle();
+            if (handle < 0) { regs->eax = (uint32)-1; break; }
+
+            // Allocate persistent strings (tiler stores pointers)
+            user_gui_t* e = &g_user_guis[handle];
+            e->title = kstrdup_bounded(title_tmp, sizeof(title_tmp) - 1);
+            e->status_left = status_tmp[0] ? kstrdup_bounded(status_tmp, sizeof(status_tmp) - 1) : NULL;
+            if (!e->title) {
+                user_gui_free_entry(e);
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            int tile_idx = tile_create_gui_tile(e->title, e->status_left);
+            if (tile_idx < 0) {
+                user_gui_free_entry(e);
+                regs->eax = (uint32)-1;
+                break;
+            }
+            e->tile_idx = tile_idx;
+            tile_invalidate_decorations(tile_idx);
+            regs->eax = (uint32)handle;
+            break;
+        }
+        case SYSCALL_GUI_SET_TITLE: {
+            // gui_set_title(handle=arg1, title_ptr=arg2)
+            if (!tile_is_tiling_active() || !g_user_task_active) { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            const char* user_title = (const char*)arg2;
+            if (!user_title) { regs->eax = (uint32)-1; break; }
+
+            char title_tmp[96];
+            if (copyin_cstr(title_tmp, sizeof(title_tmp), user_title) != 0) { regs->eax = (uint32)-1; break; }
+            trim_trailing_crlf(title_tmp);
+
+            if (handle == 0) {
+                int tile_idx = tile_get_focused();
+                if (tile_idx < 0) { regs->eax = (uint32)-1; break; }
+                char* new_title = kstrdup_bounded(title_tmp, sizeof(title_tmp) - 1);
+                if (!new_title) { regs->eax = (uint32)-1; break; }
+                if (g_user_self_title) free(g_user_self_title);
+                g_user_self_title = new_title;
+                g_user_self_tile_idx = tile_idx;
+                tile_set_title_status(tile_idx, g_user_self_title, NULL, NULL);
+                tile_invalidate_decorations(tile_idx);
+                regs->eax = 0;
+                break;
+            }
+
+            user_gui_t* e = user_gui_get(handle);
+            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+            char* new_title = kstrdup_bounded(title_tmp, sizeof(title_tmp) - 1);
+            if (!new_title) { regs->eax = (uint32)-1; break; }
+            if (e->title) free(e->title);
+            e->title = new_title;
+            tile_set_title_status(e->tile_idx, e->title, e->status_left, NULL);
+            tile_invalidate_decorations(e->tile_idx);
+            regs->eax = 0;
+            break;
+        }
         case SYSCALL_EXIT: {
             // Keep this visible in the graphical shell too.
             char msg[64];
             int n = snprintf(msg, sizeof(msg), "[SYSCALL] Program exited with code %d\n", (int)arg1);
             if (n > 0) syscall_console_write(msg, n);
+            // Clean up any GUI resources created by this user task.
+            syscall_reset_user_guis();
             g_user_task_active = 0;
             g_user_task_term = -1;
             g_user_interrupt = 0;
