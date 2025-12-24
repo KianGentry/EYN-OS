@@ -21,6 +21,14 @@ void tile_close(int tile_idx);
 // Get the currently focused tile index (0..tile_count-1)
 int tile_get_focused();
 
+// Find the tile index that is backed by a given vterm index.
+// Returns -1 if not found.
+int tile_find_by_term(int term_idx);
+
+// Get the content rect (inside borders/title/status) in screen pixels.
+// Outputs are set to 0 on failure.
+void tile_get_content_rect(int tile_idx, int* out_x, int* out_y, int* out_w, int* out_h);
+
 // Tiling mode detection
 int tile_is_tiling_active();
 

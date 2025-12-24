@@ -20,6 +20,15 @@ enum {
     // GUI / tiling manager integration
     EYN_SYSCALL_GUI_CREATE    = 8,
     EYN_SYSCALL_GUI_SET_TITLE = 9,
+
+    EYN_SYSCALL_GUI_BEGIN      = 10,
+    EYN_SYSCALL_GUI_CLEAR      = 11,
+    EYN_SYSCALL_GUI_FILL_RECT  = 12,
+    EYN_SYSCALL_GUI_DRAW_TEXT  = 13,
+    EYN_SYSCALL_GUI_PRESENT    = 14,
+    EYN_SYSCALL_GUI_POLL_EVENT = 15,
+    EYN_SYSCALL_GUI_WAIT_EVENT = 16,
+    EYN_SYSCALL_GUI_ATTACH     = 17,
 };
 
 static inline int eyn_syscall3(int n, int a1, const void* a2, int a3) {

@@ -1677,6 +1677,41 @@ void tile_close(int tile_idx) {
 
 int tile_get_focused() { return focused; }
 
+int tile_find_by_term(int term_idx) {
+    if (term_idx < 0 || term_idx >= MAX_TILES) return -1;
+    for (int i = 0; i < tile_count; ++i) {
+        if (tiles[i].active && tiles[i].term_idx == term_idx) return i;
+    }
+    return -1;
+}
+
+void tile_get_content_rect(int tile_idx, int* out_x, int* out_y, int* out_w, int* out_h) {
+    if (out_x) *out_x = 0;
+    if (out_y) *out_y = 0;
+    if (out_w) *out_w = 0;
+    if (out_h) *out_h = 0;
+    if (tile_idx < 0 || tile_idx >= tile_count) return;
+
+    tile_t* t = &tiles[tile_idx];
+    if (t->type == TILE_EMPTY) return;
+
+    int title_h = (fullscreen_tile == tile_idx) ? 0 : 16;
+    int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
+    int status_h = show_status ? 12 : 0;
+
+    int cx = t->x + 1;
+    int cy = t->y + title_h + status_h + 1;
+    int cw = t->width - 2;
+    int ch = t->height - (title_h + status_h) - 2;
+    if (cw < 0) cw = 0;
+    if (ch < 0) ch = 0;
+
+    if (out_x) *out_x = cx;
+    if (out_y) *out_y = cy;
+    if (out_w) *out_w = cw;
+    if (out_h) *out_h = ch;
+}
+
 int tile_is_tiling_active() {
     return tile_count > 0;
 }

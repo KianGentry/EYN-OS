@@ -8,3 +8,35 @@ int gui_create(const char* title, const char* status_left) {
 int gui_set_title(int handle, const char* title) {
     return eyn_syscall3(EYN_SYSCALL_GUI_SET_TITLE, handle, title, 0);
 }
+
+int gui_attach(const char* title, const char* status_left) {
+    return eyn_syscall3_pii(EYN_SYSCALL_GUI_ATTACH, title, (int)status_left, 0);
+}
+
+int gui_begin(int handle) {
+    return eyn_syscall1(EYN_SYSCALL_GUI_BEGIN, handle);
+}
+
+int gui_clear(int handle, const gui_rgb_t* rgb) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_CLEAR, handle, rgb, 0);
+}
+
+int gui_fill_rect(int handle, const gui_rect_t* rect) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_FILL_RECT, handle, rect, 0);
+}
+
+int gui_draw_text(int handle, const gui_text_t* cmd) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_DRAW_TEXT, handle, cmd, 0);
+}
+
+int gui_present(int handle) {
+    return eyn_syscall1(EYN_SYSCALL_GUI_PRESENT, handle);
+}
+
+int gui_poll_event(int handle, gui_event_t* out_event) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_POLL_EVENT, handle, out_event, (int)sizeof(*out_event));
+}
+
+int gui_wait_event(int handle, gui_event_t* out_event) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_WAIT_EVENT, handle, out_event, (int)sizeof(*out_event));
+}
