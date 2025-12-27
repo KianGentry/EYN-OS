@@ -44,6 +44,7 @@ OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_s
 OBJS += obj/tiling_manager.o obj/tiling_cmd.o
 OBJS += obj/terminals.o
 OBJS += obj/partition.o obj/diskmgr.o
+OBJS += obj/pci.o
 OUTPUT = tmp/boot/kernel.bin
 
 # Source files to object files
@@ -116,6 +117,9 @@ obj/mouse.o:src/drivers/mouse.c
 
 obj/serial.o:src/drivers/serial.c
 	$(COMPILER) $(CFLAGS) src/drivers/serial.c -o obj/serial.o
+
+obj/pci.o:src/drivers/pci.c
+	$(COMPILER) $(CFLAGS) src/drivers/pci.c -o obj/pci.o
 
 obj/panic.o:src/misc/panic.c
 	$(COMPILER) $(CFLAGS) src/misc/panic.c -o obj/panic.o
@@ -347,8 +351,10 @@ testimg: eynfs_format
 
 run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
-	-hda eynfs.img \
+	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
+	-netdev user,id=net0 \
+	-device e1000,netdev=net0 \
 	-m 9M
 
 # Debug run with serial logging and detailed CPU/interrupt logs
@@ -356,8 +362,10 @@ run: build
 qemu-debug: build
 	@mkdir -p tmp
 	qemu-system-i386 -cdrom EYNOS.iso \
-	-hda eynfs.img \
+	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
+	-netdev user,id=net0 \
+	-device e1000,netdev=net0 \
 	-serial stdio \
 	-d int,cpu_reset -D tmp/qemu-debug.log \
 	-no-reboot -no-shutdown \

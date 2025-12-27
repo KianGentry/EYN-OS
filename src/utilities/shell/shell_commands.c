@@ -23,6 +23,7 @@
 #include <fs/vfs.h>
 #include <tile_manager.h>
 #include <rei.h>
+#include <drivers/pci.h>
 
 // Forward declarations for command handlers
 void help_cmd(string arg);
@@ -47,6 +48,7 @@ void error_cmd(string arg);
 void validate_cmd(string arg);
 void portable_cmd(string arg);
 void init_cmd(string arg);
+void pciscan_cmd(string arg);
 // Diagnostics/testing commands
 void panic_cmd(string arg);
 void assertfail_cmd(string arg);
@@ -716,6 +718,64 @@ REGISTER_SHELL_COMMAND(error, "error", error_cmd, CMD_STREAMING, "Display system
 REGISTER_SHELL_COMMAND(validate, "validate", validate_cmd, CMD_STREAMING, "Display input validation statistics and test validation.\nUsage: validate [test|stats]", "validate");
 REGISTER_SHELL_COMMAND(portable, "portable", portable_cmd, CMD_ESSENTIAL, "Display portability optimizations and memory usage.\nUsage: portable [stats|optimize]", "portable");
 REGISTER_SHELL_COMMAND(init, "init", init_cmd, CMD_ESSENTIAL, "Initialize full system services (ATA drives, etc.).\nUsage: init", "init");
+REGISTER_SHELL_COMMAND(pciscan_cmd_info, "pciscan", pciscan_cmd, CMD_DIAGNOSTIC, "Scan PCI devices and print vendor/device IDs and BAR0.\nUsage: pciscan [net]\nTip: e1000 usually shows as 8086:100E.", "pciscan net");
+
+typedef struct pciscan_ctx {
+    uint32 count;
+    uint32 shown;
+    uint8 filter_net_only;
+} pciscan_ctx;
+
+static void pciscan_cb(const pci_device_info* info, void* user)
+{
+    // Bring-up helper: keep this output stable and low-risk.
+    // Note: the kernel printf supports %d/%x/%s/%c (not %u), so avoid unsigned-only specifiers.
+    pciscan_ctx* ctx = (pciscan_ctx*)user;
+    if (!ctx || !info) return;
+
+    ctx->count++;
+
+    if (ctx->filter_net_only && info->class_code != 0x02) {
+        return;
+    }
+
+    uint16 command = pci_read_config_word(info->bus, info->device, info->function, 0x04);
+    uint32 bar0 = pci_read_config_dword(info->bus, info->device, info->function, 0x10);
+    uint8 bar0_is_io = (uint8)(bar0 & 0x1u);
+    uint32 bar0_base = bar0_is_io ? (bar0 & ~0x3u) : (bar0 & ~0xFu);
+
+        printf("%02x:%02x.%d %04x:%04x class=%02x/%02x/%02x hdr=%02x cmd=%04x bar0=%s:%08x\n",
+            (unsigned)info->bus, (unsigned)info->device, (int)info->function,
+            (unsigned)info->vendor_id, (unsigned)info->device_id,
+            (unsigned)info->class_code, (unsigned)info->subclass, (unsigned)info->prog_if,
+            (unsigned)info->header_type,
+            (unsigned)command,
+            bar0_is_io ? "io" : "mmio",
+            (unsigned)bar0_base);
+
+    ctx->shown++;
+}
+
+void pciscan_cmd(string arg)
+{
+    pciscan_ctx ctx;
+    ctx.count = 0;
+    ctx.shown = 0;
+    ctx.filter_net_only = 0;
+
+    if (arg) {
+        uint32 i = 0;
+        while (arg[i] && arg[i] != ' ') i++;
+        while (arg[i] == ' ') i++;
+        if (arg[i] == 'n' && arg[i + 1] == 'e' && arg[i + 2] == 't') {
+            ctx.filter_net_only = 1;
+        }
+    }
+
+    printf("PCI scan (%s):\n", ctx.filter_net_only ? "net" : "all");
+    pci_enumerate(pciscan_cb, &ctx);
+    printf("Found %d device functions (%d shown).\n", (int)ctx.count, (int)ctx.shown);
+}
 
 // Diagnostics/testing command implementations
 void panic_cmd(string ch) {

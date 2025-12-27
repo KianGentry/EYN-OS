@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2025-12-27 05:39:12
+This document is auto-generated from the source code. Last updated: 2025-12-27 06:21:45
 
-**Total Commands:** 58
+**Total Commands:** 59
 
 ## Table of Contents
 
@@ -350,6 +350,26 @@ Usage: panic yes
 **Example:**
 ```bash
 panic yes
+```
+
+---
+
+### pciscan
+
+**Handler:** `pciscan_cmd`
+
+**Type:** CMD_DIAGNOSTIC
+
+**File:** `shell_commands.c`
+
+**Description:**
+Scan PCI devices and print vendor/device IDs and BAR0.
+Usage: pciscan [net]
+Tip: e1000 usually shows as 8086:100E.
+
+**Example:**
+```bash
+pciscan net
 ```
 
 ---
@@ -1131,7 +1151,7 @@ run user_hello.uelf
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 26 |
+| Streaming Commands | 27 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |

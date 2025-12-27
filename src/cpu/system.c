@@ -3,8 +3,6 @@
 #include <stddef.h>
 #include <util.h> // for g_user_interrupt
 
-
-
 uint8 inportb (uint16 _port)
 {
     	uint8 rv;
@@ -27,6 +25,20 @@ uint16 inw(uint16 _port)
 void outw(uint16 _port, uint16 _data)
 {
     __asm__ __volatile__ ("outw %1, %0" : : "dN" (_port), "a" (_data));
+}
+
+uint32 inl(uint16 _port)
+{
+    // Needed for interfaces that expose 32-bit I/O registers (e.g., PCI config access).
+    uint32 rv;
+    __asm__ __volatile__ ("inl %1, %0" : "=a" (rv) : "dN" (_port));
+    return rv;
+}
+
+void outl(uint16 _port, uint32 _data)
+{
+    // Keep this as a thin wrapper so callsites stay readable and consistent.
+    __asm__ __volatile__ ("outl %1, %0" : : "dN" (_port), "a" (_data));
 }
 
 // Simple timer-based sleep using CPU cycles but with better efficiency

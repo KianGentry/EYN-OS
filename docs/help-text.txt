@@ -24,6 +24,7 @@ Streaming Commands:
   munmap          - Unmap a memory-mapped file
   pagingguards    - Install optional paging guards (null-page, .text/.rodata RO).
   panic           - Trigger a kernel panic to test diagnostics.
+  pciscan         - Scan PCI devices and print vendor/device IDs and BAR0.
   pf              - Intentionally trigger a page fault (read/write/exec a chosen address).
   predict         - Predictive memory management
   rect            - Draw a rectangle.

@@ -20,6 +20,11 @@ int ata_logical_drive_present(uint8 logical_drive);
 uint16 inw(uint16 _port);
 void outw(uint16 _port, uint16 _data);
 
+// 32-bit port I/O is required by some PC hardware interfaces.
+// Primary current use: PCI config mechanism #1 (0xCF8/0xCFC) for device discovery.
+uint32 inl(uint16 _port);
+void outl(uint16 _port, uint32 _data);
+
 
 
 #endif
