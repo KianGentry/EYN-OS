@@ -23,6 +23,11 @@ DEFAULT_TESTDIR = 'testdir/'
 DEFAULT_IMG = 'eynfs.img'
 
 
+def _abs_lba(sb, block_num: int) -> int:
+    """Translate filesystem-relative block numbers to absolute disk LBA."""
+    return int(sb['_partition_start']) + int(block_num)
+
+
 def find_eynfs_partition(f):
     """Find the first EYNFS partition in the MBR and return its start LBA."""
     f.seek(0)
@@ -63,15 +68,16 @@ def read_superblock(f, partition_start=None):
         'root_dir_block': fields[4],
         'free_block_map': fields[5],
         'name_table_block': fields[6],
+        '_partition_start': partition_start,
     }
 
-def read_dir_chain(f, start_block):
+def read_dir_chain(f, sb, start_block):
     """Read the full directory chain into a list of entries and block numbers."""
     entries = []
     blocks = []
     block = start_block
     while block:
-        f.seek(block * EYNFS_BLOCK_SIZE)
+        f.seek(_abs_lba(sb, block) * EYNFS_BLOCK_SIZE)
         data = f.read(EYNFS_BLOCK_SIZE)
         next_block = struct.unpack('<I', data[:4])[0]
         block_entries = []
@@ -94,17 +100,23 @@ def find_free_dir_slot(entries):
     return len(entries)
 
 def find_free_block(f, sb):
-    # Simple scan for a free block in the bitmap
+    # Scan for a free block in the bitmap.
+    # NOTE: the bitmap can span multiple blocks when total_blocks > 4096.
     bitmap_block = sb['free_block_map']
-    f.seek(bitmap_block * EYNFS_BLOCK_SIZE)
-    bitmap = bytearray(f.read(EYNFS_BLOCK_SIZE))
-    for i in range(sb['total_blocks']):
+    total_blocks = sb['total_blocks']
+    bitmap_bytes = (total_blocks + 7) // 8
+    bitmap_blocks = (bitmap_bytes + EYNFS_BLOCK_SIZE - 1) // EYNFS_BLOCK_SIZE
+
+    f.seek(_abs_lba(sb, bitmap_block) * EYNFS_BLOCK_SIZE)
+    bitmap = bytearray(f.read(bitmap_blocks * EYNFS_BLOCK_SIZE))
+
+    for i in range(total_blocks):
         byte = i // 8
         bit = i % 8
         if not (bitmap[byte] & (1 << bit)):
             # Mark as used
             bitmap[byte] |= (1 << bit)
-            f.seek(bitmap_block * EYNFS_BLOCK_SIZE)
+            f.seek(_abs_lba(sb, bitmap_block) * EYNFS_BLOCK_SIZE)
             f.write(bitmap)
             return i
     raise RuntimeError('No free blocks')
@@ -126,16 +138,16 @@ def write_file_data(f, sb, data):
         block_data[4:4+len(chunk)] = chunk
         if prev_block:
             # Update previous block's next pointer (only 4 bytes)
-            f.seek(prev_block * EYNFS_BLOCK_SIZE)
+            f.seek(_abs_lba(sb, prev_block) * EYNFS_BLOCK_SIZE)
             f.write(struct.pack('<I', block))
-        f.seek(block * EYNFS_BLOCK_SIZE)
+        f.seek(_abs_lba(sb, block) * EYNFS_BLOCK_SIZE)
         f.write(block_data)
         prev_block = block
         written += len(chunk)
     return first_block, size
 
-def update_dir_entry(f, block, entry_idx, entry):
-    f.seek(block * EYNFS_BLOCK_SIZE + 4 + entry_idx * DIR_ENTRY_SIZE)
+def update_dir_entry(f, sb, block, entry_idx, entry):
+    f.seek(_abs_lba(sb, block) * EYNFS_BLOCK_SIZE + 4 + entry_idx * DIR_ENTRY_SIZE)
     f.write(struct.pack(DIR_ENTRY_STRUCT, *entry))
 
 def find_dir_block(f, sb, path):
@@ -144,10 +156,16 @@ def find_dir_block(f, sb, path):
     parts = [p for p in path.strip('/').split('/') if p]
     block = sb['root_dir_block']
     for part in parts:
-        entries, _ = read_dir_chain(f, block)
+        entries, _ = read_dir_chain(f, sb, block)
         found = False
         for entry in entries:
-            name = entry[0].split(b'\0',1)[0].decode('utf-8')
+            raw_name = entry[0].split(b'\0', 1)[0]
+            if not raw_name:
+                continue
+            try:
+                name = raw_name.decode('utf-8')
+            except UnicodeDecodeError:
+                continue
             if name == part and entry[1] == EYNFS_TYPE_DIR:
                 block = entry[5]
                 found = True
@@ -157,7 +175,7 @@ def find_dir_block(f, sb, path):
     return block
 
 def add_dir(f, sb, parent_block, dirname):
-    entries, blocks = read_dir_chain(f, parent_block)
+    entries, blocks = read_dir_chain(f, sb, parent_block)
     slot = find_free_dir_slot(entries)
     
     # If no free slot in existing blocks, allocate a new block
@@ -169,14 +187,14 @@ def add_dir(f, sb, parent_block, dirname):
         new_parent_block = find_free_block(f, sb)
         
         # Link the last block to the new block
-        f.seek(last_block * EYNFS_BLOCK_SIZE)
+        f.seek(_abs_lba(sb, last_block) * EYNFS_BLOCK_SIZE)
         data = bytearray(f.read(EYNFS_BLOCK_SIZE))
         struct.pack_into('<I', data, 0, new_parent_block)  # Set next_block pointer
-        f.seek(last_block * EYNFS_BLOCK_SIZE)
+        f.seek(_abs_lba(sb, last_block) * EYNFS_BLOCK_SIZE)
         f.write(data)
         
         # Initialize the new block
-        f.seek(new_parent_block * EYNFS_BLOCK_SIZE)
+        f.seek(_abs_lba(sb, new_parent_block) * EYNFS_BLOCK_SIZE)
         new_block_data = bytearray(EYNFS_BLOCK_SIZE)
         struct.pack_into('<I', new_block_data, 0, 0)  # next_block = 0
         f.write(new_block_data)
@@ -194,15 +212,15 @@ def add_dir(f, sb, parent_block, dirname):
     )
     block_num, _ = blocks[slot // ((EYNFS_BLOCK_SIZE-4)//DIR_ENTRY_SIZE)]
     entry_idx = slot % ((EYNFS_BLOCK_SIZE-4)//DIR_ENTRY_SIZE)
-    update_dir_entry(f, block_num, entry_idx, entry)
+    update_dir_entry(f, sb, block_num, entry_idx, entry)
     # Zero out the new directory block
-    f.seek(new_block * EYNFS_BLOCK_SIZE)
+    f.seek(_abs_lba(sb, new_block) * EYNFS_BLOCK_SIZE)
     f.write(bytearray(EYNFS_BLOCK_SIZE))
     print(f"Created directory {dirname} at block {new_block}")
     return new_block
 
 def add_file(f, sb, dir_block, filename, filedata):
-    entries, blocks = read_dir_chain(f, dir_block)
+    entries, blocks = read_dir_chain(f, sb, dir_block)
     slot = find_free_dir_slot(entries)
     
     # If no free slot in existing blocks, allocate a new block
@@ -214,14 +232,14 @@ def add_file(f, sb, dir_block, filename, filedata):
         new_block = find_free_block(f, sb)
         
         # Link the last block to the new block
-        f.seek(last_block * EYNFS_BLOCK_SIZE)
+        f.seek(_abs_lba(sb, last_block) * EYNFS_BLOCK_SIZE)
         data = bytearray(f.read(EYNFS_BLOCK_SIZE))
         struct.pack_into('<I', data, 0, new_block)  # Set next_block pointer
-        f.seek(last_block * EYNFS_BLOCK_SIZE)
+        f.seek(_abs_lba(sb, last_block) * EYNFS_BLOCK_SIZE)
         f.write(data)
         
         # Initialize the new block
-        f.seek(new_block * EYNFS_BLOCK_SIZE)
+        f.seek(_abs_lba(sb, new_block) * EYNFS_BLOCK_SIZE)
         new_block_data = bytearray(EYNFS_BLOCK_SIZE)
         struct.pack_into('<I', new_block_data, 0, 0)  # next_block = 0
         f.write(new_block_data)
@@ -239,20 +257,20 @@ def add_file(f, sb, dir_block, filename, filedata):
     )
     block_num, _ = blocks[slot // ((EYNFS_BLOCK_SIZE-4)//DIR_ENTRY_SIZE)]
     entry_idx = slot % ((EYNFS_BLOCK_SIZE-4)//DIR_ENTRY_SIZE)
-    update_dir_entry(f, block_num, entry_idx, entry)
+    update_dir_entry(f, sb, block_num, entry_idx, entry)
     print(f"Copied {filename} to EYNFS. Size: {size} bytes, First block: {first_block}")
 
 def clear_root_directory(f, sb):
     # Zero out all directory entries in the root directory chain
     block = sb['root_dir_block']
     while block:
-        f.seek(block * EYNFS_BLOCK_SIZE)
+        f.seek(_abs_lba(sb, block) * EYNFS_BLOCK_SIZE)
         data = bytearray(f.read(EYNFS_BLOCK_SIZE))
         next_block = struct.unpack('<I', data[:4])[0]
         # Zero out all entries (but keep the next pointer)
         for i in range(4, EYNFS_BLOCK_SIZE):
             data[i] = 0
-        f.seek(block * EYNFS_BLOCK_SIZE)
+        f.seek(_abs_lba(sb, block) * EYNFS_BLOCK_SIZE)
         f.write(data)
         block = next_block
 

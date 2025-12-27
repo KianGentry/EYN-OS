@@ -216,12 +216,14 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
     
     // Send read command
     outportb(io_base + ATA_REG_COMMAND, ATA_CMD_READ_PIO);
+    ata_io_wait(io_base);
     
     // Wait for BSY to clear with better error handling
-    int timeout = 10000;
+    int timeout = 100000;
     while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout);
     if (timeout == 0) { 
-        printf("ATA read timeout: Drive %d LBA %d - BSY timeout\n", drive, lba);
+        // vga printf formatter does not support %u
+        printf("ATA read timeout: Drive %d LBA %d - BSY timeout\n", (int)drive, (int)lba);
         return -1; 
     }
     
@@ -229,15 +231,16 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
     uint8 status = inportb(io_base + ATA_REG_STATUS);
     if (status & ATA_SR_ERR) {
         uint8 error = inportb(io_base + ATA_REG_ERROR);
-        printf("ATA read error: Drive %d LBA %d - Error 0x%02X\n", drive, lba, error);
+        // vga printf formatter does not support width/padding or %X
+        printf("ATA read error: Drive %d LBA %d - Error 0x%x\n", (int)drive, (int)lba, (int)error);
         return -1;
     }
     
     // Wait for DRQ to set
-    timeout = 10000;
+    timeout = 100000;
     while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRQ) && --timeout);
     if (timeout == 0) { 
-        printf("ATA read timeout: Drive %d LBA %d - DRQ timeout\n", drive, lba);
+        printf("ATA read timeout: Drive %d LBA %d - DRQ timeout\n", (int)drive, (int)lba);
         return -1; 
     }
     
@@ -269,12 +272,13 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
     
     // Send write command
     outportb(io_base + ATA_REG_COMMAND, ATA_CMD_WRITE_PIO);
+    ata_io_wait(io_base);
 
     // Wait for BSY to clear with better error handling
-    int timeout = 10000;
+    int timeout = 100000;
     while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout);
     if (timeout == 0) { 
-        printf("ATA write timeout: Drive %d LBA %d - BSY timeout\n", drive, lba);
+        printf("ATA write timeout: Drive %d LBA %d - BSY timeout\n", (int)drive, (int)lba);
         return -1; 
     }
     
@@ -282,15 +286,15 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
     uint8 status = inportb(io_base + ATA_REG_STATUS);
     if (status & ATA_SR_ERR) {
         uint8 error = inportb(io_base + ATA_REG_ERROR);
-        printf("ATA write error: Drive %d LBA %d - Error 0x%02X\n", drive, lba, error);
+        printf("ATA write error: Drive %d LBA %d - Error 0x%x\n", (int)drive, (int)lba, (int)error);
         return -1;
     }
     
     // Wait for DRQ to set
-    timeout = 10000;
+    timeout = 100000;
     while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRQ) && --timeout);
     if (timeout == 0) { 
-        printf("ATA write timeout: Drive %d LBA %d - DRQ timeout\n", drive, lba);
+        printf("ATA write timeout: Drive %d LBA %d - DRQ timeout\n", (int)drive, (int)lba);
         return -1; 
     }
 

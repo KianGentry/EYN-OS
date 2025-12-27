@@ -261,6 +261,8 @@ uint32 get_last_error_eip() {
 #define SYSCALL_GUI_POLL_EVENT 15
 #define SYSCALL_GUI_WAIT_EVENT 16
 #define SYSCALL_GUI_ATTACH 17
+#define SYSCALL_GUI_DRAW_LINE 18
+#define SYSCALL_GUI_GET_CONTENT_SIZE 19
 
 typedef struct {
     uint32 type;
@@ -283,6 +285,8 @@ typedef struct {
     int y;
     int w;
     int h;
+    int x2;
+    int y2;
     uint8 r;
     uint8 g;
     uint8 b;
@@ -293,6 +297,7 @@ enum {
     USER_GUI_CMD_CLEAR = 1,
     USER_GUI_CMD_FILL_RECT = 2,
     USER_GUI_CMD_TEXT = 3,
+    USER_GUI_CMD_LINE = 4,
 };
 
 typedef struct {
@@ -442,6 +447,15 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
             }
             continue;
         }
+
+        if (c->type == USER_GUI_CMD_LINE) {
+            int x1 = content_x + c->x;
+            int y1 = content_y + c->y;
+            int x2 = content_x + c->x2;
+            int y2 = content_y + c->y2;
+            drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
+            continue;
+        }
     }
 }
 
@@ -479,7 +493,7 @@ static void user_gui_mouse_cb(int tile_idx, const mouse_event_t* me, void* userd
 }
 
 static user_gui_t* user_gui_get(int handle) {
-    if (handle <= 0 || handle >= USER_GUI_MAX) return NULL;
+    if (handle < 0 || handle >= USER_GUI_MAX) return NULL;
     if (!g_user_guis[handle].used) return NULL;
     return &g_user_guis[handle];
 }
@@ -1153,12 +1167,54 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = 0;
             break;
         }
+
+        case SYSCALL_GUI_DRAW_LINE: {
+            // gui_draw_line(handle, line_ptr)
+            int handle = (int)arg1;
+            const void* user_cmd = (const void*)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!e || e->tile_idx < 0 || !user_cmd) { regs->eax = (uint32)-1; break; }
+            typedef struct { int32 x1, y1, x2, y2; uint8 r, g, b, _pad; } linecmd_t;
+            linecmd_t l;
+            if (copyin(&l, user_cmd, sizeof(l)) != 0) { regs->eax = (uint32)-1; break; }
+            if (e->cmd_count >= (int)(sizeof(e->cmds) / sizeof(e->cmds[0]))) { regs->eax = (uint32)-1; break; }
+            user_gui_cmd_t* c = &e->cmds[e->cmd_count++];
+            memset(c, 0, sizeof(*c));
+            c->type = USER_GUI_CMD_LINE;
+            c->x = (int)l.x1;
+            c->y = (int)l.y1;
+            c->x2 = (int)l.x2;
+            c->y2 = (int)l.y2;
+            c->r = l.r;
+            c->g = l.g;
+            c->b = l.b;
+            regs->eax = 0;
+            break;
+        }
         case SYSCALL_GUI_PRESENT: {
             // gui_present(handle)
             int handle = (int)arg1;
             user_gui_t* e = user_gui_get(handle);
             if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
             tile_invalidate_gui(e->tile_idx);
+            regs->eax = 0;
+            break;
+        }
+
+        case SYSCALL_GUI_GET_CONTENT_SIZE: {
+            // gui_get_content_size(handle, out_size_ptr)
+            int handle = (int)arg1;
+            void* user_out = (void*)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!e || e->tile_idx < 0 || !user_out) { regs->eax = (uint32)-1; break; }
+
+            int cx = 0, cy = 0, cw = 0, ch = 0;
+            tile_get_content_rect(e->tile_idx, &cx, &cy, &cw, &ch);
+            typedef struct { int32 w, h; } gui_size_t;
+            gui_size_t s;
+            s.w = (int32)cw;
+            s.h = (int32)ch;
+            if (copyout(user_out, &s, sizeof(s)) != 0) { regs->eax = (uint32)-1; break; }
             regs->eax = 0;
             break;
         }

@@ -195,11 +195,18 @@ def create_partitioned_disk(filename, total_size_mb=10, part1_size_mb=5, part2_s
         bitmap_lba = part1_start + 1
         nametable_lba = part1_start + 2
         rootdir_lba = part1_start + 3
+
+        # On-disk EYNFS fields store *filesystem-relative* block numbers:
+        #   0=superblock, 1=bitmap, 2=nametable, 3=rootdir
+        sb_block = 0
+        bitmap_block = 1
+        nametable_block = 2
+        rootdir_block = 3
         
         # Write superblock
         f.seek(sb_lba * SECTOR_SIZE)
         f.write(create_eynfs_superblock(
-            part1_sectors, rootdir_lba, bitmap_lba, nametable_lba
+            part1_sectors, rootdir_block, bitmap_block, nametable_block
         ))
         
         # Write bitmap (mark first 4 blocks as used)

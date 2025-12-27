@@ -62,6 +62,8 @@ static tile_gui_mouse_cb gui_mouse_cb[MAX_TILES];
 static void* gui_userdata[MAX_TILES];
 // Redraw gating for GUI clients: only redraw when invalidated or when rect/version/force changes
 static int gui_needs_redraw[MAX_TILES];
+// When set, a GUI client is redrawn every frame (subject to global FPS cap)
+static int gui_continuous_redraw[MAX_TILES];
 
 static int screen_w = 640; // pixels
 static int screen_h = 480; // pixels
@@ -197,6 +199,7 @@ typedef struct {
     tile_gui_mouse_cb mouse_cb;
     void* userdata;
     int needs_redraw;
+    int continuous_redraw;
     // state
     int minimized;
     int maximized;
@@ -681,6 +684,7 @@ int wm_create_window(const char* title, int x, int y, int w, int h, const char* 
             g_windows[i].mouse_cb = NULL;
             g_windows[i].userdata = NULL;
             g_windows[i].needs_redraw = 1;
+            g_windows[i].continuous_redraw = 0;
             g_windows[i].static_drawn = 0;
             g_windows[i].last_focused = 0;
             g_windows[i].minimized = 0;
@@ -703,6 +707,7 @@ void wm_register_gui_client2(int win_id, tile_gui_draw_cb draw_cb, tile_gui_key_
     g_windows[win_id].mouse_cb = mouse_cb;
     g_windows[win_id].userdata = userdata;
     g_windows[win_id].needs_redraw = 1;
+    g_windows[win_id].continuous_redraw = 0;
 }
 
 void wm_unregister_gui_client(int win_id) {
@@ -712,6 +717,7 @@ void wm_unregister_gui_client(int win_id) {
     g_windows[win_id].mouse_cb = NULL;
     g_windows[win_id].userdata = NULL;
     g_windows[win_id].needs_redraw = 0;
+    g_windows[win_id].continuous_redraw = 0;
 }
 
 void wm_set_title_status(int win_id, const char* title, const char* status_left, const char* status_right) {
@@ -725,6 +731,12 @@ void wm_set_title_status(int win_id, const char* title, const char* status_left,
 void wm_invalidate_window(int win_id) {
     if (win_id < 0 || win_id >= MAX_WINDOWS || !g_windows[win_id].used) return;
     g_windows[win_id].needs_redraw = 1;
+}
+
+void wm_set_continuous_redraw(int win_id, int enabled) {
+    if (win_id < 0 || win_id >= MAX_WINDOWS || !g_windows[win_id].used) return;
+    g_windows[win_id].continuous_redraw = enabled ? 1 : 0;
+    if (g_windows[win_id].continuous_redraw) g_windows[win_id].needs_redraw = 1;
 }
 
 void wm_close_window(int win_id) {
@@ -1725,6 +1737,7 @@ void tile_register_gui_client(int tile_idx, tile_gui_draw_cb draw_cb, tile_gui_k
     gui_mouse_cb[term] = NULL;
     gui_userdata[term] = userdata;
     gui_needs_redraw[term] = 1;
+    gui_continuous_redraw[term] = 0;
 }
 
 void tile_register_gui_client2(int tile_idx, tile_gui_draw_cb draw_cb, tile_gui_key_cb key_cb, tile_gui_mouse_cb mouse_cb, void* userdata) {
@@ -1736,6 +1749,7 @@ void tile_register_gui_client2(int tile_idx, tile_gui_draw_cb draw_cb, tile_gui_
     gui_mouse_cb[term] = mouse_cb;
     gui_userdata[term] = userdata;
     gui_needs_redraw[term] = 1;
+    gui_continuous_redraw[term] = 0;
 }
 
 int tile_create_gui_tile(const char* title, const char* status_left) {
@@ -1767,6 +1781,7 @@ void tile_unregister_gui_client(int tile_idx) {
         gui_userdata[term] = NULL;
         // No GUI anymore; clear any pending GUI invalidation
         gui_needs_redraw[term] = 0;
+        gui_continuous_redraw[term] = 0;
     }
 
     // If this tile is a shell, restore its title/status to the default shell values
@@ -1791,6 +1806,14 @@ void tile_invalidate_gui(int tile_idx) {
     int term = tiles[tile_idx].term_idx;
     if (term < 0 || term >= MAX_TILES) term = tile_idx;
     gui_needs_redraw[term] = 1;
+}
+
+void tile_set_gui_continuous_redraw(int tile_idx, int enabled) {
+    if (tile_idx < 0 || tile_idx >= MAX_TILES) return;
+    int term = tiles[tile_idx].term_idx;
+    if (term < 0 || term >= MAX_TILES) term = tile_idx;
+    gui_continuous_redraw[term] = enabled ? 1 : 0;
+    if (gui_continuous_redraw[term]) gui_needs_redraw[term] = 1;
 }
 
 void tile_render_once(void) {
@@ -2018,11 +2041,20 @@ int tile_pump_input_once(void) {
         return 1;
     }
 
-    int term = tiles[focused].term_idx;
+    // While a ring3 task is active, route normal keys to the task's tile.
+    // Mouse-based focus switching is not pumped in the PIT path, so relying on
+    // 'focused' can starve the user task of input.
+    int target_tile = focused;
+    if (g_user_task_active && g_user_task_term >= 0) {
+        int tt = tile_find_by_term(g_user_task_term);
+        if (tt >= 0 && tt < tile_count) target_tile = tt;
+    }
+
+    int term = tiles[target_tile].term_idx;
     if (term < 0 || term >= MAX_TILES) term = 0;
 
     if (gui_key_cb[term]) {
-        gui_key_cb[term](focused, key & 0xFFFF, gui_userdata[term]);
+        gui_key_cb[term](target_tile, key & 0xFFFF, gui_userdata[term]);
         gui_needs_redraw[term] = 1;
         return 1;
     }
@@ -2246,7 +2278,7 @@ void start_tiling_manager() {
                 gui_needs_redraw[term_for_i] = 1;
             }
             int has_gui = (gui_draw_cb[term_for_i] != NULL);
-            if (g_force_full_redraw || g_tiles_full_content_redraw || (has_gui && gui_needs_redraw[term_for_i]) || tiles[i].last_drawn_version != cur_ver || rect_changed) {
+            if (g_force_full_redraw || g_tiles_full_content_redraw || (has_gui && (gui_needs_redraw[term_for_i] || gui_continuous_redraw[term_for_i])) || tiles[i].last_drawn_version != cur_ver || rect_changed) {
                 // For GUI tiles, pre-mark the entire content area so subsequent per-primitive dirty marks
                 // merge into one big rect, ensuring a single bottom-up copy and avoiding visible sweeps.
                 if (has_gui && cw_now > 0 && ch_now > 0) {
@@ -2258,7 +2290,7 @@ void start_tiling_manager() {
                 tiles[i].last_cx = cx_now; tiles[i].last_cy = cy_now; tiles[i].last_cw = cw_now; tiles[i].last_ch = ch_now;
                 content_redrew = 1;
                 g_any_tile_content_redrew = 1;
-                if (has_gui) gui_needs_redraw[term_for_i] = 0;
+                if (has_gui && !gui_continuous_redraw[term_for_i]) gui_needs_redraw[term_for_i] = 0;
             }
             // Mark only the UI decoration areas (titlebar, statusbar, and 1px borders)
             // so the blit stays small while ensuring decorations are kept in sync.
@@ -2317,9 +2349,9 @@ void start_tiling_manager() {
                     w->last_focused = is_focused_win;
                 }
                 // Redraw content if requested
-                if (w->needs_redraw || g_force_full_redraw || g_any_tile_content_redrew) {
+                if (w->needs_redraw || w->continuous_redraw || g_force_full_redraw || g_any_tile_content_redrew) {
                     wm_draw_content(w);
-                    w->needs_redraw = 0;
+                    if (!w->continuous_redraw) w->needs_redraw = 0;
                 }
             }
         }
@@ -2849,12 +2881,12 @@ after_mouse_handling:
         if (drag_active) idle_ok = 0;
         // Any GUI clients asking for redraw? (per-term)
         for (int _ti = 0; _ti < MAX_TILES; ++_ti) {
-            if (gui_needs_redraw[_ti]) { idle_ok = 0; break; }
+            if (gui_needs_redraw[_ti] || gui_continuous_redraw[_ti]) { idle_ok = 0; break; }
         }
         // Any windows needing redraw?
         if (idle_ok && g_window_count > 0) {
             for (int _wi = 0; _wi < MAX_WINDOWS; ++_wi) {
-                if (g_windows[_wi].used && g_windows[_wi].needs_redraw) { idle_ok = 0; break; }
+                if (g_windows[_wi].used && (g_windows[_wi].needs_redraw || g_windows[_wi].continuous_redraw)) { idle_ok = 0; break; }
             }
         }
         if (idle_ok) {

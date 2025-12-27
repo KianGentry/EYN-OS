@@ -9,6 +9,7 @@
 #include <shell.h>
 #include <system.h>
 #include <serial.h>
+#include <watchdog.h>
 
 extern multiboot_info_t *g_mbi;
 
@@ -32,6 +33,18 @@ static int g_dirty_count = 0;
 static int g_vsync_enabled = 1;
 // Dirty strategy: 0=multi-rect smart merge, 1=collapse to single bounding rect per swap
 static int g_dirty_strategy = 0;
+
+// 5-bit and 6-bit to 8-bit expansion lookup tables (initialized on first use)
+static int g_565_lut_init = 0;
+static uint8_t g_lut5[32];
+static uint8_t g_lut6[64];
+
+static void vga_init_565_luts(void) {
+	if (g_565_lut_init) return;
+	for (int i = 0; i < 32; ++i) g_lut5[i] = (uint8_t)((i * 255 + 15) / 31);
+	for (int i = 0; i < 64; ++i) g_lut6[i] = (uint8_t)((i * 255 + 31) / 63);
+	g_565_lut_init = 1;
+}
 
 // Shell redirection globals
 int shell_redirect_active = 0;
@@ -699,6 +712,158 @@ void vga_drawPixel_bb(int x, int y, int rr, int gg, int bb)
 	p[1] = (unsigned char)gg;
 	p[2] = (unsigned char)rr;
 	if (bpp >= 4) p[3] = 0xFF;
+}
+
+void vga_blit_rgb565_scaled_bb(int dst_x, int dst_y, int dst_w, int dst_h,
+	const uint16_t* src, int src_w, int src_h)
+{
+	if (!src) return;
+	if (dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0) return;
+	vga_init_565_luts();
+
+	int sw = g_mbi ? (int)g_mbi->framebuffer_width : 0;
+	int sh = g_mbi ? (int)g_mbi->framebuffer_height : 0;
+	if (sw <= 0 || sh <= 0) return;
+
+	// Clip destination rect to screen bounds
+	int x0 = dst_x;
+	int y0 = dst_y;
+	int x1 = dst_x + dst_w;
+	int y1 = dst_y + dst_h;
+	if (x1 <= 0 || y1 <= 0 || x0 >= sw || y0 >= sh) return;
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 > sw) x1 = sw;
+	if (y1 > sh) y1 = sh;
+	int cw = x1 - x0;
+	int ch = y1 - y0;
+	if (cw <= 0 || ch <= 0) return;
+
+	// Fast path: write directly into the RGBA backbuffer
+	if (g_backbuffer && g_backbuffer_w >= sw && g_backbuffer_h >= sh) {
+		for (int dy = 0; dy < ch; ++dy) {
+			if ((dy & 0x1F) == 0) watchdog_kick("vga-blit");
+			int out_y = y0 + dy;
+			int rel_y = out_y - dst_y;
+			int sy = (rel_y * src_h) / dst_h;
+			if (sy < 0) sy = 0;
+			if (sy >= src_h) sy = src_h - 1;
+			uint8_t* dst_row = g_backbuffer + ((size_t)out_y * (size_t)g_backbuffer_w + (size_t)x0) * 4;
+			for (int dx = 0; dx < cw; ++dx) {
+				int out_x = x0 + dx;
+				int rel_x = out_x - dst_x;
+				int sx = (rel_x * src_w) / dst_w;
+				if (sx < 0) sx = 0;
+				if (sx >= src_w) sx = src_w - 1;
+				uint16_t p = src[(size_t)sy * (size_t)src_w + (size_t)sx];
+				uint8_t r8 = g_lut5[(p >> 11) & 0x1F];
+				uint8_t g8 = g_lut6[(p >> 5) & 0x3F];
+				uint8_t b8 = g_lut5[p & 0x1F];
+				dst_row[dx * 4 + 0] = b8;
+				dst_row[dx * 4 + 1] = g8;
+				dst_row[dx * 4 + 2] = r8;
+				dst_row[dx * 4 + 3] = 0;
+			}
+		}
+		return;
+	}
+
+	// Fallback: write directly to framebuffer
+	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8;
+	if (bpp < 3) bpp = 3;
+	for (int dy = 0; dy < ch; ++dy) {
+		if ((dy & 0x1F) == 0) watchdog_kick("vga-blit");
+		int out_y = y0 + dy;
+		int rel_y = out_y - dst_y;
+		int sy = (rel_y * src_h) / dst_h;
+		if (sy < 0) sy = 0;
+		if (sy >= src_h) sy = src_h - 1;
+		unsigned char* dst_row = video + out_y * pitch + x0 * bpp;
+		for (int dx = 0; dx < cw; ++dx) {
+			int out_x = x0 + dx;
+			int rel_x = out_x - dst_x;
+			int sx = (rel_x * src_w) / dst_w;
+			if (sx < 0) sx = 0;
+			if (sx >= src_w) sx = src_w - 1;
+			uint16_t p = src[(size_t)sy * (size_t)src_w + (size_t)sx];
+			uint8_t r8 = g_lut5[(p >> 11) & 0x1F];
+			uint8_t g8 = g_lut6[(p >> 5) & 0x3F];
+			uint8_t b8 = g_lut5[p & 0x1F];
+			dst_row[dx*bpp + 0] = b8;
+			dst_row[dx*bpp + 1] = g8;
+			dst_row[dx*bpp + 2] = r8;
+			if (bpp >= 4) dst_row[dx*bpp + 3] = 0xFF;
+		}
+	}
+}
+
+void vga_blit_rgb565_bb(int dst_x, int dst_y, const uint16_t* src, int src_w, int src_h)
+{
+	if (!src) return;
+	if (src_w <= 0 || src_h <= 0) return;
+	vga_init_565_luts();
+
+	int sw = g_mbi ? (int)g_mbi->framebuffer_width : 0;
+	int sh = g_mbi ? (int)g_mbi->framebuffer_height : 0;
+	if (sw <= 0 || sh <= 0) return;
+
+	// Clip destination rect
+	int x0 = dst_x;
+	int y0 = dst_y;
+	int x1 = dst_x + src_w;
+	int y1 = dst_y + src_h;
+	if (x1 <= 0 || y1 <= 0 || x0 >= sw || y0 >= sh) return;
+	if (x0 < 0) x0 = 0;
+	if (y0 < 0) y0 = 0;
+	if (x1 > sw) x1 = sw;
+	if (y1 > sh) y1 = sh;
+	int cw = x1 - x0;
+	int ch = y1 - y0;
+	if (cw <= 0 || ch <= 0) return;
+
+	int src_x0 = x0 - dst_x;
+	int src_y0 = y0 - dst_y;
+
+	if (g_backbuffer && g_backbuffer_w >= sw && g_backbuffer_h >= sh) {
+		for (int dy = 0; dy < ch; ++dy) {
+			if ((dy & 0x3F) == 0) watchdog_kick("vga-blit");
+			int sy = src_y0 + dy;
+			const uint16_t* src_row = src + (size_t)sy * (size_t)src_w + (size_t)src_x0;
+			uint8_t* dst_row = g_backbuffer + ((size_t)(y0 + dy) * (size_t)g_backbuffer_w + (size_t)x0) * 4;
+			for (int dx = 0; dx < cw; ++dx) {
+				uint16_t p = src_row[dx];
+				dst_row[dx * 4 + 0] = g_lut5[p & 0x1F];
+				dst_row[dx * 4 + 1] = g_lut6[(p >> 5) & 0x3F];
+				dst_row[dx * 4 + 2] = g_lut5[(p >> 11) & 0x1F];
+				dst_row[dx * 4 + 3] = 0;
+			}
+		}
+		return;
+	}
+
+	// Fallback: write directly to framebuffer
+	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8;
+	if (bpp < 3) bpp = 3;
+	for (int dy = 0; dy < ch; ++dy) {
+		if ((dy & 0x3F) == 0) watchdog_kick("vga-blit");
+		int sy = src_y0 + dy;
+		const uint16_t* src_row = src + (size_t)sy * (size_t)src_w + (size_t)src_x0;
+		unsigned char* dst_row = video + (y0 + dy) * pitch + x0 * bpp;
+		for (int dx = 0; dx < cw; ++dx) {
+			uint16_t p = src_row[dx];
+			uint8_t r8 = g_lut5[(p >> 11) & 0x1F];
+			uint8_t g8 = g_lut6[(p >> 5) & 0x3F];
+			uint8_t b8 = g_lut5[p & 0x1F];
+			dst_row[dx*bpp + 0] = b8;
+			dst_row[dx*bpp + 1] = g8;
+			dst_row[dx*bpp + 2] = r8;
+			if (bpp >= 4) dst_row[dx*bpp + 3] = 0xFF;
+		}
+	}
 }
 
 // Blend an RGBA pixel into the backbuffer. Alpha 0..255 where 0 is transparent.

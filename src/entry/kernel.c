@@ -102,11 +102,18 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     // Initialize kernel API system
     eyn_kernel_api_init();
     
-    // Initialize scheduler
-    sched_init();
-    
-    // Initialize IRQs and PIT timer (enables IRQ0 dispatch)
+    // Initialize IRQs and PIT timer (sets up IDT/PIC and PIT IRQ0)
+    // NOTE: irq_init() clears the IRQ handler table, so it must run
+    // before any register_interrupt_handler() calls (including sched_init).
     irq_init();
+
+    // Initialize scheduler (registers IRQ0 tick handler)
+    sched_init();
+
+    // Enable interrupts globally now that IDT/PIC/PIT are initialized and
+    // the IRQ0 handler is registered. Without this, sched_get_tick_count()
+    // never advances (breaking REIV playback timing and other tick-based code).
+    __asm__ __volatile__("sti");
     // Initialize watchdog with a sensitive default (~250ms)
     uint32 hz = sched_get_tick_hz();
     uint32 to = (hz ? (hz/4) : 12); // ~0.25s

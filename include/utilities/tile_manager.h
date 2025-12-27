@@ -47,6 +47,10 @@ void tile_unregister_gui_client(int tile_idx);
 // Mark a GUI client dirty so the tiler redraws it next frame
 void tile_invalidate_gui(int tile_idx);
 
+// When enabled, the tiler will redraw this GUI tile every frame (subject to global FPS cap).
+// Useful for animation/video playback without needing to spam invalidations.
+void tile_set_gui_continuous_redraw(int tile_idx, int enabled);
+
 // Render a single tiler frame immediately.
 // Useful when the main tiler loop is blocked (e.g. while running a ring3 task)
 // but we still want vterm output to appear on-screen.
@@ -78,6 +82,9 @@ void wm_set_title_status(int win_id, const char* title, const char* status_left,
 
 // Mark window content dirty to force redraw next frame
 void wm_invalidate_window(int win_id);
+
+// When enabled, the tiler will redraw this window every frame (subject to global FPS cap).
+void wm_set_continuous_redraw(int win_id, int enabled);
 
 // Close the window
 void wm_close_window(int win_id);

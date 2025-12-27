@@ -3,6 +3,7 @@
 
 #include <types.h>
 #include <multiboot.h>
+#include <stdint.h>
 #include <stddef.h>
 
 // Shell redirection buffer size (lowered for small-memory systems)
@@ -95,6 +96,13 @@ void vga_clear_swap_exclude(void);
 // Overlay helpers (draw directly to framebuffer without touching backbuffer)
 void vga_drawPixel_fb(int x, int y, int r, int g, int b);
 void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h);
+// Blit a RGB565LE source image into the backbuffer, scaling (nearest-neighbor)
+// into the destination rectangle. Call vga_mark_dirty_rect() separately.
+void vga_blit_rgb565_scaled_bb(int dst_x, int dst_y, int dst_w, int dst_h,
+	const uint16_t* src, int src_w, int src_h);
+// Blit a RGB565LE source image into the backbuffer without scaling (clipped).
+// Call vga_mark_dirty_rect() separately.
+void vga_blit_rgb565_bb(int dst_x, int dst_y, const uint16_t* src, int src_w, int src_h);
 // Fill a rectangle directly into the physical framebuffer (overlay), clipped to screen
 void vga_fillRect_fb(int x, int y, int w, int h, int r, int g, int b);
 // Multiply-darken a rectangle in the backbuffer (or framebuffer if no backbuffer):

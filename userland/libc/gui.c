@@ -29,8 +29,16 @@ int gui_draw_text(int handle, const gui_text_t* cmd) {
     return eyn_syscall3(EYN_SYSCALL_GUI_DRAW_TEXT, handle, cmd, 0);
 }
 
+int gui_draw_line(int handle, const gui_line_t* cmd) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_DRAW_LINE, handle, cmd, 0);
+}
+
 int gui_present(int handle) {
     return eyn_syscall1(EYN_SYSCALL_GUI_PRESENT, handle);
+}
+
+int gui_get_content_size(int handle, gui_size_t* out_size) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_GET_CONTENT_SIZE, handle, out_size, 0);
 }
 
 int gui_poll_event(int handle, gui_event_t* out_event) {

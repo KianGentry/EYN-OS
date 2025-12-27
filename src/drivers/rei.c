@@ -4,7 +4,6 @@
 #include <string.h>
 #include <multiboot.h>
 #include <stdint.h>
-// Do not include stdio; project provides printf/putchar in VGA/util
 
 // Read REI header from data
 int rei_read_header(const uint8_t* data, size_t size, rei_header_t* header) {

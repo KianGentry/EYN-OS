@@ -50,11 +50,40 @@ static void buf_append_int(char* out, int cap, int* io_len, int v) {
 static void redraw(int h, int mx, int my, int buttons, int last_key) {
     (void)gui_begin(h);
 
+    gui_size_t sz;
+    sz.w = 0;
+    sz.h = 0;
+    (void)gui_get_content_size(h, &sz);
+    if (sz.w <= 0) sz.w = 320;
+    if (sz.h <= 0) sz.h = 200;
+
     gui_rgb_t bg = { .r = 0, .g = 0, .b = 0, ._pad = 0 };
     (void)gui_clear(h, &bg);
 
-    gui_rect_t bar = { .x = 0, .y = 0, .w = 400, .h = 14, .r = 32, .g = 32, .b = 32, ._pad = 0 };
+    gui_rect_t bar = { .x = 0, .y = 0, .w = sz.w, .h = 14, .r = 32, .g = 32, .b = 32, ._pad = 0 };
     (void)gui_fill_rect(h, &bar);
+
+    // Border
+    gui_line_t top = { .x1 = 0, .y1 = 0, .x2 = sz.w - 1, .y2 = 0, .r = 96, .g = 96, .b = 96, ._pad = 0 };
+    gui_line_t bot = { .x1 = 0, .y1 = sz.h - 1, .x2 = sz.w - 1, .y2 = sz.h - 1, .r = 96, .g = 96, .b = 96, ._pad = 0 };
+    gui_line_t lef = { .x1 = 0, .y1 = 0, .x2 = 0, .y2 = sz.h - 1, .r = 96, .g = 96, .b = 96, ._pad = 0 };
+    gui_line_t rig = { .x1 = sz.w - 1, .y1 = 0, .x2 = sz.w - 1, .y2 = sz.h - 1, .r = 96, .g = 96, .b = 96, ._pad = 0 };
+    (void)gui_draw_line(h, &top);
+    (void)gui_draw_line(h, &bot);
+    (void)gui_draw_line(h, &lef);
+    (void)gui_draw_line(h, &rig);
+
+    // Crosshair at mouse (clamped)
+    int cx = mx;
+    int cy = my;
+    if (cx < 0) cx = 0;
+    if (cy < 0) cy = 0;
+    if (cx >= sz.w) cx = sz.w - 1;
+    if (cy >= sz.h) cy = sz.h - 1;
+    gui_line_t hline = { .x1 = 0, .y1 = cy, .x2 = sz.w - 1, .y2 = cy, .r = 0, .g = 120, .b = 200, ._pad = 0 };
+    gui_line_t vline = { .x1 = cx, .y1 = 0, .x2 = cx, .y2 = sz.h - 1, .r = 0, .g = 120, .b = 200, ._pad = 0 };
+    (void)gui_draw_line(h, &hline);
+    (void)gui_draw_line(h, &vline);
 
     char line1[64];
     int l1 = 0;
@@ -78,8 +107,10 @@ static void redraw(int h, int mx, int my, int buttons, int last_key) {
 
     gui_text_t t1 = { .x = 8, .y = 3, .r = 220, .g = 220, .b = 220, ._pad = 0, .text = line1 };
     gui_text_t t2 = { .x = 8, .y = 20, .r = 200, .g = 200, .b = 0, ._pad = 0, .text = line2 };
+    gui_text_t t3 = { .x = 8, .y = 32, .r = 180, .g = 180, .b = 180, ._pad = 0, .text = "demo: clear/rect/text/line + key/mouse events" };
     (void)gui_draw_text(h, &t1);
     (void)gui_draw_text(h, &t2);
+    (void)gui_draw_text(h, &t3);
 
     (void)gui_present(h);
 }
@@ -111,7 +142,8 @@ int main(void) {
 
         if (ev.type == GUI_EVENT_KEY) {
             last_key = ev.a;
-            if (((unsigned)ev.a & 0x20FFu) == (unsigned)'q') {
+            unsigned ch = (unsigned)ev.a & 0xFFu;
+            if (ch == (unsigned)'q' || ch == (unsigned)'Q') {
                 break;
             }
             redraw(h, mx, my, buttons, last_key);

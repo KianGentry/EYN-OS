@@ -29,6 +29,9 @@ enum {
     EYN_SYSCALL_GUI_POLL_EVENT = 15,
     EYN_SYSCALL_GUI_WAIT_EVENT = 16,
     EYN_SYSCALL_GUI_ATTACH     = 17,
+
+    EYN_SYSCALL_GUI_DRAW_LINE        = 18,
+    EYN_SYSCALL_GUI_GET_CONTENT_SIZE = 19,
 };
 
 static inline int eyn_syscall3(int n, int a1, const void* a2, int a3) {

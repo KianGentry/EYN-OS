@@ -175,8 +175,9 @@ static void stats_sample_disk(void) {
         int free_blocks = 0;
         static uint8_t sector_buf[512];
         int32_t current_bitmap_sector = -1;
-        // Prefer bitmap base from superblock if provided; fallback to superblock+1
-        uint32_t bitmap_base_lba = (sb.free_block_map != 0) ? sb.free_block_map : (2048 + 1);
+        // EYNFS stores block numbers relative to the filesystem base (superblock at LBA 2048).
+        // Prefer bitmap block from superblock if provided; fallback to block 1.
+        uint32_t bitmap_base_lba = 2048 + ((sb.free_block_map != 0) ? sb.free_block_map : 1);
         for (int i = 0; i < (int)sb.total_blocks; i++) {
             uint32_t bitmap_index = (uint32_t)i / 8; // which byte in bitmap
             uint32_t sector_offset = bitmap_index / 512; // which sector within bitmap region
