@@ -6,10 +6,7 @@
 #include <math.h> // For quicksort and boyer-moore
 #include <stdint.h>
 #include <drivers/serial.h>
-
-// Forward declarations for ATA sector I/O
-extern int ata_read_sector(uint8 drive, uint32 lba, uint8* buf);
-extern int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf);
+#include <ata.h>
 
 #define EYNFS_BLOCK_SIZE 512 // For now, fixed block size
 #define EYNFS_SUPERBLOCK_LBA 2048 // Standard superblock location

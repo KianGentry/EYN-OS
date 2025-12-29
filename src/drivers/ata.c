@@ -2,6 +2,7 @@
 #include <system.h>
 #include <vga.h>
 #include <string.h>
+#include <ata.h>
 
 // Define NULL if not available
 #ifndef NULL
@@ -54,15 +55,6 @@
 #define ATA_FEATURE_SATA_ENABLE 0x10
 #define ATA_FEATURE_SATA_DISABLE 0x90
 
-// Drive detection structure
-typedef struct {
-    uint8 present;
-    uint8 type;  // 0=IDE, 1=SATA, 2=RAID
-    char model[41];
-    uint32 sectors;
-    uint32 size_mb;
-} drive_info_t;
-
 static drive_info_t detected_drives[8];
 
 // logical drive mapping system
@@ -75,6 +67,15 @@ static void init_logical_drive_mapping(void);
 
 static void ata_io_wait(uint16 io_base) {
     for (int i = 0; i < 4; i++) inportb(io_base + ATA_REG_ALTSTATUS);
+}
+
+static void ata_soft_reset(uint16 io_base) {
+    /* Legacy control port is io_base + 0x206 (0x3F6/0x376). */
+    uint16 ctrl = io_base + ATA_REG_ALTSTATUS;
+    outportb(ctrl, 0x04); /* SRST */
+    ata_io_wait(io_base);
+    outportb(ctrl, 0x00);
+    ata_io_wait(io_base);
 }
 
 static int ata_poll(uint16 io_base) {
@@ -93,10 +94,11 @@ int ata_detect_drive(uint8 drive) {
     // Reset the drive first
     outportb(io_base + ATA_REG_HDDEVSEL, slavebit);
     ata_io_wait(io_base);
+    ata_soft_reset(io_base);
     
     // Try to detect if drive is present
     uint8 status = inportb(io_base + ATA_REG_STATUS);
-    if (status == 0) {
+    if (status == 0 || status == 0xFF) {
         return -1; // No drive present
     }
     
@@ -119,12 +121,9 @@ int ata_detect_drive(uint8 drive) {
         detected_drives[drive].sectors = identify_data[60] | (identify_data[61] << 16);
         detected_drives[drive].size_mb = (detected_drives[drive].sectors / 2048);
         
-        // Determine drive type based on identify data
-        if (identify_data[83] & 0x0400) {
-            detected_drives[drive].type = 1; // SATA
-        } else {
-            detected_drives[drive].type = 0; // IDE
-        }
+        // Keep legacy semantics: default to "IDE".
+        // Note: IDENTIFY does not reliably indicate SATA vs PATA transport.
+        detected_drives[drive].type = 0;
         
         return 0;
     }
@@ -143,9 +142,8 @@ void ata_init_drives() {
         detected_drives[i].model[0] = '\0';
     }
     
-    // Probe only primary drives (0,1) first for faster boot
-    // Secondary drives (2,3) are less common and can be detected on-demand
-    for (int drive = 0; drive < 2; drive++) {
+    // Probe classic primary/secondary master/slave.
+    for (int drive = 0; drive < 4; drive++) {
         ata_detect_drive(drive);
     }
     
@@ -160,6 +158,7 @@ int ata_identify(uint8 drive, uint16* identify_data) {
     // Reset drive
     outportb(io_base + ATA_REG_HDDEVSEL, slavebit);
     ata_io_wait(io_base);
+    ata_soft_reset(io_base);
     
     // Clear registers
     outportb(io_base + ATA_REG_SECCOUNT0, 0);
@@ -173,22 +172,35 @@ int ata_identify(uint8 drive, uint16* identify_data) {
     
     uint8 status = inportb(io_base + ATA_REG_STATUS);
     
-    if (status == 0) {
+    if (status == 0 || status == 0xFF) {
         return -1;
     }
     
     // Wait for BSY to clear (reduced timeout for faster boot)
     int timeout = 10000; // Reduced from 1000000
     while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout);
-    if (timeout == 0) { 
-        return -1; 
+    if (timeout == 0) {
+        return -1;
+    }
+
+    // If IDENTIFY errored, it may be an ATAPI device. Try IDENTIFY PACKET.
+    status = inportb(io_base + ATA_REG_STATUS);
+    if (status & ATA_SR_ERR) {
+        uint8 lba1 = inportb(io_base + ATA_REG_LBA1);
+        uint8 lba2 = inportb(io_base + ATA_REG_LBA2);
+        if ((lba1 == 0x14 && lba2 == 0xEB) || (lba1 == 0x69 && lba2 == 0x96)) {
+            outportb(io_base + ATA_REG_COMMAND, ATA_CMD_IDENTIFY_PACKET);
+            ata_io_wait(io_base);
+        } else {
+            return -1;
+        }
     }
     
     // Wait for DRQ to set (reduced timeout for faster boot)
     timeout = 10000; // Reduced from 1000000
     while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRQ) && --timeout);
-    if (timeout == 0) { 
-        return -1; 
+    if (timeout == 0) {
+        return -1;
     }
     
     // Read identify data
@@ -332,6 +344,36 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
 drive_info_t* ata_get_drive_info(uint8 drive) {
     if (drive >= 8) return NULL;
     return &detected_drives[drive];
+}
+
+void ata_identify_drive(uint8 drive, char* model, uint32* sectors) {
+    if (model) model[0] = '\0';
+    if (sectors) *sectors = 0;
+
+    if (drive >= 8) return;
+
+    if (detected_drives[drive].present) {
+        if (model) {
+            strncpy(model, detected_drives[drive].model, 40);
+            model[40] = '\0';
+        }
+        if (sectors) *sectors = detected_drives[drive].sectors;
+        return;
+    }
+
+    uint16 id[256];
+    if (ata_identify(drive, id) != 0) return;
+
+    if (model) {
+        for (int i = 0; i < 20; i++) {
+            model[i * 2] = (id[27 + i] >> 8) & 0xFF;
+            model[i * 2 + 1] = id[27 + i] & 0xFF;
+        }
+        model[40] = '\0';
+    }
+    if (sectors) {
+        *sectors = id[60] | (id[61] << 16);
+    }
 }
 
 // Check if drive is present

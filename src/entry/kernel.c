@@ -21,12 +21,10 @@
 #include <mm/vmm.h>
 #include <partition.h>
 #include <gdt.h>
+#include <ata.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
-
-// Forward declaration for ATA driver functions
-extern void ata_init_drives(void);
 
 int kmain(uint32 magic, multiboot_info_t *mbi)
 {

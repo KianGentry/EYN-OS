@@ -10,10 +10,7 @@
 #include <string.h>
 #include <vga.h>
 #include <util.h>
-
-/* Forward declarations for ATA driver */
-extern int ata_read_sector(uint8 drive, uint32 lba, uint8 *buf);
-extern int ata_write_sector(uint8 drive, uint32 lba, const uint8 *buf);
+#include <ata.h>
 
 // GLOBAL STATE
 

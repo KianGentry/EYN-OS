@@ -12,10 +12,7 @@
 #include <partition.h>
 #include <shell_command_info.h>
 #include <eynfs.h>
-
-/* External ATA info */
-extern int ata_read_sector(uint8 drive, uint32 lba, uint8 *buf);
-extern void ata_identify_drive(uint8 drive, char *model, uint32 *sectors);
+#include <ata.h>
 
 // DISK MANAGER COMMAND
 
