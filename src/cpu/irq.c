@@ -4,6 +4,7 @@
 #include <util.h>
 #include <vga.h>
 #include <tile_manager.h>
+#include <watchdog.h>
 
 extern void poll_keyboard_for_ctrl_c();
 
@@ -124,6 +125,10 @@ void irq_dispatch_c(int irq_number) {
     }
 
     if (irq_number == 0 && g_user_task_active) {
+        // Ring3 tasks can run for long periods without calling into the kernel.
+        // While they run, IRQ0 still pumps input/render; count that as forward
+        // progress so the watchdog doesn't fire.
+        watchdog_kick("user-task");
         // While a ring3 task runs, the main tiler loop is blocked. We do a tiny
         // input+render pump here. Critical: do not consume scancodes from two
         // different readers (it corrupts input and can make UI appear frozen).

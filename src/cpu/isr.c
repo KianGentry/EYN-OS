@@ -7,6 +7,7 @@
 #include <string.h>
 #include <kb.h>
 #include <panic.h>
+#include <watchdog.h>
 
 #include <sched.h>
 
@@ -750,6 +751,10 @@ uint32 syscall_dispatch(regs_t* regs) {
                             regs->eax = (uint32)-1;
                             goto stdin_done;
                         }
+                        // A ring3 task may legitimately block waiting for input;
+                        // keep the watchdog from firing while we're alive and
+                        // PIT IRQ0 is pumping UI/input.
+                        watchdog_kick("sys-read");
                         // Yield to allow IRQ processing (PIT feeds the buffer)
                         __asm__ __volatile__("hlt");
                     }

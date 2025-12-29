@@ -167,13 +167,23 @@ static void backtrace_to_serial(void) {
     __asm__ volatile ("movl %%ebp, %0" : "=r"(ebp));
     serial_write(SERIAL_COM1, "Backtrace:\n", 11);
     for (int i = 0; i < 16 && ebp; ++i) {
+        // Be defensive: a corrupted EBP chain can otherwise fault while panicking.
+        if ((ebp & 0x3) != 0) break;           // must be 4-byte aligned
+        if (ebp < 0x1000) break;               // never dereference near-null
+
         uint32_t* frame = (uint32_t*)ebp;
+        uint32_t next_ebp = frame[0];
         uint32_t ret = frame[1];
         char linebuf[64];
         // Format:  "  #nn 0xXXXXXXXX\n"
         snprintf(linebuf, sizeof(linebuf), "  #%02d 0x%08X\n", i, ret);
         serial_write(SERIAL_COM1, linebuf, (int)strlen(linebuf));
-        ebp = frame[0];
+
+        // EBP should monotonically increase as we unwind (stack grows down).
+        if (next_ebp <= ebp) break;
+        // Prevent pathological jumps/loops.
+        if ((next_ebp - ebp) > 0x10000) break;
+        ebp = next_ebp;
     }
 }
 
