@@ -16,6 +16,4 @@ void outw(uint16 _port, uint16 _data);
 uint32 inl(uint16 _port);
 void outl(uint16 _port, uint32 _data);
 
-
-
 #endif

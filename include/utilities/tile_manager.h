@@ -38,10 +38,16 @@ typedef void (*tile_gui_key_cb)(int tile_idx, int key, void* userdata);
 // Optional mouse event callback (called once per event snapshot)
 typedef void (*tile_gui_mouse_cb)(int tile_idx, const mouse_event_t* me, void* userdata);
 
+// Optional close request callback (close button, Super+Q, default Ctrl+X close).
+// Return 1 to allow close, 0 to veto.
+typedef int (*tile_gui_close_cb)(int tile_idx, void* userdata);
+
 // Register/unregister a GUI client for a tile (tile takes ownership until unregistered)
 void tile_register_gui_client(int tile_idx, tile_gui_draw_cb draw_cb, tile_gui_key_cb key_cb, void* userdata);
 // Extended registration with optional mouse callback
 void tile_register_gui_client2(int tile_idx, tile_gui_draw_cb draw_cb, tile_gui_key_cb key_cb, tile_gui_mouse_cb mouse_cb, void* userdata);
+// Optional: register a close request callback for this GUI tile
+void tile_register_gui_close_cb(int tile_idx, tile_gui_close_cb close_cb);
 void tile_unregister_gui_client(int tile_idx);
 
 // Mark a GUI client dirty so the tiler redraws it next frame
@@ -62,7 +68,7 @@ int tile_pump_input_once(void);
 
 void start_tiling_manager();
 
-// ---------------- Floating window manager (experimental) ----------------
+//  Floating window manager (experimental) 
 // Windows are GUI-only (no vterm). They render and receive input on top of tiles.
 
 // Create a floating window. Returns window id (>=0) or -1 on failure.
@@ -89,7 +95,7 @@ void wm_set_continuous_redraw(int win_id, int enabled);
 // Close the window
 void wm_close_window(int win_id);
 
-// ---------------- Runtime GUI tuning (low-spec controls) ----------------
+//  Runtime GUI tuning (low-spec controls) 
 // Mode: 0=high (full features), 1=low (wireframe drag, simplified decor), 2=auto (based on RAM)
 void tiler_gui_set_mode(int mode);
 // FPS cap: 0 disables the cap (unlimited), otherwise set to desired frames per second (e.g., 20/30/60)
@@ -99,7 +105,7 @@ void tiler_gui_set_drag_throttle_ms(int ms);
 // Print current GUI tuning status to the shell
 void tiler_gui_print_status(void);
 
-// ---------------- Terminal background images (per tile) ----------------
+//  Terminal background images (per tile) 
 // Begin an interactive prompt to set a REI image as the background for a tile's
 // content area. A popup will ask for Tile/Scale/Center (if the image is larger than
 // the screen, only Scale will be offered). The function takes ownership of the image
@@ -109,5 +115,18 @@ int tile_begin_set_background_from_rei(int tile_idx, rei_image_t* image);
 
 // Clear any configured background image for the given tile (no-op if none).
 void tile_clear_background(int tile_idx);
+
+// --- Theme (window/tile chrome) ---
+typedef struct {
+	uint8 title_focused_r, title_focused_g, title_focused_b;
+	uint8 title_unfocused_r, title_unfocused_g, title_unfocused_b;
+	uint8 status_r, status_g, status_b;
+	uint8 status_text_r, status_text_g, status_text_b;
+} wm_theme_t;
+
+// Get/set runtime theme colors used by the tiler/window manager.
+void wm_theme_get(wm_theme_t* out);
+void wm_theme_set(const wm_theme_t* in);
+void wm_theme_reset_defaults(void);
 
 #endif // TILE_MANAGER_H

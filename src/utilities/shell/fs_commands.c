@@ -177,6 +177,24 @@ static void ls_icon_key_for_entry(uint8 disk, const char* parent_dir, const char
     ext[ei] = '\0';
     if (ei == 0) { safe_strcpy(out_key, "file_none", 16); return; }
 
+    // Special-case mappings
+    // - .s should use the assembler icon
+    // - executables should use the EYN icon (native + ring3)
+    // - .hex should use the bin icon (fonts, hex blobs)
+    if (strcmp(ext, "s") == 0 || strcmp(ext, "asm") == 0) {
+        safe_strcpy(out_key, "file_asm", 16);
+        return;
+    }
+    if (strcmp(ext, "hex") == 0) {
+        safe_strcpy(out_key, "file_bin", 16);
+        return;
+    }
+    if (strcmp(ext, "uelf") == 0 || strcmp(ext, "elf") == 0 || strcmp(ext, "eyn") == 0 ||
+        strcmp(ext, "bin") == 0 || strcmp(ext, "flat") == 0) {
+        safe_strcpy(out_key, "file_eyn", 16);
+        return;
+    }
+
     char key[16];
     snprintf(key, sizeof(key), "file_%s", ext);
     key[sizeof(key) - 1] = '\0';

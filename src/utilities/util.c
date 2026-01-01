@@ -193,7 +193,7 @@ string int_to_ascii(int n, char str[]) {
 
 // String validation functions moved to string.c for standardization
 
-// --- Robust Memory Manager with Enhanced Error Handling ---
+// Robust Memory Manager with Enhanced Error Handling ---
 // Heap start must be after the kernel image (.text/.rodata/.data/.bss).
 // Using a fixed address (like 0x200000) breaks as soon as .bss grows.
 extern uint8 __kernel_end;

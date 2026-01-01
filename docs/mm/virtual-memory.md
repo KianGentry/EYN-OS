@@ -173,7 +173,7 @@ address_space_t* create_address_space(void);
 /* Free all user pages/tables, destroy address space */
 void destroy_address_space(address_space_t* as);
 
-/* Clone for fork() — marks pages COW */
+/* Clone for fork() - marks pages COW */
 address_space_t* clone_address_space(address_space_t* src);
 
 /* Switch CR3 to new address space */
@@ -262,7 +262,7 @@ void handle_demand_fault(address_space_t* as, uint32 va, pte_t* pte) {
 }
 ```
 
-## Page Replacement — Clock Algorithm
+## Page Replacement - Clock Algorithm
 
 ### Concept
 - Circular buffer of evictable pages
@@ -399,7 +399,7 @@ void kernel_main(multiboot_info_t* mbi) {
     vmm_enable_paging();                /* Step 2: Load CR3, set CR0.PG
                                          *         NOW RUNNING WITH PAGING! */
     
-    /* Step 3: Optional — protect kernel text as read-only */
+    /* Step 3: Optional - protect kernel text as read-only */
     // paging_protect_kernel_text_ro();
     
     /* Continue kernel init... */
@@ -441,8 +441,8 @@ void vmm_enable_paging(void) {
 ## Integration Points
 
 ### Files Created
-- `include/mm/vmm.h` — Public API and data structures
-- `src/mm/vmm.c` — Full implementation
+- `include/mm/vmm.h` - Public API and data structures
+- `src/mm/vmm.c` - Full implementation
 
 ### Makefile Integration
 Add to `OBJS` in Makefile:

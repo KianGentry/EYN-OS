@@ -59,6 +59,7 @@ static int fullscreen_tile = -1;
 static tile_gui_draw_cb gui_draw_cb[MAX_TILES];
 static tile_gui_key_cb gui_key_cb[MAX_TILES];
 static tile_gui_mouse_cb gui_mouse_cb[MAX_TILES];
+static tile_gui_close_cb gui_close_cb[MAX_TILES];
 static void* gui_userdata[MAX_TILES];
 // Redraw gating for GUI clients: only redraw when invalidated or when rect/version/force changes
 static int gui_needs_redraw[MAX_TILES];
@@ -118,7 +119,36 @@ static int g_min_icon_unf_loaded = 0;
 static rei_image_t g_max_icon_unf;
 static int g_max_icon_unf_loaded = 0;
 
-// ---------------- Per-tile background images ----------------
+// --- Runtime theme (tile/window chrome colors) ---
+static wm_theme_t g_wm_theme = {
+    // Default: darker gray chrome
+    .title_focused_r = 96, .title_focused_g = 96, .title_focused_b = 96,
+    .title_unfocused_r = 64, .title_unfocused_g = 64, .title_unfocused_b = 64,
+    .status_r = 32, .status_g = 32, .status_b = 32,
+    .status_text_r = 255, .status_text_g = 255, .status_text_b = 255,
+};
+
+void wm_theme_get(wm_theme_t* out) {
+    if (!out) return;
+    *out = g_wm_theme;
+}
+
+void wm_theme_set(const wm_theme_t* in) {
+    if (!in) return;
+    g_wm_theme = *in;
+    // Force redraw so chrome updates immediately.
+    g_force_full_redraw = 1;
+}
+
+void wm_theme_reset_defaults(void) {
+    g_wm_theme.title_focused_r = 96; g_wm_theme.title_focused_g = 96; g_wm_theme.title_focused_b = 96;
+    g_wm_theme.title_unfocused_r = 64; g_wm_theme.title_unfocused_g = 64; g_wm_theme.title_unfocused_b = 64;
+    g_wm_theme.status_r = 32; g_wm_theme.status_g = 32; g_wm_theme.status_b = 32;
+    g_wm_theme.status_text_r = 255; g_wm_theme.status_text_g = 255; g_wm_theme.status_text_b = 255;
+    g_force_full_redraw = 1;
+}
+
+// - Per-tile background images -
 typedef enum { BG_NONE=0, BG_TILE=1, BG_SCALE=2, BG_CENTER=3 } bg_mode_t;
 typedef struct {
     rei_image_t* img;   // owned; freed when replaced/cleared
@@ -183,7 +213,7 @@ static inline void rect_union(int ax, int ay, int aw, int ah, int bx, int by, in
 
 // Use vga_fillRect_fb for overlay rect fills; local helper removed for simplicity
 
-// ---------------- Floating Windows (experimental) ----------------
+// - Floating Windows (experimental) -
 typedef struct {
     int used;
     int x, y, w, h; // outer rect including decorations
@@ -217,8 +247,20 @@ static int point_in_rect(int x, int y, int rx, int ry, int rw, int rh) {
     return (x >= rx && x < rx + rw && y >= ry && y < ry + rh);
 }
 
-static int win_title_height(const window_t* w) { (void)w; return 16; }
-static int win_status_height(const window_t* w) { (void)w; return (w->status_left || w->status_right) ? 12 : 0; }
+static int win_title_height(const window_t* w) {
+    (void)w;
+    int fh = vga_text_cell_h();
+    int h = fh + 4;
+    if (h < 16) h = 16;
+    return h;
+}
+static int win_status_height(const window_t* w) {
+    if (!(w->status_left || w->status_right)) return 0;
+    int fh = vga_text_cell_h();
+    int h = fh + 4;
+    if (h < 12) h = 12;
+    return h;
+}
 
 // Forward declarations for window helpers used later in the main loop
 static void wm_draw_decor(window_t* w, int is_focused);
@@ -231,14 +273,17 @@ static void wm_get_max_rect(const window_t* w, int* rx, int* ry, int* rw, int* r
 static void wm_get_min_rect(const window_t* w, int* rx, int* ry, int* rw, int* rh);
 // Small helper to draw an icon into a button rect with alpha support
 static void wm_draw_icon_into_button(const rei_image_t* icon, int loaded, int bx, int by, int bw, int bh);
+static void load_close_icon_try_paths(uint8 disk);
+static void load_min_icon_try_paths(uint8 disk);
+static void load_max_icon_try_paths(uint8 disk);
 static void load_close_icon_unf_try_paths(uint8 disk);
 static void load_min_icon_unf_try_paths(uint8 disk);
 static void load_max_icon_unf_try_paths(uint8 disk);
 
-// ---------------- Icon cache for small file icons ----------------
+// - Icon cache for small file icons -
 #define ICON_CACHE_MAX 64
 typedef struct {
-    char ext[16];
+    char key[24];
     rei_image_t img;
     int loaded;
 } icon_cache_entry_t;
@@ -246,12 +291,65 @@ typedef struct {
 static icon_cache_entry_t g_icon_cache[ICON_CACHE_MAX];
 static int g_icon_cache_count = 0;
 
+static int g_last_icon_mode_16 = -1;
+
+static void icon_cache_clear(void) {
+    for (int i = 0; i < g_icon_cache_count; ++i) {
+        if (g_icon_cache[i].loaded) {
+            rei_free_image(&g_icon_cache[i].img);
+        }
+    }
+    memset(g_icon_cache, 0, sizeof(g_icon_cache));
+    g_icon_cache_count = 0;
+}
+
+static void free_window_icons(void) {
+    if (g_close_icon_loaded) { rei_free_image(&g_close_icon); g_close_icon_loaded = 0; }
+    if (g_min_icon_loaded) { rei_free_image(&g_min_icon); g_min_icon_loaded = 0; }
+    if (g_max_icon_loaded) { rei_free_image(&g_max_icon); g_max_icon_loaded = 0; }
+
+    if (g_close_icon_unf_loaded) { rei_free_image(&g_close_icon_unf); g_close_icon_unf_loaded = 0; }
+    if (g_min_icon_unf_loaded) { rei_free_image(&g_min_icon_unf); g_min_icon_unf_loaded = 0; }
+    if (g_max_icon_unf_loaded) { rei_free_image(&g_max_icon_unf); g_max_icon_unf_loaded = 0; }
+}
+
+static void maybe_update_icon_mode(uint8 disk) {
+    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
+    if (g_last_icon_mode_16 == want16) return;
+    g_last_icon_mode_16 = want16;
+
+    // Switching fonts can change desired icon set (8x8 vs 16x16). Flush caches and reload UI icons.
+    watchdog_kick("wm-iconmode");
+    icon_cache_clear();
+    free_window_icons();
+    watchdog_kick("wm-iconmode");
+    load_close_icon_try_paths(disk);
+    watchdog_kick("wm-iconmode");
+    load_min_icon_try_paths(disk);
+    watchdog_kick("wm-iconmode");
+    load_max_icon_try_paths(disk);
+    watchdog_kick("wm-iconmode");
+    load_close_icon_unf_try_paths(disk);
+    watchdog_kick("wm-iconmode");
+    load_min_icon_unf_try_paths(disk);
+    watchdog_kick("wm-iconmode");
+    load_max_icon_unf_try_paths(disk);
+
+    g_force_full_redraw = 1;
+}
+
 // Try a few candidate paths for an icon with given extension and load into cache entry
 static rei_image_t* load_icon_for_ext(const char* ext) {
     if (!ext) return NULL;
+
+    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
+    char cache_key[24];
+    snprintf(cache_key, sizeof(cache_key), "%s|%s", want16 ? "16" : "8", ext);
+    cache_key[sizeof(cache_key) - 1] = '\0';
+
     // Check cache first
     for (int i = 0; i < g_icon_cache_count; ++i) {
-        if (strcmp(g_icon_cache[i].ext, ext) == 0) {
+        if (strcmp(g_icon_cache[i].key, cache_key) == 0) {
             return g_icon_cache[i].loaded ? &g_icon_cache[i].img : NULL;
         }
     }
@@ -259,10 +357,18 @@ static rei_image_t* load_icon_for_ext(const char* ext) {
 
     // Candidate filename patterns.
     // ext is treated as the full icon base name (without .rei), e.g. "file_txt", "file_none", "dir_empty", "dir_full".
-    const char* patterns[] = {
+    const char* patterns16[] = {
+        "/icons16/%s.rei",
+        "/testdir/icons16/%s.rei",
+        // Legacy fallbacks
+        "/icons16/file_%s.rei",
+        "/testdir/icons16/file_%s.rei",
+        NULL
+    };
+    const char* patterns8[] = {
         "/icons/%s.rei",
         "/testdir/icons/%s.rei",
-        // Legacy fallbacks (older naming conventions)
+        // Legacy fallbacks
         "/icons/file_%s.rei",
         "/testdir/icons/file_%s.rei",
         NULL
@@ -276,21 +382,29 @@ static rei_image_t* load_icon_for_ext(const char* ext) {
 
     rei_image_t tmp;
     int found = 0;
-    for (int pi = 0; patterns[pi]; ++pi) {
-        snprintf(pathbuf, sizeof(pathbuf), patterns[pi], ext);
-        eynfs_dir_entry_t entry;
-        if (eynfs_traverse_path(0, &sb, pathbuf, &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
-            int size = entry.size;
-            uint8_t* buf = (uint8_t*)malloc(size);
-            if (!buf) break;
-            int n = eynfs_read_file(0, &sb, &entry, (char*)buf, size, 0);
-            if (n == size) {
-                if (rei_parse_image(buf, size, &tmp) == 0) {
-                    found = 1;
+    const char** primary = want16 ? patterns16 : patterns8;
+    const char** fallback = want16 ? patterns8 : NULL;
+
+    for (int pass = 0; pass < 2 && !found; ++pass) {
+        const char** patterns = (pass == 0) ? primary : fallback;
+        if (!patterns) continue;
+        for (int pi = 0; patterns[pi]; ++pi) {
+            watchdog_kick("wm-iconload");
+            snprintf(pathbuf, sizeof(pathbuf), patterns[pi], ext);
+            eynfs_dir_entry_t entry;
+            if (eynfs_traverse_path(0, &sb, pathbuf, &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+                int size = entry.size;
+                uint8_t* buf = (uint8_t*)malloc(size);
+                if (!buf) { found = 0; break; }
+                int n = eynfs_read_file(0, &sb, &entry, (char*)buf, size, 0);
+                if (n == size) {
+                    if (rei_parse_image(buf, size, &tmp) == 0) {
+                        found = 1;
+                    }
                 }
+                free(buf);
+                if (found) break;
             }
-            free(buf);
-            if (found) break;
         }
     }
     // No special-case fallback needed here; callers can request "file_none" if desired.
@@ -298,7 +412,7 @@ static rei_image_t* load_icon_for_ext(const char* ext) {
     // Add to cache entry regardless (to avoid repeated failed lookups)
     int idx = g_icon_cache_count++;
     memset(&g_icon_cache[idx], 0, sizeof(g_icon_cache[idx]));
-    strncpy(g_icon_cache[idx].ext, ext, sizeof(g_icon_cache[idx].ext)-1);
+    strncpy(g_icon_cache[idx].key, cache_key, sizeof(g_icon_cache[idx].key)-1);
     if (found) {
         g_icon_cache[idx].img = tmp; // struct copy (contains allocated data)
         g_icon_cache[idx].loaded = 1;
@@ -336,12 +450,9 @@ static void draw_rei_at(const rei_image_t* im, int x, int y) {
     vga_mark_dirty_rect(x, y, w, h);
 }
 
-// Forward declarations for icon loaders (must appear before start_tiling_manager)
-static void load_close_icon_try_paths(uint8 disk);
-static void load_min_icon_try_paths(uint8 disk);
-static void load_max_icon_try_paths(uint8 disk);
-
 static void wm_draw_decor(window_t* w, int is_focused) {
+    int cw = vga_text_cell_w();
+    int fh = vga_text_cell_h();
     // In low mode, draw simpler decorations: skip icons and minimize overdraw
     if (g_gui_low_mode) {
         int th = win_title_height(w);
@@ -349,26 +460,27 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         // frame background
         drawRect(w->x, w->y, w->w, w->h, 0, 0, 0);
         // title bar
-        int title_color_r = is_focused ? 160 : 90;
-        int title_color_g = is_focused ? 160 : 90;
-        int title_color_b = is_focused ? 50 : 50;
+        int title_color_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
+        int title_color_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
+        int title_color_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
         drawRect(w->x, w->y, w->w, th, title_color_r, title_color_g, title_color_b);
         if (w->title && w->title[0]) {
             int len = strlen(w->title);
-            int max_chars = (w->w / 8) - 2; if (max_chars < 0) max_chars = 0;
-            int color_r = is_focused ? 0 : 255, color_g = is_focused ? 0 : 255, color_b = is_focused ? 0 : 255;
-            int text_y = w->y + 4;
+            int max_chars = (w->w / cw) - 2; if (max_chars < 0) max_chars = 0;
+            int color_r = is_focused ? 255 : 0, color_g = is_focused ? 255 : 0, color_b = is_focused ? 255 : 0;
+            int text_y = w->y + (th - fh) / 2;
             if (len > max_chars) len = max_chars;
             int start_x = w->x + 4;
-            for (int i = 0; i < len; ++i) drawCharAt(start_x + i * 8, text_y, (unsigned char)w->title[i], color_r, color_g, color_b);
+            for (int i = 0; i < len; ++i) drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], color_r, color_g, color_b);
         }
         // optional compact status
         if (sh > 0) {
             int sy = w->y + th;
-            drawRect(w->x, sy, w->w, sh, 32, 32, 32);
+            drawRect(w->x, sy, w->w, sh, g_wm_theme.status_r, g_wm_theme.status_g, g_wm_theme.status_b);
             const char* left = w->status_left ? w->status_left : "";
-            int max_chars = (w->w - 8) / 8; if (max_chars < 0) max_chars = 0;
-            for (int i = 0; left[i] && i < max_chars; ++i) drawCharAt(w->x + 4 + i * 8, sy + 2, (unsigned char)left[i], 220, 220, 220);
+            int max_chars = (w->w - 8) / cw; if (max_chars < 0) max_chars = 0;
+            int text_y = sy + (sh - fh) / 2;
+            for (int i = 0; left[i] && i < max_chars; ++i) drawCharAt(w->x + 4 + i * cw, text_y, (unsigned char)left[i], g_wm_theme.status_text_r, g_wm_theme.status_text_g, g_wm_theme.status_text_b);
         }
         // border
         int br = is_focused ? 120 : 60, bg = is_focused ? 120 : 60, bb = is_focused ? 80 : 60;
@@ -383,22 +495,22 @@ static void wm_draw_decor(window_t* w, int is_focused) {
     // frame background
     drawRect(w->x, w->y, w->w, w->h, 0, 0, 0);
     // title bar
-    int title_color_r = is_focused ? 180 : 100;
-    int title_color_g = is_focused ? 180 : 100;
-    int title_color_b = is_focused ? 60 : 60;
+    int title_color_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
+    int title_color_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
+    int title_color_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
     drawRect(w->x, w->y, w->w, th, title_color_r, title_color_g, title_color_b);
     if (w->title && w->title[0]) {
         int len = strlen(w->title);
         // Try to avoid drawing under the close button by shrinking max chars by ~2
-        int max_chars = (w->w / 8) - 2;
+        int max_chars = (w->w / cw) - 2;
         if (max_chars < 0) max_chars = 0;
-        int text_y = w->y + 4;
-        int color_r = is_focused ? 0 : 255;
-        int color_g = is_focused ? 0 : 255;
-        int color_b = is_focused ? 0 : 255;
+        int text_y = w->y + (th - fh) / 2;
+        int color_r = is_focused ? 255 : 0;
+        int color_g = is_focused ? 255 : 0;
+        int color_b = is_focused ? 255 : 0;
         if (len <= max_chars) {
-            int start_x = w->x + (w->w - len * 8) / 2;
-            for (int i = 0; i < len; ++i) drawCharAt(start_x + i * 8, text_y, (unsigned char)w->title[i], color_r, color_g, color_b);
+            int start_x = w->x + (w->w - len * cw) / 2;
+            for (int i = 0; i < len; ++i) drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], color_r, color_g, color_b);
         } else {
             int window = max_chars;
             int speed = 6;
@@ -407,7 +519,7 @@ static void wm_draw_decor(window_t* w, int is_focused) {
             for (int i = 0; i < window; ++i) {
                 int idx = pos + i; char ch = ' ';
                 if (idx < len) ch = w->title[idx]; else { int wrap = idx - len; if (wrap < len) ch = w->title[wrap]; }
-                drawCharAt(w->x + i * 8, text_y, (unsigned char)ch, color_r, color_g, color_b);
+                drawCharAt(w->x + i * cw, text_y, (unsigned char)ch, color_r, color_g, color_b);
             }
         }
     }
@@ -416,12 +528,6 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         // Close
         {
             int bx, by, bw, bh; wm_get_close_rect(w, &bx, &by, &bw, &bh);
-            // button background and border
-            drawRect(bx, by, bw, bh, 160, 40, 40);
-            drawRect(bx, by, bw, 1, 220, 80, 80);
-            drawRect(bx, by + bh - 1, bw, 1, 80, 20, 20);
-            drawRect(bx, by, 1, bh, 220, 80, 80);
-            drawRect(bx + bw - 1, by, 1, bh, 80, 20, 20);
             if (g_close_icon_loaded && g_close_icon.data) {
                 if (is_focused) {
                     wm_draw_icon_into_button(&g_close_icon, g_close_icon_loaded, bx, by, bw, bh);
@@ -446,11 +552,6 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         // Maximize
         {
             int bx, by, bw, bh; wm_get_max_rect(w, &bx, &by, &bw, &bh);
-            drawRect(bx, by, bw, bh, 80, 80, 160);
-            drawRect(bx, by, bw, 1, 120, 120, 220);
-            drawRect(bx, by + bh - 1, bw, 1, 20, 20, 80);
-            drawRect(bx, by, 1, bh, 120, 120, 220);
-            drawRect(bx + bw - 1, by, 1, bh, 20, 20, 80);
             if (g_max_icon_loaded && g_max_icon.data) {
                 if (is_focused) {
                     wm_draw_icon_into_button(&g_max_icon, g_max_icon_loaded, bx, by, bw, bh);
@@ -471,11 +572,6 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         // Minimize
         {
             int bx, by, bw, bh; wm_get_min_rect(w, &bx, &by, &bw, &bh);
-            drawRect(bx, by, bw, bh, 80, 160, 80);
-            drawRect(bx, by, bw, 1, 120, 220, 120);
-            drawRect(bx, by + bh - 1, bw, 1, 20, 80, 20);
-            drawRect(bx, by, 1, bh, 120, 220, 120);
-            drawRect(bx + bw - 1, by, 1, bh, 20, 80, 20);
             if (g_min_icon_loaded && g_min_icon.data) {
                 if (is_focused) {
                     wm_draw_icon_into_button(&g_min_icon, g_min_icon_loaded, bx, by, bw, bh);
@@ -495,16 +591,17 @@ static void wm_draw_decor(window_t* w, int is_focused) {
     if (sh > 0) {
         int sy = w->y + th;
         drawRect(w->x, sy, w->w, sh, 32, 32, 32);
+        int text_y = sy + (sh - fh) / 2;
         const char* left = w->status_left ? w->status_left : "";
-        for (int i = 0; left[i] && (w->x + 4 + i * 8) < w->x + w->w - 4; ++i) {
-            drawCharAt(w->x + 4 + i * 8, sy + 2, (unsigned char)left[i], 255, 255, 255);
+        for (int i = 0; left[i] && (w->x + 4 + i * cw) < w->x + w->w - 4; ++i) {
+            drawCharAt(w->x + 4 + i * cw, text_y, (unsigned char)left[i], 255, 255, 255);
         }
         if (w->status_right && w->status_right[0]) {
             int rl = strlen(w->status_right);
-            int max_chars = (w->w - 8) / 8;
+            int max_chars = (w->w - 8) / cw;
             if (rl > max_chars) rl = max_chars - 1;
-            int start_x = w->x + w->w - rl * 8 - 4;
-            for (int i = 0; i < rl; ++i) drawCharAt(start_x + i * 8, sy + 2, (unsigned char)w->status_right[i], 255, 0, 0);
+            int start_x = w->x + w->w - rl * cw - 4;
+            for (int i = 0; i < rl; ++i) drawCharAt(start_x + i * cw, text_y, (unsigned char)w->status_right[i], 255, 0, 0);
         }
     }
     // border
@@ -517,46 +614,66 @@ static void wm_draw_decor(window_t* w, int is_focused) {
 
 static void wm_get_close_rect(const window_t* w, int* rx, int* ry, int* rw, int* rh) {
     int th = win_title_height(w);
-    int btn_w = 12, btn_h = 12;
-    int pad = 2;
-    if (btn_w > w->w - 2 * pad) btn_w = (w->w > 2 * pad) ? (w->w - 2 * pad) : 0;
-    if (btn_h > th - 2 * pad) btn_h = (th > 2 * pad) ? (th - 2 * pad) : 0;
-    int bx = w->x + w->w - btn_w - pad;
-    int by = w->y + pad;
+    // Size buttons to the icon (when available) and center them vertically within the titlebar.
+    int btn_side = 12;
+    if (g_close_icon_loaded) {
+        int iw = g_close_icon.header.width;
+        int ih = g_close_icon.header.height;
+        int m = (iw > ih) ? iw : ih;
+        if (m > btn_side) btn_side = m;
+    }
+    if (btn_side > th) btn_side = th;
+    int margin = 2;
+    int pad_y = (th - btn_side) / 2;
+    if (btn_side > w->w - 2 * margin) btn_side = (w->w > 2 * margin) ? (w->w - 2 * margin) : 0;
+    int bx = w->x + w->w - btn_side - margin;
+    int by = w->y + pad_y;
     if (rx) *rx = bx;
     if (ry) *ry = by;
-    if (rw) *rw = btn_w;
-    if (rh) *rh = btn_h;
+    if (rw) *rw = btn_side;
+    if (rh) *rh = btn_side;
 }
 
 static void wm_get_max_rect(const window_t* w, int* rx, int* ry, int* rw, int* rh) {
     int th = win_title_height(w);
-    int btn_w = 12, btn_h = 12;
-    int pad = 2;
-    if (btn_w > w->w - 2 * pad) btn_w = (w->w > 2 * pad) ? (w->w - 2 * pad) : 0;
-    if (btn_h > th - 2 * pad) btn_h = (th > 2 * pad) ? (th - 2 * pad) : 0;
+    int btn_side = 12;
+    if (g_max_icon_loaded) {
+        int iw = g_max_icon.header.width;
+        int ih = g_max_icon.header.height;
+        int m = (iw > ih) ? iw : ih;
+        if (m > btn_side) btn_side = m;
+    }
+    if (btn_side > th) btn_side = th;
+    int gap = 2;
+    int pad_y = (th - btn_side) / 2;
     int bx_close, by_close, bw_close, bh_close; wm_get_close_rect(w, &bx_close, &by_close, &bw_close, &bh_close);
-    int bx = bx_close - pad - btn_w;
-    int by = w->y + pad;
+    int bx = bx_close - gap - btn_side;
+    int by = w->y + pad_y;
     if (rx) *rx = bx;
     if (ry) *ry = by;
-    if (rw) *rw = btn_w;
-    if (rh) *rh = btn_h;
+    if (rw) *rw = btn_side;
+    if (rh) *rh = btn_side;
 }
 
 static void wm_get_min_rect(const window_t* w, int* rx, int* ry, int* rw, int* rh) {
     int th = win_title_height(w);
-    int btn_w = 12, btn_h = 12;
-    int pad = 2;
-    if (btn_w > w->w - 2 * pad) btn_w = (w->w > 2 * pad) ? (w->w - 2 * pad) : 0;
-    if (btn_h > th - 2 * pad) btn_h = (th > 2 * pad) ? (th - 2 * pad) : 0;
+    int btn_side = 12;
+    if (g_min_icon_loaded) {
+        int iw = g_min_icon.header.width;
+        int ih = g_min_icon.header.height;
+        int m = (iw > ih) ? iw : ih;
+        if (m > btn_side) btn_side = m;
+    }
+    if (btn_side > th) btn_side = th;
+    int gap = 2;
+    int pad_y = (th - btn_side) / 2;
     int bx_max, by_max, bw_max, bh_max; wm_get_max_rect(w, &bx_max, &by_max, &bw_max, &bh_max);
-    int bx = bx_max - pad - btn_w;
-    int by = w->y + pad;
+    int bx = bx_max - gap - btn_side;
+    int by = w->y + pad_y;
     if (rx) *rx = bx;
     if (ry) *ry = by;
-    if (rw) *rw = btn_w;
-    if (rh) *rh = btn_h;
+    if (rw) *rw = btn_side;
+    if (rh) *rh = btn_side;
 }
 
 static void wm_draw_icon_into_button(const rei_image_t* icon, int loaded, int bx, int by, int bw, int bh) {
@@ -768,7 +885,7 @@ static void draw_cursor_overlay(int x, int y) {
             for (int xx = 0; xx < w; ++xx) {
                 int px = x + xx;
                 if (px < 0 || px >= screen_w) continue;
-                vga_drawPixel_fb(px, py, 255, 255, 0);
+                vga_drawPixel_fb(px, py, 200, 200, 200);
             }
         }
         cursor_w = w; cursor_h = h;
@@ -910,124 +1027,183 @@ static void load_cursor_image_try_paths(uint8 disk) {
 
 // Try to load a close button icon from a few candidate paths in EYNFS
 static void load_close_icon_try_paths(uint8 disk) {
-    const char* paths[] = { "/close.rei", "/ui/close.rei", "/testdir/close.rei", "/testdir/ui/close.rei" };
+    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
+    const char* paths16[] = { "/ui16/close.rei", "/testdir/ui16/close.rei", NULL };
+    const char* paths8[] = { "/close.rei", "/ui/close.rei", "/testdir/close.rei", "/testdir/ui/close.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
-    for (int pi = 0; pi < 4; ++pi) {
-        eynfs_dir_entry_t entry;
-        if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
-            int size = entry.size;
-            uint8_t* buf = (uint8_t*)malloc(size);
-            if (!buf) return;
-            int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
-            if (n == size) {
-                if (rei_parse_image(buf, size, &g_close_icon) == 0) {
-                    g_close_icon_loaded = 1;
-                    free(buf);
-                    return;
+
+    const char** primary = want16 ? paths16 : paths8;
+    const char** fallback = want16 ? paths8 : NULL;
+    for (int pass = 0; pass < 2; ++pass) {
+        const char** paths = (pass == 0) ? primary : fallback;
+        if (!paths) continue;
+        for (int pi = 0; paths[pi]; ++pi) {
+            watchdog_kick("wm-iconload");
+            eynfs_dir_entry_t entry;
+            if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+                int size = entry.size;
+                uint8_t* buf = (uint8_t*)malloc(size);
+                if (!buf) return;
+                int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
+                if (n == size) {
+                    if (rei_parse_image(buf, size, &g_close_icon) == 0) {
+                        g_close_icon_loaded = 1;
+                        free(buf);
+                        return;
+                    }
                 }
+                free(buf);
             }
-            free(buf);
         }
     }
 }
 
 // Try to load a minimize button icon from candidate paths
 static void load_min_icon_try_paths(uint8 disk) {
-    const char* paths[] = { "/min.rei", "/ui/min.rei", "/minimize.rei", "/ui/minimize.rei", "/testdir/min.rei", "/testdir/ui/min.rei" };
+    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
+    const char* paths16[] = { "/ui16/min.rei", "/testdir/ui16/min.rei", "/ui16/minimize.rei", "/testdir/ui16/minimize.rei", NULL };
+    const char* paths8[] = { "/min.rei", "/ui/min.rei", "/minimize.rei", "/ui/minimize.rei", "/testdir/min.rei", "/testdir/ui/min.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
-    for (int pi = 0; pi < (int)(sizeof(paths)/sizeof(paths[0])); ++pi) {
-        eynfs_dir_entry_t entry;
-        if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
-            int size = entry.size;
-            uint8_t* buf = (uint8_t*)malloc(size);
-            if (!buf) return;
-            int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
-            if (n == size) {
-                if (rei_parse_image(buf, size, &g_min_icon) == 0) {
-                    g_min_icon_loaded = 1;
-                    free(buf);
-                    return;
+
+    const char** primary = want16 ? paths16 : paths8;
+    const char** fallback = want16 ? paths8 : NULL;
+    for (int pass = 0; pass < 2; ++pass) {
+        const char** paths = (pass == 0) ? primary : fallback;
+        if (!paths) continue;
+        for (int pi = 0; paths[pi]; ++pi) {
+            watchdog_kick("wm-iconload");
+            eynfs_dir_entry_t entry;
+            if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+                int size = entry.size;
+                uint8_t* buf = (uint8_t*)malloc(size);
+                if (!buf) return;
+                int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
+                if (n == size) {
+                    if (rei_parse_image(buf, size, &g_min_icon) == 0) {
+                        g_min_icon_loaded = 1;
+                        free(buf);
+                        return;
+                    }
                 }
+                free(buf);
             }
-            free(buf);
         }
     }
 }
 
 // Try to load a maximize button icon from candidate paths
 static void load_max_icon_try_paths(uint8 disk) {
-    const char* paths[] = { "/max.rei", "/ui/max.rei", "/maximize.rei", "/ui/maximize.rei", "/testdir/max.rei", "/testdir/ui/max.rei" };
+    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
+    const char* paths16[] = { "/ui16/max.rei", "/testdir/ui16/max.rei", "/ui16/maximize.rei", "/testdir/ui16/maximize.rei", NULL };
+    const char* paths8[] = { "/max.rei", "/ui/max.rei", "/maximize.rei", "/ui/maximize.rei", "/testdir/max.rei", "/testdir/ui/max.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
-    for (int pi = 0; pi < (int)(sizeof(paths)/sizeof(paths[0])); ++pi) {
-        eynfs_dir_entry_t entry;
-        if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
-            int size = entry.size;
-            uint8_t* buf = (uint8_t*)malloc(size);
-            if (!buf) return;
-            int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
-            if (n == size) {
-                if (rei_parse_image(buf, size, &g_max_icon) == 0) {
-                    g_max_icon_loaded = 1;
-                    free(buf);
-                    return;
+
+    const char** primary = want16 ? paths16 : paths8;
+    const char** fallback = want16 ? paths8 : NULL;
+    for (int pass = 0; pass < 2; ++pass) {
+        const char** paths = (pass == 0) ? primary : fallback;
+        if (!paths) continue;
+        for (int pi = 0; paths[pi]; ++pi) {
+            watchdog_kick("wm-iconload");
+            eynfs_dir_entry_t entry;
+            if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+                int size = entry.size;
+                uint8_t* buf = (uint8_t*)malloc(size);
+                if (!buf) return;
+                int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
+                if (n == size) {
+                    if (rei_parse_image(buf, size, &g_max_icon) == 0) {
+                        g_max_icon_loaded = 1;
+                        free(buf);
+                        return;
+                    }
                 }
+                free(buf);
             }
-            free(buf);
         }
     }
 }
 
 // Try to load unfocused variants of icons
 static void load_close_icon_unf_try_paths(uint8 disk) {
-    const char* paths[] = { "/close_unfocused.rei", "/ui/close_unfocused.rei", "/testdir/close_unfocused.rei", "/testdir/ui/close_unfocused.rei" };
+    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
+    const char* paths16[] = { "/ui16/close_unfocused.rei", "/testdir/ui16/close_unfocused.rei", NULL };
+    const char* paths8[] = { "/close_unfocused.rei", "/ui/close_unfocused.rei", "/testdir/close_unfocused.rei", "/testdir/ui/close_unfocused.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
-    for (int pi = 0; pi < (int)(sizeof(paths)/sizeof(paths[0])); ++pi) {
-        eynfs_dir_entry_t entry;
-        if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
-            int size = entry.size; uint8_t* buf = (uint8_t*)malloc(size); if (!buf) return;
-            int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
-            if (n == size) {
-                if (rei_parse_image(buf, size, &g_close_icon_unf) == 0) { g_close_icon_unf_loaded = 1; free(buf); return; }
+
+    const char** primary = want16 ? paths16 : paths8;
+    const char** fallback = want16 ? paths8 : NULL;
+    for (int pass = 0; pass < 2; ++pass) {
+        const char** paths = (pass == 0) ? primary : fallback;
+        if (!paths) continue;
+        for (int pi = 0; paths[pi]; ++pi) {
+            watchdog_kick("wm-iconload");
+            eynfs_dir_entry_t entry;
+            if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+                int size = entry.size; uint8_t* buf = (uint8_t*)malloc(size); if (!buf) return;
+                int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
+                if (n == size) {
+                    if (rei_parse_image(buf, size, &g_close_icon_unf) == 0) { g_close_icon_unf_loaded = 1; free(buf); return; }
+                }
+                free(buf);
             }
-            free(buf);
         }
     }
 }
 
 static void load_min_icon_unf_try_paths(uint8 disk) {
-    const char* paths[] = { "/min_unfocused.rei", "/ui/min_unfocused.rei", "/minimize_unfocused.rei", "/ui/minimize_unfocused.rei", "/testdir/min_unfocused.rei", "/testdir/ui/min_unfocused.rei" };
+    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
+    const char* paths16[] = { "/ui16/min_unfocused.rei", "/testdir/ui16/min_unfocused.rei", "/ui16/minimize_unfocused.rei", "/testdir/ui16/minimize_unfocused.rei", NULL };
+    const char* paths8[] = { "/min_unfocused.rei", "/ui/min_unfocused.rei", "/minimize_unfocused.rei", "/ui/minimize_unfocused.rei", "/testdir/min_unfocused.rei", "/testdir/ui/min_unfocused.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
-    for (int pi = 0; pi < (int)(sizeof(paths)/sizeof(paths[0])); ++pi) {
-        eynfs_dir_entry_t entry;
-        if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
-            int size = entry.size; uint8_t* buf = (uint8_t*)malloc(size); if (!buf) return;
-            int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
-            if (n == size) {
-                if (rei_parse_image(buf, size, &g_min_icon_unf) == 0) { g_min_icon_unf_loaded = 1; free(buf); return; }
+
+    const char** primary = want16 ? paths16 : paths8;
+    const char** fallback = want16 ? paths8 : NULL;
+    for (int pass = 0; pass < 2; ++pass) {
+        const char** paths = (pass == 0) ? primary : fallback;
+        if (!paths) continue;
+        for (int pi = 0; paths[pi]; ++pi) {
+            watchdog_kick("wm-iconload");
+            eynfs_dir_entry_t entry;
+            if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+                int size = entry.size; uint8_t* buf = (uint8_t*)malloc(size); if (!buf) return;
+                int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
+                if (n == size) {
+                    if (rei_parse_image(buf, size, &g_min_icon_unf) == 0) { g_min_icon_unf_loaded = 1; free(buf); return; }
+                }
+                free(buf);
             }
-            free(buf);
         }
     }
 }
 
 static void load_max_icon_unf_try_paths(uint8 disk) {
-    const char* paths[] = { "/max_unfocused.rei", "/ui/max_unfocused.rei", "/maximize_unfocused.rei", "/ui/maximize_unfocused.rei", "/testdir/max_unfocused.rei", "/testdir/ui/max_unfocused.rei" };
+    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
+    const char* paths16[] = { "/ui16/max_unfocused.rei", "/testdir/ui16/max_unfocused.rei", "/ui16/maximize_unfocused.rei", "/testdir/ui16/maximize_unfocused.rei", NULL };
+    const char* paths8[] = { "/max_unfocused.rei", "/ui/max_unfocused.rei", "/maximize_unfocused.rei", "/ui/maximize_unfocused.rei", "/testdir/max_unfocused.rei", "/testdir/ui/max_unfocused.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
-    for (int pi = 0; pi < (int)(sizeof(paths)/sizeof(paths[0])); ++pi) {
-        eynfs_dir_entry_t entry;
-        if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+    const char** primary = want16 ? paths16 : paths8;
+    const char** fallback = want16 ? paths8 : NULL;
+    for (int pass = 0; pass < 2; ++pass) {
+        const char** paths = (pass == 0) ? primary : fallback;
+        if (!paths) continue;
+        for (int pi = 0; paths[pi]; ++pi) {
+            watchdog_kick("wm-iconload");
+            eynfs_dir_entry_t entry;
+            if (eynfs_traverse_path(disk, &sb, paths[pi], &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
             int size = entry.size; uint8_t* buf = (uint8_t*)malloc(size); if (!buf) return;
             int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
             if (n == size) {
                 if (rei_parse_image(buf, size, &g_max_icon_unf) == 0) { g_max_icon_unf_loaded = 1; free(buf); return; }
             }
             free(buf);
+            }
         }
     }
 }
@@ -1064,34 +1240,39 @@ static void layout_tiles() {
 // cached in the backbuffer and only redrawn when needed.
 static int get_title_height(const tile_t* t) {
     if (fullscreen_tile == (t - tiles)) return 0; // hide titlebar in fullscreen
-    return 16;
+    int fh = vga_text_cell_h();
+    int h = fh + 4;
+    if (h < 16) h = 16;
+    return h;
 }
 
 static void draw_decorations(tile_t* t, int is_focused) {
     if (t->type == TILE_EMPTY) return;
+    int cw = vga_text_cell_w();
+    int fh = vga_text_cell_h();
     int title_h = get_title_height(t);
     // In low mode, draw simpler title/status without scrolling text or fancy clipping
     if (g_gui_low_mode) {
         if (title_h > 0) {
             int title_y = t->y;
-            int title_color_r = is_focused ? 160 : 90;
-            int title_color_g = is_focused ? 160 : 90;
-            int title_color_b = is_focused ? 50 : 50;
+            int title_color_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
+            int title_color_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
+            int title_color_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
             drawRect(t->x, title_y, t->width, title_h, title_color_r, title_color_g, title_color_b);
             if (t->title && t->title[0]) {
                 int title_len = (int)strlen(t->title);
-                int max_chars = t->width / 8; if (max_chars < 0) max_chars = 0;
-                int text_y = title_y + 4;
-                int cr = is_focused ? 0 : 255, cg = is_focused ? 0 : 255, cb = is_focused ? 0 : 255;
+                int max_chars = t->width / cw; if (max_chars < 0) max_chars = 0;
+                int text_y = title_y + (title_h - fh) / 2;
+                int cr = is_focused ? 255 : 0, cg = is_focused ? 255 : 0, cb = is_focused ? 255 : 0;
                 if (title_len <= max_chars) {
-                    int start_x = t->x + (t->width - (8 * title_len)) / 2;
+                    int start_x = t->x + (t->width - (cw * title_len)) / 2;
                     for (int i = 0; i < title_len; ++i) {
-                        int cx = start_x + i * 8;
+                        int cx = start_x + i * cw;
                         int clip_left = t->x + 4;
                         int clip_right = t->x + t->width - 4;
                         if (cx < clip_left) continue;
-                        if (cx + 8 > clip_right) break;
-                        if (cx < 0 || cx + 8 > screen_w) break;
+                        if (cx + cw > clip_right) break;
+                        if (cx < 0 || cx + cw > screen_w) break;
                         drawCharAt(cx, text_y, (int)(unsigned char)t->title[i], cr, cg, cb);
                     }
                 } else {
@@ -1103,12 +1284,12 @@ static void draw_decorations(tile_t* t, int is_focused) {
                         int idx = pos + i; char ch = ' ';
                         if (idx < title_len) ch = t->title[idx];
                         else { int wrap_idx = idx - title_len; if (wrap_idx < title_len) ch = t->title[wrap_idx]; }
-                        int cx = t->x + i * 8;
+                        int cx = t->x + i * cw;
                         int clip_left = t->x + 4;
                         int clip_right = t->x + t->width - 4;
                         if (cx < clip_left) continue;
-                        if (cx + 8 > clip_right) break;
-                        if (cx < 0 || cx + 8 > screen_w) break;
+                        if (cx + cw > clip_right) break;
+                        if (cx < 0 || cx + cw > screen_w) break;
                         drawCharAt(cx, text_y, (int)(unsigned char)ch, cr, cg, cb);
                     }
                 }
@@ -1118,13 +1299,15 @@ static void draw_decorations(tile_t* t, int is_focused) {
         int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
         if (show_status) {
             int status_y = t->y + title_h;
-            status_h = 12;
-            drawRect(t->x, status_y, t->width, status_h, 32, 32, 32);
+            status_h = fh + 4;
+            if (status_h < 12) status_h = 12;
+            drawRect(t->x, status_y, t->width, status_h, g_wm_theme.status_r, g_wm_theme.status_g, g_wm_theme.status_b);
             const char* left_text = t->status_left ? t->status_left : "";
             int left_len = (int)strlen(left_text);
-            int max_chars = (t->width - 8) / 8; if (max_chars < 0) max_chars = 0;
+            int max_chars = (t->width - cw) / cw; if (max_chars < 0) max_chars = 0;
             if (left_len > max_chars) left_len = max_chars;
-            for (int i = 0; i < left_len; ++i) drawCharAt(t->x + 4 + i * 8, status_y + 2, (unsigned char)left_text[i], 220, 220, 220);
+            int text_y = status_y + (status_h - fh) / 2;
+            for (int i = 0; i < left_len; ++i) drawCharAt(t->x + 4 + i * cw, text_y, (unsigned char)left_text[i], g_wm_theme.status_text_r, g_wm_theme.status_text_g, g_wm_theme.status_text_b);
         }
         int border_r = is_focused ? 120 : 48, border_g = is_focused ? 120 : 48, border_b = is_focused ? 80 : 48;
         drawRect(t->x, t->y, t->width, 1, border_r, border_g, border_b);
@@ -1135,26 +1318,26 @@ static void draw_decorations(tile_t* t, int is_focused) {
     }
     if (title_h > 0) {
         int title_y = t->y;
-        int title_color_r = is_focused ? 200 : 120;
-        int title_color_g = is_focused ? 200 : 120;
-        int title_color_b = is_focused ? 50 : 50;
+        int title_color_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
+        int title_color_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
+        int title_color_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
         drawRect(t->x, title_y, t->width, title_h, title_color_r, title_color_g, title_color_b);
         if (t->title && t->title[0]) {
             int title_len = (int)strlen(t->title);
-            int max_chars = t->width / 8;
-            int text_y = title_y + 4;
-            int color_r = is_focused ? 0 : 255;
-            int color_g = is_focused ? 0 : 255;
-            int color_b = is_focused ? 0 : 255;
+            int max_chars = t->width / cw;
+            int text_y = title_y + (title_h - fh) / 2;
+            int color_r = is_focused ? 255 : 0;
+            int color_g = is_focused ? 255 : 0;
+            int color_b = is_focused ? 255 : 0;
             if (title_len <= max_chars) {
-                int start_x = t->x + (t->width - (8 * title_len)) / 2;
+                int start_x = t->x + (t->width - (cw * title_len)) / 2;
                 for (int i = 0; i < title_len; ++i) {
-                    int cx = start_x + i * 8;
+                    int cx = start_x + i * cw;
                     int clip_left = t->x + 4;
                     int clip_right = t->x + t->width - 4;
                     if (cx < clip_left) continue;
-                    if (cx + 8 > clip_right) break;
-                    if (cx < 0 || cx + 8 > screen_w) break;
+                    if (cx + cw > clip_right) break;
+                    if (cx < 0 || cx + cw > screen_w) break;
                     drawCharAt(cx, text_y, (int)(unsigned char)t->title[i], color_r, color_g, color_b);
                 }
             } else {
@@ -1170,12 +1353,12 @@ static void draw_decorations(tile_t* t, int is_focused) {
                         int wrap_idx = idx - title_len;
                         if (wrap_idx < title_len) ch = t->title[wrap_idx];
                     }
-                    int cx = t->x + i * 8;
+                    int cx = t->x + i * cw;
                     int clip_left = t->x + 4;
                     int clip_right = t->x + t->width - 4;
                     if (cx < clip_left) continue;
-                    if (cx + 8 > clip_right) break;
-                    if (cx < 0 || cx + 8 > screen_w) break;
+                    if (cx + cw > clip_right) break;
+                    if (cx < 0 || cx + cw > screen_w) break;
                     drawCharAt(cx, text_y, (int)(unsigned char)ch, color_r, color_g, color_b);
                 }
             }
@@ -1186,21 +1369,22 @@ static void draw_decorations(tile_t* t, int is_focused) {
     int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
     if (show_status) {
         int status_y = t->y + title_h; // if title_h==0 this is top
-        status_h = 12;
-        drawRect(t->x, status_y, t->width, status_h, 32, 32, 32);
+        status_h = fh + 4;
+        if (status_h < 12) status_h = 12;
+        drawRect(t->x, status_y, t->width, status_h, g_wm_theme.status_r, g_wm_theme.status_g, g_wm_theme.status_b);
         const char* left_text = t->status_left ? t->status_left : "Super+n:New | Super+Arrow:Switch | Super+Q:Close";
         int left_len = (int)strlen(left_text);
-        int avail_chars = (t->width - 8) / 8;
-        int text_y = status_y + 2;
+        int avail_chars = (t->width - cw) / cw;
+        int text_y = status_y + (status_h - fh) / 2;
         if (left_len <= avail_chars) {
             int clip_min = t->x + 4;
             int clip_max = t->x + t->width - 4;
             for (int i = 0; i < left_len; ++i) {
-                int cx = clip_min + i * 8;
+                int cx = clip_min + i * cw;
                 if (cx < clip_min) continue;
-                if (cx + 8 > clip_max) break;
-                if (cx < 0 || cx + 8 > screen_w) break;
-                drawCharAt(cx, text_y, (int)(unsigned char)left_text[i], 255, 255, 255);
+                if (cx + cw > clip_max) break;
+                if (cx < 0 || cx + cw > screen_w) break;
+                drawCharAt(cx, text_y, (int)(unsigned char)left_text[i], g_wm_theme.status_text_r, g_wm_theme.status_text_g, g_wm_theme.status_text_b);
             }
         } else {
             int window = avail_chars;
@@ -1217,17 +1401,17 @@ static void draw_decorations(tile_t* t, int is_focused) {
                     int wrap_idx = idx - left_len;
                     if (wrap_idx < left_len) ch = left_text[wrap_idx];
                 }
-                int cx = clip_min + i * 8;
+                int cx = clip_min + i * cw;
                 if (cx < clip_min) continue;
-                if (cx + 8 > clip_max) break;
-                if (cx < 0 || cx + 8 > screen_w) break;
-                drawCharAt(cx, text_y, (int)(unsigned char)ch, 255, 255, 255);
+                if (cx + cw > clip_max) break;
+                if (cx < 0 || cx + cw > screen_w) break;
+                drawCharAt(cx, text_y, (int)(unsigned char)ch, g_wm_theme.status_text_r, g_wm_theme.status_text_g, g_wm_theme.status_text_b);
             }
         }
         if (t->status_right && t->status_right[0]) {
             int right_len = strlen(t->status_right);
-            int max_right_pixels = t->width - 8;
-            int max_right_chars = max_right_pixels / 8;
+            int max_right_pixels = t->width - cw;
+            int max_right_chars = max_right_pixels / cw;
             if (max_right_chars <= 0) max_right_chars = 0;
             const char* right_ptr = t->status_right;
             if (right_len > max_right_chars) {
@@ -1242,30 +1426,30 @@ static void draw_decorations(tile_t* t, int is_focused) {
                 }
             }
             int right_len_visible = right_len;
-            int max_chars = (t->width - 8) / 8;
+            int max_chars = (t->width - cw) / cw;
             if (right_len > max_chars) right_len_visible = max_chars - 1;
             if (right_len_visible <= max_chars && right_len_visible > 0) {
-                int start_x = t->x + t->width - right_len_visible * 8 - 4;
+                int start_x = t->x + t->width - right_len_visible * cw - 4;
                 for (int ri = 0; ri < right_len_visible; ++ri) {
-                    int cx = start_x + ri * 8;
+                    int cx = start_x + ri * cw;
                     int clip_left = t->x + 4;
                     int clip_right = t->x + t->width - 4;
                     if (cx < clip_left) continue;
-                    if (cx + 8 > clip_right) break;
-                    if (cx < 0 || cx + 8 > screen_w) break;
-                    drawCharAt(cx, status_y + 2, (int)(unsigned char)right_ptr[ri], 255, 0, 0);
+                    if (cx + cw > clip_right) break;
+                    if (cx < 0 || cx + cw > screen_w) break;
+                    drawCharAt(cx, text_y, (int)(unsigned char)right_ptr[ri], 255, 0, 0);
                 }
             } else {
-                int tx = t->x + t->width - right_len * 8 - 4;
+                int tx = t->x + t->width - right_len * cw - 4;
                 if (tx < t->x + 4) tx = t->x + 4;
                 for (int ri = 0; ri < right_len; ++ri) {
-                    int cx = tx + ri * 8;
+                    int cx = tx + ri * cw;
                     int clip_left = t->x + 4;
                     int clip_right = t->x + t->width - 4;
                     if (cx < clip_left) continue;
-                    if (cx + 8 > clip_right) break;
-                    if (cx < 0 || cx + 8 > screen_w) break;
-                    drawCharAt(cx, status_y + 2, (int)(unsigned char)right_ptr[ri], 255, 0, 0);
+                    if (cx + cw > clip_right) break;
+                    if (cx < 0 || cx + cw > screen_w) break;
+                    drawCharAt(cx, text_y, (int)(unsigned char)right_ptr[ri], 255, 0, 0);
                 }
             }
         }
@@ -1302,11 +1486,16 @@ static void draw_tile_content(const tile_t* t) {
     int title_h = get_title_height(t);
     int status_h = 0;
     int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
-    if (show_status) status_h = 12;
+    int cw = vga_text_cell_w();
+    int fh = vga_text_cell_h();
+    if (show_status) {
+        status_h = fh + 4;
+        if (status_h < 12) status_h = 12;
+    }
     // Keep a 1px margin for the border so clears don't overwrite border pixels
     int content_x = t->x + 1;
     int content_y = t->y + title_h + status_h + 1;
-    int line_h = 8;
+    int line_h = fh;
     int max_lines = (t->height - (title_h + status_h + 2)) / line_h;
     int content_w = t->width - 2; // leave 1px border on left/right
     int content_h = t->height - (title_h + status_h) - 2; // leave 1px top/bottom border
@@ -1319,7 +1508,7 @@ static void draw_tile_content(const tile_t* t) {
             char label[8];
             int n = (shell_redirect_icon_count > 9) ? 9 : shell_redirect_icon_count;
             label[0] = 'I'; label[1] = 'c'; label[2] = ':'; label[3] = '0' + n; label[4] = '\0';
-            for (int i = 0; label[i]; ++i) drawCharAt(content_x + i*8, content_y, (int)(unsigned char)label[i], 255, 200, 0);
+            for (int i = 0; label[i]; ++i) drawCharAt(content_x + i * cw, content_y, (int)(unsigned char)label[i], 255, 200, 0);
         }
         // Draw configured background (if any); else clear to black
         int ti_bg = t - tiles;
@@ -1385,7 +1574,7 @@ static void draw_tile_content(const tile_t* t) {
     } else {
         // Soft-wrapped rendering: draw from the end of the buffer using visual rows.
         // Compute visible columns from content width.
-        int cols = content_w / 8;
+        int cols = content_w / cw;
         if (cols < 1) cols = 1;
     // Determine the absolute last row to show (cursor row minus scrollback offset)
     int end_row = vterm_get_cursor_row(t->term_idx) - vterm_get_scroll(t->term_idx);
@@ -1409,19 +1598,23 @@ static void draw_tile_content(const tile_t* t) {
                 // If this wrapped segment contains the anchor column, draw the icon once on this visual row.
                 if (line_icon_key && line_anchor_col >= start_col && line_anchor_col < start_col + cols) {
                     int py_icon = content_y + vis_row * line_h;
-                    int x_text0 = content_x + (line_anchor_col - start_col) * 8 + line_indent_px;
-                    int icon_x = x_text0 - 9;
                     rei_image_t* icon = load_icon_for_ext(line_icon_key);
                     if (!icon) icon = load_icon_for_ext("file_none");
-                    if (icon) draw_rei_at(icon, icon_x, py_icon);
+                    if (icon) {
+                        int icon_x = content_x;
+                        int icon_y = py_icon;
+                        int ih = icon->header.height;
+                        if (fh > ih) icon_y = py_icon + (fh - ih) / 2;
+                        draw_rei_at(icon, icon_x, icon_y);
+                    }
                 }
 
                 for (int cc = 0; cc < cols; ++cc) {
-                    int px = content_x + cc * 8 + line_indent_px;
+                    int px = content_x + cc * cw + line_indent_px;
                     int py = content_y + vis_row * line_h;
                     // Horizontal & vertical clipping
-                    if (px + 7 < content_x || px >= content_x + content_w) continue;
-                    if (py + 7 < content_y || py >= content_y + content_h) continue;
+                    if (px + (cw - 1) < content_x || px >= content_x + content_w) continue;
+                    if (py + (fh - 1) < content_y || py >= content_y + content_h) continue;
                     int src_col = start_col + cc;
                     char ch = ' ';
                     int rr = 200, gg = 200, bb = 200;
@@ -1449,14 +1642,14 @@ static void draw_tile_content(const tile_t* t) {
                             tile_bg_t* bgp3 = &g_tile_bg[ti_bg_idx3];
                             if (bgp3->img && bgp3->mode != BG_NONE && bgp3->local_darken && ch != ' ') {
                                 // Multiply darken by ~50% for a softer look
-                                vga_darkenRect_bb(px, py, 8, 8, 128);
+                                vga_darkenRect_bb(px, py, cw, fh, 128);
                             }
                         }
                     }
                     int is_sel = vterm_is_selected(t->term_idx, abs_row, src_col);
                     if (is_sel) {
                         // selection background teal-ish
-                        drawRect(px, py, 8, 8, 0, 128, 128);
+                        drawRect(px, py, cw, fh, 0, 128, 128);
                     }
                     // Optional text shadow: draw small dark offset before main glyph
                     int ti_bg_idx = t - tiles;
@@ -1480,7 +1673,7 @@ static void draw_tile_content(const tile_t* t) {
                     drawCharAt(px, py, (int)(unsigned char)ch, rr, gg, bb);
                     // Then overlay underscore cursor at the logical caret position
                     if (abs_row == cursor_row && start_col + cc == cursor_col) {
-                        drawCharAt(px, py, (int)'_', 255, 255, 0);
+                        drawCharAt(px, py, (int)'_', 220, 220, 220);
                     }
                 }
                 vis_row--;
@@ -1528,14 +1721,14 @@ static void draw_bg_modal() {
     // border and title
     drawRect(bx, by, box_w, box_h, 32, 32, 32);
     const char* title = "Background Mode";
-    for (int i = 0; title[i]; ++i) drawCharAt(bx + 8 + i*8, by + 8, (int)(unsigned char)title[i], 255, 255, 0);
+    for (int i = 0; title[i]; ++i) drawCharAt(bx + 8 + i*8, by + 8, (int)(unsigned char)title[i], 220, 220, 220);
     const char* hint = "Enter=Select  Esc=Cancel";
     for (int i = 0; hint[i]; ++i) drawCharAt(bx + 8 + i*8, by + 24, (int)(unsigned char)hint[i], 200, 200, 200);
     int y0 = by + 40;
     for (int i = 0; i < opt_count; ++i) {
-        int rr = (i == g_bg_modal.selected) ? 255 : 200;
-        int gg = (i == g_bg_modal.selected) ? 255 : 200;
-        int bb = (i == g_bg_modal.selected) ? 0 : 200;
+        int rr = (i == g_bg_modal.selected) ? 220 : 200;
+        int gg = (i == g_bg_modal.selected) ? 220 : 200;
+        int bb = (i == g_bg_modal.selected) ? 220 : 200;
         for (int j = 0; opts[i][j]; ++j) drawCharAt(bx + 16 + j*8, y0 + i*12, (int)(unsigned char)opts[i][j], rr, gg, bb);
     }
     // mark only the modal region dirty to keep the blit minimal
@@ -1646,6 +1839,17 @@ void tile_invalidate_decorations(int tile_idx) {
 void tile_close(int tile_idx) {
     if (tile_idx < 0 || tile_idx >= MAX_TILES) return;
     if (tiles[tile_idx].type == TILE_EMPTY) return;
+
+    // If a GUI client is registered, allow it to veto closing.
+    int term = tiles[tile_idx].term_idx;
+    if (term >= 0 && term < MAX_TILES && gui_close_cb[term]) {
+        tile_gui_close_cb cb = gui_close_cb[term];
+        void* ud = gui_userdata[term];
+        if (!cb(tile_idx, ud)) {
+            return; // vetoed
+        }
+    }
+
     // Mark empty
     tiles[tile_idx].type = TILE_EMPTY;
     tiles[tile_idx].title = "";
@@ -1662,7 +1866,7 @@ void tile_close(int tile_idx) {
     for (int i = n; i < MAX_TILES; ++i) {
         tiles[i].type = TILE_EMPTY; tiles[i].title = ""; tiles[i].status_left = NULL; tiles[i].status_right = NULL; tiles[i].term_idx = i; tiles[i].active = 0;
     }
-    // Reassign term_idx for compacted tiles. Do NOT clear vterm buffers here — keep terminal content intact.
+    // Reassign term_idx for compacted tiles. Do NOT clear vterm buffers here - keep terminal content intact.
     for (int i = 0; i < n; ++i) {
         int old_idx = tiles[i].term_idx;
         tiles[i].term_idx = i;
@@ -1735,6 +1939,7 @@ void tile_register_gui_client(int tile_idx, tile_gui_draw_cb draw_cb, tile_gui_k
     gui_draw_cb[term] = draw_cb;
     gui_key_cb[term] = key_cb;
     gui_mouse_cb[term] = NULL;
+    gui_close_cb[term] = NULL;
     gui_userdata[term] = userdata;
     gui_needs_redraw[term] = 1;
     gui_continuous_redraw[term] = 0;
@@ -1747,9 +1952,17 @@ void tile_register_gui_client2(int tile_idx, tile_gui_draw_cb draw_cb, tile_gui_
     gui_draw_cb[term] = draw_cb;
     gui_key_cb[term] = key_cb;
     gui_mouse_cb[term] = mouse_cb;
+    gui_close_cb[term] = NULL;
     gui_userdata[term] = userdata;
     gui_needs_redraw[term] = 1;
     gui_continuous_redraw[term] = 0;
+}
+
+void tile_register_gui_close_cb(int tile_idx, tile_gui_close_cb close_cb_fn) {
+    if (tile_idx < 0 || tile_idx >= MAX_TILES) return;
+    int term = tiles[tile_idx].term_idx;
+    if (term < 0 || term >= MAX_TILES) term = tile_idx;
+    gui_close_cb[term] = close_cb_fn;
 }
 
 int tile_create_gui_tile(const char* title, const char* status_left) {
@@ -1778,6 +1991,7 @@ void tile_unregister_gui_client(int tile_idx) {
         gui_draw_cb[term] = NULL;
         gui_key_cb[term] = NULL;
         gui_mouse_cb[term] = NULL;
+        gui_close_cb[term] = NULL;
         gui_userdata[term] = NULL;
         // No GUI anymore; clear any pending GUI invalidation
         gui_needs_redraw[term] = 0;
@@ -1831,6 +2045,9 @@ void tile_render_once(void) {
 
     // Advance effects that are otherwise driven per-frame.
     g_tile_scroll_tick++;
+
+    // Ensure UI/icon assets match current font metrics (8x8 vs 16x16 icon sets).
+    maybe_update_icon_mode(0);
 
     vga_begin_frame();
 
@@ -2166,6 +2383,9 @@ void start_tiling_manager() {
     while (running) {
         // UI loop heartbeat for the watchdog
         watchdog_kick("wm-loop");
+
+        // Ensure UI/icon assets match current font metrics (8x8 vs 16x16 icon sets).
+        maybe_update_icon_mode(0);
         // 1 Hz GUI heartbeat: invalidate GUI tiles once per second so they can update time-based views
         {
             uint32 now_ticks_hb = sched_get_tick_count();
@@ -2802,7 +3022,7 @@ after_mouse_handling:
                     g_force_full_redraw = 1;
                 } else {
                     // If more than one tile, close the focused tile.
-                    // If only one tile remains, DO NOT close/exit — keep at least one tile to avoid OS instability.
+                    // If only one tile remains, DO NOT close/exit - keep at least one tile to avoid OS instability.
                     if (tile_count > 1) {
                         tile_close(focused);
                         g_force_full_redraw = 1;
@@ -2840,10 +3060,16 @@ after_mouse_handling:
                     tile_gui_key_cb cb = gui_key_cb[term];
                     void* ud = gui_userdata[term];
                     cb(focused, key & 0xFFFF, ud);
-                    // If the GUI is still registered (app didn't close itself), default to unregister
+                    // If the GUI is still registered (app didn't close itself), consult close-veto callback.
                     if (gui_key_cb[term]) {
-                        tile_unregister_gui_client(focused);
-                        g_force_full_redraw = 1;
+                        int allow_close = 1;
+                        if (gui_close_cb[term]) {
+                            allow_close = gui_close_cb[term](focused, gui_userdata[term]) ? 1 : 0;
+                        }
+                        if (allow_close) {
+                            tile_unregister_gui_client(focused);
+                            g_force_full_redraw = 1;
+                        }
                     }
                     continue;
                 }
@@ -2921,7 +3147,7 @@ after_mouse_handling:
     }
 }
 
-// ---------------- Runtime GUI tuning (low-spec controls) ----------------
+// - Runtime GUI tuning (low-spec controls) -
 void tiler_gui_set_mode(int mode) {
     // mode: 0=high, 1=low, 2=auto
     int new_low = g_gui_low_mode;

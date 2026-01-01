@@ -26,7 +26,7 @@ void sched_set_timeslice_ticks(uint32 ticks);
 // called when a timeslice ends to trigger a context switch (stub)
 void sched_on_timeslice_end(void);
 
-// --- Lightweight timing/usage getters ---
+// Lightweight timing/usage getters ---
 // Monotonic scheduler tick counter (increments in IRQ0 handler)
 uint32 sched_get_tick_count(void);
 // Configured tick frequency in Hz

@@ -16,7 +16,7 @@ static int tui_cur_y = 0;
 int tui_alt_pressed = 0;
 
 // Helper to compute pixel position for cell coords (kept for potential future use)
-static void tui_set_cursor(int x, int y) {
+static __attribute__((unused)) void tui_set_cursor(int x, int y) {
     tui_cur_x = x;
     tui_cur_y = y;
     // Intentionally avoid touching global VGA cursor (width/height) to prevent side effects.
@@ -36,6 +36,8 @@ void tui_refresh() {
 }
 
 void tui_draw_text(int x, int y, const char* text, tui_style_t style) {
+    int cw = vga_text_cell_w();
+    int ch = vga_text_cell_h();
     int rr = 0, gg = 0, bb = 0;
     switch (style.fg_color) {
         case TUI_COLOR_YELLOW: rr = 255; gg = 255; bb = 0; break;
@@ -47,7 +49,7 @@ void tui_draw_text(int x, int y, const char* text, tui_style_t style) {
         default:               rr = 255; gg = 255; bb = 255; break;
     }
     // Use side-effect-free pixel-based text to avoid console cursor side effects
-    drawTextAt(x * 8, y * 8, text, rr, gg, bb);
+    drawTextAt(x * cw, y * ch, text, rr, gg, bb);
 }
 
 void tui_draw_window(const tui_window_t* win) {
@@ -97,6 +99,8 @@ void tui_draw_list(const tui_window_t* win, const char** items, int item_count, 
 }
 
 void tui_draw_text_area(const tui_window_t* win, const char* text, int scroll_offset, tui_style_t style) {
+    int cell_w = vga_text_cell_w();
+    int cell_h = vga_text_cell_h();
     int max_lines = win->height - 3;
     int y = win->y + 2;
     int x = win->x + 1;
@@ -105,9 +109,9 @@ void tui_draw_text_area(const tui_window_t* win, const char* text, int scroll_of
         if (line >= scroll_offset) {
             // Draw this character at the appropriate pixel position directly to avoid
             // any global console cursor side effects.
-            char ch[2] = {text[i], '\0'};
-            int px = (x + col) * 8;
-            int py = (y + line - scroll_offset) * 8;
+            char chbuf[2] = {text[i], '\0'};
+            int px = (x + col) * cell_w;
+            int py = (y + line - scroll_offset) * cell_h;
             int rr = 255, gg = 255, bb = 255;
             switch (style.fg_color) {
                 case TUI_COLOR_YELLOW: rr = 255; gg = 255; bb = 0; break;
@@ -118,7 +122,7 @@ void tui_draw_text_area(const tui_window_t* win, const char* text, int scroll_of
                 case TUI_COLOR_GRAY:   rr = 192; gg = 192; bb = 192; break;
                 default:               rr = 255; gg = 255; bb = 255; break;
             }
-            drawTextAt(px, py, ch, rr, gg, bb);
+            drawTextAt(px, py, chbuf, rr, gg, bb);
         }
         if (text[i] == '\n' || col >= win->width - 3) {
             line++;
@@ -130,6 +134,8 @@ void tui_draw_text_area(const tui_window_t* win, const char* text, int scroll_of
 }
 
 void tui_draw_status_bar(const tui_window_t* win, const char* text, tui_style_t style) {
+    int cw = vga_text_cell_w();
+    int ch = vga_text_cell_h();
     // If a window is provided, draw the status bar just below the window; otherwise, draw at the screen bottom.
     // Clamp to last visible row (0-based). Previous code used height itself, which is off-by-one.
     int y = (win == NULL) ? (tui_screen_height - 1) : (win->y + win->height - 1);
@@ -148,15 +154,15 @@ void tui_draw_status_bar(const tui_window_t* win, const char* text, tui_style_t 
     }
 
     // Convert TUI grid coords to pixel coords
-    int px = x * 8;
-    int py = y * 8;
+    int px = x * cw;
+    int py = y * ch;
     int clip_min = px;
-    int clip_max = (x + bar_width) * 8 - 8; // last character must fit 8 pixels
+    int clip_max = (x + bar_width) * cw - cw; // last character must fit
 
     // Draw characters one-by-one clipped to the provided window area
     for (int i = 0; text && text[i]; ++i) {
-        int cx = px + i * 8;
-        if (cx + 7 > clip_max) break;
+        int cx = px + i * cw;
+        if (cx + (cw - 1) > clip_max) break;
         if (cx < clip_min) continue; // should not happen for left-aligned, but safe
         drawCharAt(cx, py, (int)(unsigned char)text[i], rr, gg, bb);
     }
@@ -200,6 +206,7 @@ int tui_read_key() {
     if (ctrl_pressed) {
         if (scancode == 46) return 0x2206; // Ctrl+C (abort / interrupt)
         if (scancode == 24) return 0x2001; // Ctrl+O (save)
+        if (scancode == 31) return 0x2001; // Ctrl+S (save)
         if (scancode == 45) return 0x2002; // Ctrl+X (exit)
         if (scancode == 16) return 0x2101; // Ctrl+Q (quit)
         if (scancode == 13) return 0x2102; // Ctrl+Plus/Equals (zoom in)
@@ -224,6 +231,7 @@ int tui_read_key() {
         case 45: base = 'x'; is_letter = 1; break; case 46: base = 'c'; is_letter = 1; break;
         case 47: base = 'v'; is_letter = 1; break; case 48: base = 'b'; is_letter = 1; break;
         case 49: base = 'n'; is_letter = 1; break; case 50: base = 'm'; is_letter = 1; break;
+        default: break;
     }
     if (is_letter) {
         int upper = (caps_lock && !shift_pressed) || (!caps_lock && shift_pressed);
@@ -237,6 +245,7 @@ int tui_read_key() {
     case 80: return (shift_pressed ? 0x3000 : 0) | (super_pressed ? (0x4000 | 0x1002) : 0x1002); // Down
     case 75: return (shift_pressed ? 0x3000 : 0) | (super_pressed ? (0x4000 | 0x1003) : 0x1003); // Left
     case 77: return (shift_pressed ? 0x3000 : 0) | (super_pressed ? (0x4000 | 0x1004) : 0x1004); // Right
+        case 15: return '\t';
         case 14: return '\b';
         case 28: return '\n';
         case 1:  return 27; // Esc
@@ -254,6 +263,7 @@ int tui_read_key() {
         case 8: return shift_pressed ? '&' : '7';
         case 9: return shift_pressed ? '*' : '8';
         case 10: return shift_pressed ? '(' : '9';
+        default: break;
         case 11: return shift_pressed ? ')' : '0';
         case 12: return shift_pressed ? '_' : '-';
         case 13: return shift_pressed ? '+' : '=';

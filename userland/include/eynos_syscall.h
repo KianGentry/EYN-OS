@@ -1,12 +1,6 @@
-#pragma once
-
 // Low-level EYN-OS syscall ABI (int 0x80).
 // eax = syscall number
 // ebx/ecx/edx = args 1..3
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 enum {
     EYN_SYSCALL_WRITE  = 1,
@@ -32,6 +26,9 @@ enum {
 
     EYN_SYSCALL_GUI_DRAW_LINE        = 18,
     EYN_SYSCALL_GUI_GET_CONTENT_SIZE = 19,
+
+    // Set the active bitmap font for a GUI handle (path to .hex). Empty/NULL resets.
+    EYN_SYSCALL_GUI_SET_FONT = 20,
 };
 
 static inline int eyn_syscall3(int n, int a1, const void* a2, int a3) {
@@ -77,7 +74,3 @@ static inline int eyn_syscall0(int n) {
     );
     return ret;
 }
-
-#ifdef __cplusplus
-}
-#endif

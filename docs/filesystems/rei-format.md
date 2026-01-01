@@ -16,12 +16,12 @@ REI (Raw EYN Image) is a simple, efficient image format for EYN-OS.
 
 | Offset | Size | Field   | Description                                                    |
 |--------|------|---------|----------------------------------------------------------------|
-| 0x00   | 4    | Magic   | 0x52454900 ("REI\0")                                         |
+| 0x00   | 4    | Magic   | 0x52454900 ("REI\0")                                           |
 | 0x04   | 2    | Width   | Image width in pixels (max 320)                                |
 | 0x06   | 2    | Height  | Image height in pixels (max 200)                               |
 | 0x08   | 1    | Depth   | 1=mono, 3=RGB, 4=RGBA                                          |
 | 0x09   | 1    | Flags   | Low nibble: compression (0=none, 1=RLE)                        |
-| 0x0A   | 2    | Reserved| Reserved                                                        |
+| 0x0A   | 2    | Reserved| Reserved                                                       |
 
 ## Pixel Data
 
@@ -91,9 +91,9 @@ Options:
 
 EYN-OS integration:
 
-- `include/drivers/rei.h` — format and API
-- `src/drivers/rei.c` — parsing, optional RLE decompression, rendering helpers
-- `src/utilities/shell/image_viewer_gui.c` — GUI viewer
+- `include/drivers/rei.h` - format and API
+- `src/drivers/rei.c` - parsing, optional RLE decompression, rendering helpers
+- `src/utilities/shell/image_viewer_gui.c` - GUI viewer
 
 ## Notes
 

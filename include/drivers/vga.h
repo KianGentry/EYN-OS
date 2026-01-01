@@ -28,6 +28,35 @@ void drawText(int charnum, int r, int g, int b);
 void drawTextAt(int x, int y, const char* text, int r, int g, int b);
 // Draw a single character at pixel coords (x,y)
 void drawCharAt(int x, int y, int charnum, int r, int g, int b);
+// Draw a single character at pixel coords (x,y) using a specific font handle.
+// font_handle 0 is the built-in fallback font.
+void drawCharAt_font(int font_handle, int x, int y, int charnum, int r, int g, int b);
+
+// Acquire a bitmap font from a .hex file via the VFS. Returns a font handle (>0) on success.
+// The returned handle is refcounted; call vga_font_release() when no longer needed.
+// On failure returns <0.
+int vga_font_acquire_hex(uint8 drive, const char* path);
+// Release a previously-acquired font handle (safe no-op for handle <= 0).
+void vga_font_release(int font_handle);
+
+// Acquire the system default font handle (refcounted). Returns >0 when the
+// configured system font is available; returns 0 to indicate the built-in
+// fallback should be used.
+// Call vga_font_release() when no longer needed.
+int vga_system_font_acquire(void);
+
+// Set the system default font used by drawText/drawCharAt when font_handle==0.
+// On success, loads the font from disk into RAM and releases the previous system font.
+// Use path="builtin" (or NULL/empty) to revert to built-in fallback.
+// Returns 0 on success, -1 on failure.
+int vga_system_font_set(uint8 drive, const char* path);
+
+// Text cell metrics for the currently active system font used by drawText/drawCharAt.
+// Width is always 8; height is 8 or 16 depending on the loaded system font.
+int vga_text_cell_w(void);
+int vga_text_cell_h(void);
+// Query glyph height (8 or 16) for a specific font handle (0 = built-in).
+int vga_font_glyph_h(int font_handle);
 void drawText_bold(int charnum, int r, int g, int b);
 void drawText_italic(int charnum, int r, int g, int b);
 void drawText_large(int charnum, int r, int g, int b);
@@ -123,7 +152,7 @@ int vga_get_dirty_strategy(void);
 
 // Global variables
 extern int width, height;
-extern int r, g, b;
+extern int vga_default_r, vga_default_g, vga_default_b;
 
 // Printf function
 void printf(const char* format, ...);

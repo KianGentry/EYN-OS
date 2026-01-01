@@ -1,5 +1,5 @@
 /*
- * partition.c — Disk Partition Management Implementation
+ * partition.c - Disk Partition Management Implementation
  *
  * Provides MBR partition table management, virtual drive mapping,
  * and swap partition support for EYN-OS.

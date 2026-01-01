@@ -264,6 +264,7 @@ uint32 get_last_error_eip() {
 #define SYSCALL_GUI_ATTACH 17
 #define SYSCALL_GUI_DRAW_LINE 18
 #define SYSCALL_GUI_GET_CONTENT_SIZE 19
+#define SYSCALL_GUI_SET_FONT 20
 
 typedef struct {
     uint32 type;
@@ -332,6 +333,9 @@ typedef struct {
     char* title;
     char* status_left;
 
+    // Current font handle for this GUI context (0 = built-in fallback).
+    int font_handle;
+
     // Immediate-mode command list. Draw callback replays this list.
     int cmd_count;
     user_gui_cmd_t cmds[48];
@@ -355,6 +359,10 @@ static int g_user_self_tile_idx = -1;
 
 static void user_gui_free_entry(user_gui_t* e) {
     if (!e) return;
+	if (e->font_handle > 0) {
+		vga_font_release(e->font_handle);
+		e->font_handle = 0;
+	}
     if (e->tile_idx >= 0) {
         tile_unregister_gui_client(e->tile_idx);
         tile_close(e->tile_idx);
@@ -444,7 +452,7 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
             int x = content_x + c->x;
             int y = content_y + c->y;
             for (int j = 0; c->text[j] && j < (int)sizeof(c->text); ++j) {
-                drawCharAt(x + j * 8, y, (int)(unsigned char)c->text[j], c->r, c->g, c->b);
+                drawCharAt_font(e->font_handle, x + j * 8, y, (int)(unsigned char)c->text[j], c->r, c->g, c->b);
             }
             continue;
         }
@@ -505,6 +513,21 @@ void syscall_reset_user_guis(void) {
         if (g_user_guis[i].used) {
             user_gui_free_entry(&g_user_guis[i]);
         }
+    }
+
+    // Reset handle 0 "attached" GUI state too.
+    if (g_user_guis[0].used) {
+        if (g_user_guis[0].font_handle > 0) {
+            vga_font_release(g_user_guis[0].font_handle);
+            g_user_guis[0].font_handle = 0;
+        }
+        if (g_user_guis[0].title) { free(g_user_guis[0].title); g_user_guis[0].title = NULL; }
+        if (g_user_guis[0].status_left) { free(g_user_guis[0].status_left); g_user_guis[0].status_left = NULL; }
+        g_user_guis[0].used = 0;
+        g_user_guis[0].tile_idx = -1;
+        g_user_guis[0].cmd_count = 0;
+        g_user_guis[0].ev_head = 0;
+        g_user_guis[0].ev_tail = 0;
     }
     // Restore the current tile title if the user task changed it.
     if (g_user_self_title) {
@@ -984,6 +1007,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             user_gui_t* e = &g_user_guis[handle];
             e->title = kstrdup_bounded(title_tmp, sizeof(title_tmp) - 1);
             e->status_left = status_tmp[0] ? kstrdup_bounded(status_tmp, sizeof(status_tmp) - 1) : NULL;
+			e->font_handle = vga_system_font_acquire();
             if (!e->title) {
                 user_gui_free_entry(e);
                 regs->eax = (uint32)-1;
@@ -1078,12 +1102,17 @@ uint32 syscall_dispatch(regs_t* regs) {
                 if (e->status_left) free(e->status_left);
                 e->title = NULL;
                 e->status_left = NULL;
+				if (e->font_handle > 0) {
+					vga_font_release(e->font_handle);
+					e->font_handle = 0;
+				}
             }
 
             e->used = 1;
             e->tile_idx = tile_idx;
             e->title = kstrdup_bounded(title_tmp, sizeof(title_tmp) - 1);
             e->status_left = status_tmp[0] ? kstrdup_bounded(status_tmp, sizeof(status_tmp) - 1) : NULL;
+			e->font_handle = vga_system_font_acquire();
             if (!e->title) { regs->eax = (uint32)-1; break; }
             e->cmd_count = 0;
             e->ev_head = 0;
@@ -1220,6 +1249,38 @@ uint32 syscall_dispatch(regs_t* regs) {
             s.w = (int32)cw;
             s.h = (int32)ch;
             if (copyout(user_out, &s, sizeof(s)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_GUI_SET_FONT: {
+            // gui_set_font(handle, path_ptr). If path is NULL or empty, resets to the system default font.
+            int handle = (int)arg1;
+            const char* user_path = (const char*)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+
+            int new_font = vga_system_font_acquire();
+            if (user_path) {
+                char path[128];
+                if (copyin_cstr(path, sizeof(path), user_path) == 0) {
+                    trim_trailing_crlf(path);
+                    if (path[0]) {
+                        const char* cwd = "/";
+                        if (g_user_task_active) cwd = vterm_get_cwd(g_user_task_term);
+                        char abspath[128];
+                        resolve_path(path, cwd, abspath, sizeof(abspath));
+                        extern uint8 g_current_drive;
+                        uint8 drive = g_current_drive;
+                        int h = vga_font_acquire_hex(drive, abspath);
+                        if (h > 0) new_font = h;
+                    }
+                }
+            }
+
+            if (e->font_handle != new_font) {
+                if (e->font_handle > 0) vga_font_release(e->font_handle);
+                e->font_handle = new_font;
+            }
             regs->eax = 0;
             break;
         }

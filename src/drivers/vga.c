@@ -10,18 +10,472 @@
 #include <system.h>
 #include <serial.h>
 #include <watchdog.h>
+#include <fs/vfs.h>
 
 extern multiboot_info_t *g_mbi;
 
 int width, height;
-int r = 255, g = 255, b = 255; // Default to white
+int vga_default_r = 255, vga_default_g = 255, vga_default_b = 255; // Default to white
 // When non-zero, drawText operates in a minimal glyph-draw mode used by drawCharAt.
 static int g_drawCharAt_mode = 0;
+
+// Bitmap font registry (8xN, 256 glyphs)
+// Supports 8x8 and 8x16 .hex fonts.
+#define VGA_FONT_GLYPH_W 8
+#define VGA_FONT_GLYPH_H_8 8
+#define VGA_FONT_GLYPH_H_16 16
+#define VGA_FONT_GLYPHS 256
+#define VGA_FONT_MAX 12
+
+// System default font (used by drawText/drawCharAt when callers don't specify one).
+#define VGA_SYSTEM_FONT_DRIVE 0
+#define VGA_SYSTEM_FONT_PATH "/fonts/unscii-16.hex"
+
+// Runtime-selected system font (can be changed while the OS is running).
+static uint8 g_vga_system_font_drive = (uint8)VGA_SYSTEM_FONT_DRIVE;
+static char g_vga_system_font_path[128] = VGA_SYSTEM_FONT_PATH;
+
+typedef struct {
+	int used;
+	uint8 drive;
+	uint16 refcount;
+	char path[128];
+	uint8 glyph_h;  // 8 or 16
+	uint8* bitmap;  // VGA_FONT_GLYPHS * glyph_h
+} vga_font_entry_t;
+
+// Handle 0 = built-in font.
+// Handles 1..VGA_FONT_MAX map to g_vga_fonts[handle-1].
+static vga_font_entry_t g_vga_fonts[VGA_FONT_MAX];
+
+// System default font handle is held with a permanent refcount by the driver.
+static int g_vga_system_font_handle = 0;
+static int g_vga_system_font_attempted = 0;
+
+static const unsigned char* vga_builtin_font(void);
+
+static vga_font_entry_t* vga_font_entry_from_handle(int handle) {
+	if (handle <= 0) return NULL;
+	int idx = handle - 1;
+	if (idx < 0 || idx >= VGA_FONT_MAX) return NULL;
+	if (!g_vga_fonts[idx].used) return NULL;
+	return &g_vga_fonts[idx];
+}
+
+static const unsigned char* vga_font_bitmap_or_builtin(int handle) {
+	vga_font_entry_t* e = vga_font_entry_from_handle(handle);
+	if (!e || !e->bitmap) return vga_builtin_font();
+	return (const unsigned char*)e->bitmap;
+}
+
+static uint8 vga_font_glyph_h_or_builtin(int handle) {
+	vga_font_entry_t* e = vga_font_entry_from_handle(handle);
+	if (!e || !e->bitmap) return (uint8)VGA_FONT_GLYPH_H_8;
+	if (e->glyph_h != VGA_FONT_GLYPH_H_16) return (uint8)VGA_FONT_GLYPH_H_8;
+	return (uint8)VGA_FONT_GLYPH_H_16;
+}
+
+static void vga_try_init_system_font(void) {
+	if (g_vga_system_font_attempted) return;
+	if (g_vga_system_font_path[0] == '\0') return;
+	// Only attempt after a filesystem is detectable.
+	if (vfs_detect(g_vga_system_font_drive) == VFS_FS_NONE) return;
+	g_vga_system_font_attempted = 1;
+	int h = vga_font_acquire_hex(g_vga_system_font_drive, g_vga_system_font_path);
+	if (h > 0) g_vga_system_font_handle = h;
+}
+
+static int vga_get_system_font_handle_raw(void) {
+	vga_try_init_system_font();
+	return g_vga_system_font_handle;
+}
+
+int vga_system_font_acquire(void) {
+	vga_try_init_system_font();
+	if (g_vga_system_font_handle > 0) {
+		return vga_font_acquire_hex(g_vga_system_font_drive, g_vga_system_font_path);
+	}
+	return 0;
+}
+
+// Set the system font at runtime.
+// - On success, the previous system font (if any) is released.
+// - If path is NULL, empty, or "builtin", the system font is set to built-in fallback.
+// Returns 0 on success, -1 on failure (e.g., file not found / OOM).
+int vga_system_font_set(uint8 drive, const char* path) {
+	if (!path || !path[0] || strcmp(path, "builtin") == 0) {
+		int old = g_vga_system_font_handle;
+		g_vga_system_font_handle = 0;
+		g_vga_system_font_attempted = 1;
+		g_vga_system_font_drive = drive;
+		g_vga_system_font_path[0] = '\0';
+		if (old > 0) vga_font_release(old);
+		return 0;
+	}
+
+	int new_handle = vga_font_acquire_hex(drive, path);
+	if (new_handle <= 0) return -1;
+
+	int old = g_vga_system_font_handle;
+	g_vga_system_font_handle = new_handle;
+	g_vga_system_font_attempted = 1;
+	g_vga_system_font_drive = drive;
+	strncpy(g_vga_system_font_path, path, sizeof(g_vga_system_font_path) - 1);
+	g_vga_system_font_path[sizeof(g_vga_system_font_path) - 1] = '\0';
+
+	if (old > 0) vga_font_release(old);
+	return 0;
+}
+
+int vga_text_cell_w(void) {
+	return VGA_FONT_GLYPH_W;
+}
+
+int vga_text_cell_h(void) {
+	// Use the system font if it exists; otherwise, fall back to the built-in height.
+	int h = (int)vga_font_glyph_h_or_builtin(vga_get_system_font_handle_raw());
+	return (h == VGA_FONT_GLYPH_H_16) ? VGA_FONT_GLYPH_H_16 : VGA_FONT_GLYPH_H_8;
+}
+
+int vga_font_glyph_h(int font_handle) {
+	int h = (int)vga_font_glyph_h_or_builtin(font_handle);
+	return (h == VGA_FONT_GLYPH_H_16) ? VGA_FONT_GLYPH_H_16 : VGA_FONT_GLYPH_H_8;
+}
+
+static int vga_hex_nibble(char c) {
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+	if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+	return -1;
+}
+
+static int vga_hex_parse_u32(const char* s, int max_chars, uint32* out) {
+	if (!s || !out) return -1;
+	uint32 v = 0;
+	int n = 0;
+	for (; n < max_chars && s[n]; ++n) {
+		int h = vga_hex_nibble(s[n]);
+		if (h < 0) break;
+		v = (v << 4) | (uint32)h;
+	}
+	if (n == 0) return -1;
+	*out = v;
+	return n;
+}
+
+static int vga_font_parse_hex_line_bytes(const char* line, int* out_glyph_index, uint8* out_bytes, int out_cap, int* out_count) {
+	if (!line || !out_glyph_index || !out_bytes || out_cap <= 0 || !out_count) return -1;
+	*out_glyph_index = -1;
+	*out_count = 0;
+
+	// Skip leading whitespace
+	const char* p = line;
+	while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+	if (*p == '\0') return 0;
+	// Comments
+	if (*p == '#' || *p == ';') return 0;
+	if (p[0] == '/' && p[1] == '/') return 0;
+
+	// out_glyph_index meanings:
+	//  >=0 : explicit glyph index (0..255)
+	//  -1  : no prefix label found (caller may use sequential indexing)
+	//  -2  : prefix label found but codepoint is out of 8-bit range (caller should skip)
+	int glyph_index = -1;
+	// Optional prefixes: U+00XX: or 00XX: or 0xXX:
+	if ((p[0] == 'U' || p[0] == 'u') && p[1] == '+') {
+		uint32 cp = 0;
+		int n = vga_hex_parse_u32(p + 2, 8, &cp);
+		if (n > 0) {
+			const char* q = p + 2 + n;
+			while (*q == ' ' || *q == '\t') ++q;
+			if (*q == ':') {
+				glyph_index = (cp <= 255u) ? (int)cp : -2;
+				p = q + 1;
+			}
+		}
+	} else {
+		const char* q = p;
+		if (q[0] == '0' && (q[1] == 'x' || q[1] == 'X')) q += 2;
+		uint32 cp = 0;
+		int n = vga_hex_parse_u32(q, 8, &cp);
+		if (n > 0) {
+			const char* r = q + n;
+			while (*r == ' ' || *r == '\t') ++r;
+			if (*r == ':') {
+				glyph_index = (cp <= 255u) ? (int)cp : -2;
+				p = r + 1;
+			}
+		}
+	}
+
+	int byte_count = 0;
+	int have_hi = 0;
+	int hi = 0;
+	for (; *p && *p != '\n' && *p != '\r'; ++p) {
+		int h = vga_hex_nibble(*p);
+		if (h < 0) continue;
+		if (!have_hi) {
+			hi = h;
+			have_hi = 1;
+		} else {
+			if (byte_count < out_cap) {
+				out_bytes[byte_count++] = (uint8)((hi << 4) | h);
+			}
+			have_hi = 0;
+		}
+	}
+
+	*out_glyph_index = glyph_index;
+	*out_count = byte_count;
+	return (byte_count > 0) ? 1 : 0;
+}
+
+static int vga_font_probe_hex_glyph_h(uint8 drive, const char* path, uint8* out_glyph_h) {
+	if (!path || !out_glyph_h) return -1;
+	*out_glyph_h = 0;
+
+	uint32 size = 0;
+	if (vfs_get_file_size(drive, path, &size) != 0) return -1;
+	if (size == 0) return -1;
+	if (size > (uint32)(256 * 1024)) return -1;
+
+	char chunk[256];
+	char line[256];
+	int line_len = 0;
+	uint32 off = 0;
+	uint32 kick_next_off = 0;
+	int count8 = 0;
+	int count16 = 0;
+	int samples = 0;
+	while (off < size) {
+		int to_read = (int)(size - off);
+		if (to_read > (int)sizeof(chunk)) to_read = (int)sizeof(chunk);
+		int n = vfs_read_file_at(drive, path, chunk, to_read, off);
+		if (n <= 0) break;
+		off += (uint32)n;
+		if (off >= kick_next_off) { watchdog_kick("font-probe"); kick_next_off = off + 4096; }
+		for (int i = 0; i < n; ++i) {
+			char c = chunk[i];
+			if (c == '\n') {
+				line[line_len] = '\0';
+				uint8 bytes[VGA_FONT_GLYPH_H_16];
+				int gi = -1;
+				int bc = 0;
+				int prc = vga_font_parse_hex_line_bytes(line, &gi, bytes, (int)sizeof(bytes), &bc);
+				if (prc > 0) {
+					if (bc == VGA_FONT_GLYPH_H_8) { count8++; samples++; }
+					else if (bc == VGA_FONT_GLYPH_H_16) { count16++; samples++; }
+					// Sample enough lines to make a robust decision even if the
+					// first glyph is atypical (some fonts encode U+0000 with 16 bytes).
+					if (samples >= 32) {
+						*out_glyph_h = (uint8)((count16 > count8) ? VGA_FONT_GLYPH_H_16 : VGA_FONT_GLYPH_H_8);
+						return 0;
+					}
+				}
+				line_len = 0;
+				continue;
+			}
+			if (c == '\r') continue;
+			if (line_len < (int)sizeof(line) - 1) line[line_len++] = c;
+		}
+	}
+	// trailing partial line
+	if (line_len > 0) {
+		line[line_len] = '\0';
+		uint8 bytes[VGA_FONT_GLYPH_H_16];
+		int gi = -1;
+		int bc = 0;
+		int prc = vga_font_parse_hex_line_bytes(line, &gi, bytes, (int)sizeof(bytes), &bc);
+		if (prc > 0) {
+			if (bc == VGA_FONT_GLYPH_H_8) { count8++; samples++; }
+			else if (bc == VGA_FONT_GLYPH_H_16) { count16++; samples++; }
+		}
+	}
+	if (samples <= 0) return -1;
+	*out_glyph_h = (uint8)((count16 > count8) ? VGA_FONT_GLYPH_H_16 : VGA_FONT_GLYPH_H_8);
+	return 0;
+}
+
+static int vga_font_load_hex_stream(uint8 drive, const char* path, uint8* out_bitmap, uint8 glyph_h) {
+	if (!path || !out_bitmap) return -1;
+	if (glyph_h != VGA_FONT_GLYPH_H_8 && glyph_h != VGA_FONT_GLYPH_H_16) return -1;
+	// Initialize to blank glyphs.
+	memset(out_bitmap, 0, (size_t)VGA_FONT_GLYPHS * (size_t)glyph_h);
+
+	uint32 size = 0;
+	if (vfs_get_file_size(drive, path, &size) != 0) return -1;
+	if (size == 0) return -1;
+	// Safety: refuse absurdly large font text files.
+	if (size > (uint32)(256 * 1024)) return -1;
+
+	char chunk[256];
+	char line[256];
+	int line_len = 0;
+	uint32 off = 0;
+	int seq_glyph = 0;
+	int any = 0;
+	uint32 kick_next_off = 0;
+	while (off < size) {
+		int to_read = (int)(size - off);
+		if (to_read > (int)sizeof(chunk)) to_read = (int)sizeof(chunk);
+		int n = vfs_read_file_at(drive, path, chunk, to_read, off);
+		if (n <= 0) break;
+		off += (uint32)n;
+		if (off >= kick_next_off) { watchdog_kick("font-load"); kick_next_off = off + 4096; }
+		for (int i = 0; i < n; ++i) {
+			char c = chunk[i];
+			if (c == '\n') {
+				line[line_len] = '\0';
+				uint8 bytes[VGA_FONT_GLYPH_H_16];
+				int gi_pref = -1;
+				int bc = 0;
+				int prc = vga_font_parse_hex_line_bytes(line, &gi_pref, bytes, (int)sizeof(bytes), &bc);
+				if (prc > 0 && bc == (int)glyph_h) {
+					if (gi_pref != -2) {
+						int gi = gi_pref;
+						if (gi < 0) {
+							gi = seq_glyph;
+							if (gi >= 0 && gi < VGA_FONT_GLYPHS) seq_glyph++;
+						}
+						if (gi >= 0 && gi < VGA_FONT_GLYPHS) {
+							memcpy(out_bitmap + (gi * (int)glyph_h), bytes, (size_t)glyph_h);
+							any = 1;
+						}
+					}
+				}
+				line_len = 0;
+				if (seq_glyph >= VGA_FONT_GLYPHS) return any ? 0 : -1;
+				continue;
+			}
+			if (c == '\r') continue;
+			if (line_len < (int)sizeof(line) - 1) {
+				line[line_len++] = c;
+			}
+		}
+	}
+	// Process trailing partial line
+	if (line_len > 0) {
+		line[line_len] = '\0';
+		uint8 bytes[VGA_FONT_GLYPH_H_16];
+		int gi_pref = -1;
+		int bc = 0;
+		int prc = vga_font_parse_hex_line_bytes(line, &gi_pref, bytes, (int)sizeof(bytes), &bc);
+		if (prc > 0 && bc == (int)glyph_h) {
+			if (gi_pref != -2) {
+				int gi = gi_pref;
+				if (gi < 0) {
+					gi = seq_glyph;
+					if (gi >= 0 && gi < VGA_FONT_GLYPHS) seq_glyph++;
+				}
+				if (gi >= 0 && gi < VGA_FONT_GLYPHS) {
+					memcpy(out_bitmap + (gi * (int)glyph_h), bytes, (size_t)glyph_h);
+					any = 1;
+				}
+			}
+		}
+	}
+	return any ? 0 : -1;
+}
+
+int vga_font_acquire_hex(uint8 drive, const char* path) {
+	if (!path || !path[0]) return -1;
+	// Reuse already-loaded fonts.
+	for (int i = 0; i < VGA_FONT_MAX; ++i) {
+		vga_font_entry_t* e = &g_vga_fonts[i];
+		if (!e->used) continue;
+		if (e->drive == drive && strncmp(e->path, path, sizeof(e->path)) == 0) {
+			if (e->refcount < 0xFFFF) e->refcount++;
+			return i + 1;
+		}
+	}
+	// Find a free slot.
+	int slot = -1;
+	for (int i = 0; i < VGA_FONT_MAX; ++i) {
+		if (!g_vga_fonts[i].used) { slot = i; break; }
+	}
+	if (slot < 0) return -1;
+
+	vga_font_entry_t* e = &g_vga_fonts[slot];
+	memset(e, 0, sizeof(*e));
+	uint8 glyph_h = 0;
+	if (vga_font_probe_hex_glyph_h(drive, path, &glyph_h) != 0) {
+		memset(e, 0, sizeof(*e));
+		return -1;
+	}
+	int bitmap_bytes = VGA_FONT_GLYPHS * (int)glyph_h;
+	e->bitmap = (uint8*)malloc((size_t)bitmap_bytes);
+	if (!e->bitmap) { memset(e, 0, sizeof(*e)); return -1; }
+	if (vga_font_load_hex_stream(drive, path, e->bitmap, glyph_h) != 0) {
+		free(e->bitmap);
+		memset(e, 0, sizeof(*e));
+		return -1;
+	}
+	e->used = 1;
+	e->drive = drive;
+	e->refcount = 1;
+	e->glyph_h = glyph_h;
+	strncpy(e->path, path, sizeof(e->path) - 1);
+	e->path[sizeof(e->path) - 1] = '\0';
+	return slot + 1;
+}
+
+void vga_font_release(int font_handle) {
+	vga_font_entry_t* e = vga_font_entry_from_handle(font_handle);
+	if (!e) return;
+	if (e->refcount > 0) e->refcount--;
+	if (e->refcount == 0) {
+		if (e->bitmap) free(e->bitmap);
+		memset(e, 0, sizeof(*e));
+	}
+}
 
 // Simple software backbuffer (RGBA8)
 static unsigned char* g_backbuffer = NULL;
 static int g_backbuffer_w = 0;
 static int g_backbuffer_h = 0;
+
+static void vga_draw_glyph8xN_at(const unsigned char* font, int glyph_h, int x0, int y0, int charnum, int rr, int gg, int bb) {
+	if (!font) font = vga_builtin_font();
+	if (charnum < 0) return;
+	if (glyph_h != VGA_FONT_GLYPH_H_16) glyph_h = VGA_FONT_GLYPH_H_8;
+	unsigned int c = (unsigned int)(unsigned char)charnum;
+	// draw into backbuffer if present
+	if (g_backbuffer) {
+		for (int k = 0; k < glyph_h; k++) {
+			int yy = y0 + k;
+			if (yy < 0 || yy >= g_backbuffer_h) continue;
+			unsigned char rowbits = font[c * (unsigned)glyph_h + (unsigned)k];
+			for (int i = 0; i < 8; i++) {
+				int xx = x0 + i;
+				if (xx < 0 || xx >= g_backbuffer_w) continue;
+				// .hex fonts encode each row byte MSB->LSB (left->right)
+				if (rowbits & (0x80u >> (unsigned)i)) {
+					unsigned char *px = g_backbuffer + ((size_t)yy * (size_t)g_backbuffer_w + (size_t)xx) * 4;
+					px[0] = (unsigned char)bb;
+					px[1] = (unsigned char)gg;
+					px[2] = (unsigned char)rr;
+					px[3] = 0;
+				}
+			}
+		}
+		vga_mark_dirty_rect(x0, y0, 8, glyph_h);
+		return;
+	}
+	// fallback to framebuffer pixel drawing
+	for (int k = 0; k < glyph_h; k++) {
+		for (int i = 0; i < 8; i++) {
+			if (font[c * (unsigned)glyph_h + (unsigned)k] & (0x80u >> (unsigned)i)) {
+				drawPixel(x0 + i, k + y0, rr, gg, bb);
+			}
+		}
+	}
+}
+
+void drawCharAt_font(int font_handle, int x, int y, int charnum, int rr, int gg, int bb) {
+	const unsigned char* font = vga_font_bitmap_or_builtin(font_handle);
+	int glyph_h = (int)vga_font_glyph_h_or_builtin(font_handle);
+	vga_draw_glyph8xN_at(font, glyph_h, x, y, charnum, rr, gg, bb);
+}
 // Optional exclusion rect for swap (e.g., software cursor overlay)
 static int g_exclude_x = -1, g_exclude_y = -1, g_exclude_w = 0, g_exclude_h = 0;
 // Dirty rect tracking (multi-rect)
@@ -79,7 +533,6 @@ void init_dynamic_log_buffer() {
     if (shell_log_buf != NULL) return; // Already initialized
     
     // Detect available memory and set appropriate buffer size
-    extern multiboot_info_t *g_mbi;
     uint32_t available_memory = 32 * 1024 * 1024; // Default assumption
     
     if (g_mbi && (g_mbi->flags & MULTIBOOT_INFO_MEM_MAP)) {
@@ -228,7 +681,7 @@ void drawRect(int x, int y, int w, int h, int r, int g, int b)
 		return;
 	}
 	// fallback to drawing directly to framebuffer
-	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	unsigned char *video = (unsigned char *)(uintptr_t)g_mbi->framebuffer_addr;
 	int pitch = g_mbi->framebuffer_pitch;
 	int bpp = g_mbi->framebuffer_bpp / 8;
 	if (bpp < 3) bpp = 3;
@@ -278,7 +731,7 @@ void vga_darkenRect_bb(int x, int y, int w, int h, int factor)
 
 	// Fallback: operate directly on framebuffer
 	if (!g_mbi) return;
-	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	unsigned char *video = (unsigned char *)(uintptr_t)g_mbi->framebuffer_addr;
 	int pitch = g_mbi->framebuffer_pitch;
 	int bpp = g_mbi->framebuffer_bpp / 8; if (bpp < 3) bpp = 3;
 	for (int yy = 0; yy < h; ++yy) {
@@ -293,10 +746,9 @@ void vga_darkenRect_bb(int x, int y, int w, int h, int factor)
 	}
 }
 
-void drawText(int charnum, int r, int g, int b)
-{
-	// store hex numbers representing the pattern for characters (8 numbers per character) into an array
-	// i knicked all this off of github i cant lie, i am NOT writing this much hex
+
+static const unsigned char* vga_builtin_font(void) {
+	// Built-in 8x8 font. Used as a safe fallback if font loading fails.
 	static const unsigned char font[2057] = {
 		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x7E, 0x81, 0xA5, 0x81, 0xBD, 0x99, 0x81, 0x7E,
@@ -325,6 +777,14 @@ void drawText(int charnum, int r, int g, int b)
 		0x18, 0x3C, 0x7E, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x3C, 0x18, 0x00, 0x00, 0x18, 0x0C, 0xFE, 0x0C, 0x18, 0x00, 0x00, 0x00, 0x30, 0x60, 0xFE, 0x60, 0x30, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xC0, 0xC0, 0xFE, 0x00, 0x00, 0x00, 0x24, 0x66, 0xFF, 0x66, 0x24, 0x00, 0x00, 0x00, 0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x7E, 0x3C, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x78, 0x78, 0x30, 0x30, 0x00, 0x30, 0x00, 0x6C, 0x6C, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6C, 0x6C, 0xFE, 0x6C, 0xFE, 0x6C, 0x6C, 0x00, 0x30, 0x7C, 0xC0, 0x78, 0x0C, 0xF8, 0x30, 0x00, 0x00, 0xC6, 0xCC, 0x18, 0x30, 0x66, 0xC6, 0x00, 0x38, 0x6C, 0x38, 0x76, 0xDC, 0xCC, 0x76, 0x00, 0x60, 0x60, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x30, 0x60, 0x60, 0x60, 0x30, 0x18, 0x00, 0x60, 0x30, 0x18, 0x18, 0x18, 0x30, 0x60, 0x00, 0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00, 0x00, 0x30, 0x30, 0xFC, 0x30, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x30, 0x60, 0x00, 0x00, 0x00, 0xFC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x30, 0x00, 0x06, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0x80, 0x00, 0x7C, 0xC6, 0xCE, 0xDE, 0xF6, 0xE6, 0x7C, 0x00, 0x30, 0x70, 0x30, 0x30, 0x30, 0x30, 0xFC, 0x00, 0x78, 0xCC, 0x0C, 0x38, 0x60, 0xCC, 0xFC, 0x00, 0x78, 0xCC, 0x0C, 0x38, 0x0C, 0xCC, 0x78, 0x00, 0x1C, 0x3C, 0x6C, 0xCC, 0xFE, 0x0C, 0x1E, 0x00, 0xFC, 0xC0, 0xF8, 0x0C, 0x0C, 0xCC, 0x78, 0x00, 0x38, 0x60, 0xC0, 0xF8, 0xCC, 0xCC, 0x78, 0x00, 0xFC, 0xCC, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x00, 0x78, 0xCC, 0xCC, 0x78, 0xCC, 0xCC, 0x78, 0x00, 0x78, 0xCC, 0xCC, 0x7C, 0x0C, 0x18, 0x70, 0x00, 0x00, 0x30, 0x30, 0x00, 0x00, 0x30, 0x30, 0x00, 0x00, 0x30, 0x30, 0x00, 0x00, 0x30, 0x30, 0x60, 0x18, 0x30, 0x60, 0xC0, 0x60, 0x30, 0x18, 0x00, 0x00, 0x00, 0xFC, 0x00, 0x00, 0xFC, 0x00, 0x00, 0x60, 0x30, 0x18, 0x0C, 0x18, 0x30, 0x60, 0x00, 0x78, 0xCC, 0x0C, 0x18, 0x30, 0x00, 0x30, 0x00, 0x7C, 0xC6, 0xDE, 0xDE, 0xDE, 0xC0, 0x78, 0x00, 0x30, 0x78, 0xCC, 0xCC, 0xFC, 0xCC, 0xCC, 0x00, 0xFC, 0x66, 0x66, 0x7C, 0x66, 0x66, 0xFC, 0x00, 0x3C, 0x66, 0xC0, 0xC0, 0xC0, 0x66, 0x3C, 0x00, 0xF8, 0x6C, 0x66, 0x66, 0x66, 0x6C, 0xF8, 0x00, 0xFE, 0x62, 0x68, 0x78, 0x68, 0x62, 0xFE, 0x00, 0xFE, 0x62, 0x68, 0x78, 0x68, 0x60, 0xF0, 0x00, 0x3C, 0x66, 0xC0, 0xC0, 0xCE, 0x66, 0x3E, 0x00, 0xCC, 0xCC, 0xCC, 0xFC, 0xCC, 0xCC, 0xCC, 0x00, 0x78, 0x30, 0x30, 0x30, 0x30, 0x30, 0x78, 0x00, 0x1E, 0x0C, 0x0C, 0x0C, 0xCC, 0xCC, 0x78, 0x00, 0xE6, 0x66, 0x6C, 0x78, 0x6C, 0x66, 0xE6, 0x00, 0xF0, 0x60, 0x60, 0x60, 0x62, 0x66, 0xFE, 0x00, 0xC6, 0xEE, 0xFE, 0xFE, 0xD6, 0xC6, 0xC6, 0x00, 0xC6, 0xE6, 0xF6, 0xDE, 0xCE, 0xC6, 0xC6, 0x00, 0x38, 0x6C, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x00, 0xFC, 0x66, 0x66, 0x7C, 0x60, 0x60, 0xF0, 0x00, 0x78, 0xCC, 0xCC, 0xCC, 0xDC, 0x78, 0x1C, 0x00, 0xFC, 0x66, 0x66, 0x7C, 0x6C, 0x66, 0xE6, 0x00, 0x78, 0xCC, 0x60, 0x30, 0x18, 0xCC, 0x78, 0x00, 0xFC, 0xB4, 0x30, 0x30, 0x30, 0x30, 0x78, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xFC, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0x78, 0x30, 0x00, 0xC6, 0xC6, 0xC6, 0xD6, 0xFE, 0xEE, 0xC6, 0x00, 0xC6, 0xC6, 0x6C, 0x38, 0x38, 0x6C, 0xC6, 0x00, 0xCC, 0xCC, 0xCC, 0x78, 0x30, 0x30, 0x78, 0x00, 0xFE, 0xC6, 0x8C, 0x18, 0x32, 0x66, 0xFE, 0x00, 0x78, 0x60, 0x60, 0x60, 0x60, 0x60, 0x78, 0x00, 0xC0, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x02, 0x00, 0x78, 0x18, 0x18, 0x18, 0x18, 0x18, 0x78, 0x00, 0x10, 0x38, 0x6C, 0xC6, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x30, 0x30, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x78, 0x0C, 0x7C, 0xCC, 0x76, 0x00, 0xE0, 0x60, 0x60, 0x7C, 0x66, 0x66, 0xDC, 0x00, 0x00, 0x00, 0x78, 0xCC, 0xC0, 0xCC, 0x78, 0x00, 0x1C, 0x0C, 0x0C, 0x7C, 0xCC, 0xCC, 0x76, 0x00, 0x00, 0x00, 0x78, 0xCC, 0xFC, 0xC0, 0x78, 0x00, 0x38, 0x6C, 0x60, 0xF0, 0x60, 0x60, 0xF0, 0x00, 0x00, 0x00, 0x76, 0xCC, 0xCC, 0x7C, 0x0C, 0xF8, 0xE0, 0x60, 0x6C, 0x76, 0x66, 0x66, 0xE6, 0x00, 0x30, 0x00, 0x70, 0x30, 0x30, 0x30, 0x78, 0x00, 0x0C, 0x00, 0x0C, 0x0C, 0x0C, 0xCC, 0xCC, 0x78, 0xE0, 0x60, 0x66, 0x6C, 0x78, 0x6C, 0xE6, 0x00, 0x70, 0x30, 0x30, 0x30, 0x30, 0x30, 0x78, 0x00, 0x00, 0x00, 0xCC, 0xFE, 0xFE, 0xD6, 0xC6, 0x00, 0x00, 0x00, 0xF8, 0xCC, 0xCC, 0xCC, 0xCC, 0x00, 0x00, 0x00, 0x78, 0xCC, 0xCC, 0xCC, 0x78, 0x00, 0x00, 0x00, 0xDC, 0x66, 0x66, 0x7C, 0x60, 0xF0, 0x00, 0x00, 0x76, 0xCC, 0xCC, 0x7C, 0x0C, 0x1E, 0x00, 0x00, 0xDC, 0x76, 0x66, 0x60, 0xF0, 0x00, 0x00, 0x00, 0x7C, 0xC0, 0x78, 0x0C, 0xF8, 0x00, 0x10, 0x30, 0x7C, 0x30, 0x30, 0x34, 0x18, 0x00, 0x00, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0x76, 0x00, 0x00, 0x00, 0xCC, 0xCC, 0xCC, 0x78, 0x30, 0x00, 0x00, 0x00, 0xC6, 0xD6, 0xFE, 0xFE, 0x6C, 0x00, 0x00, 0x00, 0xC6, 0x6C, 0x38, 0x6C, 0xC6, 0x00, 0x00, 0x00, 0xCC, 0xCC, 0xCC, 0x7C, 0x0C, 0xF8, 0x00, 0x00, 0xFC, 0x98, 0x30, 0x64, 0xFC, 0x00, 0x1C, 0x30, 0x30, 0xE0, 0x30, 0x30, 0x1C, 0x00, 0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00, 0xE0, 0x30, 0x30, 0x1C, 0x30, 0x30, 0xE0, 0x00, 0x76, 0xDC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x38, 0x6C, 0xC6, 0xC6, 0xFE, 0x00, 0x78, 0xCC, 0xC0, 0xCC, 0x78, 0x18, 0x0C, 0x78, 0x00, 0xCC, 0x00, 0xCC, 0xCC, 0xCC, 0x7E, 0x00, 0x1C, 0x00, 0x78, 0xCC, 0xFC, 0xC0, 0x78, 0x00, 0x7E, 0xC3, 0x3C, 0x06, 0x3E, 0x66, 0x3F, 0x00, 0xCC, 0x00, 0x78, 0x0C, 0x7C, 0xCC, 0x7E, 0x00, 0xE0, 0x00, 0x78, 0x0C, 0x7C, 0xCC, 0x7E, 0x00, 0x30, 0x30, 0x78, 0x0C, 0x7C, 0xCC, 0x7E, 0x00, 0x00, 0x00, 0x78, 0xC0, 0xC0, 0x78, 0x0C, 0x38, 0x7E, 0xC3, 0x3C, 0x66, 0x7E, 0x60, 0x3C, 0x00, 0xCC, 0x00, 0x78, 0xCC, 0xFC, 0xC0, 0x78, 0x00, 0xE0, 0x00, 0x78, 0xCC, 0xFC, 0xC0, 0x78, 0x00, 0xCC, 0x00, 0x70, 0x30, 0x30, 0x30, 0x78, 0x00, 0x7C, 0xC6, 0x38, 0x18, 0x18, 0x18, 0x3C, 0x00, 0xE0, 0x00, 0x70, 0x30, 0x30, 0x30, 0x78, 0x00, 0xC6, 0x38, 0x6C, 0xC6, 0xFE, 0xC6, 0xC6, 0x00, 0x30, 0x30, 0x00, 0x78, 0xCC, 0xFC, 0xCC, 0x00, 0x1C, 0x00, 0xFC, 0x60, 0x78, 0x60, 0xFC, 0x00, 0x00, 0x00, 0x7F, 0x0C, 0x7F, 0xCC, 0x7F, 0x00, 0x3E, 0x6C, 0xCC, 0xFE, 0xCC, 0xCC, 0xCE, 0x00, 0x78, 0xCC, 0x00, 0x78, 0xCC, 0xCC, 0x78, 0x00, 0x00, 0xCC, 0x00, 0x78, 0xCC, 0xCC, 0x78, 0x00, 0x00, 0xE0, 0x00, 0x78, 0xCC, 0xCC, 0x78, 0x00, 0x78, 0xCC, 0x00, 0xCC, 0xCC, 0xCC, 0x7E, 0x00, 0x00, 0xE0, 0x00, 0xCC, 0xCC, 0xCC, 0x7E, 0x00, 0x00, 0xCC, 0x00, 0xCC, 0xCC, 0x7C, 0x0C, 0xF8, 0xC3, 0x18, 0x3C, 0x66, 0x66, 0x3C, 0x18, 0x00, 0xCC, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0x78, 0x00, 0x18, 0x18, 0x7E, 0xC0, 0xC0, 0x7E, 0x18, 0x18, 0x38, 0x6C, 0x64, 0xF0, 0x60, 0xE6, 0xFC, 0x00, 0xCC, 0xCC, 0x78, 0xFC, 0x30, 0xFC, 0x30, 0x30, 0xF8, 0xCC, 0xCC, 0xFA, 0xC6, 0xCF, 0xC6, 0xC7, 0x0E, 0x1B, 0x18, 0x3C, 0x18, 0x18, 0xD8, 0x70, 0x1C, 0x00, 0x78, 0x0C, 0x7C, 0xCC, 0x7E, 0x00, 0x38, 0x00, 0x70, 0x30, 0x30, 0x30, 0x78, 0x00, 0x00, 0x1C, 0x00, 0x78, 0xCC, 0xCC, 0x78, 0x00, 0x00, 0x1C, 0x00, 0xCC, 0xCC, 0xCC, 0x7E, 0x00, 0x00, 0xF8, 0x00, 0xF8, 0xCC, 0xCC, 0xCC, 0x00, 0xFC, 0x00, 0xCC, 0xEC, 0xFC, 0xDC, 0xCC, 0x00, 0x3C, 0x6C, 0x6C, 0x3E, 0x00, 0x7E, 0x00, 0x00, 0x38, 0x6C, 0x6C, 0x38, 0x00, 0x7C, 0x00, 0x00, 0x30, 0x00, 0x30, 0x60, 0xC0, 0xCC, 0x78, 0x00, 0x00, 0x00, 0x00, 0xFC, 0xC0, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFC, 0x0C, 0x0C, 0x00, 0x00, 0xC3, 0xC6, 0xCC, 0xDE, 0x33, 0x66, 0xCC, 0x0F, 0xC3, 0xC6, 0xCC, 0xDB, 0x37, 0x6F, 0xCF, 0x03, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x33, 0x66, 0xCC, 0x66, 0x33, 0x00, 0x00, 0x00, 0xCC, 0x66, 0x33, 0x66, 0xCC, 0x00, 0x00, 0x22, 0x88, 0x22, 0x88, 0x22, 0x88, 0x22, 0x88, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0x55, 0xAA, 0xDB, 0x77, 0xDB, 0xEE, 0xDB, 0x77, 0xDB, 0xEE, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0xF8, 0x18, 0x18, 0x18, 0x18, 0x18, 0xF8, 0x18, 0xF8, 0x18, 0x18, 0x18, 0x36, 0x36, 0x36, 0x36, 0xF6, 0x36, 0x36, 0x36, 0x00, 0x00, 0x00, 0x00, 0xFE, 0x36, 0x36, 0x36, 0x00, 0x00, 0xF8, 0x18, 0xF8, 0x18, 0x18, 0x18, 0x36, 0x36, 0xF6, 0x06, 0xF6, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x00, 0x00, 0xFE, 0x06, 0xF6, 0x36, 0x36, 0x36, 0x36, 0x36, 0xF6, 0x06, 0xFE, 0x00, 0x00, 0x00, 0x36, 0x36, 0x36, 0x36, 0xFE, 0x00, 0x00, 0x00, 0x18, 0x18, 0xF8, 0x18, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x1F, 0x00, 0x00, 0x00, 0x18, 0x18, 0x18, 0x18, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x1F, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x18, 0x18, 0x18, 0x18, 0xFF, 0x18, 0x18, 0x18, 0x18, 0x18, 0x1F, 0x18, 0x1F, 0x18, 0x18, 0x18, 0x36, 0x36, 0x36, 0x36, 0x37, 0x36, 0x36, 0x36, 0x36, 0x36, 0x37, 0x30, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x30, 0x37, 0x36, 0x36, 0x36, 0x36, 0x36, 0xF7, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xF7, 0x36, 0x36, 0x36, 0x36, 0x36, 0x37, 0x30, 0x37, 0x36, 0x36, 0x36, 0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x36, 0x36, 0xF7, 0x00, 0xF7, 0x36, 0x36, 0x36, 0x18, 0x18, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x36, 0x36, 0x36, 0x36, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xFF, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x3F, 0x00, 0x00, 0x00, 0x18, 0x18, 0x1F, 0x18, 0x1F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F, 0x18, 0x1F, 0x18, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00, 0x3F, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0x36, 0xFF, 0x36, 0x36, 0x36, 0x18, 0x18, 0xFF, 0x18, 0xFF, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F, 0x18, 0x18, 0x18, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0xF0, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x76, 0xDC, 0xC8, 0xDC, 0x76, 0x00, 0x00, 0x78, 0xCC, 0xF8, 0xCC, 0xF8, 0xC0, 0xC0, 0x00, 0xFC, 0xCC, 0xC0, 0xC0, 0xC0, 0xC0, 0x00, 0x00, 0xFE, 0x6C, 0x6C, 0x6C, 0x6C, 0x6C, 0x00, 0xFC, 0xCC, 0x60, 0x30, 0x60, 0xCC, 0xFC, 0x00, 0x00, 0x00, 0x7E, 0xD8, 0xD8, 0xD8, 0x70, 0x00, 0x00, 0x66, 0x66, 0x66, 0x66, 0x7C, 0x60, 0xC0, 0x00, 0x76, 0xDC, 0x18, 0x18, 0x18, 0x18, 0x00, 0xFC, 0x30, 0x78, 0xCC, 0xCC, 0x78, 0x30, 0xFC, 0x38, 0x6C, 0xC6, 0xFE, 0xC6, 0x6C, 0x38, 0x00, 0x38, 0x6C, 0xC6, 0xC6, 0x6C, 0x6C, 0xEE, 0x00, 0x1C, 0x30, 0x18, 0x7C, 0xCC, 0xCC, 0x78, 0x00, 0x00, 0x00, 0x7E, 0xDB, 0xDB, 0x7E, 0x00, 0x00, 0x06, 0x0C, 0x7E, 0xDB, 0xDB, 0x7E, 0x60, 0xC0, 0x38, 0x60, 0xC0, 0xF8, 0xC0, 0x60, 0x38, 0x00, 0x78, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0x00, 0x00, 0xFC, 0x00, 0xFC, 0x00, 0xFC, 0x00, 0x00, 0x30, 0x30, 0xFC, 0x30, 0x30, 0x00, 0xFC, 0x00, 0x60, 0x30, 0x18, 0x30, 0x60, 0x00, 0xFC, 0x00, 0x18, 0x30, 0x60, 0x30, 0x18, 0x00, 0xFC, 0x00, 0x0E, 0x1B, 0x1B, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0xD8, 0xD8, 0x70, 0x30, 0x30, 0x00, 0xFC, 0x00, 0x30, 0x30, 0x00, 0x00, 0x76, 0xDC, 0x00, 0x76, 0xDC, 0x00, 0x00, 0x38, 0x6C, 0x6C, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x0F, 0x0C, 0x0C, 0x0C, 0xEC, 0x6C, 0x3C, 0x1C, 0x78, 0x6C, 0x6C, 0x6C, 0x6C, 0x00, 0x00, 0x00, 0x70, 0x18, 0x30, 0x60, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3C, 0x3C, 0x3C, 0x3C, 0x00, 0x00,
 		0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
 	};
+	return font;
+}
+
+void drawText(int charnum, int r, int g, int b)
+{
+	int font_handle = vga_get_system_font_handle_raw();
+	const unsigned char* font = vga_font_bitmap_or_builtin(font_handle);
+	int glyph_h = (int)vga_font_glyph_h_or_builtin(font_handle);
 
 	int i; // column number in the 8x8 pattern
 	int k; // row number in the 8x8 pattern
@@ -334,36 +794,7 @@ void drawText(int charnum, int r, int g, int b)
 	// Minimal side-effect-free path for drawCharAt to prevent console scrolling/wrapping side effects.
 	if (g_drawCharAt_mode) {
 		if (charnum >= 0) {
-			int x0 = width;
-			int y0 = height;
-			if (g_backbuffer) {
-				for (k = 0; k < 8; k++) {
-					int yy = y0 + k;
-					if (yy < 0 || yy >= g_backbuffer_h) continue;
-					unsigned char rowbits = font[charnum * 8 + k];
-					unsigned char *dst = g_backbuffer + ((size_t)yy * g_backbuffer_w + x0) * 4;
-					for (i = 0; i < 8; i++) {
-						int xx = (8 - i);
-						if (x0 + xx < 0 || x0 + xx >= g_backbuffer_w) continue;
-						if (rowbits & (0x01 << i)) {
-							dst[xx*4 + 0] = (unsigned char)b;
-							dst[xx*4 + 1] = (unsigned char)g;
-							dst[xx*4 + 2] = (unsigned char)r;
-							dst[xx*4 + 3] = 0;
-						}
-					}
-				}
-				// Mark the glyph's 8x8 area dirty
-				vga_mark_dirty_rect(x0, y0, 8, 8);
-			} else {
-				for (k = 0; k < 8; k++) {
-					for (i = 0; i < 8; i++) {
-						if (font[charnum * 8 + k] & (0x01 << i)) {
-							drawPixel((8 - i) + x0, k + y0, r, g, b);
-						}
-					}
-				}
-			}
+			vga_draw_glyph8xN_at(font, glyph_h, width, height, charnum, r, g, b);
 		}
 		return;
 	}
@@ -401,13 +832,13 @@ void drawText(int charnum, int r, int g, int b)
 	if (width > (int)(g_mbi->framebuffer_width - 20))
     {
 		width = 0;
-		height = height + 8;
+		height = height + glyph_h;
 	}
 	
 	if (width < -2 && height > 34)
     {
 		width = g_mbi->framebuffer_width - 30;
-		height = height - 8;
+		height = height - glyph_h;
 	}
 	
 	if (charnum == -1)
@@ -420,7 +851,7 @@ void drawText(int charnum, int r, int g, int b)
     {
 		drawText(-1, r, g, b);
 		width = 0;
-		height = height + 8;
+		height = height + glyph_h;
 	}
 
 	else if (charnum== 8) // backspace
@@ -428,22 +859,13 @@ void drawText(int charnum, int r, int g, int b)
         if (width > 0) {  // Only backspace if we're not at the start of a line
             width = width - 8;  // Move back one character width
             // Draw a black rectangle to erase the previous character
-            drawRect(width, height, 8, 8, 0, 0, 0);
+			drawRect(width, height, 8, glyph_h, 0, 0, 0);
         }
     }
 
 	else // drawing characters in 8x8
     {
-		for (k = 0; k < 8; k++)
-        {
-			for (i = 0; i < 8; i++)
-            {
-				if (font[charnum * 8 + k] & (0x01 << i))
-                {
-					drawPixel((8 - i) + width, k + height, r, g, b);
-				}
-			}
-		}
+		vga_draw_glyph8xN_at(font, glyph_h, width, height, charnum, r, g, b);
 		width = width + 8; // move to draw the next character
 	}
 }
@@ -464,13 +886,13 @@ static int vga_format_to_buffer(char* out, int out_cap, const char* fmt, va_list
 		if (!*p) break;
 
 		int zero_pad = 0;
-		int width = 0;
+		int field_width = 0;
 		if (*p == '0') {
 			zero_pad = 1;
 			++p;
 		}
 		while (*p >= '0' && *p <= '9') {
-			width = (width * 10) + (*p - '0');
+			field_width = (field_width * 10) + (*p - '0');
 			++p;
 		}
 		if (!*p) break;
@@ -509,8 +931,8 @@ static int vga_format_to_buffer(char* out, int out_cap, const char* fmt, va_list
 					v >>= 4;
 				} while (v != 0 && nd < 8);
 
-				if (width > 8) width = 8;
-				int pad = width - nd;
+				if (field_width > 8) field_width = 8;
+				int pad = field_width - nd;
 				if (!zero_pad) pad = 0;
 				while (pad-- > 0 && pos < out_cap - 1) out[pos++] = '0';
 				while (nd-- > 0 && pos < out_cap - 1) out[pos++] = tmp[nd];
@@ -648,12 +1070,12 @@ void printf(const char* format, ...)
 		char temp[512];
 		int temp_pos = vga_format_to_buffer(temp, (int)sizeof(temp), format, ap);
 		for (int i = 0; i < temp_pos; ++i) {
-			char ch = temp[i];
-			if (ch == '\n') {
-				width = 0;
-				height = height + 8;
+			unsigned char ch = (unsigned char)temp[i];
+			// Route through drawText so newline/scrolling uses the active font height.
+			if (ch == (unsigned char)'\n') {
+				drawText(10, r, g, b);
 			} else {
-				drawText(ch, r, g, b);
+				drawText((int)ch, r, g, b);
 			}
 		}
 	}
@@ -678,7 +1100,7 @@ void drawPixel(int x, int y, int r, int g, int b)
 		return;
 	}
 
-	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	unsigned char *video = (unsigned char *)(uintptr_t)g_mbi->framebuffer_addr;
 	unsigned int offset = (x + y * g_mbi->framebuffer_width) * 4; // finding loc of pixel
 	video[offset] = (unsigned char)b;   // setting the colour of pixel; blue, green, red
 	video[offset + 1] = (unsigned char)g;
@@ -703,7 +1125,7 @@ void vga_drawPixel_bb(int x, int y, int rr, int gg, int bb)
 		return;
 	}
 	// Fallback: draw directly to framebuffer without marking dirty (overlay semantics)
-	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	unsigned char *video = (unsigned char *)(uintptr_t)g_mbi->framebuffer_addr;
 	int pitch = g_mbi->framebuffer_pitch;
 	int bpp = g_mbi->framebuffer_bpp / 8;
 	if (!video || pitch <= 0 || bpp < 3) return;
@@ -769,7 +1191,7 @@ void vga_blit_rgb565_scaled_bb(int dst_x, int dst_y, int dst_w, int dst_h,
 	}
 
 	// Fallback: write directly to framebuffer
-	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	unsigned char *video = (unsigned char *)(uintptr_t)g_mbi->framebuffer_addr;
 	int pitch = g_mbi->framebuffer_pitch;
 	int bpp = g_mbi->framebuffer_bpp / 8;
 	if (bpp < 3) bpp = 3;
@@ -844,7 +1266,7 @@ void vga_blit_rgb565_bb(int dst_x, int dst_y, const uint16_t* src, int src_w, in
 	}
 
 	// Fallback: write directly to framebuffer
-	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	unsigned char *video = (unsigned char *)(uintptr_t)g_mbi->framebuffer_addr;
 	int pitch = g_mbi->framebuffer_pitch;
 	int bpp = g_mbi->framebuffer_bpp / 8;
 	if (bpp < 3) bpp = 3;
@@ -892,7 +1314,7 @@ void vga_blendPixel_bb(int x, int y, int rr, int gg, int bb, int aa)
 	}
 
 	// Fallback: composite directly into framebuffer
-	unsigned char *video = (unsigned char *)g_mbi->framebuffer_addr;
+	unsigned char *video = (unsigned char *)(uintptr_t)g_mbi->framebuffer_addr;
 	int pitch = g_mbi->framebuffer_pitch;
 	int bpp = g_mbi->framebuffer_bpp / 8; if (bpp < 3) bpp = 3;
 	unsigned char* dst = video + y * pitch + x * bpp;
@@ -1022,7 +1444,7 @@ void vga_swap_buffers(void) {
 	if (g_vsync_enabled) vga_wait_vblank();
 	if (!g_mbi) return;
 	if (!g_backbuffer) return;
-	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	unsigned char* fb = (unsigned char*)(uintptr_t)g_mbi->framebuffer_addr;
 	int fbw = g_mbi->framebuffer_width;
 	int fbh = g_mbi->framebuffer_height;
 	int pitch = g_mbi->framebuffer_pitch;
@@ -1217,7 +1639,7 @@ void vga_drawPixel_fb(int x, int y, int r, int g, int b) {
 	if (!g_mbi) return;
 	if (x < 0 || y < 0) return;
 	if (x >= (int)g_mbi->framebuffer_width || y >= (int)g_mbi->framebuffer_height) return;
-	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	unsigned char* fb = (unsigned char*)(uintptr_t)g_mbi->framebuffer_addr;
 	int pitch = g_mbi->framebuffer_pitch;
 	int bpp = g_mbi->framebuffer_bpp / 8;
 	if (!fb || pitch <= 0 || bpp < 3) return;
@@ -1239,7 +1661,7 @@ void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h) {
 	if (x + w > fb_w) w = fb_w - x;
 	if (y + h > fb_h) h = fb_h - y;
 	if (w <= 0 || h <= 0) return;
-	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	unsigned char* fb = (unsigned char*)(uintptr_t)g_mbi->framebuffer_addr;
 	int pitch = g_mbi->framebuffer_pitch;
 	int bpp = g_mbi->framebuffer_bpp / 8;
 	if (!fb || pitch <= 0 || bpp < 3) return;
@@ -1279,7 +1701,7 @@ void vga_fillRect_fb(int x, int y, int w, int h, int rr, int gg, int bb) {
 	if (x + w > sw) w = sw - x;
 	if (y + h > sh) h = sh - y;
 	if (w <= 0 || h <= 0) return;
-	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	unsigned char* fb = (unsigned char*)(uintptr_t)g_mbi->framebuffer_addr;
 	int pitch = g_mbi->framebuffer_pitch;
 	int bpp = g_mbi->framebuffer_bpp / 8; if (bpp < 3) bpp = 3;
 	// Precompute a row in a small stack buffer for fast copy when bpp==4
@@ -1330,7 +1752,7 @@ int vga_capture_fb_region(int x, int y, int w, int h, unsigned char* out_buf, in
 	if (y + h > fb_h) h = fb_h - y;
 	int need = w * h * bpp;
 	if (need > out_buf_len) return -1;
-	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	unsigned char* fb = (unsigned char*)(uintptr_t)g_mbi->framebuffer_addr;
 	for (int row = 0; row < h; ++row) {
 		unsigned char* src = fb + (y + row) * pitch + x * bpp;
 		memcpy(out_buf + row * w * bpp, src, (size_t)w * bpp);
@@ -1351,7 +1773,7 @@ int vga_restore_fb_region(int x, int y, int w, int h, const unsigned char* in_bu
 	if (y + h > fb_h) h = fb_h - y;
 	int need = w * h * bpp;
 	if (need > in_buf_len) return -1;
-	unsigned char* fb = (unsigned char*)g_mbi->framebuffer_addr;
+	unsigned char* fb = (unsigned char*)(uintptr_t)g_mbi->framebuffer_addr;
 	for (int row = 0; row < h; ++row) {
 		unsigned char* dst = fb + (y + row) * pitch + x * bpp;
 		memcpy(dst, in_buf + row * w * bpp, (size_t)w * bpp);
@@ -1364,6 +1786,7 @@ int vga_restore_fb_region(int x, int y, int w, int h, const unsigned char* in_bu
 void drawTextAt(int x, int y, const char* text, int rr, int gg, int bb)
 {
 	if (!text) return;
+	int glyph_h = (int)vga_font_glyph_h_or_builtin(vga_get_system_font_handle_raw());
 	int old_w = width;
 	int old_h = height;
 	int cx = x;
@@ -1372,7 +1795,7 @@ void drawTextAt(int x, int y, const char* text, int rr, int gg, int bb)
 	for (const char* p = text; *p; ++p) {
 		if (*p == '\n') {
 			cx = x;
-			cy += 8;
+			cy += glyph_h;
 			continue;
 		}
 		// draw a single char at the pixel position with color
@@ -1386,17 +1809,7 @@ void drawTextAt(int x, int y, const char* text, int rr, int gg, int bb)
 }
 
 void drawCharAt(int x, int y, int charnum, int rr, int gg, int bb) {
-	if (charnum < 0) return;
-	// Use the minimal glyph-draw path in drawText without console side effects.
-	int old_w = width;
-	int old_h = height;
-	width = x;
-	height = y;
-	g_drawCharAt_mode = 1;
-	drawText(charnum, rr, gg, bb);
-	g_drawCharAt_mode = 0;
-	width = old_w;
-	height = old_h;
+	drawCharAt_font(vga_get_system_font_handle_raw(), x, y, charnum, rr, gg, bb);
 }
 
 // Start redirection
@@ -1485,9 +1898,9 @@ int snprintf(char *str, size_t size, const char *format, ...) {
 }
 
 void vga_set_color(int nr, int ng, int nb) {
-    r = nr;
-    g = ng;
-    b = nb;
+	vga_default_r = nr;
+	vga_default_g = ng;
+	vga_default_b = nb;
 }
 
 // Bold font - just use regular drawText with brighter color for now
@@ -1503,9 +1916,9 @@ void drawText_italic(int charnum, int r, int g, int b) {
 }
 
 // Large font for headers - enhanced spacing and visual emphasis
-void drawText_large(int charnum, int r, int g, int b) {
+void drawText_large(int charnum, int r, int g, int bb) {
     // Use regular drawText but add extra spacing and visual emphasis
-    drawText(charnum, r, g, b);
+	drawText(charnum, r, g, bb);
     // Add extra spacing to make headers appear larger
     width += 2; // Extra spacing between characters
 }
@@ -1600,7 +2013,7 @@ void render_markdown(const char* content) {
     printf("\n");
 }
 
-// --- simple 2x2 windowing support ---
+// simple 2x2 windowing support ---
 typedef struct { int x, y, w, h; } vga_window_rect_t;
 static vga_window_rect_t g_win_rects[4];
 static int g_active_window = -1;
@@ -1612,7 +2025,7 @@ static void vga_draw_window_frame(int x, int y, int w, int h, const char* title)
         int old_w = width, old_h = height;
         width = x + 4;
         height = y + 2;
-        for (const char* p = title; *p; ++p) drawText(*p, 255, 255, 0);
+		for (const char* p = title; *p; ++p) drawText(*p, 220, 220, 220);
         width = old_w; height = old_h;
     }
 }

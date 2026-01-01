@@ -53,11 +53,11 @@ const char* vterm_get_cwd(int idx);
 // Increase terminal buffer height so the terminal can fill tall tiles/screens (480px ~= 60 rows)
 #define TERM_ROWS 60
 
-// -----------------------------------------------------------------------------
+// -
 // User task stdin buffer API
 // When a ring3 user task is active and waiting for input, the TUI routes
 // keyboard characters to this buffer. The syscall READ (fd=0) consumes from here.
-// -----------------------------------------------------------------------------
+// -
 
 // Clear the stdin buffer for a vterm (called when starting a new user task)
 void vterm_stdin_clear(int idx);

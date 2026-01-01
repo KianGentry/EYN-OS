@@ -116,7 +116,7 @@ extern uint8_t g_current_drive;
 static int g_asm_error_count = 0;
 static int g_asm_warning_count = 0;
 
-// --- Colored error/warning printing ---
+// Colored error/warning printing ---
 void print_error(const char* file, int line, const char* msg, const char* line_text) {
     g_asm_error_count++;
     // Bright red: 255,0,0
@@ -351,7 +351,7 @@ Token lexer_next_token(Lexer *lexer) {
     return token;
 }
 
-// --- AST appenders ---
+// AST appenders ---
 void add_instruction(AST* ast, Instruction* inst) {
     inst->next = 0;
     if (!ast->instructions) {
@@ -385,7 +385,7 @@ void add_data_def(AST* ast, DataDef* def) {
     }
 }
 
-// --- Code Generator ---
+// Code Generator ---
 // Runner mapping assumptions (must match run_command.c):
 // - Code is loaded at USER_CODE_ADDR
 // - Data (if any) is placed at USER_CODE_ADDR + 0x1000
@@ -1554,7 +1554,7 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
     return 0;
 }
 
-// --- File I/O helpers ---
+// File I/O helpers ---
 // Reads the entire file at 'filename' from the current drive into a buffer allocated with my_malloc.
 // Returns pointer and sets out_size, or NULL on error.
 char* read_file_to_buffer(const char* filename, uint32_t* out_size) {

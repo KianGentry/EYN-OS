@@ -41,6 +41,10 @@ int gui_get_content_size(int handle, gui_size_t* out_size) {
     return eyn_syscall3(EYN_SYSCALL_GUI_GET_CONTENT_SIZE, handle, out_size, 0);
 }
 
+int gui_set_font(int handle, const char* hex_path) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_SET_FONT, handle, hex_path, 0);
+}
+
 int gui_poll_event(int handle, gui_event_t* out_event) {
     return eyn_syscall3(EYN_SYSCALL_GUI_POLL_EVENT, handle, out_event, (int)sizeof(*out_event));
 }

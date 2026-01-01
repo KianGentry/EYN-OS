@@ -80,7 +80,7 @@ static int count_subcommands(const subcommand_info_t* subcmds) {
     return count;
 }
 
-// --- GUI-backed help state (used when running inside a tile) ---
+// GUI-backed help state (used when running inside a tile) ---
 static const shell_command_info_t** g_sorted_cmds = NULL;
 static int g_cmd_count = 0;
 static int g_selected = 0;
@@ -401,6 +401,8 @@ void help_tui() {
 
 // GUI draw callback: draw two panes inside the provided content rectangle (pixel coords)
 void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
+    int cw = vga_text_cell_w();
+    int ch = vga_text_cell_h();
     // Stash the rect for mouse hit-testing
     g_last_cx = content_x; g_last_cy = content_y; g_last_cw = content_w; g_last_ch = content_h;
     // Belt-and-suspenders: fully clear the content area first to avoid any residuals from prior
@@ -410,14 +412,14 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
         drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
     }
     // Convert pixels -> TUI grid (strictly within content rect)
-    int cell_x = content_x / 8;
-    int cell_y = content_y / 8;
-    int cell_w = content_w / 8;
-    int cell_h = content_h / 8;
+    int cell_x = content_x / cw;
+    int cell_y = content_y / ch;
+    int cell_w = content_w / cw;
+    int cell_h = content_h / ch;
     // Background: only clear the rows we'll redraw this pass.
     // Top subtitle row
     if (content_w > 0 && content_h > 0) {
-        drawRect(content_x, content_y, content_w, 8, 0, 0, 0);
+        drawRect(content_x, content_y, content_w, ch, 0, 0, 0);
     }
 
     // Left pane width in chars
@@ -430,7 +432,7 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
     tui_window_t right_win = {cell_x + left_chars + 2, cell_y + 1, right_chars, (cell_h > 1 ? cell_h - 1 : 0), "", {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1}, {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0}, {TUI_COLOR_BLACK, TUI_COLOR_BLACK, 0}};
 
     // Draw a single faint vertical separator between panes inside content
-    int sep_x = content_x + left_chars * 8;
+    int sep_x = content_x + left_chars * cw;
     int sep_h = content_h; if (sep_h < 0) sep_h = 0;
     if (sep_x >= content_x && sep_x < content_x + content_w) {
         int sep_w = 3; if (sep_x + sep_w > content_x + content_w) sep_w = (content_x + content_w) - sep_x;
@@ -441,23 +443,23 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
     int subtitle_y = content_y; // first row of content
     // Left subtitle
     int left_px_x = content_x;
-    int left_px_w = left_chars * 8; if (left_px_w > content_w) left_px_w = content_w;
+    int left_px_w = left_chars * cw; if (left_px_w > content_w) left_px_w = content_w;
     if (left_px_w > 0) {
-        drawRect(left_px_x, subtitle_y, left_px_w, 8, 64, 64, 64);
+        drawRect(left_px_x, subtitle_y, left_px_w, ch, 64, 64, 64);
         const char* left_label = "Commands";
-        for (int i = 0; left_label[i] && (8 + i * 8) < left_px_w - 1; ++i) {
-            drawCharAt(left_px_x + 8 + i * 8, subtitle_y, (int)(unsigned char)left_label[i], 255, 255, 255);
+        for (int i = 0; left_label[i] && (cw + i * cw) < left_px_w - 1; ++i) {
+            drawCharAt(left_px_x + cw + i * cw, subtitle_y, (int)(unsigned char)left_label[i], 255, 255, 255);
         }
     }
     // Right subtitle
-    int right_px_x = content_x + left_chars * 8 + 8; // a little padding after separator
+    int right_px_x = content_x + left_chars * cw + cw; // a little padding after separator
     if (right_px_x < content_x) right_px_x = content_x;
     int right_px_w = content_w - (right_px_x - content_x);
     if (right_px_w > 0) {
-        drawRect(right_px_x, subtitle_y, right_px_w, 8, 64, 64, 64);
+        drawRect(right_px_x, subtitle_y, right_px_w, ch, 64, 64, 64);
         const char* right_label = "Description";
-        for (int i = 0; right_label[i] && (8 + i * 8) < right_px_w - 1; ++i) {
-            drawCharAt(right_px_x + 8 + i * 8, subtitle_y, (int)(unsigned char)right_label[i], 255, 255, 255);
+        for (int i = 0; right_label[i] && (cw + i * cw) < right_px_w - 1; ++i) {
+            drawCharAt(right_px_x + cw + i * cw, subtitle_y, (int)(unsigned char)right_label[i], 255, 255, 255);
         }
     }
 
@@ -494,9 +496,9 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
     // clear on left_win.y rather than raw cell_y to avoid off-by-one artifacts
     // that left stale characters behind when help opened after prior terminal output.
     for (int row_idx = 0; row_idx < max_visible; ++row_idx) {
-        int y_band = (left_win.y + 2 + row_idx) * 8;
-        if (y_band >= content_y && y_band + 8 <= content_y + content_h) {
-            drawRect(content_x, y_band, content_w, 8, 0, 0, 0);
+        int y_band = (left_win.y + 2 + row_idx) * ch;
+        if (y_band >= content_y && y_band + ch <= content_y + content_h) {
+            drawRect(content_x, y_band, content_w, ch, 0, 0, 0);
         }
     }
 
@@ -523,8 +525,8 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
                 for (int j = 0; j < subcmd_count && display_y < max_visible; ++j) {
                     int sub_y_pos = left_win.y + 2 + display_y;
                     // Clear just this sub-row band before drawing
-                    int py = sub_y_pos * 8;
-                    if (py >= content_y && py + 8 <= content_y + content_h) drawRect(content_x, py, content_w, 8, 0, 0, 0);
+                    int py = sub_y_pos * ch;
+                    if (py >= content_y && py + ch <= content_y + content_h) drawRect(content_x, py, content_w, ch, 0, 0, 0);
                     char sub_line[64];
                     snprintf(sub_line, sizeof(sub_line), "  %s", subcmd_list[j].name);
                     if (i == g_selected && g_selected_sub == j + 1) {
@@ -578,31 +580,31 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
     {
         int max_desc = (right_win.height > 3) ? (right_win.height - 3) : 0;
         for (int row_idx = 0; row_idx < max_desc; ++row_idx) {
-            int y_band = (right_win.y + 2 + row_idx) * 8;
-            if (y_band >= content_y && y_band + 8 <= content_y + content_h) {
+            int y_band = (right_win.y + 2 + row_idx) * ch;
+            if (y_band >= content_y && y_band + ch <= content_y + content_h) {
                 // Clear only the right pane region
-                int rx = right_win.x * 8;
-                int rw = (right_win.width > 0 ? right_win.width * 8 : 0);
-                if (rw > 0) drawRect(rx, y_band, rw, 8, 0, 0, 0);
+                int rx = right_win.x * cw;
+                int rw = (right_win.width > 0 ? right_win.width * cw : 0);
+                if (rw > 0) drawRect(rx, y_band, rw, ch, 0, 0, 0);
             }
         }
     }
     tui_draw_text_area(&right_win, desc_buf, 0, norm_style);
     // Draw bottom status inside the tile content area
     const char* status_text = "^/v: Move | Enter: Toggle | Ctrl+X: Exit";
-    int status_px_y = (cell_y + cell_h - 1) * 8; // bottom-most character row inside content
-    int status_px_x = cell_x * 8;
-    int status_px_w = cell_w * 8;
+    int status_px_y = (cell_y + cell_h - 1) * ch; // bottom-most character row inside content
+    int status_px_x = cell_x * cw;
+    int status_px_w = cell_w * cw;
     // Clear and redraw the background bar to avoid leftovers when switching to help
-    drawRect(status_px_x, status_px_y, status_px_w, 8, 0, 0, 0);
+    drawRect(status_px_x, status_px_y, status_px_w, ch, 0, 0, 0);
     // background bar
-    drawRect(status_px_x, status_px_y, status_px_w, 8, 32, 32, 32);
+    drawRect(status_px_x, status_px_y, status_px_w, ch, 32, 32, 32);
     // draw status text clipped to content area
     int clip_min = status_px_x + 4;
     int clip_max = status_px_x + status_px_w - 4;
     for (int i = 0; status_text[i]; ++i) {
-        int cx = status_px_x + i * 8 + 4;
-        if (cx + 7 > clip_max) break;
+        int cx = status_px_x + i * cw + 4;
+        if (cx + (cw - 1) > clip_max) break;
         if (cx < clip_min) continue;
         drawCharAt(cx, status_px_y, (int)(unsigned char)status_text[i], 255, 255, 255);
     }
@@ -790,23 +792,26 @@ void help_gui_key(int tile_idx, int key, void* userdata) {
 void help_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata) {
     (void)tile_idx; (void)userdata;
     if (!g_sorted_cmds || g_cmd_count <= 0) return;
+    int cw = vga_text_cell_w();
+    int ch = vga_text_cell_h();
     // Convert to cell coords
-    int cell_x = g_last_cx / 8;
-    int cell_y = g_last_cy / 8;
-    int cell_w = g_last_cw / 8;
-    int cell_h = g_last_ch / 8;
+    int cell_x = g_last_cx / cw;
+    int cell_y = g_last_cy / ch;
+    int cell_w = g_last_cw / cw;
+    int cell_h = g_last_ch / ch;
     if (cell_w <= 0 || cell_h <= 0) return;
     int left_chars = CMD_LIST_WIDTH;
     if (left_chars + 4 >= cell_w) left_chars = (cell_w > 1) ? (cell_w / 2) : cell_w;
-    int click_cx = me->x / 8;
-    int click_cy = me->y / 8;
+    int click_cx = me->x / cw;
+    int click_cy = me->y / ch;
     // Wheel: adjust scroll
     if (me->wheel_delta != 0) {
         int delta = me->wheel_delta;
         int ns = g_scroll + (delta < 0 ? -1 : 1); // wheel up = scroll up
         if (ns < 0) ns = 0;
         // compute a rough maximum scroll: limit so at least one item remains visible
-        int max_vis = (cell_h > 3) ? (cell_h - 3) : cell_h;
+        int left_win_h = (cell_h > 1 ? cell_h - 1 : 0);
+        int max_vis = (left_win_h > 3) ? (left_win_h - 3) : left_win_h;
         int max_scroll = (g_cmd_count > max_vis) ? (g_cmd_count - max_vis) : 0;
         if (ns > max_scroll) ns = max_scroll;
         if (ns != g_scroll) g_scroll = ns;
@@ -828,7 +833,8 @@ void help_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata) {
         g_selected_sub = 0;
         // keep selection in view
         if (g_selected < g_scroll) g_scroll = g_selected;
-        int max_visible = (cell_h > 3) ? (cell_h - 3) : 1;
+        int left_win_h = (cell_h > 1 ? cell_h - 1 : 0);
+        int max_visible = (left_win_h > 3) ? (left_win_h - 3) : 1;
         if (g_selected > g_scroll + max_visible - 1) g_scroll = g_selected - max_visible + 1;
     }
 }

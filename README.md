@@ -1,4 +1,4 @@
-# EYN-OS — a public domain x86 operating system
+# EYN-OS - a public domain x86 operating system
 
 EYN-OS is a small, educational operating system for 32‑bit x86 built entirely from scratch. It aims to be clear, portable, and approachable, favoring simple designs that are easy to learn from and extend.
 
@@ -8,6 +8,7 @@ EYN-OS is a small, educational operating system for 32‑bit x86 built entirely 
 - Basic drivers (display, keyboard, storage) and a simple userspace model
 - A native filesystem alongside compatibility with common layouts
 - A text‑first user interface with optional graphical elements
+- Bitmap font loading (`.hex`) and runtime system-font switching
 - Built‑in developer tools and sample applications
 - Strong emphasis on robustness and portable, low‑memory operation
 

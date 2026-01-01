@@ -1,5 +1,5 @@
 /*
- * diskmgr.c — Disk Management Shell Commands
+ * diskmgr.c - Disk Management Shell Commands
  *
  * Provides commands for viewing and managing disk partitions.
  * Commands: diskmgr, partitions, mount, unmount, mkswap

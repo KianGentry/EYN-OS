@@ -125,11 +125,11 @@ int  vterm_get_version(int idx); // content version for incremental redraw
 ## Commands
 
 The following commands integrate with the GUI layer:
-- `tiling` — launch the tiling manager UI
-- `view <file.rei>` — open an image viewer in a tile
-- `vieww <file.rei>` — open an image viewer in a floating window
-- `draw` — open a simple canvas editor in a tile
-- `win_test` — open a sample floating window (compositor test)
+- `tiling` - launch the tiling manager UI
+- `view <file.rei>` - open an image viewer in a tile
+- `vieww <file.rei>` - open an image viewer in a floating window
+- `draw` - open a simple canvas editor in a tile
+- `win_test` - open a sample floating window (compositor test)
 
 ## Input
 
@@ -162,8 +162,8 @@ Low mode simplifies decor and uses wireframe outlines during drags to avoid over
 Tiles can render a custom REI image behind the terminal text with optional darkening and text adaptation.
 
 Commands:
-- `setbg <file.rei>` — Choose how to display (Tile/Scale/Center) and apply to the focused tile
-- `clearbg` — Remove the background for the focused tile
+- `setbg <file.rei>` - Choose how to display (Tile/Scale/Center) and apply to the focused tile
+- `clearbg` - Remove the background for the focused tile
 
 APIs:
 ```c
@@ -174,12 +174,24 @@ void tile_clear_background(int tile_idx);
 
 ## Examples
 
+### Text rendering and font metrics
+
+Terminal/UI text is rendered using the **current system font** from the VGA driver.
+
+- Do not assume an 8×8 font.
+- Use `vga_text_cell_w()` / `vga_text_cell_h()` when computing text layout.
+- You can switch the active system font at runtime with the shell command `setfont`.
+
 Minimal tile app:
 ```c
 static void app_draw(int t, int x, int y, int w, int h, void* ud) {
     drawRect(x, y, w, h, 0, 0, 0);
     const char* msg = "Hello Tile";
-    for (int i = 0; msg[i]; ++i) drawCharAt(x + 4 + i*8, y + 4, (unsigned char)msg[i], 255,255,0);
+    const int cw = vga_text_cell_w();
+    const int ch = vga_text_cell_h();
+    for (int i = 0; msg[i]; ++i) {
+        drawCharAt(x + 4 + i * cw, y + 4, (unsigned char)msg[i], 255, 255, 0);
+    }
 }
 
 static void app_key(int t, int key, void* ud) {

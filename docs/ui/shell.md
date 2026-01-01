@@ -258,6 +258,23 @@ Show version information.
 ver             # Display EYN-OS version
 ```
 
+#### `setfont <file.hex>` / `setfont builtin`
+Switch the **system font** at runtime.
+
+- Loads a `.hex` bitmap font from disk into RAM and makes it the active font used by text rendering.
+- Use `setfont builtin` to revert to the built-in fallback font.
+- Fonts are typically stored under `/fonts/` in the EYNFS image (the build copies the repository's top-level `fonts/` directory into the image).
+
+```bash
+setfont /fonts/unscii-16.hex
+setfont /fonts/unscii-8.hex
+setfont builtin
+```
+
+Notes:
+- Today the UI/terminal text pipeline is **byte-based** (glyph indices 0–255). Unicode-indexed `.hex` fonts will render correctly only for codepoints that map into 0–255 in the font table.
+- GUI/TUI sizing is based on the active font metrics (see `vga_text_cell_w()` / `vga_text_cell_h()`).
+
 ### Utility Commands
 
 #### `echo <text>`

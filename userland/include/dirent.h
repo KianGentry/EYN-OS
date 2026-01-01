@@ -1,11 +1,5 @@
-#pragma once
-
 #include <stddef.h>
 #include <stdint.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 // Fixed-size directory entry record returned by getdents().
 // Buffer passed to getdents() should be an array of these.
@@ -17,7 +11,3 @@ typedef struct {
 } eyn_dirent_t;
 
 int getdents(int fd, eyn_dirent_t* out, size_t bytes);
-
-#ifdef __cplusplus
-}
-#endif

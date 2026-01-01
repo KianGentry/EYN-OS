@@ -31,8 +31,10 @@ Streaming Commands:
   ring3           - Switch to ring 3 and run a tiny user-mode stub (prints via int 0x80).
   serialtest      - Write a test line to COM1 to verify serial output.
   setbg           - Set a REI image as background for the focused tile (shows Tile/Scale/Center chooser).
+  setfont         - Set the system font at runtime (loads .hex from disk into RAM).
   size            - Show the size of a file in bytes.
   stats           - Graphical system performance monitor with CPU, memory, disk pies and sortable table
+  theme           - Open a GUI theme editor (colors + font).
   tiling          - Launch the tiling front-end manager.
   userrun         - Load a raw user-mode code blob from VFS into ring 3 and run it at 0x00400000.
   validate        - Display input validation statistics and test validation.

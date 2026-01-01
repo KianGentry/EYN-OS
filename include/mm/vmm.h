@@ -1,5 +1,5 @@
 /*
- * vmm.h — Virtual Memory Manager for EYN-OS
+ * vmm.h - Virtual Memory Manager for EYN-OS
  * 
  * i386 paging with 4KB pages, demand paging, COW, swap integration,
  * and working-set tracking. Designed for 3–9 MB physical RAM.
@@ -11,23 +11,23 @@
 #include <types.h>
 
 /*
- * i386 PAGING MODEL — BIT DEFINITIONS
+ * i386 PAGING MODEL - BIT DEFINITIONS
  *
  *  31              12 11  9  8   7   6   5   4   3   2   1   0
- * +------------------+-----+---+---+---+---+---+---+---+---+---+
+ * +---++---+---+---+---+---+---+---+---+---+
  * |    Frame/PFN     | AVL | G | S | D | A |PCD|PWT|U/S|R/W| P |
- * +------------------+-----+---+---+---+---+---+---+---+---+---+
+ * +---++---+---+---+---+---+---+---+---+---+
  *
- * P      (0) — Present: 1=mapped, 0=not present (triggers #PF)
- * R/W    (1) — Read/Write: 1=writable, 0=read-only
- * U/S    (2) — User/Supervisor: 1=ring3 accessible, 0=kernel only
- * PWT    (3) — Write-through caching
- * PCD    (4) — Cache disable
- * A      (5) — Accessed: set by CPU on read/write
- * D      (6) — Dirty: set by CPU on write (PTE only)
- * S/PAT  (7) — Page size (PDE): 1=4MB page, 0=4KB pages via PT
- * G      (8) — Global: don't flush from TLB on CR3 switch (PTE only)
- * AVL  (9-11)— Available for OS use (we use for COW, swap, etc.)
+ * P      (0) - Present: 1=mapped, 0=not present (triggers #PF)
+ * R/W    (1) - Read/Write: 1=writable, 0=read-only
+ * U/S    (2) - User/Supervisor: 1=ring3 accessible, 0=kernel only
+ * PWT    (3) - Write-through caching
+ * PCD    (4) - Cache disable
+ * A      (5) - Accessed: set by CPU on read/write
+ * D      (6) - Dirty: set by CPU on write (PTE only)
+ * S/PAT  (7) - Page size (PDE): 1=4MB page, 0=4KB pages via PT
+ * G      (8) - Global: don't flush from TLB on CR3 switch (PTE only)
+ * AVL  (9-11)- Available for OS use (we use for COW, swap, etc.)
  *
  * CR3 holds physical address of the page directory (bits 31:12) plus PCD/PWT
  * bits. CR0.PG (bit 31) enables paging when set.
@@ -73,7 +73,7 @@
 #define PTE_FRAME_MASK      0xFFFFF000
 
 /*
- * VIRTUAL ADDRESS SPACE LAYOUT — HIGH-HALF KERNEL (3GB split)
+ * VIRTUAL ADDRESS SPACE LAYOUT - HIGH-HALF KERNEL (3GB split)
  *
  *  0x00000000 – 0x3FFFFFFF  User code/data          (1 GB)
  *  0x40000000 – 0x7FFFFFFF  User heap (grows up)    (1 GB)
@@ -130,7 +130,7 @@ typedef struct page_table {
 
 /*
  * PHYSICAL FRAME ALLOCATOR
- * Simple bitmap allocator — one bit per 4KB frame. With a 128MB cap we track
+ * Simple bitmap allocator - one bit per 4KB frame. With a 128MB cap we track
  * 32768 frames (1024 uint32 words) for a 4KB bitmap footprint.
  */
 
@@ -197,7 +197,7 @@ typedef struct swap_state {
 } swap_state_t;
 
 /*
- * PAGE REPLACEMENT — CLOCK ALGORITHM
+ * PAGE REPLACEMENT - CLOCK ALGORITHM
  * Circular buffer of (physical frame, owning PTE pointer) pairs. The hand
  * advances on allocation; pages with A=1 get a second chance.
  */

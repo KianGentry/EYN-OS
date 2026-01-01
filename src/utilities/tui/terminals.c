@@ -610,7 +610,7 @@ void vterm_handle_key(int idx, int key) {
                             if (len < 0) len = 0;
 
                             // If any icon marker falls within this output line, record it on this vterm row.
-                            // We store the icon key and shift the line by +10px when rendered.
+                            // We store the icon key and shift the line by icon width (8px or 16px) when rendered.
                             int out_row = t->cur_y;
                             int out_start_col = t->cur_x;
                             const char* icon_key = NULL;
@@ -621,7 +621,8 @@ void vterm_handle_key(int idx, int key) {
                             if (icon_key && out_row >= 0 && out_row < TERM_ROWS) {
                                 strncpy(t->line_icon_key[out_row], icon_key, sizeof(t->line_icon_key[out_row]) - 1);
                                 t->line_icon_key[out_row][sizeof(t->line_icon_key[out_row]) - 1] = '\0';
-                                t->line_indent_px[out_row] = 10;
+                                // Keep text indented by the icon width (8/16). Icon is drawn flush-left.
+                                t->line_indent_px[out_row] = (uint8_t)((vga_text_cell_h() >= 16) ? 16 : 8);
                                 t->line_icon_anchor_col[out_row] = (uint8_t)out_start_col;
                             }
 
@@ -665,7 +666,8 @@ void vterm_handle_key(int idx, int key) {
                         if (icon_key && out_row >= 0 && out_row < TERM_ROWS) {
                             strncpy(t->line_icon_key[out_row], icon_key, sizeof(t->line_icon_key[out_row]) - 1);
                             t->line_icon_key[out_row][sizeof(t->line_icon_key[out_row]) - 1] = '\0';
-                            t->line_indent_px[out_row] = 10;
+                            // Keep text indented by the icon width (8/16). Icon is drawn flush-left.
+                            t->line_indent_px[out_row] = (uint8_t)((vga_text_cell_h() >= 16) ? 16 : 8);
                             t->line_icon_anchor_col[out_row] = (uint8_t)out_start_col;
                         }
 
@@ -799,11 +801,11 @@ int vterm_is_selected(int idx, int row, int col) {
     return (col >= abs_a && col < abs_b);
 }
 
-// -----------------------------------------------------------------------------
+
 // User task stdin buffer API
 // When a ring3 user task is active and waiting for input, the TUI routes
 // keyboard characters to this buffer. The syscall READ (fd=0) consumes from here.
-// -----------------------------------------------------------------------------
+
 
 // Clear the stdin buffer for a vterm (called when starting a new user task)
 void vterm_stdin_clear(int idx) {

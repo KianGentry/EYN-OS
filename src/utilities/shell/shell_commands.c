@@ -59,6 +59,7 @@ void ring3_cmd(string arg);
 void userrun_cmd(string arg);
 void setbg_cmd(string arg);
 void clearbg_cmd(string arg);
+void setfont_cmd(string arg);
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
@@ -191,6 +192,55 @@ void setbg_cmd(string ch) {
 // Clear background on focused tile
 void clearbg_cmd(string ch) { (void)ch; int focused = tile_get_focused(); if (focused < 0) { printf("%cError: Tiling UI not active.\n", 255, 0, 0); return; } tile_clear_background(focused); }
 
+// Switch system font at runtime: setfont <file.hex> | setfont builtin
+void setfont_cmd(string ch) {
+    uint8 i = 0;
+    while (ch[i] && ch[i] != ' ') i++;
+    while (ch[i] == ' ') i++;
+
+    if (!ch[i]) {
+        printf("%cUsage: setfont <file.hex>\n", 255, 255, 255);
+        printf("%c       setfont builtin\n", 255, 255, 255);
+        printf("%cExample: setfont /fonts/unscii-16.hex\n", 255, 255, 255);
+        return;
+    }
+
+    char arg[128] = {0};
+    uint8 j = 0;
+    while (ch[i] && ch[i] != ' ' && j < sizeof(arg) - 1) {
+        arg[j++] = ch[i++];
+    }
+    arg[j] = '\0';
+
+    if (strcmp(arg, "builtin") == 0) {
+        if (vga_system_font_set(g_current_drive, "builtin") != 0) {
+            printf("%cError: Failed to switch to builtin font.\n", 255, 0, 0);
+            return;
+        }
+        printf("%cSystem font set to builtin fallback.\n", 0, 255, 0);
+        tile_render_once();
+        return;
+    }
+
+    char abspath[128];
+    resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+
+    vfs_stat_t st;
+    if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) {
+        printf("%cError: Font file not found.\n", 255, 0, 0);
+        return;
+    }
+
+    if (vga_system_font_set(g_current_drive, abspath) != 0) {
+        printf("%cError: Failed to load font (bad file or OOM).\n", 255, 0, 0);
+        return;
+    }
+
+    printf("%cSystem font set to %s.\n", 0, 255, 0, abspath);
+    // Force a full repaint so all tiles/UI re-render with the new font metrics.
+    tile_render_once();
+}
+
 // history command implementation
 void history_cmd(string ch) {
     uint8 i = 0;
@@ -306,6 +356,7 @@ void sort_cmd(string ch) {
 #include <shell_command_info.h>
 REGISTER_SHELL_COMMAND(setbg_cmd_info, "setbg", setbg_cmd, CMD_STREAMING, "Set a REI image as background for the focused tile (shows Tile/Scale/Center chooser).\nUsage: setbg <file.rei>", "setbg eynos.rei");
 REGISTER_SHELL_COMMAND(clearbg_cmd_info, "clearbg", clearbg_cmd, CMD_STREAMING, "Clear background image for the focused tile.", "clearbg");
+REGISTER_SHELL_COMMAND(setfont_cmd_info, "setfont", setfont_cmd, CMD_STREAMING, "Set the system font at runtime (loads .hex from disk into RAM).\nUsage: setfont <file.hex> | setfont builtin", "setfont /fonts/unscii-16.hex");
 
 // Ultra-lightweight search with streaming (no large allocations)
 void search_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 

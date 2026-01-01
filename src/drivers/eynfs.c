@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <drivers/serial.h>
 #include <ata.h>
+#include <watchdog.h>
 
 #define EYNFS_BLOCK_SIZE 512 // For now, fixed block size
 #define EYNFS_SUPERBLOCK_LBA 2048 // Standard superblock location
@@ -143,6 +144,26 @@ static void eynfs_cache_flush(uint8 drive) {
         if (block_cache[i].valid && block_cache[i].dirty) {
             ata_write_sector(drive, eynfs_block_to_lba(block_cache[i].block_num), block_cache[i].data);
             block_cache[i].dirty = 0;
+        }
+    }
+}
+
+static void eynfs_cache_invalidate_block(uint32_t block_num) {
+    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
+        if (block_cache[i].valid && block_cache[i].block_num == block_num) {
+            block_cache[i].valid = 0;
+            block_cache[i].dirty = 0;
+        }
+    }
+}
+
+static void eynfs_dir_cache_invalidate(uint32_t dir_block) {
+    for (int i = 0; i < EYNFS_DIR_CACHE_SIZE; i++) {
+        if (dir_cache[i].entries && dir_cache[i].dir_block == dir_block) {
+            free(dir_cache[i].entries);
+            dir_cache[i].entries = NULL;
+            dir_cache[i].count = 0;
+            dir_cache[i].sorted = 0;
         }
     }
 }
@@ -755,7 +776,9 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
     uint8 block[EYNFS_BLOCK_SIZE];
     size_t skip = offset;
     // Skip blocks and bytes up to offset
+    uint32_t kick_ctr = 0;
     while (block_num && skip >= (EYNFS_BLOCK_SIZE-4)) {
+        if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
         uint32_t next_block = *(uint32_t*)block;
         block_num = next_block;
@@ -763,6 +786,7 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
     }
     // Now at the block containing the offset
     if (block_num && bytes_left > 0) {
+        if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
         uint32_t next_block = *(uint32_t*)block;
         size_t block_offset = skip;
@@ -775,6 +799,7 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
     }
     // Read remaining blocks
     while (block_num && bytes_left > 0) {
+        if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
         uint32_t next_block = *(uint32_t*)block;
         size_t chunk = (EYNFS_BLOCK_SIZE-4) < bytes_left ? (EYNFS_BLOCK_SIZE-4) : bytes_left;
@@ -799,6 +824,8 @@ int eynfs_write_file(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *ent
             uint8 tmp[EYNFS_BLOCK_SIZE];
             if (ata_read_sector(drive, eynfs_block_to_lba(block_num), tmp) != 0) break;
             uint32_t next_block = *(uint32_t*)tmp;
+            // Ensure any cached data for this block can't be served after it's freed/reused.
+            eynfs_cache_invalidate_block(block_num);
             eynfs_free_block(drive, sb, block_num);
             block_num = next_block;
         }
@@ -813,6 +840,9 @@ int eynfs_write_file(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *ent
     while (bytes_left > 0) {
         int new_block = eynfs_alloc_block(drive, sb);
         if (new_block < 0) return -1;
+
+        // This block may have been previously cached under the same number.
+        eynfs_cache_invalidate_block((uint32_t)new_block);
         
         if (!first_block) first_block = new_block;
         
@@ -821,7 +851,7 @@ int eynfs_write_file(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *ent
             uint8 tmp[EYNFS_BLOCK_SIZE];
             if (ata_read_sector(drive, eynfs_block_to_lba(prev_block), tmp) != 0) return -1;
             *(uint32_t*)tmp = new_block;
-            if (ata_write_sector(drive, eynfs_block_to_lba(prev_block), tmp) != 0) return -1;
+            if (eynfs_cache_write_block(drive, prev_block, tmp) != 0) return -1;
         }
         
         uint8 block[EYNFS_BLOCK_SIZE] = {0};
@@ -836,7 +866,7 @@ int eynfs_write_file(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *ent
             return -1;
         }
         
-        if (ata_write_sector(drive, eynfs_block_to_lba((uint32_t)new_block), block) != 0) return -1;
+        if (eynfs_cache_write_block(drive, (uint32_t)new_block, block) != 0) return -1;
         total_written += chunk;
         bytes_left -= chunk;
         prev_block = new_block;
@@ -890,11 +920,14 @@ int eynfs_write_file(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *ent
         printf("Error: Failed to write directory table\n");
         return -1;
     }
+
+    // Directory contents and path traversal results are cached; invalidate so metadata updates are visible immediately.
+    eynfs_dir_cache_invalidate(parent_block);
     
     return (int)size;
 } 
 
-// --- Unix-like File Table and Open/Close Implementation ---
+// Unix-like File Table and Open/Close Implementation ---
 #define EYNFS_MAX_OPEN_FILES 32
 
 typedef struct {
@@ -1166,7 +1199,7 @@ int eynfs_alloc_block_fast(uint8 drive, eynfs_superblock_t *sb) {
     return eynfs_alloc_block_optimized(drive, sb);
 } 
 
-// --- Streaming writer implementation ---
+// Streaming writer implementation ---
 int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
     if (!s || !path) return -1;
     memset(s, 0, sizeof(*s));

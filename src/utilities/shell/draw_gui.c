@@ -144,7 +144,7 @@ static void draw_gui_draw(int tile_idx, int content_x, int content_y, int conten
     int wbx = bx + 48; int wby = by + 24; int wbl = 8; for (int t = 0; wbuf[t]; ++t) wbl += 8;
     uint8 fr = (g_draw.prompt_focus==0)?80:48, fg = (g_draw.prompt_focus==0)?80:48, fb = (g_draw.prompt_focus==0)?80:48;
     drawRect(wbx-2, wby-2, wbl+4, 12, fr, fg, fb);
-    for (int i = 0; wbuf[i]; ++i) drawCharAt(wbx + i*8, wby, (unsigned char)wbuf[i], 255, 255, 0);
+    for (int i = 0; wbuf[i]; ++i) drawCharAt(wbx + i*8, wby, (unsigned char)wbuf[i], 220, 220, 220);
         // Height
         const char* hl = "H:";
         for (int i = 0; hl[i]; ++i) drawCharAt(bx + 8 + i*8, by + 40, (unsigned char)hl[i], 220, 220, 220);
@@ -152,7 +152,7 @@ static void draw_gui_draw(int tile_idx, int content_x, int content_y, int conten
     int hbx = bx + 48; int hby = by + 40; int hbl = 8; for (int t = 0; hbuf[t]; ++t) hbl += 8;
     fr = (g_draw.prompt_focus==1)?80:48; fg = (g_draw.prompt_focus==1)?80:48; fb = (g_draw.prompt_focus==1)?80:48;
     drawRect(hbx-2, hby-2, hbl+4, 12, fr, fg, fb);
-    for (int i = 0; hbuf[i]; ++i) drawCharAt(hbx + i*8, hby, (unsigned char)hbuf[i], 255, 255, 0);
+    for (int i = 0; hbuf[i]; ++i) drawCharAt(hbx + i*8, hby, (unsigned char)hbuf[i], 220, 220, 220);
         // Buttons
     drawRect(bx + 30, by + 60, 60, 14, (g_draw.prompt_focus==2)?96:64, (g_draw.prompt_focus==2)?96:64, (g_draw.prompt_focus==2)?96:64);
         const char* create = "Create";

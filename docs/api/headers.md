@@ -65,28 +65,39 @@ char* strtok(char* str, const char* delim);
 ## Hardware Driver Headers
 
 ### `vga.h`
-VGA text mode display functions.
+Framebuffer drawing, text rendering, and bitmap font management.
 
-#### Display Functions
+#### Drawing and text
 ```c
-void clearScreen();
-void setCursorPosition(int x, int y);
-void setTextColor(uint8_t color);
-void putchar(char c);
-void printf(const char* format, ...);
-int snprintf(char* str, size_t size, const char* format, ...);
+void drawRect(int x, int y, int w, int h, int r, int g, int b);
+void drawTextAt(int x, int y, const char* text, int r, int g, int b);
+void drawCharAt(int x, int y, int charnum, int r, int g, int b);
+void drawCharAt_font(int font_handle, int x, int y, int charnum, int r, int g, int b);
+void clearScreen(void);
 ```
 
-#### Color Constants
+#### Font acquisition and lifetime
+Fonts are loaded from `.hex` files via the VFS and stored as a 256-glyph bitmap table in RAM.
+
 ```c
-#define VGA_BLACK 0
-#define VGA_WHITE 15
-#define VGA_RED 4
-#define VGA_GREEN 2
-#define VGA_BLUE 1
-#define VGA_MAGENTA 5
-#define VGA_CYAN 3
-#define VGA_YELLOW 14
+int vga_font_acquire_hex(uint8 drive, const char* path);
+void vga_font_release(int font_handle);
+
+int vga_system_font_acquire(void);
+int vga_system_font_set(uint8 drive, const char* path);
+```
+
+Notes:
+- `vga_system_font_set()` accepts `path = "builtin"` (or NULL/empty) to revert to the built-in fallback font.
+- The text pipeline currently treats the character value as a **glyph index 0–255**.
+
+#### Font metrics
+Use these helpers for layout; the active system font can be 8×8 or 8×16.
+
+```c
+int vga_text_cell_w(void);
+int vga_text_cell_h(void);
+int vga_font_glyph_h(int font_handle);
 ```
 
 ### `kb.h`

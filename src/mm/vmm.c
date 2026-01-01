@@ -1,5 +1,5 @@
 /*
- * vmm.c — Virtual Memory Manager Implementation for EYN-OS
+ * vmm.c - Virtual Memory Manager Implementation for EYN-OS
  *
  * Complete i386 paging subsystem with:
  * - 4KB page support (4MB pages optional)
@@ -87,7 +87,7 @@ void invalidate_tlb_all(void) {
 }
 
 /*
- * FRAME ALLOCATOR — BITMAP-BASED
+ * FRAME ALLOCATOR - BITMAP-BASED
  * Each bit represents one 4KB frame. We scan for zeros to find free frames.
  * search_hint accelerates sequential allocations by remembering where we last
  * found a free frame.
@@ -118,7 +118,7 @@ static void frame_alloc_init(uint32 total_ram_bytes) {
     g_frame_alloc.free_frames = g_frame_alloc.total_frames;
     g_frame_alloc.search_hint = 0;
     
-    /* Reserve first 1MB for BIOS/legacy (256 frames) — these are never allocatable */
+    /* Reserve first 1MB for BIOS/legacy (256 frames) - these are never allocatable */
     for (uint32 i = 0; i < 256; i++) {
         frame_set(i);
         g_frame_alloc.free_frames--;
@@ -371,7 +371,7 @@ int vmm_map_page(address_space_t* as, uint32 va, uint32 pa, uint32 flags) {
     
     /* If page already mapped, unmap first (avoids frame leak) */
     if (*pte & PTE_PRESENT) {
-        /* Could be replacing mapping — don't free the old frame 
+        /* Could be replacing mapping - don't free the old frame 
          * if caller is remapping same address */
     }
     
@@ -610,7 +610,7 @@ void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
         }
     }
     
-    /* CASE 2: Protection violation on write — possible COW */
+    /* CASE 2: Protection violation on write - possible COW */
     if (is_present && is_write && pte) {
         pte_t entry = *pte;
         
@@ -646,7 +646,7 @@ void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
         
         /* Heap access within brk: should have been mapped via brk() */
         if (fault_addr >= USER_HEAP_BASE && fault_addr < as->heap_break) {
-            /* Lazy heap page — allocate now */
+            /* Lazy heap page - allocate now */
             uint32 page_va = fault_addr & PAGE_MASK;
             uint32 frame = frame_alloc();
             if (frame == 0) {
@@ -660,7 +660,7 @@ void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
     }
     
 segfault:
-    /* Unrecoverable fault — print diagnostic and halt/kill process */
+    /* Unrecoverable fault - print diagnostic and halt/kill process */
     printf("\n%c*** Page Fault ***\n", 255, 0, 0);
     printf("Address: 0x%08X  EIP: 0x%08X\n", fault_addr, eip);
     printf("Error: %s %s %s\n",
@@ -707,7 +707,7 @@ int vmm_handle_cow_fault(address_space_t* as, uint32 va, pte_t* pte) {
     
     invalidate_tlb_entry(va);
     
-    /* Note: old_frame is not freed — other processes may still reference it.
+    /* Note: old_frame is not freed - other processes may still reference it.
      * A proper implementation would reference-count shared frames. */
     
     return 0;
@@ -863,7 +863,7 @@ int swap_in_page(address_space_t* as, uint32 va, uint32 swap_slot) {
 
 void clock_add_page(uint32 frame, pte_t* pte, uint32 va, address_space_t* as) {
     if (g_clock.count >= CLOCK_SIZE) {
-        /* Clock buffer full — would need to evict first, but this shouldn't
+        /* Clock buffer full - would need to evict first, but this shouldn't
          * happen if CLOCK_SIZE matches typical resident set */
         return;
     }
@@ -915,7 +915,7 @@ uint32 clock_evict_page(void) {
         
         pte_t* pte = entry->pte_ptr;
         if (!pte || !(*pte & PTE_PRESENT)) {
-            /* Stale entry — remove it */
+            /* Stale entry - remove it */
             clock_remove_page(entry->frame);
             continue;
         }
@@ -931,10 +931,10 @@ uint32 clock_evict_page(void) {
         uint32 frame = entry->frame;
         
         if (*pte & PTE_DIRTY) {
-            /* Page was modified — must write to swap */
+            /* Page was modified - must write to swap */
             swap_out_page(pte, entry->va, entry->as);
         } else {
-            /* Clean page — just invalidate */
+            /* Clean page - just invalidate */
             *pte = 0;
             invalidate_tlb_entry(entry->va);
         }
@@ -947,7 +947,7 @@ uint32 clock_evict_page(void) {
         return frame;
     }
     
-    /* Full rotation with no victim — all pages recently accessed (thrashing!) */
+    /* Full rotation with no victim - all pages recently accessed (thrashing!) */
     return 0;
 }
 
@@ -961,7 +961,7 @@ uint32 clock_evict_page(void) {
 #define THRASH_THRESHOLD    50    /* >50 faults/second = thrashing */
 
 void vmm_update_working_set(address_space_t* as) {
-    /* Count pages with Accessed bit set — rough working set size */
+    /* Count pages with Accessed bit set - rough working set size */
     uint32 ws_count = 0;
     
     for (int pdi = 0; pdi < 768; pdi++) {
@@ -1152,7 +1152,7 @@ void vmm_init(uint32 total_ram_bytes) {
         /* Low mapping (0x00000000+) */
         kernel_pd->entries[pdi] = (uint32)pt | PTE_PRESENT | PTE_RW;
         
-        /* High mapping (0xC0000000+) — kernel's preferred addresses */
+        /* High mapping (0xC0000000+) - kernel's preferred addresses */
         kernel_pd->entries[768 + pdi] = (uint32)pt | PTE_PRESENT | PTE_RW;
     }
     
@@ -1197,7 +1197,7 @@ void vmm_init(uint32 total_ram_bytes) {
     
     /* Set null page as not-present (null pointer guard) */
     page_table_t* pt0 = (page_table_t*)(kernel_pd->entries[0] & PTE_FRAME_MASK);
-    pt0->entries[0] = 0;  /* First page not present — dereferencing NULL faults */
+    pt0->entries[0] = 0;  /* First page not present - dereferencing NULL faults */
 
     /* IMPORTANT: Reserve all boot-time early_alloc() memory in the frame bitmap.
      * frame_alloc_init() only reserves up through __kernel_end; without this,

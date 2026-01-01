@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-create_partitioned_disk.py — Create a partitioned disk image for EYN-OS
+create_partitioned_disk.py - Create a partitioned disk image for EYN-OS
 
 Creates a 10MB disk image with:
 - MBR partition table

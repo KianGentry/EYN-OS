@@ -1,10 +1,4 @@
-#pragma once
-
 #include <stddef.h>
-
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 typedef long ssize_t;
 
@@ -18,7 +12,3 @@ __attribute__((noreturn)) void _exit(int code);
 
 // Non-blocking single-key read. Returns 0 if none available.
 int getkey(void);
-
-#ifdef __cplusplus
-}
-#endif

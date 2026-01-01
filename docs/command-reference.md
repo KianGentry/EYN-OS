@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2025-12-29 03:00:52
+This document is auto-generated from the source code. Last updated: 2026-01-01 01:16:29
 
-**Total Commands:** 59
+**Total Commands:** 61
 
 ## Table of Contents
 
@@ -488,6 +488,25 @@ setbg eynos.rei
 
 ---
 
+### setfont
+
+**Handler:** `setfont_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `shell_commands.c`
+
+**Description:**
+Set the system font at runtime (loads .hex from disk into RAM).
+Usage: setfont <file.hex> | setfont builtin
+
+**Example:**
+```bash
+setfont /fonts/unscii-16.hex
+```
+
+---
+
 ### size
 
 **Handler:** `size`
@@ -521,6 +540,24 @@ Graphical system performance monitor with CPU, memory, disk pies and sortable ta
 **Example:**
 ```bash
 stats
+```
+
+---
+
+### theme
+
+**Handler:** `theme_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `theme_cmd.c`
+
+**Description:**
+Open a GUI theme editor (colors + font).
+
+**Example:**
+```bash
+theme
 ```
 
 ---
@@ -1151,7 +1188,7 @@ run user_hello.uelf
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 27 |
+| Streaming Commands | 29 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |

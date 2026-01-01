@@ -314,6 +314,25 @@ def main():
                 with open(src_file, 'rb') as infile:
                     data = infile.read()
                 add_file(f, sb, dir_block, file, data)
+
+        # Also copy the repository's top-level fonts/ directory (if present)
+        # into /fonts so default system fonts are available in the image.
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        fonts_dir = os.path.join(repo_root, 'fonts')
+        if os.path.isdir(fonts_dir):
+            for root, dirs, files in os.walk(fonts_dir):
+                rel_dir = os.path.relpath(root, fonts_dir)
+                eynfs_path = 'fonts' if rel_dir == '.' else ('fonts/' + rel_dir.replace('\\', '/'))
+                parent_path = os.path.dirname(eynfs_path)
+                parent_block = find_dir_block(f, sb, parent_path)
+                if eynfs_path and parent_block is not None:
+                    add_dir(f, sb, parent_block, os.path.basename(eynfs_path))
+                dir_block = find_dir_block(f, sb, eynfs_path)
+                for file in files:
+                    src_file = os.path.join(root, file)
+                    with open(src_file, 'rb') as infile:
+                        data = infile.read()
+                    add_file(f, sb, dir_block, file, data)
     
     print(f"Successfully copied '{source_dir}' to '{img_file}'")
 

@@ -34,6 +34,10 @@ static int write_editor_gui_tile = -1;
 static char write_editor_gui_filename[128];
 static uint8 write_editor_gui_disk = 0;
 
+// Unsaved-changes close prompt state (GUI mode)
+static int write_editor_exit_prompt_active = 0;
+static int write_editor_last_save_failed = 0;
+
 // GUI geometry cached for scroll logic
 static int write_editor_gui_cols = 0;
 static int write_editor_gui_rows = 0;
@@ -70,6 +74,7 @@ static void write_editor_update_tile_modified(void) {
 static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata);
 static void write_editor_gui_key(int tile_idx, int key, void* userdata);
 static void write_editor_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata);
+static int write_editor_gui_close_request(int tile_idx, void* userdata);
 
 // Helper: get last path component (filename) from a path
 static const char* get_basename(const char* path) {
@@ -369,7 +374,7 @@ void write_editor_draw(const char* filename) {
 
     // Status bar just below the window
     char status[160];
-    snprintf(status, sizeof(status), "Line %d/%d, Col %d | V-Scroll: %d-%d | H-Scroll: %d | Ctrl+O: Save | Ctrl+X: Exit", 
+    snprintf(status, sizeof(status), "Line %d/%d, Col %d | V-Scroll: %d-%d | H-Scroll: %d | Ctrl+S: Save | Ctrl+X: Exit", 
         write_editor_cursor_y + 1, write_editor_num_lines, write_editor_cursor_x + 1, 
         write_editor_scroll_y + 1, write_editor_scroll_y + EDITOR_HEIGHT, write_editor_scroll_x);
     tui_style_t status_style = {TUI_COLOR_WHITE, TUI_COLOR_BLACK, 0};
@@ -468,7 +473,7 @@ static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, in
                     int cur_wrap = write_editor_cursor_x / cols;
                     int cur_col = write_editor_cursor_x % cols;
                     if (seg == cur_wrap && cc == cur_col) {
-                        drawCharAt(px, draw_y, (int)'_', 255, 255, 0);
+                        drawCharAt(px, draw_y, (int)'_', 220, 220, 220);
                     }
                 }
             }
@@ -480,15 +485,70 @@ static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, in
     if (rows >= 1) {
         int status_y = content_y + text_rows * 8;
         char status[160];
-        snprintf(status, sizeof(status), "Ctrl+O: Save | Ctrl+X: Exit | Line %d Col %d", write_editor_cursor_y + 1, write_editor_cursor_x + 1);
+        if (write_editor_last_save_failed) {
+            snprintf(status, sizeof(status), "Save failed | Ctrl+S: Save | Ctrl+X: Exit | Line %d Col %d", write_editor_cursor_y + 1, write_editor_cursor_x + 1);
+        } else {
+            snprintf(status, sizeof(status), "Ctrl+S: Save | Ctrl+X: Exit | Line %d Col %d", write_editor_cursor_y + 1, write_editor_cursor_x + 1);
+        }
         // background already drawn above
         drawTextAt(content_x + 8, status_y, status, 255, 255, 255);
+    }
+
+    // Unsaved-changes prompt overlay (draw last so it appears on top)
+    if (write_editor_exit_prompt_active) {
+        int box_w = 320;
+        int box_h = 64;
+        if (box_w > content_w - 16) box_w = content_w - 16;
+        if (box_h > content_h - 16) box_h = content_h - 16;
+        if (box_w < 160) box_w = 160;
+        if (box_h < 48) box_h = 48;
+        int bx = content_x + (content_w - box_w) / 2;
+        int by = content_y + (content_h - box_h) / 2;
+
+        drawRect(bx, by, box_w, box_h, 0, 0, 0);
+        // Border
+        drawRect(bx, by, box_w, 1, 255, 255, 255);
+        drawRect(bx, by + box_h - 1, box_w, 1, 255, 255, 255);
+        drawRect(bx, by, 1, box_h, 255, 255, 255);
+        drawRect(bx + box_w - 1, by, 1, box_h, 255, 255, 255);
+
+        drawTextAt(bx + 8, by + 10, "Unsaved changes", 255, 255, 255);
+        drawTextAt(bx + 8, by + 26, "Save (S) / Exit (X)", 200, 200, 200);
+        drawTextAt(bx + 8, by + 40, "Cancel (Esc)", 200, 200, 200);
     }
 }
 
 // GUI key callback (top-level)
 static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
     (void)tile_idx; (void)userdata;
+
+    // If the unsaved-changes prompt is active, consume keys to avoid editing behind it.
+    if (write_editor_exit_prompt_active) {
+        if (key == 27) { // Esc cancels
+            write_editor_exit_prompt_active = 0;
+            tile_invalidate_gui(write_editor_gui_tile);
+            return;
+        }
+        if (key == 0x2001 || key == 's' || key == 'S' || key == '\n') {
+            write_editor_last_save_failed = 0;
+            if (save_write_editor_buffer(write_editor_gui_filename, write_editor_gui_disk) == 0) {
+                write_editor_modified = 0;
+                write_editor_update_tile_modified();
+                write_editor_exit_prompt_active = 0;
+                if (write_editor_gui_tile >= 0) tile_unregister_gui_client(write_editor_gui_tile);
+            } else {
+                write_editor_last_save_failed = 1;
+            }
+            tile_invalidate_gui(write_editor_gui_tile);
+            return;
+        }
+        if (key == 'x' || key == 'X') {
+            write_editor_exit_prompt_active = 0;
+            if (write_editor_gui_tile >= 0) tile_unregister_gui_client(write_editor_gui_tile);
+            return;
+        }
+        return;
+    }
     // Use global helper to delete active selection when needed
     // Shift+Arrows selection extension
     if ((key & 0x3000) && ((key & 0x0FFF) >= 0x1001 && (key & 0x0FFF) <= 0x1004)) {
@@ -670,8 +730,10 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
         return;
     }
     if (key == 0x2001) { // save
+        write_editor_last_save_failed = 0;
         if (save_write_editor_buffer(write_editor_gui_filename, write_editor_gui_disk) == 0) {
             write_editor_modified = 0;
+            write_editor_last_save_failed = 0;
             write_editor_update_tile_modified();
             if (write_editor_gui_tile >= 0) {
                 static char title_static[] = "Write Editor";
@@ -681,11 +743,18 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
                 left_buf[sizeof(left_buf) - 1] = '\0';
                 tile_set_title_status(write_editor_gui_tile, title_static, left_buf, NULL);
             }
+        } else {
+            write_editor_last_save_failed = 1;
         }
         return;
     }
     if (key == 0x2002) { // exit
-        if (write_editor_gui_tile >= 0) tile_unregister_gui_client(write_editor_gui_tile);
+        // Tiler will attempt to close after this callback.
+        // If modified, show prompt and veto close via the close callback.
+        if (write_editor_modified) {
+            write_editor_exit_prompt_active = 1;
+            tile_invalidate_gui(write_editor_gui_tile);
+        }
         return;
     }
     // Printable insert
@@ -748,6 +817,7 @@ static void write_editor_hit_test(int px, int py, int* out_line, int* out_col) {
 static void write_editor_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata) {
     (void)tile_idx; (void)userdata;
     if (write_editor_gui_tile < 0) return;
+    if (write_editor_exit_prompt_active) return;
     // Wheel scroll vertical
     if (me->wheel_delta != 0) {
         int delta = me->wheel_delta; // up positive
@@ -859,6 +929,18 @@ static void write_editor_gui_mouse(int tile_idx, const mouse_event_t* me, void* 
     }
 }
 
+// Called by the tiler when a close is requested (close button, Super+Q, default Ctrl+X close).
+// Return 1 to allow close, 0 to veto.
+static int write_editor_gui_close_request(int tile_idx, void* userdata) {
+    (void)tile_idx;
+    (void)userdata;
+    if (write_editor_exit_prompt_active) return 0;
+    if (!write_editor_modified) return 1;
+    write_editor_exit_prompt_active = 1;
+    if (write_editor_gui_tile >= 0) tile_invalidate_gui(write_editor_gui_tile);
+    return 0;
+}
+
 // Main editor loop
 void write_editor(const char* filename, uint8 disk) {
     // Reset editor state for new file
@@ -867,6 +949,8 @@ void write_editor(const char* filename, uint8 disk) {
     write_editor_scroll_y = 0;
     write_editor_scroll_x = 0;
     write_editor_modified = 0;
+    write_editor_exit_prompt_active = 0;
+    write_editor_last_save_failed = 0;
     if (load_file_to_write_editor(filename, disk) < 0) {
         printf("%cFailed to load file.\n", 255, 0, 0);
         return;
@@ -892,6 +976,7 @@ void write_editor(const char* filename, uint8 disk) {
         write_editor_gui_filename[sizeof(write_editor_gui_filename) - 1] = '\0';
         write_editor_gui_disk = disk;
         tile_register_gui_client2(t, write_editor_gui_draw, write_editor_gui_key, write_editor_gui_mouse, NULL);
+        tile_register_gui_close_cb(t, write_editor_gui_close_request);
         // return, GUI will be active until unregistered or tile closed
         return;
     }

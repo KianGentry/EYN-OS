@@ -44,7 +44,7 @@ The panic renderer classifies messages into categories like ASSERT, PAGING, FILE
 ## Testing
 
 Two shell commands exercise the system:
-- `panic` — triggers a manual panic to verify display and serial output.
-- `assertfail` — triggers an ASSERT to test the assertion path.
+- `panic` - triggers a manual panic to verify display and serial output.
+- `assertfail` - triggers an ASSERT to test the assertion path.
 
 Use these to validate serial capture and overall diagnostic behavior in your environment.
