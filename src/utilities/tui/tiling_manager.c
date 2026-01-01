@@ -229,6 +229,26 @@ static uint32 g_last_drag_tick = 0;
 // Mouse cursor image and overlay state
 static rei_image_t g_cursor_img;
 static int g_cursor_loaded = 0;
+
+// Optional resize cursors (draw-time transforms used instead of multiple images)
+static rei_image_t g_cursor_res_img;
+static int g_cursor_res_loaded = 0;
+static rei_image_t g_cursor_res_diag_img;
+static int g_cursor_res_diag_loaded = 0;
+
+typedef enum {
+    CURSOR_NORMAL = 0,
+    CURSOR_RES_VERT,
+    CURSOR_RES_HOR,
+    CURSOR_RES_DIAG,
+} cursor_kind_t;
+
+static cursor_kind_t g_cursor_kind = CURSOR_NORMAL;
+// Cursor draw transform flags applied in draw_cursor_overlay()
+#define CURSOR_XFORM_FLIP_X 1
+#define CURSOR_XFORM_FLIP_Y 2
+#define CURSOR_XFORM_ROT_90 4
+static int g_cursor_xform = 0;
 static int cursor_prev_x = -1000, cursor_prev_y = -1000;
 static unsigned char* cursor_savebuf = NULL; // save-under buffer
 static int cursor_save_w = 0, cursor_save_h = 0, cursor_save_len = 0;
@@ -248,6 +268,63 @@ static int g_dirty_hits_prev_cursor = 0;
 static int g_tiles_full_content_redraw = 0;
 // Live-drag overlay state for smoother window moves
 static int prev_drag_x = -1, prev_drag_y = -1, prev_drag_w = 0, prev_drag_h = 0;
+
+// --- Floating window resize state ---
+static int resize_active = 0;
+static int resize_win = -1;
+static int resize_edges = 0;
+static int resize_start_mx = 0, resize_start_my = 0;
+static int resize_start_x = 0, resize_start_y = 0, resize_start_w = 0, resize_start_h = 0;
+
+// --- Tiling resize state (dragging split borders) ---
+static int g_tile_split_inited_for_count = -1;
+static int g_tile_split_x = 0;
+static int g_tile_split_y = 0;
+static int tile_resize_active = 0;
+static int tile_resize_mode = 0; // 1=vert,2=hor,3=both
+
+#define RESIZE_EDGE_L 1
+#define RESIZE_EDGE_R 2
+#define RESIZE_EDGE_T 4
+#define RESIZE_EDGE_B 8
+
+static inline void cursor_set_kind(cursor_kind_t k) {
+    g_cursor_kind = k;
+    g_cursor_xform = 0;
+}
+
+static inline void cursor_set_style(cursor_kind_t k, int xform) {
+    g_cursor_kind = k;
+    g_cursor_xform = xform;
+}
+
+static inline int cursor_img_loaded_for_kind(cursor_kind_t k) {
+    if (k == CURSOR_RES_VERT) return g_cursor_res_loaded;
+    if (k == CURSOR_RES_HOR) return g_cursor_res_loaded;
+    if (k == CURSOR_RES_DIAG) return g_cursor_res_diag_loaded;
+    return g_cursor_loaded;
+}
+
+static inline const rei_image_t* cursor_img_for_kind(cursor_kind_t k) {
+    if ((k == CURSOR_RES_VERT || k == CURSOR_RES_HOR) && g_cursor_res_loaded) return &g_cursor_res_img;
+    if (k == CURSOR_RES_DIAG && g_cursor_res_diag_loaded) return &g_cursor_res_diag_img;
+    return &g_cursor_img;
+}
+
+static inline void cursor_get_dims(int* out_w, int* out_h) {
+    int w = cursor_w;
+    int h = cursor_h;
+    const rei_image_t* im = cursor_img_for_kind(g_cursor_kind);
+    if (im && cursor_img_loaded_for_kind(g_cursor_kind)) {
+        w = im->header.width;
+        h = im->header.height;
+        if (g_cursor_xform & CURSOR_XFORM_ROT_90) {
+            int tmp = w; w = h; h = tmp;
+        }
+    }
+    if (out_w) *out_w = w;
+    if (out_h) *out_h = h;
+}
 
 // Optional REI close icon for window titlebars
 static rei_image_t g_close_icon;
@@ -901,6 +978,85 @@ static int wm_hit_test(int x, int y) {
     return -1;
 }
 
+static int wm_resize_hit_test_edges(const window_t* w, int x, int y) {
+    if (!w || !w->used || w->minimized) return 0;
+    if (w->maximized) return 0;
+    // Grab zone thickness in pixels
+    const int m = 4;
+    const int corner = 10;
+    int edges = 0;
+    // Outside window => not resizable
+    if (!point_in_rect(x, y, w->x, w->y, w->w, w->h)) return 0;
+
+    // Avoid treating clicks in the titlebar button cluster as resize.
+    // (The buttons live in the titlebar near the top-right.)
+    int th = win_title_height(w);
+    int bx0 = 0, by0 = 0, bw0 = 0, bh0 = 0;
+    wm_get_close_rect(w, &bx0, &by0, &bw0, &bh0);
+    int avoid_x = bx0 - (bw0 * 3);
+    if (avoid_x < w->x) avoid_x = w->x;
+    if (point_in_rect(x, y, avoid_x, w->y, (w->x + w->w) - avoid_x, th)) {
+        // still allow resize on the extreme right edge in the titlebar
+        if (x < w->x + w->w - m) return 0;
+    }
+
+    // Prefer diagonal resize when near corners (bigger target than just intersecting both edge strips).
+    // This makes diagonal resizing much easier to grab.
+    if (x < w->x + corner && y < w->y + corner) return RESIZE_EDGE_L | RESIZE_EDGE_T;
+    if (x >= w->x + w->w - corner && y < w->y + corner) return RESIZE_EDGE_R | RESIZE_EDGE_T;
+    if (x < w->x + corner && y >= w->y + w->h - corner) return RESIZE_EDGE_L | RESIZE_EDGE_B;
+    if (x >= w->x + w->w - corner && y >= w->y + w->h - corner) return RESIZE_EDGE_R | RESIZE_EDGE_B;
+
+    if (x < w->x + m) edges |= RESIZE_EDGE_L;
+    if (x >= w->x + w->w - m) edges |= RESIZE_EDGE_R;
+    if (y < w->y + m) edges |= RESIZE_EDGE_T;
+    if (y >= w->y + w->h - m) edges |= RESIZE_EDGE_B;
+
+    return edges;
+}
+
+static int tile_split_hit_test_mode(int x, int y) {
+    if (fullscreen_tile >= 0) return 0;
+    if (tile_count < 2) return 0;
+    const int m = 3;
+    int near_v = 0;
+    int near_h = 0;
+
+    // vertical split
+    if (tile_count >= 2) {
+        if (x >= g_tile_split_x - m && x <= g_tile_split_x + m) near_v = 1;
+    }
+    // horizontal split
+    if (tile_count == 3) {
+        if (x >= g_tile_split_x && (y >= g_tile_split_y - m && y <= g_tile_split_y + m)) near_h = 1;
+    } else if (tile_count >= 4) {
+        if (y >= g_tile_split_y - m && y <= g_tile_split_y + m) near_h = 1;
+    }
+
+    if (near_v && near_h) return 3;
+    if (near_v) return 1;
+    if (near_h) return 2;
+    return 0;
+}
+
+// For input hit-testing, treat the cursor's "hot" point as its center rather than its top-left.
+// This makes resize interactions feel centered even for arrow-shaped cursors.
+static inline void cursor_get_draw_pos_for_kind(int tip_x, int tip_y, int* out_x, int* out_y) {
+    // Keep the normal cursor behavior unchanged: (tip_x,tip_y) is the draw origin.
+    if (g_cursor_kind == CURSOR_NORMAL) {
+        if (out_x) *out_x = tip_x;
+        if (out_y) *out_y = tip_y;
+        return;
+    }
+    // For resize cursors, center the sprite on the cursor tip.
+    int w = 0, h = 0;
+    cursor_get_dims(&w, &h);
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (out_x) *out_x = tip_x - (w / 2);
+    if (out_y) *out_y = tip_y - (h / 2);
+}
+
 static void wm_bring_to_front(int wi) {
     if (wi < 0 || wi >= MAX_WINDOWS || !g_windows[wi].used) return;
     int pos = -1;
@@ -1007,10 +1163,19 @@ void wm_close_window(int win_id) {
 
 static void draw_cursor_overlay(int x, int y) {
     static int s_logged_cursor_once = 0;
-    int w = g_cursor_loaded ? g_cursor_img.header.width : cursor_w;
-    int h = g_cursor_loaded ? g_cursor_img.header.height : cursor_h;
-    // Simple fallback: small yellow box if no image
-    if (!g_cursor_loaded) {
+    int w = cursor_w;
+    int h = cursor_h;
+    const rei_image_t* cim = cursor_img_for_kind(g_cursor_kind);
+    int cim_loaded = cursor_img_loaded_for_kind(g_cursor_kind);
+    if (cim && cim_loaded) {
+        w = cim->header.width;
+        h = cim->header.height;
+        if (g_cursor_xform & CURSOR_XFORM_ROT_90) {
+            int tmp = w; w = h; h = tmp;
+        }
+    }
+    // Simple fallback: small box if no image
+    if (!cim_loaded || !cim || !cim->data) {
         for (int yy = 0; yy < h; ++yy) {
             int py = y + yy;
             if (py < 0 || py >= screen_h) continue;
@@ -1024,33 +1189,35 @@ static void draw_cursor_overlay(int x, int y) {
         return;
     }
     // Draw REI image (supports MONO/RGB/RGBA)
-    if (g_cursor_loaded && !s_logged_cursor_once) {
+    if (cim_loaded && !s_logged_cursor_once) {
         s_logged_cursor_once = 1;
     }
     // Transparency handling:
     // - RGBA: draw only if alpha >= 128 (skip low-alpha to avoid halos)
     // - RGB/MONO: if the four corner pixels are the same value/color, treat that as a color key
     //   and skip any pixels matching it. This removes solid background boxes on assets lacking alpha.
-    const uint8_t* data = g_cursor_img.data;
-    int depth = g_cursor_img.header.depth;
-    int stride = w * depth;
+    const uint8_t* data = cim->data;
+    int depth = cim->header.depth;
+    int sw = cim->header.width;
+    int sh = cim->header.height;
+    int stride = sw * depth;
     // Determine color key for non-alpha formats by sampling corners
     int use_key = 0; uint8_t keyR = 0, keyG = 0, keyB = 0, keyM = 0;
-    if (depth == REI_DEPTH_RGB && w > 0 && h > 0) {
+    if (depth == REI_DEPTH_RGB && sw > 0 && sh > 0) {
         const uint8_t* tl = data + 0 * stride + 0 * 3;
-        const uint8_t* tr = data + 0 * stride + (w - 1) * 3;
-        const uint8_t* bl = data + (h - 1) * stride + 0 * 3;
-        const uint8_t* br = data + (h - 1) * stride + (w - 1) * 3;
+        const uint8_t* tr = data + 0 * stride + (sw - 1) * 3;
+        const uint8_t* bl = data + (sh - 1) * stride + 0 * 3;
+        const uint8_t* br = data + (sh - 1) * stride + (sw - 1) * 3;
         if (tl[0]==tr[0] && tl[1]==tr[1] && tl[2]==tr[2] &&
             tl[0]==bl[0] && tl[1]==bl[1] && tl[2]==bl[2] &&
             tl[0]==br[0] && tl[1]==br[1] && tl[2]==br[2]) {
             use_key = 1; keyR = tl[0]; keyG = tl[1]; keyB = tl[2];
         }
-    } else if (depth == REI_DEPTH_MONO && w > 0 && h > 0) {
+    } else if (depth == REI_DEPTH_MONO && sw > 0 && sh > 0) {
         uint8_t tl = data[0];
-        uint8_t tr = data[(w - 1)];
-        uint8_t bl = data[(h - 1) * stride + 0];
-        uint8_t br = data[(h - 1) * stride + (w - 1)];
+        uint8_t tr = data[(sw - 1)];
+        uint8_t bl = data[(sh - 1) * stride + 0];
+        uint8_t br = data[(sh - 1) * stride + (sw - 1)];
         if (tl == tr && tl == bl && tl == br) { use_key = 1; keyM = tl; }
     }
     // Offsets into the saved-under buffer if the capture was clipped at edges
@@ -1059,20 +1226,35 @@ static void draw_cursor_overlay(int x, int y) {
     for (int yy = 0; yy < h; ++yy) {
         int py = y + yy;
         if (py < 0 || py >= screen_h) continue;
-        const uint8_t* row = data + yy * stride;
         for (int xx = 0; xx < w; ++xx) {
             int px = x + xx;
             if (px < 0 || px >= screen_w) continue;
+            // Apply transforms in destination space (so flips work consistently with rotation)
+            int dx = xx;
+            int dy = yy;
+            if (g_cursor_xform & CURSOR_XFORM_FLIP_X) dx = (w - 1) - dx;
+            if (g_cursor_xform & CURSOR_XFORM_FLIP_Y) dy = (h - 1) - dy;
+
+            int sx = dx;
+            int sy = dy;
+            if (g_cursor_xform & CURSOR_XFORM_ROT_90) {
+                // 90 degrees clockwise: dest(w=sh,h=sw) maps to source(sw,sh)
+                // sx = sw - 1 - dy; sy = dx
+                sx = (sw - 1) - dy;
+                sy = dx;
+            }
+            if (sx < 0 || sy < 0 || sx >= sw || sy >= sh) continue;
+            const uint8_t* row = data + sy * stride;
             if (depth == REI_DEPTH_MONO) {
-                uint8_t v = row[xx];
+                uint8_t v = row[sx];
                 if (use_key && v == keyM) continue;
                 if (v) vga_drawPixel_fb(px, py, v, v, v);
             } else if (depth == REI_DEPTH_RGB) {
-                const uint8_t* p3 = row + xx * 3;
+                const uint8_t* p3 = row + sx * 3;
                 if (use_key && p3[0]==keyR && p3[1]==keyG && p3[2]==keyB) continue;
                 vga_drawPixel_fb(px, py, p3[0], p3[1], p3[2]);
             } else if (depth == REI_DEPTH_RGBA) {
-                const uint8_t* p4 = row + xx * 4;
+                const uint8_t* p4 = row + sx * 4;
                 uint8_t sr = p4[0], sg = p4[1], sb = p4[2], a = p4[3];
                 if (a == 0) {
                     // fully transparent
@@ -1155,6 +1337,39 @@ static void load_cursor_image_try_paths(uint8 disk) {
         }
     }
     printf("No cursor image found in EYNFS; using fallback box.\n");
+}
+
+static void load_cursor_variant_try_paths(uint8 disk, const char* name, rei_image_t* out_img, int* out_loaded) {
+    if (out_loaded) *out_loaded = 0;
+    if (!name || !out_img || !out_loaded) return;
+    const char* paths[] = {
+        "/ui/",            // primary
+        "/testdir/ui/",    // compatibility
+        NULL
+    };
+    char full[64];
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
+    for (int pi = 0; paths[pi]; ++pi) {
+        watchdog_kick("wm-iconload");
+        snprintf(full, sizeof(full), "%s%s", paths[pi], name);
+        full[sizeof(full) - 1] = '\0';
+        eynfs_dir_entry_t entry;
+        if (eynfs_traverse_path(disk, &sb, full, &entry, NULL, NULL) == 0 && entry.type == EYNFS_TYPE_FILE) {
+            int size = entry.size;
+            uint8_t* buf = (uint8_t*)malloc(size);
+            if (!buf) return;
+            int n = eynfs_read_file(disk, &sb, &entry, (char*)buf, size, 0);
+            if (n == size) {
+                if (rei_parse_image(buf, size, out_img) == 0) {
+                    *out_loaded = 1;
+                    free(buf);
+                    return;
+                }
+            }
+            free(buf);
+        }
+    }
 }
 
 // Try to load a close button icon from a few candidate paths in EYNFS
@@ -1343,21 +1558,37 @@ static void load_max_icon_unf_try_paths(uint8 disk) {
 static void layout_tiles() {
     // Convert layout rules into pixel rectangles
     if (tile_count <= 0) return;
+
+    // Initialize splits when tile count changes
+    if (g_tile_split_inited_for_count != tile_count) {
+        g_tile_split_inited_for_count = tile_count;
+        g_tile_split_x = screen_w / 2;
+        g_tile_split_y = screen_h / 2;
+    }
+
+    // Clamp splits to keep tiles usable
+    int minw = 64;
+    int minh = 48;
+    if (g_tile_split_x < minw) g_tile_split_x = minw;
+    if (g_tile_split_x > screen_w - minw) g_tile_split_x = screen_w - minw;
+    if (g_tile_split_y < minh) g_tile_split_y = minh;
+    if (g_tile_split_y > screen_h - minh) g_tile_split_y = screen_h - minh;
+
     if (tile_count == 1) {
         tiles[0].x = 0; tiles[0].y = 0; tiles[0].width = screen_w; tiles[0].height = screen_h;
     } else if (tile_count == 2) {
-        int w = screen_w / 2;
+        int w = g_tile_split_x;
         tiles[0].x = 0; tiles[0].y = 0; tiles[0].width = w; tiles[0].height = screen_h;
         tiles[1].x = w; tiles[1].y = 0; tiles[1].width = screen_w - w; tiles[1].height = screen_h;
     } else if (tile_count == 3) {
-        int w = screen_w / 2;
-        int h = screen_h / 2;
+        int w = g_tile_split_x;
+        int h = g_tile_split_y;
         tiles[0].x = 0; tiles[0].y = 0; tiles[0].width = w; tiles[0].height = screen_h;
         tiles[1].x = w; tiles[1].y = 0; tiles[1].width = screen_w - w; tiles[1].height = h;
         tiles[2].x = w; tiles[2].y = h; tiles[2].width = screen_w - w; tiles[2].height = screen_h - h;
     } else {
-        int w = screen_w / 2;
-        int h = screen_h / 2;
+        int w = g_tile_split_x;
+        int h = g_tile_split_y;
         tiles[0].x = 0; tiles[0].y = 0; tiles[0].width = w; tiles[0].height = h;
         tiles[1].x = w; tiles[1].y = 0; tiles[1].width = screen_w - w; tiles[1].height = h;
         tiles[2].x = 0; tiles[2].y = h; tiles[2].width = w; tiles[2].height = screen_h - h;
@@ -1428,7 +1659,7 @@ static void draw_decorations(tile_t* t, int is_focused) {
             }
         }
         // status overlay is drawn after content
-        int border_r = is_focused ? 120 : 48, border_g = is_focused ? 120 : 48, border_b = is_focused ? 80 : 48;
+        int border_r = is_focused ? 255 : 48, border_g = is_focused ? 255 : 48, border_b = is_focused ? 255 : 48;
         drawRect(t->x, t->y, t->width, 1, border_r, border_g, border_b);
         drawRect(t->x, t->y + t->height - 1, t->width, 1, border_r, border_g, border_b);
         drawRect(t->x, t->y, 1, t->height, border_r, border_g, border_b);
@@ -1485,9 +1716,9 @@ static void draw_decorations(tile_t* t, int is_focused) {
     }
     // status overlay is drawn after content
     // borders
-    int border_r = is_focused ? 120 : 48;
-    int border_g = is_focused ? 120 : 48;
-    int border_b = is_focused ? 80 : 48;
+    int border_r = is_focused ? 225 : 40;
+    int border_g = is_focused ? 225 : 40;
+    int border_b = is_focused ? 225 : 40;
     drawRect(t->x, t->y, t->width, 1, border_r, border_g, border_b);
     drawRect(t->x, t->y + t->height - 1, t->width, 1, border_r, border_g, border_b);
     drawRect(t->x, t->y, 1, t->height, border_r, border_g, border_b);
@@ -2414,6 +2645,8 @@ void start_tiling_manager() {
         // Try to load UI assets unless in low mode (saves memory and draw time)
         // Always try to load the cursor image (small asset); other window icons are skipped in low mode.
         load_cursor_image_try_paths(0);
+        load_cursor_variant_try_paths(0, "cursor_res.rei", &g_cursor_res_img, &g_cursor_res_loaded);
+        load_cursor_variant_try_paths(0, "cursor_res_diag.rei", &g_cursor_res_diag_img, &g_cursor_res_diag_loaded);
         if (!g_gui_low_mode) {
             // window button icons (focused/unfocused)
             load_close_icon_try_paths(0);
@@ -2706,6 +2939,11 @@ void start_tiling_manager() {
                 vga_blit_backbuffer_region_to_fb(dw->x, dw->y, dw->w, dw->h);
                 prev_drag_x = dw->x; prev_drag_y = dw->y; prev_drag_w = dw->w; prev_drag_h = dw->h;
             }
+            if (resize_active && resize_win >= 0 && g_windows[resize_win].used) {
+                window_t* dw = &g_windows[resize_win];
+                vga_blit_backbuffer_region_to_fb(dw->x, dw->y, dw->w, dw->h);
+                prev_drag_x = dw->x; prev_drag_y = dw->y; prev_drag_w = dw->w; prev_drag_h = dw->h;
+            }
         } else {
             // Low mode: wireframe dragging to reduce copies
             // Erase previous wireframe by restoring only border segments from backbuffer
@@ -2720,8 +2958,9 @@ void start_tiling_manager() {
                 vga_blit_backbuffer_region_to_fb(prev_outline_x + prev_outline_w - 1, prev_outline_y, 1, prev_outline_h);
                 prev_outline_w = prev_outline_h = 0;
             }
-            if (drag_active && drag_win >= 0 && g_windows[drag_win].used) {
-                window_t* dw = &g_windows[drag_win];
+            if ((drag_active && drag_win >= 0 && g_windows[drag_win].used) ||
+                (resize_active && resize_win >= 0 && g_windows[resize_win].used)) {
+                window_t* dw = drag_active ? &g_windows[drag_win] : &g_windows[resize_win];
                 int bx = dw->x, by = dw->y, bw = dw->w, bh = dw->h;
                 // draw 2px border wireframe
                 int rr = 255, gg = 255, bb = 0;
@@ -2736,11 +2975,53 @@ void start_tiling_manager() {
         // No need to restore the previous cursor from a saved-under buffer; we refreshed
         // the excluded area directly from the backbuffer post-swap above.
 
-    // Draw mouse cursor overlay on top of the freshly swapped framebuffer
+        // Choose cursor kind (normal vs resize) based on hover/active state.
+        cursor_set_style(CURSOR_NORMAL, 0);
+        if (resize_active) {
+            if ((resize_edges & (RESIZE_EDGE_L | RESIZE_EDGE_R)) && (resize_edges & (RESIZE_EDGE_T | RESIZE_EDGE_B))) {
+                // Diagonal cursor base is NE-SW; flip for NW-SE corners.
+                int xform = 0;
+                if ((resize_edges & RESIZE_EDGE_L) && (resize_edges & RESIZE_EDGE_T)) xform |= CURSOR_XFORM_FLIP_X;
+                if ((resize_edges & RESIZE_EDGE_R) && (resize_edges & RESIZE_EDGE_B)) xform |= CURSOR_XFORM_FLIP_X;
+                cursor_set_style(CURSOR_RES_DIAG, xform);
+            }
+            else if (resize_edges & (RESIZE_EDGE_T | RESIZE_EDGE_B)) cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
+            else if (resize_edges & (RESIZE_EDGE_L | RESIZE_EDGE_R)) cursor_set_style(CURSOR_RES_HOR, 0);
+        } else if (tile_resize_active) {
+            if (tile_resize_mode == 3) cursor_set_style(CURSOR_RES_DIAG, 0);
+            else if (tile_resize_mode == 2) cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
+            else if (tile_resize_mode == 1) cursor_set_style(CURSOR_RES_HOR, 0);
+        } else if (cur_mx > -100 && cur_my > -100) {
+            int w_hit = wm_hit_test(cur_mx, cur_my);
+            if (w_hit >= 0) {
+                int e = wm_resize_hit_test_edges(&g_windows[w_hit], cur_mx, cur_my);
+                if (e) {
+                    if ((e & (RESIZE_EDGE_L | RESIZE_EDGE_R)) && (e & (RESIZE_EDGE_T | RESIZE_EDGE_B))) {
+                        int xform = 0;
+                        if ((e & RESIZE_EDGE_L) && (e & RESIZE_EDGE_T)) xform |= CURSOR_XFORM_FLIP_X;
+                        if ((e & RESIZE_EDGE_R) && (e & RESIZE_EDGE_B)) xform |= CURSOR_XFORM_FLIP_X;
+                        cursor_set_style(CURSOR_RES_DIAG, xform);
+                    }
+                    else if (e & (RESIZE_EDGE_T | RESIZE_EDGE_B)) cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
+                    else if (e & (RESIZE_EDGE_L | RESIZE_EDGE_R)) cursor_set_style(CURSOR_RES_HOR, 0);
+                }
+            } else {
+                int m = tile_split_hit_test_mode(cur_mx, cur_my);
+                if (m == 3) cursor_set_style(CURSOR_RES_DIAG, 0);
+                else if (m == 2) cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
+                else if (m == 1) cursor_set_style(CURSOR_RES_HOR, 0);
+            }
+        }
+
+        // Draw mouse cursor overlay on top of the freshly swapped framebuffer
         if (cur_mx > -100 && cur_my > -100) {
+            int draw_x = cur_mx;
+            int draw_y = cur_my;
+            cursor_get_draw_pos_for_kind(cur_mx, cur_my, &draw_x, &draw_y);
+
             // Ensure save-under buffer matches current cursor size (if image changed)
-            int nw = g_cursor_loaded ? g_cursor_img.header.width : cursor_w;
-            int nh = g_cursor_loaded ? g_cursor_img.header.height : cursor_h;
+            int nw = 0, nh = 0;
+            cursor_get_dims(&nw, &nh);
             int bpp1 = vga_get_fb_bpp_bytes(); if (bpp1 < 3) bpp1 = 3;
             if (!cursor_savebuf || nw != cursor_save_w || nh != cursor_save_h) {
                 int newlen = nw * nh * bpp1;
@@ -2750,8 +3031,8 @@ void start_tiling_manager() {
             }
             if (cursor_savebuf) {
                 // Clip capture to screen and remember exact saved region dims
-                int cap_x = cur_mx;
-                int cap_y = cur_my;
+                int cap_x = draw_x;
+                int cap_y = draw_y;
                 int cap_w = cursor_save_w;
                 int cap_h = cursor_save_h;
                 if (cap_x < 0) { cap_w += cap_x; cap_x = 0; }
@@ -2763,9 +3044,9 @@ void start_tiling_manager() {
                     if (need <= cursor_save_len) {
                         vga_capture_fb_region(cap_x, cap_y, cap_w, cap_h, cursor_savebuf, cursor_save_len);
                         prev_saved_x = cap_x; prev_saved_y = cap_y; prev_saved_w = cap_w; prev_saved_h = cap_h;
-                        // Store offsets from logical cursor (cur_mx,cur_my) to the capture top-left
-                        prev_saved_offx = cap_x - cur_mx;
-                        prev_saved_offy = cap_y - cur_my;
+                        // Store offsets from draw origin (draw_x,draw_y) to the capture top-left
+                        prev_saved_offx = cap_x - draw_x;
+                        prev_saved_offy = cap_y - draw_y;
                     } else {
                         prev_saved_w = prev_saved_h = 0;
                         prev_saved_offx = prev_saved_offy = 0;
@@ -2775,7 +3056,8 @@ void start_tiling_manager() {
                     prev_saved_offx = prev_saved_offy = 0;
                 }
             }
-            draw_cursor_overlay(cur_mx, cur_my);
+            draw_cursor_overlay(draw_x, draw_y);
+            // Keep cursor_prev_* as the last mouse tip position.
             cursor_prev_x = cur_mx; cursor_prev_y = cur_my;
         } else {
             // No valid current position: clear prev so we don't try to restore garbage next frame
@@ -2785,7 +3067,7 @@ void start_tiling_manager() {
         // If drag just ended, ensure the last overlay region is reconciled by the next swap
         if (!drag_active && prev_drag_w > 0 && prev_drag_h > 0) {
             // The next frame's swap will copy the backbuffer which already has the window at its final position
-            // Here we just clear the overlay bookkeeping so exclusion stops next frame
+            // Jjust clear the overlay bookkeeping so exclusion stops next frame
             prev_drag_w = prev_drag_h = 0;
         }
         // No swap exclusion used; overlay erase is handled proactively via backbuffer blit each loop
@@ -2866,7 +3148,18 @@ void start_tiling_manager() {
                     // Drag if titlebar and not already handled
                     if (!did_action) {
                         int th = win_title_height(&g_windows[w_hit]);
-                        if (point_in_rect(me.x, me.y, g_windows[w_hit].x, g_windows[w_hit].y, g_windows[w_hit].w, th)) {
+                        int e = wm_resize_hit_test_edges(&g_windows[w_hit], me.x, me.y);
+                        if (e) {
+                            resize_active = 1;
+                            resize_win = w_hit;
+                            resize_edges = e;
+                            resize_start_mx = me.x;
+                            resize_start_my = me.y;
+                            resize_start_x = g_windows[w_hit].x;
+                            resize_start_y = g_windows[w_hit].y;
+                            resize_start_w = g_windows[w_hit].w;
+                            resize_start_h = g_windows[w_hit].h;
+                        } else if (point_in_rect(me.x, me.y, g_windows[w_hit].x, g_windows[w_hit].y, g_windows[w_hit].w, th)) {
                             drag_active = 1; drag_win = w_hit; drag_off_x = me.x - g_windows[w_hit].x; drag_off_y = me.y - g_windows[w_hit].y;
                         }
                     }
@@ -2875,6 +3168,12 @@ void start_tiling_manager() {
                         if (g_windows[w_hit].used) g_windows[w_hit].static_drawn = 0;
                     }
                 } else {
+                    // Tiling split resize start
+                    int m = tile_split_hit_test_mode(me.x, me.y);
+                    if (m) {
+                        tile_resize_active = 1;
+                        tile_resize_mode = m;
+                    }
                     int hit = tile_index_at(me.x, me.y);
                     if (hit >= 0 && hit < tile_count && hit != focused) {
                         focused = hit;
@@ -2900,7 +3199,9 @@ void start_tiling_manager() {
                 }
             }
             if (release_edge) { 
-                drag_active = 0; drag_win = -1; 
+                drag_active = 0; drag_win = -1;
+                resize_active = 0; resize_win = -1; resize_edges = 0;
+                tile_resize_active = 0; tile_resize_mode = 0;
                 // On drag end in low mode, force a full reconcile since we only drew wireframes
                 if (g_gui_low_mode) { 
                     if (prev_outline_w > 0 && prev_outline_h > 0) {
@@ -2914,6 +3215,89 @@ void start_tiling_manager() {
                     g_force_full_redraw = 1; g_tiles_full_content_redraw = 1; 
                 }
             }
+            if (tile_resize_active) {
+                // Update splits based on mouse position and relayout tiles
+                if (tile_resize_mode & 1) {
+                    g_tile_split_x = me.x;
+                }
+                if (tile_resize_mode & 2) {
+                    g_tile_split_y = me.y;
+                }
+                layout_tiles();
+                g_force_full_redraw = 1;
+                g_tiles_full_content_redraw = 1;
+                for (int ti = 0; ti < tile_count; ++ti) tiles[ti].static_drawn = 0;
+                for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                    if (g_windows[wi].used && !g_windows[wi].minimized) {
+                        g_windows[wi].needs_redraw = 1;
+                        g_windows[wi].static_drawn = 0;
+                    }
+                }
+            }
+
+            if (resize_active && resize_win >= 0) {
+                window_t* w = &g_windows[resize_win];
+                int dx = me.x - resize_start_mx;
+                int dy = me.y - resize_start_my;
+
+                int new_x = resize_start_x;
+                int new_y = resize_start_y;
+                int new_w = resize_start_w;
+                int new_h = resize_start_h;
+
+                if (resize_edges & RESIZE_EDGE_L) { new_x = resize_start_x + dx; new_w = resize_start_w - dx; }
+                if (resize_edges & RESIZE_EDGE_R) { new_w = resize_start_w + dx; }
+                if (resize_edges & RESIZE_EDGE_T) { new_y = resize_start_y + dy; new_h = resize_start_h - dy; }
+                if (resize_edges & RESIZE_EDGE_B) { new_h = resize_start_h + dy; }
+
+                // Clamp size and position
+                int minw = 64;
+                int minh = 48;
+                if (new_w < minw) {
+                    if (resize_edges & RESIZE_EDGE_L) new_x -= (minw - new_w);
+                    new_w = minw;
+                }
+                if (new_h < minh) {
+                    if (resize_edges & RESIZE_EDGE_T) new_y -= (minh - new_h);
+                    new_h = minh;
+                }
+                if (new_x < 0) { if (resize_edges & RESIZE_EDGE_L) { new_w += new_x; } new_x = 0; }
+                if (new_y < 0) { if (resize_edges & RESIZE_EDGE_T) { new_h += new_y; } new_y = 0; }
+                if (new_x + new_w > screen_w) new_w = screen_w - new_x;
+                if (new_y + new_h > screen_h) new_h = screen_h - new_y;
+                if (new_w < minw) new_w = minw;
+                if (new_h < minh) new_h = minh;
+                if (new_x + new_w > screen_w) new_x = screen_w - new_w;
+                if (new_y + new_h > screen_h) new_y = screen_h - new_h;
+
+                if (!g_gui_low_mode) {
+                    vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
+                    int old_x = w->x, old_y = w->y, old_w = w->w, old_h = w->h;
+                    w->x = new_x; w->y = new_y; w->w = new_w; w->h = new_h;
+                    vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
+                    w->static_drawn = 0;
+                    w->needs_redraw = 1;
+                    g_tiles_full_content_redraw = 1;
+                    for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                        if (wi == resize_win) continue;
+                        window_t* wo = &g_windows[wi];
+                        if (!wo->used || wo->minimized) continue;
+                        if (rects_intersect(wo->x, wo->y, wo->w, wo->h, old_x, old_y, old_w, old_h) ||
+                            rects_intersect(wo->x, wo->y, wo->w, wo->h, w->x, w->y, w->w, w->h)) {
+                            wo->needs_redraw = 1; wo->static_drawn = 0;
+                        }
+                    }
+                } else {
+                    // Low mode: keep updates throttled via the existing drag throttle
+                    uint32 nowt = sched_get_tick_count();
+                    if (nowt - g_last_drag_tick >= g_drag_throttle_ticks) {
+                        g_last_drag_tick = nowt;
+                        w->x = new_x; w->y = new_y; w->w = new_w; w->h = new_h;
+                    }
+                    w->static_drawn = 0;
+                }
+            }
+
             if (drag_active && drag_win >= 0) {
                 window_t* w = &g_windows[drag_win];
                 // Drag throttling in low mode
