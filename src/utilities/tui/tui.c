@@ -14,6 +14,7 @@ static int tui_cur_y = 0;
 
 // exported flag, updated by tui_read_key
 int tui_alt_pressed = 0;
+int tui_shift_pressed = 0;
 
 // Helper to compute pixel position for cell coords (kept for potential future use)
 static __attribute__((unused)) void tui_set_cursor(int x, int y) {
@@ -188,7 +189,7 @@ int tui_read_key() {
     // Key release
     if (scancode & 0x80) {
         uint8_t realcode = scancode & 0x7F;
-        if (realcode == 42 || realcode == 54) shift_pressed = 0;
+        if (realcode == 42 || realcode == 54) { shift_pressed = 0; tui_shift_pressed = 0; }
         if (realcode == 29) ctrl_pressed = 0;
         if (realcode == 91) super_pressed = 0;
         if (realcode == 56) tui_alt_pressed = 0; // left Alt release
@@ -196,7 +197,7 @@ int tui_read_key() {
     }
 
     // Modifiers and toggles
-    if (scancode == 42 || scancode == 54) { shift_pressed = 1; return 0; }
+    if (scancode == 42 || scancode == 54) { shift_pressed = 1; tui_shift_pressed = 1; return 0; }
     if (scancode == 29) { ctrl_pressed = 1; return 0; }
     if (scancode == 91) { super_pressed = 1; return 0; }
     if (scancode == 56) { tui_alt_pressed = 1; return 0; } // left Alt press
@@ -207,12 +208,17 @@ int tui_read_key() {
         if (scancode == 46) return 0x2206; // Ctrl+C (abort / interrupt)
         if (scancode == 24) return 0x2001; // Ctrl+O (save)
         if (scancode == 31) return 0x2001; // Ctrl+S (save)
-        if (scancode == 45) return 0x2002; // Ctrl+X (exit)
+        if (scancode == 45) return 0x210B; // Ctrl+X (cut)
         if (scancode == 16) return 0x2101; // Ctrl+Q (quit)
         if (scancode == 13) return 0x2102; // Ctrl+Plus/Equals (zoom in)
         if (scancode == 12) return 0x2103; // Ctrl+Minus (zoom out)
         if (scancode == 30) return 0x2104; // Ctrl+A (select all)
         if (scancode == 38) return 0x2105; // Ctrl+L (select line)
+        if (scancode == 17) return 0x2106; // Ctrl+W (toggle whitespace)
+        if (scancode == 33) return 0x2107; // Ctrl+F (find)
+        if (scancode == 34) return 0x2108; // Ctrl+G (go to line)
+        if (scancode == 44) return 0x2109; // Ctrl+Z (undo)
+        if (scancode == 21) return 0x210A; // Ctrl+Y (redo)
     }
 
     // Letters with Shift/Caps

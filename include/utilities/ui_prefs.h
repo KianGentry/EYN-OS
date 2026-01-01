@@ -16,4 +16,10 @@ int ui_prefs_save(uint8 drive);
 const char* ui_prefs_get_font_path(void);
 void ui_prefs_set_font_path(const char* path);
 
+// Status bar behavior:
+// 0 = only show while Alt is held
+// 1 = pinned (always show)
+int ui_prefs_get_status_bar_mode(void);
+void ui_prefs_set_status_bar_mode(int mode);
+
 #endif // UI_PREFS_H

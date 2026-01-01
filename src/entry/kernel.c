@@ -54,7 +54,7 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     clearScreen();
     
     printf("EYN-OS Release 15\n");
-    printf("Please wait for system services to start...\n\n");
+    printf("Please wait for system services to start.\n\n");
 
     // Initialize VMM/paging as early as possible so any subsequent malloc()
     // picks a heap start after VMM boot allocations (page tables, etc.).
@@ -62,19 +62,24 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     // address and can be overwritten by early_alloc(), corrupting heap
     // metadata and later causing copyout/page faults in user mode.
     uint32 ram = detect_available_memory();
+    printf("Detected %u MB of RAM.\n", ram / (1024 * 1024));
+    printf("Starting memory manager...");
     vmm_init(ram);
     vmm_enable_paging();
+    printf("Done.\n");
     
     printf("Starting ATA driver...");
     // Initialize ATA drives immediately
     ata_init_drives();
-    printf("ATA driver started.\n");
+    printf("Done.\n");
 
     // Initialize partition system and auto-mount partitions
+    printf("Starting virtual drive system...");
     vdrive_init();
-    printf("Virtual drive system started.\n");
+    printf("Done.\n");
     
     // Scan drive 0 for partitions and auto-mount EYNFS partitions
+    printf("Scanning drive 0 for partitions...\n");
     {
         disk_info_t disk;
         if (partition_read_table(0, &disk) == 0 && disk.partition_count > 0) {
@@ -99,44 +104,52 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
 
     // Load and apply persisted UI preferences (theme + font) if present.
     // Safe to do here: VFS is usable after vdrive_init()+mount.
+    printf("Loading UI preferences...");
     ui_prefs_load_apply(0);
-    printf("UI preferences loaded.\n");
+    printf("Done.\n");
 
     // Initialize predictive memory management system
+    printf("Starting predictive memory manager...");
     predictive_memory_init();
-    printf("Predictive memory manager started.\n");
+    printf("Done.\n");
     
     // Initialize zero-copy file operations system
+    printf("Starting zero-copy file system...");
     zero_copy_init();
-    printf("Zero-copy file system started.\n");
+    printf("Done.\n");
     
     // Initialize kernel API system
+    printf("Starting (Legacy) kernel API system...");
     eyn_kernel_api_init();
-    printf("(Legacy) Kernel API system started.\n");
+    printf("Done.\n");
     
     // Initialize IRQs and PIT timer (sets up IDT/PIC and PIT IRQ0)
     // NOTE: irq_init() clears the IRQ handler table, so it must run
     // before any register_interrupt_handler() calls (including sched_init).
+    printf("Starting IRQ system...");
     irq_init();
-    printf("IRQ system started.\n");
+    printf("Done.\n");
 
     // Initialize scheduler (registers IRQ0 tick handler)
+    printf("Starting scheduler...");
     sched_init();
-    printf("Scheduler started.\n");
+    printf("Done.\n");
 
     // Enable interrupts globally now that IDT/PIC/PIT are initialized and
     // the IRQ0 handler is registered. Without this, sched_get_tick_count()
     // never advances (breaking REIV playback timing and other tick-based code).
     __asm__ __volatile__("sti");
     // Initialize watchdog with a sensitive default (~250ms)
+    printf("Starting watchdog...");
     uint32 hz = sched_get_tick_hz();
     uint32 to = (hz ? (hz/4) : 12); // ~0.25s
     watchdog_init(to);
-    printf("Watchdog started.\n");
+    printf("Done.\n");
     
     // Initialize native execution system
+    printf("Starting (Legacy) native execution system...");
     native_exec_init();
-    printf("(Legacy) Native execution system started.\n");
+    printf("Done.\n");
     
     // Launch tiling manager by default; it provides the graphical shell UI
     start_tiling_manager();

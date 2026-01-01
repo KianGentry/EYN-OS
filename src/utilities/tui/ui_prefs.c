@@ -9,6 +9,7 @@
 #define UI_PREFS_PATH_FALLBACK "/ui.cfg"
 
 static char g_ui_font_path[96] = "/fonts/unscii-16.hex";
+static int g_ui_status_bar_mode = 0; // 0=hold Alt, 1=pinned
 
 const char* ui_prefs_get_font_path(void) {
     return g_ui_font_path;
@@ -18,6 +19,14 @@ void ui_prefs_set_font_path(const char* path) {
     if (!path || !path[0]) return;
     strncpy(g_ui_font_path, path, sizeof(g_ui_font_path) - 1);
     g_ui_font_path[sizeof(g_ui_font_path) - 1] = '\0';
+}
+
+int ui_prefs_get_status_bar_mode(void) {
+    return g_ui_status_bar_mode ? 1 : 0;
+}
+
+void ui_prefs_set_status_bar_mode(int mode) {
+    g_ui_status_bar_mode = mode ? 1 : 0;
 }
 
 static const char* skip_ws(const char* s) {
@@ -45,6 +54,15 @@ static int parse_u8(const char* s, int* out_v, const char** out_end) {
     if (!any) return -1;
     if (out_v) *out_v = v;
     if (out_end) *out_end = s;
+    return 0;
+}
+
+static int parse_int01(const char* s, int* out_v) {
+    int v = 0;
+    const char* end = NULL;
+    if (parse_u8(s, &v, &end) != 0) return -1;
+    if (v != 0) v = 1;
+    if (out_v) *out_v = v;
     return 0;
 }
 
@@ -131,6 +149,12 @@ int ui_prefs_load_apply(uint8 drive) {
                 parse_rgb_triplet(val, &theme.status_r, &theme.status_g, &theme.status_b);
             }
             ok = 1;
+        } else if (starts_with(key, "status_bar_mode")) {
+            int v = 0;
+            if (parse_int01(val, &v) == 0) {
+                ui_prefs_set_status_bar_mode(v);
+                ok = 1;
+            }
         }
 
         line = next;
@@ -164,12 +188,14 @@ int ui_prefs_save(uint8 drive) {
         "title_focused=%u,%u,%u\n"
         "title_unfocused=%u,%u,%u\n"
         "status=%u,%u,%u\n"
-        "status_text=%u,%u,%u\n",
+        "status_text=%u,%u,%u\n"
+        "status_bar_mode=%u\n",
         ui_prefs_get_font_path(),
         (unsigned)theme.title_focused_r, (unsigned)theme.title_focused_g, (unsigned)theme.title_focused_b,
         (unsigned)theme.title_unfocused_r, (unsigned)theme.title_unfocused_g, (unsigned)theme.title_unfocused_b,
         (unsigned)theme.status_r, (unsigned)theme.status_g, (unsigned)theme.status_b,
-        (unsigned)theme.status_text_r, (unsigned)theme.status_text_g, (unsigned)theme.status_text_b
+        (unsigned)theme.status_text_r, (unsigned)theme.status_text_g, (unsigned)theme.status_text_b,
+        (unsigned)ui_prefs_get_status_bar_mode()
     );
     if (n <= 0) return -1;
     if (n >= (int)sizeof(out)) n = (int)sizeof(out) - 1;

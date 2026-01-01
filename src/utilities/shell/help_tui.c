@@ -192,7 +192,7 @@ void help_tui() {
         g_help_running = 1;
 
         int focused = tile_get_focused();
-        tile_set_title_status(focused, "EYN-OS Help", NULL, NULL);
+        tile_set_title_status(focused, "EYN-OS Help", "^/v: Move | Enter: Toggle", NULL);
         tile_register_gui_client2(focused, help_gui_draw, help_gui_key, help_gui_mouse, NULL);
         help_dbg_ch('g');
         return;
@@ -382,7 +382,7 @@ void help_tui() {
                     scroll = total_items - max_visible;
                 }
             }
-        } else if (key == 0x2002) { // Ctrl+X
+        } else if (key == 0x2101) { // Ctrl+Q
             break;
         } else if (key == '\n' || key == 13) {
             // Toggle sub-command expansion
@@ -590,24 +590,6 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
         }
     }
     tui_draw_text_area(&right_win, desc_buf, 0, norm_style);
-    // Draw bottom status inside the tile content area
-    const char* status_text = "^/v: Move | Enter: Toggle | Ctrl+X: Exit";
-    int status_px_y = (cell_y + cell_h - 1) * ch; // bottom-most character row inside content
-    int status_px_x = cell_x * cw;
-    int status_px_w = cell_w * cw;
-    // Clear and redraw the background bar to avoid leftovers when switching to help
-    drawRect(status_px_x, status_px_y, status_px_w, ch, 0, 0, 0);
-    // background bar
-    drawRect(status_px_x, status_px_y, status_px_w, ch, 32, 32, 32);
-    // draw status text clipped to content area
-    int clip_min = status_px_x + 4;
-    int clip_max = status_px_x + status_px_w - 4;
-    for (int i = 0; status_text[i]; ++i) {
-        int cx = status_px_x + i * cw + 4;
-        if (cx + (cw - 1) > clip_max) break;
-        if (cx < clip_min) continue;
-        drawCharAt(cx, status_px_y, (int)(unsigned char)status_text[i], 255, 255, 255);
-    }
 }
 
 // Initialize help state (build sorted command pointers) without registering GUI.
@@ -759,7 +741,7 @@ void help_gui_key(int tile_idx, int key, void* userdata) {
             g_selected_sub = 0;
             if (g_selected > g_scroll + g_max_visible - 1) g_scroll = g_selected - g_max_visible + 1;
         }
-    } else if (key == 0x2002) { // Ctrl+X
+    } else if (key == 0x2101) { // Ctrl+Q
         // Clean up GUI mode: unregister and free resources
         int focused = tile_get_focused();
         tile_unregister_gui_client(focused);

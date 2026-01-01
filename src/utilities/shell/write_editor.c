@@ -19,16 +19,410 @@
 extern void* fat32_disk_img;
 
 // Editor state and helpers (renamed)
-#define MAX_LINES 100
-#define MAX_LINE_LENGTH 80
+// Variable-length lines stored as per-line heap buffers.
+// We cap both line count and total bytes to keep memory use predictable.
+#define MAX_LINES 10000
+#define MAX_LINE_LENGTH 4096
+// Max bytes we will load/edit/save as a single in-memory buffer.
+#define WRITE_EDITOR_MAX_FILE_BYTES (256 * 1024)
 #define EDITOR_HEIGHT 30
-static char write_editor_buffer[MAX_LINES][MAX_LINE_LENGTH + 1];
+static char* write_editor_buffer[MAX_LINES];
+static uint16_t write_editor_line_caps[MAX_LINES];
 static int write_editor_num_lines = 1;
 static int write_editor_cursor_x = 0;
 static int write_editor_cursor_y = 0;
 static int write_editor_scroll_y = 0;
 static int write_editor_scroll_x = 0;
 static int write_editor_modified = 0;
+static int write_editor_show_whitespace = 0;
+
+// Selection and clipboard state
+static int write_editor_sel_active = 0;
+static int write_editor_sel_ax = 0, write_editor_sel_ay = 0; // anchor (col,x) within absolute line
+static int write_editor_sel_fx = 0, write_editor_sel_fy = 0; // focus (col,x)
+static char write_editor_clipboard[4096];
+static int write_editor_clipboard_len = 0;
+
+// Forward declarations for helpers used before their definitions
+static void write_editor_update_tile_modified(void);
+static int write_editor_ensure_line_cap(int idx, int need_chars_including_nul);
+static int write_editor_line_len(int idx);
+static void write_editor_set_line_from_span(int idx, const char* s, int len, int* out_truncated);
+static void write_editor_shift_lines_down(int at_idx);
+static void write_editor_delete_line_at(int idx);
+
+// Lightweight status message (shown in GUI status bar when non-empty)
+static char write_editor_status_msg[96];
+
+// Find / Go-to overlays (GUI mode)
+typedef enum {
+    WRITE_EDITOR_MODAL_NONE = 0,
+    WRITE_EDITOR_MODAL_FIND,
+    WRITE_EDITOR_MODAL_GOTO,
+} write_editor_modal_t;
+static write_editor_modal_t write_editor_modal = WRITE_EDITOR_MODAL_NONE;
+static char write_editor_find_query[64];
+static int write_editor_find_len = 0;
+static char write_editor_goto_buf[16];
+static int write_editor_goto_len = 0;
+
+// Pop-out scrollbar geometry (pixels) for mouse hit-testing
+static int write_editor_scrollbar_active = 0;
+static int write_editor_scrollbar_x = 0;
+static int write_editor_scrollbar_y = 0;
+static int write_editor_scrollbar_w = 0;
+static int write_editor_scrollbar_h = 0;
+static int write_editor_scrollbar_thumb_y = 0;
+static int write_editor_scrollbar_thumb_h = 0;
+
+// Undo/Redo (bounded, no heap)
+#define WRITE_EDITOR_UNDO_DEPTH 48
+#define WRITE_EDITOR_UNDO_TEXT_MAX 256
+typedef struct {
+    uint16 y;
+    uint16 x;
+    uint16 before_len;
+    uint16 after_len;
+    char before[WRITE_EDITOR_UNDO_TEXT_MAX];
+    char after[WRITE_EDITOR_UNDO_TEXT_MAX];
+} write_editor_undo_t;
+static write_editor_undo_t write_editor_undo_stack[WRITE_EDITOR_UNDO_DEPTH];
+static int write_editor_undo_len = 0;
+static write_editor_undo_t write_editor_redo_stack[WRITE_EDITOR_UNDO_DEPTH];
+static int write_editor_redo_len = 0;
+
+static void write_editor_set_status(const char* msg) {
+    if (!msg) msg = "";
+    snprintf(write_editor_status_msg, sizeof(write_editor_status_msg), "%s", msg);
+}
+
+static void write_editor_clear_status(void) {
+    write_editor_status_msg[0] = '\0';
+}
+
+static void write_editor_undo_clear(void) {
+    write_editor_undo_len = 0;
+    write_editor_redo_len = 0;
+}
+
+static void write_editor_undo_clear_redo(void) {
+    write_editor_redo_len = 0;
+}
+
+static int write_editor_undo_push(write_editor_undo_t rec) {
+    if (rec.before_len > WRITE_EDITOR_UNDO_TEXT_MAX || rec.after_len > WRITE_EDITOR_UNDO_TEXT_MAX) return -1;
+    if (write_editor_undo_len >= WRITE_EDITOR_UNDO_DEPTH) {
+        // Drop oldest
+        memmove(&write_editor_undo_stack[0], &write_editor_undo_stack[1], sizeof(write_editor_undo_stack[0]) * (WRITE_EDITOR_UNDO_DEPTH - 1));
+        write_editor_undo_len = WRITE_EDITOR_UNDO_DEPTH - 1;
+    }
+    write_editor_undo_stack[write_editor_undo_len++] = rec;
+    write_editor_undo_clear_redo();
+    return 0;
+}
+
+static int write_editor_redo_push(write_editor_undo_t rec) {
+    if (rec.before_len > WRITE_EDITOR_UNDO_TEXT_MAX || rec.after_len > WRITE_EDITOR_UNDO_TEXT_MAX) return -1;
+    if (write_editor_redo_len >= WRITE_EDITOR_UNDO_DEPTH) {
+        memmove(&write_editor_redo_stack[0], &write_editor_redo_stack[1], sizeof(write_editor_redo_stack[0]) * (WRITE_EDITOR_UNDO_DEPTH - 1));
+        write_editor_redo_len = WRITE_EDITOR_UNDO_DEPTH - 1;
+    }
+    write_editor_redo_stack[write_editor_redo_len++] = rec;
+    return 0;
+}
+
+static int write_editor_copy_range_text(int sy, int sx, int fy, int fx, char* out, int out_cap, int* out_len) {
+    if (out_len) *out_len = 0;
+    if (!out || out_cap <= 0) return -1;
+    out[0] = '\0';
+    if (sy < 0) sy = 0;
+    if (fy < 0) fy = 0;
+    if (sy >= write_editor_num_lines) sy = write_editor_num_lines - 1;
+    if (fy >= write_editor_num_lines) fy = write_editor_num_lines - 1;
+    int s_len = write_editor_line_len(sy);
+    int f_len = write_editor_line_len(fy);
+    if (sx < 0) sx = 0;
+    if (fx < 0) fx = 0;
+    if (sx > s_len) sx = s_len;
+    if (fx > f_len) fx = f_len;
+    int w = 0;
+    for (int y = sy; y <= fy; ++y) {
+        int start = (y == sy) ? sx : 0;
+        int end = (y == fy) ? fx : write_editor_line_len(y);
+        const char* s = write_editor_buffer[y] ? write_editor_buffer[y] : "";
+        for (int x = start; x < end; ++x) {
+            if (w >= out_cap) { if (out_len) *out_len = w; return -1; }
+            out[w++] = s[x];
+        }
+        if (y != fy) {
+            if (w >= out_cap) { if (out_len) *out_len = w; return -1; }
+            out[w++] = '\n';
+        }
+    }
+    if (w >= out_cap) { if (out_len) *out_len = w; return -1; }
+    out[w] = '\0';
+    if (out_len) *out_len = w;
+    return 0;
+}
+
+static int write_editor_insert_text_at(int y, int x, const char* text, int len, int* out_end_y, int* out_end_x) {
+    if (out_end_y) *out_end_y = y;
+    if (out_end_x) *out_end_x = x;
+    if (!text || len <= 0) return 0;
+    if (y < 0) y = 0;
+    if (y >= write_editor_num_lines) y = write_editor_num_lines - 1;
+    int cx = x;
+    int cy = y;
+    for (int i = 0; i < len; ++i) {
+        char ch = text[i];
+        if (ch == '\0') break;
+        if (ch == '\n') {
+            if (write_editor_num_lines >= MAX_LINES) return -1;
+            int line_len = write_editor_line_len(cy);
+            if (cx > line_len) cx = line_len;
+            char* line = write_editor_buffer[cy];
+            if (!line) {
+                write_editor_ensure_line_cap(cy, 1);
+                line = write_editor_buffer[cy];
+                line_len = write_editor_line_len(cy);
+                if (cx > line_len) cx = line_len;
+            }
+            const char* tail = line ? &line[cx] : "";
+            int tail_len = line_len - cx;
+            if (tail_len < 0) tail_len = 0;
+            if (line) line[cx] = '\0';
+            write_editor_shift_lines_down(cy + 1);
+            write_editor_set_line_from_span(cy + 1, tail, tail_len, NULL);
+            cy++;
+            cx = 0;
+            continue;
+        }
+        if (ch < 32 || ch > 126) continue;
+        int line_len = write_editor_line_len(cy);
+        if (line_len >= MAX_LINE_LENGTH) continue;
+        int new_len = line_len + 1;
+        if (write_editor_ensure_line_cap(cy, new_len + 1) != 0) return -1;
+        char* line = write_editor_buffer[cy];
+        if (!line) return -1;
+        if (cx > line_len) cx = line_len;
+        int tail_bytes = line_len - cx;
+        if (tail_bytes >= 0) {
+            memmove(&line[cx + 1], &line[cx], (size_t)(tail_bytes + 1));
+        }
+        line[cx] = ch;
+        cx++;
+    }
+    if (out_end_y) *out_end_y = cy;
+    if (out_end_x) *out_end_x = cx;
+    return 0;
+}
+
+static int write_editor_delete_text_at(int y, int x, const char* text, int len) {
+    if (!text || len <= 0) return 0;
+    int cy = y;
+    int cx = x;
+    if (cy < 0) cy = 0;
+    if (cy >= write_editor_num_lines) cy = write_editor_num_lines - 1;
+    for (int i = 0; i < len; ++i) {
+        char ch = text[i];
+        if (ch == '\0') break;
+        if (ch == '\n') {
+            // Delete a line break: merge current line with next line
+            if (cy >= write_editor_num_lines - 1) continue;
+            int left_len = write_editor_line_len(cy);
+            if (cx > left_len) cx = left_len;
+            int right_len = write_editor_line_len(cy + 1);
+            int can_copy = MAX_LINE_LENGTH - left_len;
+            int copy = (right_len < can_copy) ? right_len : can_copy;
+            if (write_editor_ensure_line_cap(cy, left_len + copy + 1) != 0) return -1;
+            char* left = write_editor_buffer[cy];
+            char* right = write_editor_buffer[cy + 1];
+            if (left && right && copy > 0) memcpy(&left[left_len], right, (size_t)copy);
+            if (left) left[left_len + copy] = '\0';
+            write_editor_delete_line_at(cy + 1);
+            continue;
+        }
+        if (cy < 0 || cy >= write_editor_num_lines) break;
+        int line_len = write_editor_line_len(cy);
+        if (cx > line_len) cx = line_len;
+        if (cx >= line_len) {
+            // nothing to delete on this line; if next char would have been newline, it will be handled by '\n'
+            continue;
+        }
+        char* line = write_editor_buffer[cy];
+        if (!line) {
+            write_editor_ensure_line_cap(cy, 1);
+            line = write_editor_buffer[cy];
+        }
+        if (!line) return -1;
+        memmove(&line[cx], &line[cx + 1], (size_t)((line_len - cx) + 1));
+    }
+    return 0;
+}
+
+static void write_editor_apply_undo_record(const write_editor_undo_t* rec, int is_redo) {
+    if (!rec) return;
+    int y = (int)rec->y;
+    int x = (int)rec->x;
+    if (!is_redo) {
+        // Undo: remove after, restore before
+        (void)write_editor_delete_text_at(y, x, rec->after, (int)rec->after_len);
+        int end_y = y, end_x = x;
+        (void)write_editor_insert_text_at(y, x, rec->before, (int)rec->before_len, &end_y, &end_x);
+        write_editor_cursor_y = end_y;
+        write_editor_cursor_x = end_x;
+    } else {
+        // Redo: remove before, restore after
+        (void)write_editor_delete_text_at(y, x, rec->before, (int)rec->before_len);
+        int end_y = y, end_x = x;
+        (void)write_editor_insert_text_at(y, x, rec->after, (int)rec->after_len, &end_y, &end_x);
+        write_editor_cursor_y = end_y;
+        write_editor_cursor_x = end_x;
+    }
+    write_editor_sel_active = 0;
+    write_editor_modified = 1;
+    write_editor_update_tile_modified();
+}
+
+// Large-file warning (GUI mode)
+static int write_editor_open_warn_active = 0;
+static char write_editor_open_warn_line1[96];
+static char write_editor_open_warn_line2[96];
+
+// Editor-local storage to avoid heap fragmentation/exhaustion.
+// NOTE: Keep this modest; QEMU default RAM is tiny.
+static char write_editor_read_buf[WRITE_EDITOR_MAX_FILE_BYTES + 1];
+static char write_editor_save_buf[WRITE_EDITOR_MAX_FILE_BYTES + 1];
+static uint8 write_editor_arena[WRITE_EDITOR_MAX_FILE_BYTES + 16384];
+static uint32 write_editor_arena_pos = 0;
+
+static void write_editor_warn(const char* l1, const char* l2) {
+    write_editor_open_warn_active = 1;
+    snprintf(write_editor_open_warn_line1, sizeof(write_editor_open_warn_line1), "%s", l1 ? l1 : "");
+    snprintf(write_editor_open_warn_line2, sizeof(write_editor_open_warn_line2), "%s", l2 ? l2 : "");
+}
+
+static void write_editor_arena_reset(void) {
+    write_editor_arena_pos = 0;
+}
+
+static void* write_editor_arena_alloc(uint32 bytes, uint32 align) {
+    if (align < 1) align = 1;
+    uint32 p = write_editor_arena_pos;
+    uint32 mask = align - 1;
+    if ((align & mask) == 0) {
+        p = (p + mask) & ~mask;
+    }
+    if (p + bytes > (uint32)sizeof(write_editor_arena)) return NULL;
+    void* out = &write_editor_arena[p];
+    write_editor_arena_pos = p + bytes;
+    return out;
+}
+
+static void write_editor_free_line(int idx) {
+    if (idx < 0 || idx >= MAX_LINES) return;
+    // No heap free: editor storage comes from a simple arena.
+    write_editor_buffer[idx] = NULL;
+    write_editor_line_caps[idx] = 0;
+}
+
+static void write_editor_free_all_lines(void) {
+    for (int i = 0; i < MAX_LINES; ++i) {
+        write_editor_buffer[i] = NULL;
+        write_editor_line_caps[i] = 0;
+    }
+    write_editor_arena_reset();
+}
+
+static void write_editor_reset_ephemeral_state(void) {
+    write_editor_modal = WRITE_EDITOR_MODAL_NONE;
+    write_editor_set_status("");
+    write_editor_undo_clear();
+}
+
+static int write_editor_ensure_line_cap(int idx, int need_chars_including_nul) {
+    if (idx < 0 || idx >= MAX_LINES) return -1;
+    if (need_chars_including_nul < 1) need_chars_including_nul = 1;
+    if (need_chars_including_nul > (MAX_LINE_LENGTH + 1)) need_chars_including_nul = MAX_LINE_LENGTH + 1;
+    uint16_t have = write_editor_line_caps[idx];
+    if (write_editor_buffer[idx] && have >= (uint16_t)need_chars_including_nul) return 0;
+
+    int new_cap = have ? have : 64;
+    while (new_cap < need_chars_including_nul) {
+        int next = new_cap * 2;
+        if (next <= new_cap) break;
+        new_cap = next;
+        if (new_cap > (MAX_LINE_LENGTH + 1)) { new_cap = MAX_LINE_LENGTH + 1; break; }
+    }
+    if (new_cap < need_chars_including_nul) new_cap = need_chars_including_nul;
+
+    // Arena-backed grow: allocate a new buffer and copy old contents.
+    char* p = (char*)write_editor_arena_alloc((uint32)new_cap, 16);
+    if (!p) return -1;
+    if (write_editor_buffer[idx]) {
+        int old_len = strlength(write_editor_buffer[idx]);
+        if (old_len >= new_cap) old_len = new_cap - 1;
+        memcpy(p, write_editor_buffer[idx], (size_t)old_len);
+        p[old_len] = '\0';
+    } else {
+        p[0] = '\0';
+    }
+    write_editor_buffer[idx] = p;
+    write_editor_line_caps[idx] = (uint16_t)new_cap;
+    return 0;
+}
+
+static int write_editor_line_len(int idx) {
+    if (idx < 0 || idx >= write_editor_num_lines) return 0;
+    if (!write_editor_buffer[idx]) return 0;
+    return strlength(write_editor_buffer[idx]);
+}
+
+static void write_editor_set_line_from_span(int idx, const char* s, int len, int* out_truncated) {
+    if (out_truncated) *out_truncated = 0;
+    if (!s) { s = ""; len = 0; }
+    if (len < 0) len = 0;
+    if (len > MAX_LINE_LENGTH) {
+        len = MAX_LINE_LENGTH;
+        if (out_truncated) *out_truncated = 1;
+    }
+    if (write_editor_ensure_line_cap(idx, len + 1) != 0) return;
+    memcpy(write_editor_buffer[idx], s, (size_t)len);
+    write_editor_buffer[idx][len] = '\0';
+}
+
+static void write_editor_shift_lines_down(int at_idx) {
+    if (at_idx < 0) at_idx = 0;
+    if (at_idx > write_editor_num_lines) at_idx = write_editor_num_lines;
+    if (write_editor_num_lines >= MAX_LINES) return;
+    // Make room for a new line at at_idx by shifting pointers down
+    for (int i = write_editor_num_lines; i > at_idx; --i) {
+        write_editor_buffer[i] = write_editor_buffer[i - 1];
+        write_editor_line_caps[i] = write_editor_line_caps[i - 1];
+    }
+    write_editor_buffer[at_idx] = NULL;
+    write_editor_line_caps[at_idx] = 0;
+    write_editor_num_lines++;
+}
+
+static void write_editor_delete_line_at(int idx) {
+    if (idx < 0 || idx >= write_editor_num_lines) return;
+    write_editor_free_line(idx);
+        for (int i = idx; i < write_editor_num_lines - 1; ++i) {
+        write_editor_buffer[i] = write_editor_buffer[i + 1];
+        write_editor_line_caps[i] = write_editor_line_caps[i + 1];
+    }
+    write_editor_buffer[write_editor_num_lines - 1] = NULL;
+    write_editor_line_caps[write_editor_num_lines - 1] = 0;
+    write_editor_num_lines--;
+    if (write_editor_num_lines < 1) {
+        write_editor_num_lines = 1;
+        write_editor_buffer[0] = NULL;
+        write_editor_line_caps[0] = 0;
+        write_editor_ensure_line_cap(0, 1);
+        if (write_editor_buffer[0]) write_editor_buffer[0][0] = '\0';
+    }
+}
 // GUI integration state (for tiling mode)
 static int write_editor_gui_tile = -1;
 static char write_editor_gui_filename[128];
@@ -48,11 +442,7 @@ static int write_editor_last_cw = 0;
 static int write_editor_last_ch = 0;
 
 // Selection and clipboard state
-static int write_editor_sel_active = 0;
-static int write_editor_sel_ax = 0, write_editor_sel_ay = 0; // anchor (col,x) within absolute line
-static int write_editor_sel_fx = 0, write_editor_sel_fy = 0; // focus (col,x)
-static char write_editor_clipboard[4096];
-static int write_editor_clipboard_len = 0;
+// (declared above)
 
 // helper: update tile's modified indicator when running in GUI mode
 // forward prototype for get_basename so helper can call it
@@ -61,10 +451,25 @@ static const char* get_basename(const char* path);
 static void write_editor_update_tile_modified(void) {
     if (write_editor_gui_tile >= 0) {
         static char title_static[] = "Write Editor";
-        static char left_buf[128];
+        static char left_buf[256];
         const char* b = get_basename(write_editor_gui_filename);
-        strncpy(left_buf, b, sizeof(left_buf) - 1);
+
+        // Move the editor's help/status line into the WM overlay instead of drawing a permanent bottom bar.
+        const char* msg = NULL;
+        if (write_editor_last_save_failed) msg = "Save failed";
+        else if (write_editor_status_msg[0]) msg = write_editor_status_msg;
+
+        if (msg) {
+            snprintf(left_buf, sizeof(left_buf),
+                     "%s | %s | Ctrl+S: Save | Ctrl+X: Cut | Ctrl+W: Whitespace | Ctrl+F: Find | Ctrl+G: Goto | Ctrl+Z/Y: Undo/Redo | Line %d Col %d",
+                     b, msg, write_editor_cursor_y + 1, write_editor_cursor_x + 1);
+        } else {
+            snprintf(left_buf, sizeof(left_buf),
+                     "%s | Ctrl+S: Save | Ctrl+X: Cut | Ctrl+W: Whitespace | Ctrl+F: Find | Ctrl+G: Goto | Ctrl+Z/Y: Undo/Redo | Line %d Col %d",
+                     b, write_editor_cursor_y + 1, write_editor_cursor_x + 1);
+        }
         left_buf[sizeof(left_buf) - 1] = '\0';
+
         if (write_editor_modified) tile_set_title_status(write_editor_gui_tile, title_static, left_buf, "[Modified] ");
         else tile_set_title_status(write_editor_gui_tile, title_static, left_buf, NULL);
     }
@@ -75,6 +480,32 @@ static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, in
 static void write_editor_gui_key(int tile_idx, int key, void* userdata);
 static void write_editor_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata);
 static int write_editor_gui_close_request(int tile_idx, void* userdata);
+
+static void write_editor_draw(const char* filename);
+
+static int write_editor_digits10(int v) {
+    int d = 1;
+    while (v >= 10) { v /= 10; d++; }
+    return d;
+}
+
+// Number of character columns reserved for the line-number gutter in GUI mode.
+// Includes one trailing spacer column.
+static int write_editor_gui_gutter_cols(void) {
+    int digits = write_editor_digits10(write_editor_num_lines > 0 ? write_editor_num_lines : 1);
+    // Example for 123 lines: " 123 " -> digits + 2
+    return digits + 2;
+}
+
+static int write_editor_gui_visible_text_rows(void) {
+    int cell_h = vga_text_cell_h();
+    if (cell_h <= 0) cell_h = 8;
+    int rows = write_editor_gui_rows;
+    if (rows <= 0 && write_editor_last_ch > 0) rows = write_editor_last_ch / cell_h;
+    if (rows < 1) rows = 1;
+    // GUI mode no longer reserves a permanent bottom status bar row.
+    return rows;
+}
 
 // Helper: get last path component (filename) from a path
 static const char* get_basename(const char* path) {
@@ -92,42 +523,49 @@ static int write_editor_delete_active_selection(void) {
     int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
     if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
     // clamp within bounds
-    if (sy < 0) sy = 0; if (sy >= write_editor_num_lines) sy = write_editor_num_lines - 1;
-    if (fy < 0) fy = 0; if (fy >= write_editor_num_lines) fy = write_editor_num_lines - 1;
-    int s_len = strlength(write_editor_buffer[sy]); if (sx < 0) sx = 0; if (sx > s_len) sx = s_len;
-    int f_len = strlength(write_editor_buffer[fy]); if (fx < 0) fx = 0; if (fx > f_len) fx = f_len;
+    if (sy < 0) sy = 0;
+    if (sy >= write_editor_num_lines) sy = write_editor_num_lines - 1;
+    if (fy < 0) fy = 0;
+    if (fy >= write_editor_num_lines) fy = write_editor_num_lines - 1;
+    int s_len = write_editor_line_len(sy); if (sx < 0) sx = 0; if (sx > s_len) sx = s_len;
+    int f_len = write_editor_line_len(fy); if (fx < 0) fx = 0; if (fx > f_len) fx = f_len;
     if (sy == fy) {
         // single-line delete
-        int len = strlength(write_editor_buffer[sy]);
-        int rem = fx - sx; if (rem < 0) rem = 0;
-        for (int i = sx; i + rem <= len; ++i) write_editor_buffer[sy][i] = write_editor_buffer[sy][i + rem];
+        char* line = write_editor_buffer[sy];
+        if (!line) {
+            write_editor_ensure_line_cap(sy, 1);
+            line = write_editor_buffer[sy];
+        }
+        int len = write_editor_line_len(sy);
+        if (line) memmove(&line[sx], &line[fx], (size_t)((len - fx) + 1));
         write_editor_cursor_y = sy; write_editor_cursor_x = sx;
     } else {
         // multi-line: keep prefix of start line up to sx, then append tail of fy from fx
-        char tail[MAX_LINE_LENGTH + 1];
-        int tail_len = 0;
-        const char* ftail = write_editor_buffer[fy] + fx;
-        while (ftail[tail_len] && tail_len < MAX_LINE_LENGTH) { tail[tail_len] = ftail[tail_len]; tail_len++; }
-        tail[tail_len] = '\0';
-        // truncate start line at sx
-        write_editor_buffer[sy][sx] = '\0';
-        int pre_len = strlength(write_editor_buffer[sy]);
-        int space = MAX_LINE_LENGTH - pre_len;
-        int copy = tail_len < space ? tail_len : space;
-        for (int i = 0; i < copy; ++i) write_editor_buffer[sy][pre_len + i] = tail[i];
-        write_editor_buffer[sy][pre_len + copy] = '\0';
-        // shift lines up removing fy-sy lines
-        int remove_count = fy - sy;
-        for (int i = sy + 1; i + remove_count < write_editor_num_lines; ++i) {
-            strcpy(write_editor_buffer[i], write_editor_buffer[i + remove_count]);
+        char* sline = write_editor_buffer[sy];
+        if (!sline) {
+            write_editor_ensure_line_cap(sy, 1);
+            sline = write_editor_buffer[sy];
         }
-        write_editor_num_lines -= remove_count;
-        if (write_editor_num_lines < 1) write_editor_num_lines = 1;
+        char* fline = write_editor_buffer[fy];
+        int pre_len = sx;
+        int tail_len = f_len - fx;
+        if (pre_len < 0) pre_len = 0;
+        if (tail_len < 0) tail_len = 0;
+        int new_len = pre_len + tail_len;
+        if (new_len > MAX_LINE_LENGTH) new_len = MAX_LINE_LENGTH;
+        if (write_editor_ensure_line_cap(sy, new_len + 1) == 0 && sline) {
+            if (pre_len > write_editor_line_len(sy)) pre_len = write_editor_line_len(sy);
+            sline[pre_len] = '\0';
+            int can_copy = MAX_LINE_LENGTH - pre_len;
+            int copy = (tail_len < can_copy) ? tail_len : can_copy;
+            if (copy > 0 && fline) memcpy(&sline[pre_len], &fline[fx], (size_t)copy);
+            sline[pre_len + copy] = '\0';
+        }
+        // delete lines sy+1 .. fy (inclusive)
+        int remove = fy - sy;
+        while (remove-- > 0) write_editor_delete_line_at(sy + 1);
         write_editor_cursor_y = sy; write_editor_cursor_x = sx;
-        // Clear any now-unused lines to avoid stale data showing up
-        for (int i = write_editor_num_lines; i < MAX_LINES; ++i) {
-            write_editor_buffer[i][0] = '\0';
-        }
+        // We only ever draw up to write_editor_num_lines, so clearing beyond that is unnecessary.
     }
     write_editor_sel_active = 0;
     write_editor_modified = 1;
@@ -141,20 +579,43 @@ static int write_editor_delete_active_selection(void) {
 
 // Load file content into editor buffer
 int load_file_to_write_editor(const char* path, uint8 disk) {
-    // Clear the entire buffer
-    for (int i = 0; i < MAX_LINES; i++) {
-        for (int j = 0; j < MAX_LINE_LENGTH + 1; j++) {
-            write_editor_buffer[i][j] = '\0';
-        }
-    }
+    write_editor_open_warn_active = 0;
+    write_editor_open_warn_line1[0] = '\0';
+    write_editor_open_warn_line2[0] = '\0';
+
+    write_editor_free_all_lines();
     write_editor_num_lines = 1;
+    write_editor_ensure_line_cap(0, 1);
+    if (write_editor_buffer[0]) write_editor_buffer[0][0] = '\0';
+
+    // Determine file size up-front (for warnings)
+    vfs_stat_t st;
+    uint32 file_size = 0;
+    if (vfs_stat(disk, path, &st) == 0 && st.type == VFS_NODE_FILE) file_size = st.size;
 
     // Read via VFS (supports EYNFS and FAT32). Missing file is fine (start empty).
-    const int max_bytes = MAX_LINES * (MAX_LINE_LENGTH + 1);
-    char* buf = (char*)malloc(max_bytes);
-    if (!buf) return -1;
-    int n = vfs_read_file(disk, path, buf, max_bytes);
-    if (n <= 0) { free(buf); return 0; }
+    // Use a fixed buffer to avoid heap pressure.
+    uint32 max_bytes = WRITE_EDITOR_MAX_FILE_BYTES;
+    uint32 want_bytes = file_size;
+    if (want_bytes == 0) want_bytes = 4096; // fallback when stat missing/zero
+    if (want_bytes > max_bytes) want_bytes = max_bytes;
+    int n = vfs_read_file(disk, path, write_editor_read_buf, want_bytes);
+    if (n <= 0) return 0;
+    if ((uint32)n > want_bytes) n = (int)want_bytes;
+    write_editor_read_buf[n] = '\0';
+
+    // Warn if the file cannot fit in our read buffer (likely truncated)
+    int any_line_truncated = 0;
+    int truncated_lines = 0;
+    if (file_size > (uint32)max_bytes) {
+        write_editor_open_warn_active = 1;
+        snprintf(write_editor_open_warn_line1, sizeof(write_editor_open_warn_line1), "Warning: file is large (%u bytes)", (unsigned)file_size);
+        snprintf(write_editor_open_warn_line2, sizeof(write_editor_open_warn_line2), "Loaded first %u bytes", (unsigned)max_bytes);
+    }
+    // If we didn't trust stat (size==0) and filled our fallback buffer, it's probably truncated.
+    if (!write_editor_open_warn_active && file_size == 0 && want_bytes < max_bytes && (uint32)n == want_bytes) {
+        write_editor_warn("Warning: file may be large", "Loaded partial content");
+    }
 
     // Helper: detect binary-like extensions we should present as editable hex
     int is_binary_edit = 0;
@@ -164,46 +625,76 @@ int load_file_to_write_editor(const char* path, uint8 disk) {
     }
 
     if (!is_binary_edit) {
-        int line = 0, pos = 0;
-        for (int i = 0; i < n && line < MAX_LINES; ++i) {
-            if (buf[i] == '\n' || pos >= MAX_LINE_LENGTH) {
-                write_editor_buffer[line][pos] = '\0';
-                line++; pos = 0;
-                if (buf[i] == '\n') continue;
+        write_editor_free_all_lines();
+        write_editor_num_lines = 0;
+        int line = 0;
+        int start = 0;
+        for (int i = 0; i <= n; ++i) {
+            if (i == n || write_editor_read_buf[i] == '\n') {
+                int len = i - start;
+                if (len > 0 && write_editor_read_buf[i - 1] == '\r') len--;
+                if (line >= MAX_LINES) { truncated_lines = 1; break; }
+                int trunc = 0;
+                write_editor_set_line_from_span(line, write_editor_read_buf + start, len, &trunc);
+                if (trunc) any_line_truncated = 1;
+                line++;
+                start = i + 1;
             }
-            if (pos < MAX_LINE_LENGTH) write_editor_buffer[line][pos++] = buf[i];
         }
-        if (pos > 0 && line < MAX_LINES) { write_editor_buffer[line][pos] = '\0'; line++; }
         write_editor_num_lines = (line > 0) ? line : 1;
+        if (write_editor_num_lines < 1) write_editor_num_lines = 1;
+        if (!write_editor_buffer[0]) {
+            write_editor_ensure_line_cap(0, 1);
+            if (write_editor_buffer[0]) write_editor_buffer[0][0] = '\0';
+        }
+
+        if (!write_editor_open_warn_active) {
+            if (truncated_lines) {
+                write_editor_open_warn_active = 1;
+                snprintf(write_editor_open_warn_line1, sizeof(write_editor_open_warn_line1), "Warning: too many lines (>%d)", MAX_LINES);
+                snprintf(write_editor_open_warn_line2, sizeof(write_editor_open_warn_line2), "Loaded first %d lines", MAX_LINES);
+            } else if (any_line_truncated) {
+                write_editor_open_warn_active = 1;
+                snprintf(write_editor_open_warn_line1, sizeof(write_editor_open_warn_line1), "Warning: long lines truncated");
+                snprintf(write_editor_open_warn_line2, sizeof(write_editor_open_warn_line2), "Max %d chars per line", MAX_LINE_LENGTH);
+            }
+        }
     } else {
         // Convert binary data into human-readable hex lines. Use 16 bytes per line for readability.
+        write_editor_free_all_lines();
+        write_editor_num_lines = 0;
         int line = 0;
         int bytes_per_line = 16;
         for (int i = 0; i < n && line < MAX_LINES; i += bytes_per_line) {
             int end = i + bytes_per_line; if (end > n) end = n;
             int pos = 0;
+            char linebuf[MAX_LINE_LENGTH + 1];
             for (int j = i; j < end && pos < MAX_LINE_LENGTH - 3; ++j) {
-                unsigned char b = (unsigned char)buf[j];
+                unsigned char b = (unsigned char)write_editor_read_buf[j];
                 // write two hex chars and a space (except maybe last in line)
                 char hi = "0123456789ABCDEF"[(b >> 4) & 0xF];
                 char lo = "0123456789ABCDEF"[b & 0xF];
                 if (pos + 3 < MAX_LINE_LENGTH) {
-                    write_editor_buffer[line][pos++] = hi;
-                    write_editor_buffer[line][pos++] = lo;
-                    write_editor_buffer[line][pos++] = ' ';
+                    linebuf[pos++] = hi;
+                    linebuf[pos++] = lo;
+                    linebuf[pos++] = ' ';
                 } else if (pos + 2 < MAX_LINE_LENGTH) {
-                    write_editor_buffer[line][pos++] = hi;
-                    write_editor_buffer[line][pos++] = lo;
+                    linebuf[pos++] = hi;
+                    linebuf[pos++] = lo;
                 }
             }
             // trim trailing space
-            if (pos > 0 && write_editor_buffer[line][pos - 1] == ' ') pos--;
-            write_editor_buffer[line][pos] = '\0';
+            if (pos > 0 && linebuf[pos - 1] == ' ') pos--;
+            linebuf[pos] = '\0';
+            write_editor_set_line_from_span(line, linebuf, pos, NULL);
             line++;
         }
         write_editor_num_lines = (line > 0) ? line : 1;
+        if (!write_editor_buffer[0]) {
+            write_editor_ensure_line_cap(0, 1);
+            if (write_editor_buffer[0]) write_editor_buffer[0][0] = '\0';
+        }
     }
-    free(buf);
     return 0;
 }
 
@@ -212,11 +703,12 @@ int save_write_editor_buffer(const char* path, uint8 disk) {
     // Calculate total size needed
     int total_size = 0;
     for (int i = 0; i < write_editor_num_lines; i++) {
-        total_size += strlength(write_editor_buffer[i]);
+        total_size += write_editor_line_len(i);
         if (i < write_editor_num_lines - 1) {
             total_size += 1; // For newline
         }
     }
+    if (total_size > (int)WRITE_EDITOR_MAX_FILE_BYTES) return -1;
     
     // Helper: detect binary-like extensions we should save by converting from hex to raw bytes
     int is_binary_edit = 0;
@@ -226,35 +718,32 @@ int save_write_editor_buffer(const char* path, uint8 disk) {
     }
 
     if (!is_binary_edit) {
-        // Allocate buffer for the entire file content
-        char* data = (char*)malloc(total_size + 1);
-        if (!data) return -1;
-        
+        char* data = write_editor_save_buf;
         int data_pos = 0;
         for (int i = 0; i < write_editor_num_lines; i++) {
-            int line_len = strlength(write_editor_buffer[i]);
-            for (int j = 0; j < line_len; j++) {
-                data[data_pos++] = write_editor_buffer[i][j];
-            }
+            const char* s = write_editor_buffer[i] ? write_editor_buffer[i] : "";
+            int line_len = write_editor_line_len(i);
+            memcpy(&data[data_pos], s, (size_t)line_len);
+            data_pos += line_len;
             if (i < write_editor_num_lines - 1) {
                 data[data_pos++] = '\n';
             }
         }
         data[data_pos] = '\0';
         int written = vfs_write_file(disk, path, data, (uint32)data_pos);
-        free(data);
         if (written < 0 || written != data_pos) return -1;
         return 0;
     } else {
         // Convert hex representation back into raw bytes.
-        // Estimate max bytes: each line may contain up to MAX_LINE_LENGTH chars, so max hex digits per line is MAX_LINE_LENGTH
-        int max_bytes = (MAX_LINES * (MAX_LINE_LENGTH / 2)) + 16;
-        unsigned char* out = (unsigned char*)malloc(max_bytes);
-        if (!out) return -1;
+        // Upper bound: at most half of the total character count will be hex digits.
+        int max_bytes = (total_size / 2) + 16;
+        if (max_bytes > (int)WRITE_EDITOR_MAX_FILE_BYTES) return -1;
+        unsigned char* out = (unsigned char*)write_editor_save_buf;
         int out_pos = 0;
         for (int i = 0; i < write_editor_num_lines; ++i) {
             const char* s = write_editor_buffer[i];
-            int len = strlength(write_editor_buffer[i]);
+            if (!s) s = "";
+            int len = write_editor_line_len(i);
             int hi_nibble = -1;
             for (int j = 0; j < len; ++j) {
                 char c = s[j];
@@ -275,7 +764,6 @@ int save_write_editor_buffer(const char* path, uint8 disk) {
             // If there's a dangling hi nibble (odd count), ignore it.
         }
         int written = vfs_write_file(disk, path, (char*)out, (uint32)out_pos);
-        free(out);
         if (written < 0 || written != out_pos) return -1;
         return 0;
     }
@@ -351,7 +839,8 @@ void write_editor_draw(const char* filename) {
             continue;
         }
         if (line_idx < write_editor_num_lines) {
-            int line_len = strlength(write_editor_buffer[line_idx]);
+            int line_len = write_editor_line_len(line_idx);
+            const char* s = write_editor_buffer[line_idx] ? write_editor_buffer[line_idx] : "";
             int x = editor_win.x + 1;
             // only draw characters that fit within the window width, accounting for horizontal scroll
             int max_chars = editor_win.width - 2; // account for borders
@@ -364,7 +853,7 @@ void write_editor_draw(const char* filename) {
                     x++;
                 }
                 if (j < line_len && (x - editor_win.x - 1) < max_chars) {
-                    char ch[2] = {write_editor_buffer[line_idx][j], '\0'};
+                    char ch[2] = {s[j], '\0'};
                     tui_draw_text(x, y, ch, text_style);
                     x++;
                 }
@@ -374,7 +863,7 @@ void write_editor_draw(const char* filename) {
 
     // Status bar just below the window
     char status[160];
-    snprintf(status, sizeof(status), "Line %d/%d, Col %d | V-Scroll: %d-%d | H-Scroll: %d | Ctrl+S: Save | Ctrl+X: Exit", 
+    snprintf(status, sizeof(status), "Line %d/%d, Col %d | V-Scroll: %d-%d | H-Scroll: %d | Ctrl+S: Save | Ctrl+Q: Exit | Ctrl+X: Cut", 
         write_editor_cursor_y + 1, write_editor_num_lines, write_editor_cursor_x + 1, 
         write_editor_scroll_y + 1, write_editor_scroll_y + EDITOR_HEIGHT, write_editor_scroll_x);
     tui_style_t status_style = {TUI_COLOR_WHITE, TUI_COLOR_BLACK, 0};
@@ -389,21 +878,27 @@ void write_editor_draw(const char* filename) {
 
 // GUI draw callback (top-level)
 static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
+    // Keep status text in sync with cursor/message state.
+    (void)tile_idx;
+    (void)userdata;
+    write_editor_update_tile_modified();
+
     // Incremental clears: clear only the bands we're about to redraw
+    int cell_w = vga_text_cell_w();
+    int cell_h = vga_text_cell_h();
+    if (cell_w <= 0) cell_w = 8;
+    if (cell_h <= 0) cell_h = 8;
     if (content_w > 0 && content_h > 0) {
         // Text area bands
-        int rows = content_h / 8;
-        int text_rows = rows > 1 ? rows - 1 : rows; // leave last row for status
+        int rows = content_h / cell_h;
+        int text_rows = rows;
         for (int r = 0; r < text_rows; ++r) {
-            int py = content_y + r * 8;
-            if (py + 8 <= content_y + content_h) drawRect(content_x, py, content_w, 8, 0, 0, 0);
+            int py = content_y + r * cell_h;
+            if (py + cell_h <= content_y + content_h) drawRect(content_x, py, content_w, cell_h, 0, 0, 0);
         }
-        // Status bar band
-        int status_y = content_y + text_rows * 8;
-        if (status_y >= content_y && status_y + 8 <= content_y + content_h) drawRect(content_x, status_y, content_w, 8, 16, 16, 16);
     }
-    int cols = content_w / 8;
-    int rows = content_h / 8;
+    int cols = content_w / cell_w;
+    int rows = content_h / cell_h;
     if (cols < 1) cols = 1;
     if (rows < 1) rows = 1;
     // cache geometry for potential key handling
@@ -413,21 +908,83 @@ static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, in
     write_editor_last_cy = content_y;
     write_editor_last_cw = content_w;
     write_editor_last_ch = content_h;
-    // Reserve one row at the bottom of the tile content for the status bar
-    int text_rows = rows > 1 ? rows - 1 : rows;
+    // Use the full tile content area for text (no permanent bottom status bar).
+    int text_rows = rows;
+
+    // Pop-out scrollbar: only active if content exceeds the visible rows.
+    // We draw it as a thin overlay on the right edge.
+    write_editor_scrollbar_active = 0;
+    write_editor_scrollbar_x = write_editor_scrollbar_y = write_editor_scrollbar_w = write_editor_scrollbar_h = 0;
+    write_editor_scrollbar_thumb_y = write_editor_scrollbar_thumb_h = 0;
+    if (write_editor_num_lines > text_rows) {
+        int track_w = 3;
+        int track_h = text_rows * cell_h;
+        int track_x = content_x + content_w - track_w;
+        int track_y = content_y;
+        if (track_w > 0 && track_h > 0 && track_x >= content_x) {
+            write_editor_scrollbar_active = 1;
+            write_editor_scrollbar_x = track_x;
+            write_editor_scrollbar_y = track_y;
+            write_editor_scrollbar_w = track_w;
+            write_editor_scrollbar_h = track_h;
+
+            // Track background
+            drawRect(track_x, track_y, track_w, track_h, 24, 24, 24);
+
+            // Thumb size and position (based on absolute line scroll)
+            int min_thumb = cell_h; if (min_thumb < 6) min_thumb = 6;
+            int thumb_h = (int)((uint32)track_h * (uint32)text_rows / (uint32)write_editor_num_lines);
+            if (thumb_h < min_thumb) thumb_h = min_thumb;
+            if (thumb_h > track_h) thumb_h = track_h;
+            int denom = write_editor_num_lines - text_rows;
+            if (denom < 1) denom = 1;
+            int thumb_y = track_y;
+            if (track_h > thumb_h) {
+                thumb_y = track_y + (int)((uint32)(track_h - thumb_h) * (uint32)write_editor_scroll_y / (uint32)denom);
+            }
+            write_editor_scrollbar_thumb_y = thumb_y;
+            write_editor_scrollbar_thumb_h = thumb_h;
+            drawRect(track_x, thumb_y, track_w, thumb_h, 200, 200, 200);
+        }
+    }
+
+    // Line-number gutter (character columns)
+    int gutter_cols = write_editor_gui_gutter_cols();
+    if (gutter_cols < 0) gutter_cols = 0;
+    if (gutter_cols > cols - 1) gutter_cols = cols - 1;
+    int text_cols = cols - gutter_cols;
+    if (text_cols < 1) text_cols = 1;
+
+    // Gutter background + separator
+    if (gutter_cols > 0) {
+        int gw = gutter_cols * cell_w;
+        if (gw > 0) {
+            drawRect(content_x, content_y, gw, text_rows * cell_h, 16, 16, 16);
+            int sep_x = content_x + gw - 1;
+            if (sep_x >= content_x && sep_x < content_x + content_w) {
+                drawRect(sep_x, content_y, 1, content_h, 48, 48, 48);
+            }
+        }
+    }
 
     // Render text with soft-wrapping: walk absolute lines starting at scroll_y
     int abs_line = write_editor_scroll_y;
     int seg = 0; // wrapped segment index within current abs_line
     for (int r = 0; r < text_rows; ++r) {
-        int draw_y = content_y + r * 8;
+        int draw_y = content_y + r * cell_h;
         if (abs_line >= write_editor_num_lines) {
             // nothing to draw on this row
             continue;
         }
     const char* line = write_editor_buffer[abs_line];
     int len = strlength((char*)line); // cast to silence discarded qualifier warning
-        int wraps = (len + cols - 1) / cols; if (wraps < 1) wraps = 1;
+        int last_ns = len;
+        while (last_ns > 0) {
+            char t = line[last_ns - 1];
+            if (t == ' ' || t == '\t') last_ns--;
+            else break;
+        }
+        int wraps = (len + text_cols - 1) / text_cols; if (wraps < 1) wraps = 1;
         // If we've exhausted wrapped segments for this line, advance to next line and retry this visual row
         if (seg >= wraps) {
             abs_line++;
@@ -435,11 +992,50 @@ static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, in
             r--; // redo this visual row with the next absolute line
             continue;
         }
-        int start_col = seg * cols;
-        for (int cc = 0; cc < cols; ++cc) {
+        int start_col = seg * text_cols;
+
+        // Draw gutter (only show the line number on the first wrapped segment)
+        if (gutter_cols > 0) {
+            int gx = content_x;
+            // Build a right-aligned line number into a fixed-width field.
+            // We draw per-char to avoid relying on drawTextAt's fixed 8px advance.
+            char gbuf[16];
+            for (int i = 0; i < gutter_cols && i < (int)sizeof(gbuf) - 1; ++i) gbuf[i] = ' ';
+            int gmax = gutter_cols < (int)sizeof(gbuf) - 1 ? gutter_cols : (int)sizeof(gbuf) - 1;
+            gbuf[gmax] = '\0';
+            if (seg == 0) {
+                int num = abs_line + 1;
+                char nb[12];
+                snprintf(nb, sizeof(nb), "%d", num);
+                int nlen = (int)strlen(nb);
+                // place digits ending at gutter_cols-2; leave gutter_cols-1 as spacer
+                int start = (gmax - 1) - nlen;
+                if (start < 0) start = 0;
+                for (int i = 0; i < nlen && (start + i) < (gmax - 1); ++i) gbuf[start + i] = nb[i];
+            }
+            int gr = (abs_line == write_editor_cursor_y) ? 220 : 160;
+            int gg = (abs_line == write_editor_cursor_y) ? 220 : 160;
+            int gb = (abs_line == write_editor_cursor_y) ? 220 : 160;
+            for (int i = 0; i < gutter_cols; ++i) {
+                drawCharAt(gx + i * cell_w, draw_y, (int)(unsigned char)gbuf[i], gr, gg, gb);
+            }
+        }
+
+        for (int cc = 0; cc < text_cols; ++cc) {
             int src_idx = start_col + cc;
             char ch = ' ';
             if (src_idx < len) ch = line[src_idx];
+            char draw_ch = ch;
+            int rr = 255, gg = 255, bb = 255;
+            if (write_editor_show_whitespace) {
+                if (ch == '\t') {
+                    draw_ch = '>';
+                    rr = 200; gg = 200; bb = 200;
+                } else if (ch == ' ' && src_idx >= last_ns) {
+                    draw_ch = '.';
+                    rr = 200; gg = 200; bb = 200;
+                }
+            }
             // Selection background per-cell (simple solid rect)
             int is_sel = 0;
             if (write_editor_sel_active) {
@@ -458,20 +1054,20 @@ static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, in
             }
             // Cursor handling: draw an underscore '_' at the cursor position (overlay, no displacement)
             if (abs_line == write_editor_cursor_y) {
-                int cur_wrap = write_editor_cursor_x / cols;
-                int cur_col = write_editor_cursor_x % cols;
+                int cur_wrap = write_editor_cursor_x / text_cols;
+                int cur_col = write_editor_cursor_x % text_cols;
                 if (seg == cur_wrap && cc == cur_col) {
                     // we'll overlay '_' after drawing the underlying character below
                 }
             }
-            int px = content_x + cc * 8;
-            if (px >= content_x && px + 7 < content_x + content_w) {
-                if (is_sel) drawRect(px, draw_y, 8, 8, 0, 128, 128);
-                drawCharAt(px, draw_y, (int)(unsigned char)ch, 255, 255, 255);
+            int px = content_x + (gutter_cols + cc) * cell_w;
+            if (px >= content_x && px + (cell_w - 1) < content_x + content_w) {
+                if (is_sel) drawRect(px, draw_y, cell_w, cell_h, 0, 128, 128);
+                drawCharAt(px, draw_y, (int)(unsigned char)draw_ch, rr, gg, bb);
                 // Overlay underscore at caret cell
                 if (abs_line == write_editor_cursor_y) {
-                    int cur_wrap = write_editor_cursor_x / cols;
-                    int cur_col = write_editor_cursor_x % cols;
+                    int cur_wrap = write_editor_cursor_x / text_cols;
+                    int cur_col = write_editor_cursor_x % text_cols;
                     if (seg == cur_wrap && cc == cur_col) {
                         drawCharAt(px, draw_y, (int)'_', 220, 220, 220);
                     }
@@ -479,19 +1075,6 @@ static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, in
             }
         }
         seg++;
-    }
-
-    // Draw bottom status bar inside this tile (last row)
-    if (rows >= 1) {
-        int status_y = content_y + text_rows * 8;
-        char status[160];
-        if (write_editor_last_save_failed) {
-            snprintf(status, sizeof(status), "Save failed | Ctrl+S: Save | Ctrl+X: Exit | Line %d Col %d", write_editor_cursor_y + 1, write_editor_cursor_x + 1);
-        } else {
-            snprintf(status, sizeof(status), "Ctrl+S: Save | Ctrl+X: Exit | Line %d Col %d", write_editor_cursor_y + 1, write_editor_cursor_x + 1);
-        }
-        // background already drawn above
-        drawTextAt(content_x + 8, status_y, status, 255, 255, 255);
     }
 
     // Unsaved-changes prompt overlay (draw last so it appears on top)
@@ -516,11 +1099,182 @@ static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, in
         drawTextAt(bx + 8, by + 26, "Save (S) / Exit (X)", 200, 200, 200);
         drawTextAt(bx + 8, by + 40, "Cancel (Esc)", 200, 200, 200);
     }
+
+    // Large-file warning overlay (draw on top of everything)
+    if (write_editor_open_warn_active) {
+        int box_w = 360;
+        int box_h = 72;
+        if (box_w > content_w - 16) box_w = content_w - 16;
+        if (box_h > content_h - 16) box_h = content_h - 16;
+        if (box_w < 200) box_w = 200;
+        if (box_h < 56) box_h = 56;
+        int bx = content_x + (content_w - box_w) / 2;
+        int by = content_y + (content_h - box_h) / 2;
+
+        drawRect(bx, by, box_w, box_h, 0, 0, 0);
+        drawRect(bx, by, box_w, 1, 255, 255, 255);
+        drawRect(bx, by + box_h - 1, box_w, 1, 255, 255, 255);
+        drawRect(bx, by, 1, box_h, 255, 255, 255);
+        drawRect(bx + box_w - 1, by, 1, box_h, 255, 255, 255);
+
+        drawTextAt(bx + 8, by + 10, "Large file", 255, 255, 255);
+        if (write_editor_open_warn_line1[0]) drawTextAt(bx + 8, by + 26, write_editor_open_warn_line1, 200, 200, 200);
+        if (write_editor_open_warn_line2[0]) drawTextAt(bx + 8, by + 40, write_editor_open_warn_line2, 200, 200, 200);
+        drawTextAt(bx + 8, by + 56, "Enter: continue", 200, 200, 200);
+    }
+
+    // Find / Goto overlays (draw last so they're always visible)
+    if (write_editor_modal != WRITE_EDITOR_MODAL_NONE) {
+        int box_w = 360;
+        int box_h = 64;
+        if (box_w > content_w - 16) box_w = content_w - 16;
+        if (box_h > content_h - 16) box_h = content_h - 16;
+        if (box_w < 200) box_w = 200;
+        if (box_h < 48) box_h = 48;
+        int bx = content_x + (content_w - box_w) / 2;
+        int by = content_y + (content_h - box_h) / 2;
+
+        drawRect(bx, by, box_w, box_h, 0, 0, 0);
+        drawRect(bx, by, box_w, 1, 255, 255, 255);
+        drawRect(bx, by + box_h - 1, box_w, 1, 255, 255, 255);
+        drawRect(bx, by, 1, box_h, 255, 255, 255);
+        drawRect(bx + box_w - 1, by, 1, box_h, 255, 255, 255);
+
+        if (write_editor_modal == WRITE_EDITOR_MODAL_FIND) {
+            drawTextAt(bx + 8, by + 10, "Find", 255, 255, 255);
+            drawTextAt(bx + 8, by + 26, write_editor_find_query, 200, 200, 200);
+            drawTextAt(bx + 8, by + 40, "Enter: search  Esc: cancel", 200, 200, 200);
+        } else if (write_editor_modal == WRITE_EDITOR_MODAL_GOTO) {
+            drawTextAt(bx + 8, by + 10, "Go to line", 255, 255, 255);
+            drawTextAt(bx + 8, by + 26, write_editor_goto_buf, 200, 200, 200);
+            drawTextAt(bx + 8, by + 40, "Enter: go  Esc: cancel", 200, 200, 200);
+        }
+    }
 }
 
 // GUI key callback (top-level)
 static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
     (void)tile_idx; (void)userdata;
+
+    int visible_rows = write_editor_gui_visible_text_rows();
+
+    // Modal overlays: find / goto consume input until dismissed
+    if (write_editor_modal != WRITE_EDITOR_MODAL_NONE) {
+        if (key == 27) {
+            write_editor_modal = WRITE_EDITOR_MODAL_NONE;
+            tile_invalidate_gui(write_editor_gui_tile);
+            return;
+        }
+        if (write_editor_modal == WRITE_EDITOR_MODAL_FIND) {
+            if (key == '\b') {
+                if (write_editor_find_len > 0) {
+                    write_editor_find_query[--write_editor_find_len] = '\0';
+                    tile_invalidate_gui(write_editor_gui_tile);
+                }
+                return;
+            }
+            if (key == '\n') {
+                if (write_editor_find_len <= 0) {
+                    write_editor_set_status("Find: empty");
+                    write_editor_modal = WRITE_EDITOR_MODAL_NONE;
+                    tile_invalidate_gui(write_editor_gui_tile);
+                    return;
+                }
+                // Search forward from the current cursor
+                int start_y = write_editor_cursor_y;
+                int start_x = write_editor_cursor_x;
+                int found = 0;
+                for (int y = start_y; y < write_editor_num_lines && !found; ++y) {
+                    const char* s = write_editor_buffer[y] ? write_editor_buffer[y] : "";
+                    int len = write_editor_line_len(y);
+                    int from = (y == start_y) ? start_x : 0;
+                    if (from < 0) from = 0;
+                    if (from > len) from = len;
+                    for (int x = from; x + write_editor_find_len <= len; ++x) {
+                        int match = 1;
+                        for (int k = 0; k < write_editor_find_len; ++k) {
+                            if (s[x + k] != write_editor_find_query[k]) { match = 0; break; }
+                        }
+                        if (match) {
+                            write_editor_cursor_y = y;
+                            write_editor_cursor_x = x;
+                            write_editor_sel_active = 1;
+                            write_editor_sel_ay = y; write_editor_sel_ax = x;
+                            write_editor_sel_fy = y; write_editor_sel_fx = x + write_editor_find_len;
+                            if (write_editor_cursor_y < write_editor_scroll_y) write_editor_scroll_y = write_editor_cursor_y;
+                            if (write_editor_cursor_y >= write_editor_scroll_y + visible_rows) write_editor_scroll_y = write_editor_cursor_y - visible_rows + 1;
+                            write_editor_set_status("Found");
+                            found = 1;
+                            break;
+                        }
+                    }
+                }
+                if (!found) write_editor_set_status("Not found");
+                write_editor_modal = WRITE_EDITOR_MODAL_NONE;
+                tile_invalidate_gui(write_editor_gui_tile);
+                return;
+            }
+            if (key >= 32 && key <= 126) {
+                if (write_editor_find_len < (int)sizeof(write_editor_find_query) - 1) {
+                    write_editor_find_query[write_editor_find_len++] = (char)key;
+                    write_editor_find_query[write_editor_find_len] = '\0';
+                    tile_invalidate_gui(write_editor_gui_tile);
+                }
+                return;
+            }
+            return;
+        }
+        if (write_editor_modal == WRITE_EDITOR_MODAL_GOTO) {
+            if (key == '\b') {
+                if (write_editor_goto_len > 0) {
+                    write_editor_goto_buf[--write_editor_goto_len] = '\0';
+                    tile_invalidate_gui(write_editor_gui_tile);
+                }
+                return;
+            }
+            if (key == '\n') {
+                int v = 0;
+                for (int i = 0; i < write_editor_goto_len; ++i) {
+                    char c = write_editor_goto_buf[i];
+                    if (c < '0' || c > '9') { v = -1; break; }
+                    v = v * 10 + (c - '0');
+                    if (v > 1000000) { v = -1; break; }
+                }
+                if (v < 1) {
+                    write_editor_set_status("Goto: invalid");
+                } else {
+                    if (v > write_editor_num_lines) v = write_editor_num_lines;
+                    write_editor_cursor_y = v - 1;
+                    write_editor_cursor_x = 0;
+                    write_editor_sel_active = 0;
+                    if (write_editor_cursor_y < write_editor_scroll_y) write_editor_scroll_y = write_editor_cursor_y;
+                    if (write_editor_cursor_y >= write_editor_scroll_y + visible_rows) write_editor_scroll_y = write_editor_cursor_y - visible_rows + 1;
+                    write_editor_set_status("Goto ok");
+                }
+                write_editor_modal = WRITE_EDITOR_MODAL_NONE;
+                tile_invalidate_gui(write_editor_gui_tile);
+                return;
+            }
+            if (key >= '0' && key <= '9') {
+                if (write_editor_goto_len < (int)sizeof(write_editor_goto_buf) - 1) {
+                    write_editor_goto_buf[write_editor_goto_len++] = (char)key;
+                    write_editor_goto_buf[write_editor_goto_len] = '\0';
+                    tile_invalidate_gui(write_editor_gui_tile);
+                }
+                return;
+            }
+            return;
+        }
+    }
+
+    // Large-file warning: block input until acknowledged.
+    if (write_editor_open_warn_active) {
+        if (key == '\n' || key == 27) { // Enter or Esc
+            write_editor_open_warn_active = 0;
+            tile_invalidate_gui(write_editor_gui_tile);
+        }
+        return;
+    }
 
     // If the unsaved-changes prompt is active, consume keys to avoid editing behind it.
     if (write_editor_exit_prompt_active) {
@@ -558,14 +1312,16 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
             if (write_editor_cursor_y > 0) {
                 write_editor_cursor_y--;
                 if (write_editor_cursor_y < write_editor_scroll_y) write_editor_scroll_y = write_editor_cursor_y;
-                if (write_editor_cursor_x > strlength(write_editor_buffer[write_editor_cursor_y])) write_editor_cursor_x = strlength(write_editor_buffer[write_editor_cursor_y]);
+                int line_len = write_editor_line_len(write_editor_cursor_y);
+                if (write_editor_cursor_x > line_len) write_editor_cursor_x = line_len;
                 write_editor_scroll_x = 0;
             }
         } else if (base == 0x1002) { // Down
             if (write_editor_cursor_y < write_editor_num_lines - 1) {
                 write_editor_cursor_y++;
-                if (write_editor_cursor_y >= write_editor_scroll_y + EDITOR_HEIGHT) write_editor_scroll_y = write_editor_cursor_y - EDITOR_HEIGHT + 1;
-                if (write_editor_cursor_x > strlength(write_editor_buffer[write_editor_cursor_y])) write_editor_cursor_x = strlength(write_editor_buffer[write_editor_cursor_y]);
+                if (write_editor_cursor_y >= write_editor_scroll_y + visible_rows) write_editor_scroll_y = write_editor_cursor_y - visible_rows + 1;
+                int line_len = write_editor_line_len(write_editor_cursor_y);
+                if (write_editor_cursor_x > line_len) write_editor_cursor_x = line_len;
                 write_editor_scroll_x = 0;
             }
         } else if (base == 0x1003) { // Left
@@ -574,12 +1330,12 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
                 if (write_editor_cursor_x < write_editor_scroll_x) write_editor_scroll_x = write_editor_cursor_x;
             } else if (write_editor_cursor_y > 0) {
                 write_editor_cursor_y--;
-                write_editor_cursor_x = strlength(write_editor_buffer[write_editor_cursor_y]);
+                write_editor_cursor_x = write_editor_line_len(write_editor_cursor_y);
                 write_editor_scroll_x = 0;
                 if (write_editor_cursor_y < write_editor_scroll_y) write_editor_scroll_y = write_editor_cursor_y;
             }
         } else if (base == 0x1004) { // Right
-            if (write_editor_cursor_x < strlength(write_editor_buffer[write_editor_cursor_y])) {
+            if (write_editor_cursor_x < write_editor_line_len(write_editor_cursor_y)) {
                 write_editor_cursor_x++;
                 int visible_cols = (write_editor_gui_cols > 0) ? write_editor_gui_cols : 76;
                 if (write_editor_cursor_x > write_editor_scroll_x + visible_cols - 1) write_editor_scroll_x = write_editor_cursor_x - (visible_cols - 1);
@@ -587,7 +1343,7 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
                 write_editor_cursor_y++;
                 write_editor_cursor_x = 0;
                 write_editor_scroll_x = 0;
-                if (write_editor_cursor_y >= write_editor_scroll_y + EDITOR_HEIGHT) write_editor_scroll_y = write_editor_cursor_y - EDITOR_HEIGHT + 1;
+                if (write_editor_cursor_y >= write_editor_scroll_y + visible_rows) write_editor_scroll_y = write_editor_cursor_y - visible_rows + 1;
             }
         }
         write_editor_sel_fy = write_editor_cursor_y; write_editor_sel_fx = write_editor_cursor_x;
@@ -599,7 +1355,7 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
         write_editor_sel_active = 1;
         write_editor_sel_ay = 0; write_editor_sel_ax = 0;
         write_editor_sel_fy = write_editor_num_lines - 1;
-        write_editor_sel_fx = strlength(write_editor_buffer[write_editor_sel_fy]);
+        write_editor_sel_fx = write_editor_line_len(write_editor_sel_fy);
         tile_invalidate_gui(write_editor_gui_tile);
         return;
     }
@@ -608,7 +1364,111 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
         write_editor_sel_active = 1;
         write_editor_sel_ay = write_editor_cursor_y; write_editor_sel_ax = 0;
         write_editor_sel_fy = write_editor_cursor_y;
-        write_editor_sel_fx = strlength(write_editor_buffer[write_editor_cursor_y]);
+        write_editor_sel_fx = write_editor_line_len(write_editor_cursor_y);
+        tile_invalidate_gui(write_editor_gui_tile);
+        return;
+    }
+
+    // Ctrl+F find
+    if (key == 0x2107) {
+        write_editor_modal = WRITE_EDITOR_MODAL_FIND;
+        // keep existing query; caret at end
+        write_editor_find_len = (int)strlen(write_editor_find_query);
+        if (write_editor_find_len >= (int)sizeof(write_editor_find_query)) write_editor_find_len = (int)sizeof(write_editor_find_query) - 1;
+        tile_invalidate_gui(write_editor_gui_tile);
+        return;
+    }
+
+    // Ctrl+G goto line
+    if (key == 0x2108) {
+        write_editor_modal = WRITE_EDITOR_MODAL_GOTO;
+        write_editor_goto_len = 0;
+        write_editor_goto_buf[0] = '\0';
+        tile_invalidate_gui(write_editor_gui_tile);
+        return;
+    }
+
+    // Ctrl+X cut (selection only)
+    if (key == 0x210B) {
+        write_editor_clear_status();
+        if (!write_editor_sel_active) {
+            write_editor_set_status("Cut: no selection");
+            tile_invalidate_gui(write_editor_gui_tile);
+            return;
+        }
+
+        // Copy selection to clipboard
+        write_editor_clipboard_len = 0;
+        int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
+        int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
+        if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
+        for (int y = sy; y <= fy; ++y) {
+            int start = (y == sy) ? sx : 0;
+            int end = (y == fy) ? fx : write_editor_line_len(y);
+            const char* s = write_editor_buffer[y];
+            for (int x = start; x < end; ++x) {
+                if (write_editor_clipboard_len < (int)sizeof(write_editor_clipboard) - 1) {
+                    write_editor_clipboard[write_editor_clipboard_len++] = s ? s[x] : 0;
+                }
+            }
+            if (y != fy) {
+                if (write_editor_clipboard_len < (int)sizeof(write_editor_clipboard) - 1) write_editor_clipboard[write_editor_clipboard_len++] = '\n';
+            }
+        }
+        write_editor_clipboard[write_editor_clipboard_len] = '\0';
+
+        // Record selection deletion for undo when bounded
+        char before[WRITE_EDITOR_UNDO_TEXT_MAX];
+        int before_len = 0;
+        int ok = (write_editor_copy_range_text(sy, sx, fy, fx, before, (int)sizeof(before) - 1, &before_len) == 0);
+        if (write_editor_delete_active_selection()) {
+            if (ok) {
+                write_editor_undo_t rec;
+                memset(&rec, 0, sizeof(rec));
+                rec.y = (uint16)sy;
+                rec.x = (uint16)sx;
+                rec.before_len = (uint16)before_len;
+                memcpy(rec.before, before, (size_t)before_len);
+                rec.after_len = 0;
+                (void)write_editor_undo_push(rec);
+            } else {
+                write_editor_set_status("Undo disabled (selection too big)");
+                write_editor_undo_clear();
+            }
+        }
+        tile_invalidate_gui(write_editor_gui_tile);
+        return;
+    }
+
+    // Ctrl+Z undo
+    if (key == 0x2109) {
+        if (write_editor_undo_len <= 0) {
+            write_editor_set_status("Undo: empty");
+            tile_invalidate_gui(write_editor_gui_tile);
+            return;
+        }
+        write_editor_undo_t rec = write_editor_undo_stack[--write_editor_undo_len];
+        write_editor_apply_undo_record(&rec, 0);
+        (void)write_editor_redo_push(rec);
+        // keep cursor visible
+        if (write_editor_cursor_y < write_editor_scroll_y) write_editor_scroll_y = write_editor_cursor_y;
+        if (write_editor_cursor_y >= write_editor_scroll_y + visible_rows) write_editor_scroll_y = write_editor_cursor_y - visible_rows + 1;
+        tile_invalidate_gui(write_editor_gui_tile);
+        return;
+    }
+
+    // Ctrl+Y redo
+    if (key == 0x210A) {
+        if (write_editor_redo_len <= 0) {
+            write_editor_set_status("Redo: empty");
+            tile_invalidate_gui(write_editor_gui_tile);
+            return;
+        }
+        write_editor_undo_t rec = write_editor_redo_stack[--write_editor_redo_len];
+        write_editor_apply_undo_record(&rec, 1);
+        (void)write_editor_undo_push(rec);
+        if (write_editor_cursor_y < write_editor_scroll_y) write_editor_scroll_y = write_editor_cursor_y;
+        if (write_editor_cursor_y >= write_editor_scroll_y + visible_rows) write_editor_scroll_y = write_editor_cursor_y - visible_rows + 1;
         tile_invalidate_gui(write_editor_gui_tile);
         return;
     }
@@ -617,7 +1477,8 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
         if (write_editor_cursor_y > 0) {
             write_editor_cursor_y--;
             if (write_editor_cursor_y < write_editor_scroll_y) write_editor_scroll_y = write_editor_cursor_y;
-            if (write_editor_cursor_x > strlength(write_editor_buffer[write_editor_cursor_y])) write_editor_cursor_x = strlength(write_editor_buffer[write_editor_cursor_y]);
+            int line_len = write_editor_line_len(write_editor_cursor_y);
+            if (write_editor_cursor_x > line_len) write_editor_cursor_x = line_len;
             write_editor_scroll_x = 0;
             write_editor_sel_active = 0;
         }
@@ -626,8 +1487,9 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
     if (key == 0x1002) { // Down
         if (write_editor_cursor_y < write_editor_num_lines - 1) {
             write_editor_cursor_y++;
-            if (write_editor_cursor_y >= write_editor_scroll_y + EDITOR_HEIGHT) write_editor_scroll_y = write_editor_cursor_y - EDITOR_HEIGHT + 1;
-            if (write_editor_cursor_x > strlength(write_editor_buffer[write_editor_cursor_y])) write_editor_cursor_x = strlength(write_editor_buffer[write_editor_cursor_y]);
+            if (write_editor_cursor_y >= write_editor_scroll_y + visible_rows) write_editor_scroll_y = write_editor_cursor_y - visible_rows + 1;
+            int line_len = write_editor_line_len(write_editor_cursor_y);
+            if (write_editor_cursor_x > line_len) write_editor_cursor_x = line_len;
             write_editor_scroll_x = 0;
             write_editor_sel_active = 0;
         }
@@ -639,7 +1501,7 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
             if (write_editor_cursor_x < write_editor_scroll_x) write_editor_scroll_x = write_editor_cursor_x;
         } else if (write_editor_cursor_y > 0) {
             write_editor_cursor_y--;
-            write_editor_cursor_x = strlength(write_editor_buffer[write_editor_cursor_y]);
+            write_editor_cursor_x = write_editor_line_len(write_editor_cursor_y);
             write_editor_scroll_x = 0;
             if (write_editor_cursor_y < write_editor_scroll_y) write_editor_scroll_y = write_editor_cursor_y;
         }
@@ -647,7 +1509,7 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
         return;
     }
     if (key == 0x1004) { // Right
-        if (write_editor_cursor_x < strlength(write_editor_buffer[write_editor_cursor_y])) {
+        if (write_editor_cursor_x < write_editor_line_len(write_editor_cursor_y)) {
             write_editor_cursor_x++;
             int visible_cols = (write_editor_gui_cols > 0) ? write_editor_gui_cols : 76;
             if (write_editor_cursor_x > write_editor_scroll_x + visible_cols - 1) write_editor_scroll_x = write_editor_cursor_x - (visible_cols - 1);
@@ -655,12 +1517,13 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
             write_editor_cursor_y++;
             write_editor_cursor_x = 0;
             write_editor_scroll_x = 0;
-            if (write_editor_cursor_y >= write_editor_scroll_y + EDITOR_HEIGHT) write_editor_scroll_y = write_editor_cursor_y - EDITOR_HEIGHT + 1;
+            if (write_editor_cursor_y >= write_editor_scroll_y + visible_rows) write_editor_scroll_y = write_editor_cursor_y - visible_rows + 1;
         }
         write_editor_sel_active = 0;
         return;
     }
     if (key == '\b') { // Backspace
+        write_editor_clear_status();
         if (write_editor_sel_active) {
             // If selection covers entire buffer, clear all quickly
             int all = 0;
@@ -668,64 +1531,168 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
                 int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
                 int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
                 if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
-                if (sy == 0 && sx == 0 && fy == write_editor_num_lines - 1 && fx == strlength(write_editor_buffer[fy])) all = 1;
+                if (sy == 0 && sx == 0 && fy == write_editor_num_lines - 1 && fx == write_editor_line_len(fy)) all = 1;
             }
             if (all) {
-                for (int i = 0; i < MAX_LINES; ++i) write_editor_buffer[i][0] = '\0';
-                write_editor_num_lines = 1; write_editor_cursor_x = 0; write_editor_cursor_y = 0;
+                write_editor_free_all_lines();
+                write_editor_num_lines = 1;
+                write_editor_ensure_line_cap(0, 1);
+                if (write_editor_buffer[0]) write_editor_buffer[0][0] = '\0';
+                write_editor_cursor_x = 0; write_editor_cursor_y = 0;
                 write_editor_scroll_x = 0; write_editor_scroll_y = 0; write_editor_sel_active = 0;
                 write_editor_modified = 1; write_editor_update_tile_modified();
+                write_editor_undo_clear();
                 tile_invalidate_gui(write_editor_gui_tile);
                 return;
             }
-            if (write_editor_delete_active_selection()) return;
+            // Record selection deletion for undo (bounded)
+            char before[WRITE_EDITOR_UNDO_TEXT_MAX];
+            int before_len = 0;
+            int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
+            int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
+            if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
+            int ok = (write_editor_copy_range_text(sy, sx, fy, fx, before, (int)sizeof(before) - 1, &before_len) == 0);
+            if (write_editor_delete_active_selection()) {
+                if (ok) {
+                    write_editor_undo_t rec;
+                    memset(&rec, 0, sizeof(rec));
+                    rec.y = (uint16)sy;
+                    rec.x = (uint16)sx;
+                    rec.before_len = (uint16)before_len;
+                    memcpy(rec.before, before, (size_t)before_len);
+                    rec.after_len = 0;
+                    (void)write_editor_undo_push(rec);
+                } else {
+                    write_editor_set_status("Undo disabled (selection too big)");
+                    write_editor_undo_clear();
+                }
+                return;
+            }
         }
         if (write_editor_cursor_x > 0) {
-            int line_len = strlength(write_editor_buffer[write_editor_cursor_y]);
-            for (int i = write_editor_cursor_x - 1; i < line_len; i++) write_editor_buffer[write_editor_cursor_y][i] = write_editor_buffer[write_editor_cursor_y][i + 1];
+            // Record single-char delete
+            int y0 = write_editor_cursor_y;
+            int x0 = write_editor_cursor_x - 1;
+            char before[2] = {0, 0};
+            const char* s = write_editor_buffer[y0] ? write_editor_buffer[y0] : "";
+            if (x0 >= 0 && x0 < write_editor_line_len(y0)) before[0] = s[x0];
+            char* line = write_editor_buffer[write_editor_cursor_y];
+            if (!line) {
+                write_editor_ensure_line_cap(write_editor_cursor_y, 1);
+                line = write_editor_buffer[write_editor_cursor_y];
+            }
+            int line_len = write_editor_line_len(write_editor_cursor_y);
+            if (line) memmove(&line[write_editor_cursor_x - 1], &line[write_editor_cursor_x], (size_t)((line_len - write_editor_cursor_x) + 1));
             write_editor_cursor_x--;
             write_editor_modified = 1;
             write_editor_update_tile_modified();
+            if (before[0]) {
+                write_editor_undo_t rec;
+                memset(&rec, 0, sizeof(rec));
+                rec.y = (uint16)y0;
+                rec.x = (uint16)x0;
+                rec.before_len = 1;
+                rec.before[0] = before[0];
+                rec.after_len = 0;
+                (void)write_editor_undo_push(rec);
+            }
         } else if (write_editor_cursor_y > 0) {
-            int prev_len = strlength(write_editor_buffer[write_editor_cursor_y - 1]);
-            int curr_len = strlength(write_editor_buffer[write_editor_cursor_y]);
-            if (prev_len + curr_len < MAX_LINE_LENGTH) {
-                for (int i = 0; i < curr_len; i++) write_editor_buffer[write_editor_cursor_y - 1][prev_len + i] = write_editor_buffer[write_editor_cursor_y][i];
-                write_editor_buffer[write_editor_cursor_y - 1][prev_len + curr_len] = '\0';
-                for (int i = write_editor_cursor_y; i < write_editor_num_lines - 1; i++) strcpy(write_editor_buffer[i], write_editor_buffer[i + 1]);
-                write_editor_num_lines--;
-                write_editor_cursor_y--;
-                write_editor_cursor_x = prev_len;
-                write_editor_modified = 1;
-                write_editor_update_tile_modified();
-                if (write_editor_cursor_y < write_editor_scroll_y) write_editor_scroll_y = write_editor_cursor_y;
-                // Clear the now-unused last logical line to avoid stale text reappearing
-                if (write_editor_num_lines >= 0 && write_editor_num_lines < MAX_LINES) {
-                    write_editor_buffer[write_editor_num_lines][0] = '\0';
+            // Record newline delete (line join)
+            int y0 = write_editor_cursor_y - 1;
+            int x0 = write_editor_line_len(y0);
+            int prev_len = write_editor_line_len(write_editor_cursor_y - 1);
+            int curr_len = write_editor_line_len(write_editor_cursor_y);
+            int can_copy = MAX_LINE_LENGTH - prev_len;
+            int copy = (curr_len < can_copy) ? curr_len : can_copy;
+            if (copy >= 0) {
+                if (write_editor_ensure_line_cap(write_editor_cursor_y - 1, prev_len + copy + 1) == 0) {
+                    char* prev = write_editor_buffer[write_editor_cursor_y - 1];
+                    char* curr = write_editor_buffer[write_editor_cursor_y];
+                    if (!prev) prev_len = 0;
+                    if (prev && curr && copy > 0) memcpy(&prev[prev_len], curr, (size_t)copy);
+                    if (prev) prev[prev_len + copy] = '\0';
+                    write_editor_delete_line_at(write_editor_cursor_y);
+                    write_editor_cursor_y--;
+                    write_editor_cursor_x = prev_len;
+                    write_editor_modified = 1;
+                    write_editor_update_tile_modified();
+                    if (write_editor_cursor_y < write_editor_scroll_y) write_editor_scroll_y = write_editor_cursor_y;
+                    if (write_editor_scroll_x > write_editor_cursor_x) write_editor_scroll_x = write_editor_cursor_x;
+
+                    write_editor_undo_t rec;
+                    memset(&rec, 0, sizeof(rec));
+                    rec.y = (uint16)y0;
+                    rec.x = (uint16)x0;
+                    rec.before_len = 1;
+                    rec.before[0] = '\n';
+                    rec.after_len = 0;
+                    (void)write_editor_undo_push(rec);
                 }
-                // Clamp horizontal scroll to caret
-                if (write_editor_scroll_x > write_editor_cursor_x) write_editor_scroll_x = write_editor_cursor_x;
             }
         }
         return;
     }
     if (key == '\n') { // Enter
+        write_editor_clear_status();
         if (write_editor_sel_active) {
-            if (!write_editor_delete_active_selection()) return; // should delete and update state
+            // Record selection replace (selection -> "\n") when bounded
+            char before[WRITE_EDITOR_UNDO_TEXT_MAX];
+            int before_len = 0;
+            int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
+            int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
+            if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
+            int ok = (write_editor_copy_range_text(sy, sx, fy, fx, before, (int)sizeof(before) - 1, &before_len) == 0);
+            if (!write_editor_delete_active_selection()) return;
+            // After deletion, cursor is at (sy,sx)
+            if (ok) {
+                write_editor_undo_t rec;
+                memset(&rec, 0, sizeof(rec));
+                rec.y = (uint16)sy;
+                rec.x = (uint16)sx;
+                rec.before_len = (uint16)before_len;
+                memcpy(rec.before, before, (size_t)before_len);
+                rec.after_len = 1;
+                rec.after[0] = '\n';
+                (void)write_editor_undo_push(rec);
+            } else {
+                write_editor_set_status("Undo disabled (selection too big)");
+                write_editor_undo_clear();
+            }
         }
         if (write_editor_num_lines < MAX_LINES) {
-            int line_len = strlength(write_editor_buffer[write_editor_cursor_y]);
-            char temp[MAX_LINE_LENGTH + 1];
-            strcpy(temp, write_editor_buffer[write_editor_cursor_y] + write_editor_cursor_x);
-            write_editor_buffer[write_editor_cursor_y][write_editor_cursor_x] = '\0';
-            for (int i = write_editor_num_lines; i > write_editor_cursor_y + 1; i--) strcpy(write_editor_buffer[i], write_editor_buffer[i - 1]);
-            strcpy(write_editor_buffer[write_editor_cursor_y + 1], temp);
-            write_editor_num_lines++;
+            // Record newline insert (no selection)
+            if (!write_editor_sel_active) {
+                write_editor_undo_t rec;
+                memset(&rec, 0, sizeof(rec));
+                rec.y = (uint16)write_editor_cursor_y;
+                rec.x = (uint16)write_editor_cursor_x;
+                rec.before_len = 0;
+                rec.after_len = 1;
+                rec.after[0] = '\n';
+                (void)write_editor_undo_push(rec);
+            }
+            int y = write_editor_cursor_y;
+            int len = write_editor_line_len(y);
+            if (write_editor_cursor_x > len) write_editor_cursor_x = len;
+            char* line = write_editor_buffer[y];
+            if (!line) {
+                write_editor_ensure_line_cap(y, 1);
+                line = write_editor_buffer[y];
+                len = write_editor_line_len(y);
+                if (write_editor_cursor_x > len) write_editor_cursor_x = len;
+            }
+            const char* tail = line ? &line[write_editor_cursor_x] : "";
+            int tail_len = len - write_editor_cursor_x;
+            if (tail_len < 0) tail_len = 0;
+            if (line) line[write_editor_cursor_x] = '\0';
+
+            write_editor_shift_lines_down(y + 1);
+            write_editor_set_line_from_span(y + 1, tail, tail_len, NULL);
             write_editor_cursor_y++;
             write_editor_cursor_x = 0;
             write_editor_modified = 1;
             write_editor_update_tile_modified();
-            if (write_editor_cursor_y >= write_editor_scroll_y + EDITOR_HEIGHT) write_editor_scroll_y = write_editor_cursor_y - EDITOR_HEIGHT + 1;
+            if (write_editor_cursor_y >= write_editor_scroll_y + visible_rows) write_editor_scroll_y = write_editor_cursor_y - visible_rows + 1;
         }
         return;
     }
@@ -748,7 +1715,7 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
         }
         return;
     }
-    if (key == 0x2002) { // exit
+    if (key == 0x2101) { // exit (Ctrl+Q)
         // Tiler will attempt to close after this callback.
         // If modified, show prompt and veto close via the close callback.
         if (write_editor_modified) {
@@ -757,28 +1724,133 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
         }
         return;
     }
+
+    // Ctrl+W: toggle visible whitespace
+    if (key == 0x2106) {
+        write_editor_show_whitespace = !write_editor_show_whitespace;
+        if (write_editor_gui_tile >= 0) tile_invalidate_gui(write_editor_gui_tile);
+        return;
+    }
+
+    // Tab: insert spaces to next 4-column boundary
+    if (key == '\t') {
+        write_editor_clear_status();
+        if (write_editor_sel_active) {
+            // Record selection replace (selection -> spaces) if bounded
+            char before[WRITE_EDITOR_UNDO_TEXT_MAX];
+            int before_len = 0;
+            int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
+            int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
+            if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
+            int ok = (write_editor_copy_range_text(sy, sx, fy, fx, before, (int)sizeof(before) - 1, &before_len) == 0);
+            if (!write_editor_delete_active_selection()) { /* continue */ }
+            // We'll push a combined record after we compute the space count below.
+            // Store selection info in locals.
+            if (!ok) {
+                write_editor_set_status("Undo disabled (selection too big)");
+                write_editor_undo_clear();
+            }
+        }
+        int line_len = write_editor_line_len(write_editor_cursor_y);
+        if (line_len < MAX_LINE_LENGTH) {
+            int tab_stop = 4;
+            int want = tab_stop - (write_editor_cursor_x % tab_stop);
+            if (want < 1) want = tab_stop;
+            int can = MAX_LINE_LENGTH - line_len;
+            if (want > can) want = can;
+            if (want > 0) {
+                // Undo record: insertion of N spaces
+                write_editor_undo_t rec;
+                memset(&rec, 0, sizeof(rec));
+                rec.y = (uint16)write_editor_cursor_y;
+                rec.x = (uint16)write_editor_cursor_x;
+                rec.before_len = 0;
+                rec.after_len = (uint16)want;
+                if (want > WRITE_EDITOR_UNDO_TEXT_MAX) {
+                    write_editor_set_status("Undo disabled (tab too big)");
+                    write_editor_undo_clear();
+                } else {
+                    for (int i = 0; i < want; ++i) rec.after[i] = ' ';
+                    (void)write_editor_undo_push(rec);
+                }
+                int new_len = line_len + want;
+                if (write_editor_ensure_line_cap(write_editor_cursor_y, new_len + 1) != 0) return;
+                char* line = write_editor_buffer[write_editor_cursor_y];
+                if (!line) return;
+                int tail_bytes = line_len - write_editor_cursor_x;
+                if (tail_bytes >= 0) {
+                    memmove(&line[write_editor_cursor_x + want],
+                            &line[write_editor_cursor_x],
+                            (size_t)(tail_bytes + 1));
+                }
+                for (int i = 0; i < want; ++i) line[write_editor_cursor_x + i] = ' ';
+                write_editor_cursor_x += want;
+                write_editor_modified = 1;
+                write_editor_update_tile_modified();
+                if (write_editor_gui_tile >= 0) tile_invalidate_gui(write_editor_gui_tile);
+                write_editor_sel_active = 0;
+            }
+        }
+        return;
+    }
     // Printable insert
     if (key >= 32 && key <= 126) {
+        write_editor_clear_status();
         if (write_editor_sel_active) {
+            // Record selection replace (selection -> single char) if bounded
+            char before[WRITE_EDITOR_UNDO_TEXT_MAX];
+            int before_len = 0;
+            int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
+            int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
+            if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
+            int ok = (write_editor_copy_range_text(sy, sx, fy, fx, before, (int)sizeof(before) - 1, &before_len) == 0);
             if (!write_editor_delete_active_selection()) { /* fallthrough */ }
+            if (ok) {
+                write_editor_undo_t rec;
+                memset(&rec, 0, sizeof(rec));
+                rec.y = (uint16)sy;
+                rec.x = (uint16)sx;
+                rec.before_len = (uint16)before_len;
+                memcpy(rec.before, before, (size_t)before_len);
+                rec.after_len = 1;
+                rec.after[0] = (char)key;
+                (void)write_editor_undo_push(rec);
+            } else {
+                write_editor_set_status("Undo disabled (selection too big)");
+                write_editor_undo_clear();
+            }
+        } else {
+            // Record single char insertion
+            write_editor_undo_t rec;
+            memset(&rec, 0, sizeof(rec));
+            rec.y = (uint16)write_editor_cursor_y;
+            rec.x = (uint16)write_editor_cursor_x;
+            rec.before_len = 0;
+            rec.after_len = 1;
+            rec.after[0] = (char)key;
+            (void)write_editor_undo_push(rec);
         }
-        int line_len = strlength(write_editor_buffer[write_editor_cursor_y]);
+        int line_len = write_editor_line_len(write_editor_cursor_y);
         if (line_len < MAX_LINE_LENGTH) {
             /* Move the tail (including terminating NUL) one position to the right so we insert without
              * overwriting the previous character. Use memmove because the source and destination
              * overlap. The number of bytes to move is (line_len - cursor_x) + 1 to include '\0'. */
+            int new_len = line_len + 1;
+            if (write_editor_ensure_line_cap(write_editor_cursor_y, new_len + 1) != 0) return;
+            char* line = write_editor_buffer[write_editor_cursor_y];
+            if (!line) return;
             int tail_bytes = line_len - write_editor_cursor_x;
             if (tail_bytes >= 0) {
-                memmove(&write_editor_buffer[write_editor_cursor_y][write_editor_cursor_x + 1],
-                        &write_editor_buffer[write_editor_cursor_y][write_editor_cursor_x],
+                memmove(&line[write_editor_cursor_x + 1],
+                        &line[write_editor_cursor_x],
                         (size_t)(tail_bytes + 1));
             }
-            write_editor_buffer[write_editor_cursor_y][write_editor_cursor_x] = (char)key;
+            line[write_editor_cursor_x] = (char)key;
             write_editor_cursor_x++;
             write_editor_modified = 1;
             write_editor_update_tile_modified();
             if (write_editor_gui_tile >= 0) tile_invalidate_gui(write_editor_gui_tile);
-            if (write_editor_cursor_y >= write_editor_scroll_y + EDITOR_HEIGHT) write_editor_scroll_y = write_editor_cursor_y - EDITOR_HEIGHT + 1;
+            if (write_editor_cursor_y >= write_editor_scroll_y + visible_rows) write_editor_scroll_y = write_editor_cursor_y - visible_rows + 1;
             write_editor_sel_active = 0;
         }
         return;
@@ -791,23 +1863,35 @@ static int clampi(int v, int lo, int hi) { if (v < lo) return lo; if (v > hi) re
 
 // Convert pixel position to absolute buffer position (line,col) accounting for scroll and wrapping
 static void write_editor_hit_test(int px, int py, int* out_line, int* out_col) {
-    int cols = (write_editor_last_cw > 0) ? (write_editor_last_cw / 8) : (write_editor_gui_cols > 0 ? write_editor_gui_cols : 80);
-    int rows = (write_editor_last_ch > 0) ? (write_editor_last_ch / 8) : (write_editor_gui_rows > 0 ? write_editor_gui_rows : 25);
+    int cell_w = vga_text_cell_w();
+    int cell_h = vga_text_cell_h();
+    if (cell_w <= 0) cell_w = 8;
+    if (cell_h <= 0) cell_h = 8;
+    int cols = (write_editor_last_cw > 0) ? (write_editor_last_cw / cell_w) : (write_editor_gui_cols > 0 ? write_editor_gui_cols : 80);
+    int rows = (write_editor_last_ch > 0) ? (write_editor_last_ch / cell_h) : (write_editor_gui_rows > 0 ? write_editor_gui_rows : 25);
     int text_rows = rows > 1 ? rows - 1 : rows; // bottom row is status
-    int rel_x = clampi(px - write_editor_last_cx, 0, write_editor_last_cw - 1) / 8;
-    int rel_y = clampi(py - write_editor_last_cy, 0, (text_rows * 8) - 1) / 8;
+
+    int gutter_cols = write_editor_gui_gutter_cols();
+    if (gutter_cols > cols - 1) gutter_cols = cols - 1;
+    int text_cols = cols - gutter_cols;
+    if (text_cols < 1) text_cols = 1;
+
+    int rel_x_cells = clampi(px - write_editor_last_cx, 0, write_editor_last_cw - 1) / cell_w;
+    int rel_x = rel_x_cells - gutter_cols;
+    if (rel_x < 0) rel_x = 0;
+    int rel_y = clampi(py - write_editor_last_cy, 0, (text_rows * cell_h) - 1) / cell_h;
     int abs_line = write_editor_scroll_y;
     int seg = 0;
     for (int r = 0; r < rel_y; ++r) {
         if (abs_line >= write_editor_num_lines) break;
-        int len = strlength(write_editor_buffer[abs_line]);
-        int wraps = (len + cols - 1) / cols; if (wraps < 1) wraps = 1;
+        int len = write_editor_line_len(abs_line);
+        int wraps = (len + text_cols - 1) / text_cols; if (wraps < 1) wraps = 1;
         seg++;
         if (seg >= wraps) { abs_line++; seg = 0; }
     }
     if (abs_line >= write_editor_num_lines) abs_line = write_editor_num_lines - 1;
-    int len = strlength(write_editor_buffer[abs_line]);
-    int col = seg * cols + rel_x;
+    int len = write_editor_line_len(abs_line);
+    int col = seg * text_cols + rel_x;
     if (col > len) col = len;
     if (out_line) *out_line = abs_line;
     if (out_col) *out_col = col;
@@ -817,7 +1901,38 @@ static void write_editor_hit_test(int px, int py, int* out_line, int* out_col) {
 static void write_editor_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata) {
     (void)tile_idx; (void)userdata;
     if (write_editor_gui_tile < 0) return;
+    if (write_editor_open_warn_active) return;
     if (write_editor_exit_prompt_active) return;
+
+    // Scrollbar click-to-jump (left button press in scrollbar track)
+    if (write_editor_scrollbar_active && write_editor_scrollbar_w > 0 && write_editor_scrollbar_h > 0) {
+        uint8 lb = me->buttons & MOUSE_BUTTON_LEFT;
+        uint8 changed = me->button_changes;
+        if ((changed & MOUSE_BUTTON_LEFT) && lb) {
+            if (me->x >= write_editor_scrollbar_x && me->x < write_editor_scrollbar_x + write_editor_scrollbar_w &&
+                me->y >= write_editor_scrollbar_y && me->y < write_editor_scrollbar_y + write_editor_scrollbar_h) {
+                int rows = write_editor_gui_visible_text_rows();
+                int denom = write_editor_num_lines - rows;
+                if (denom < 1) denom = 1;
+                int rel = me->y - write_editor_scrollbar_y;
+                if (rel < 0) rel = 0;
+                if (rel > write_editor_scrollbar_h - 1) rel = write_editor_scrollbar_h - 1;
+                int max_move = write_editor_scrollbar_h - write_editor_scrollbar_thumb_h;
+                int thumb_y = rel - (write_editor_scrollbar_thumb_h / 2);
+                if (thumb_y < 0) thumb_y = 0;
+                if (thumb_y > max_move) thumb_y = max_move;
+                int new_scroll = 0;
+                if (max_move > 0) {
+                    new_scroll = (int)((uint32)thumb_y * (uint32)denom / (uint32)max_move);
+                }
+                if (new_scroll < 0) new_scroll = 0;
+                if (new_scroll > denom) new_scroll = denom;
+                write_editor_scroll_y = new_scroll;
+                tile_invalidate_gui(write_editor_gui_tile);
+                return;
+            }
+        }
+    }
     // Wheel scroll vertical
     if (me->wheel_delta != 0) {
         int delta = me->wheel_delta; // up positive
@@ -873,10 +1988,11 @@ static void write_editor_gui_mouse(int tile_idx, const mouse_event_t* me, void* 
             if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
             for (int y = sy; y <= fy; ++y) {
                 int start = (y == sy) ? sx : 0;
-                int end = (y == fy) ? fx : strlength(write_editor_buffer[y]);
+                int end = (y == fy) ? fx : write_editor_line_len(y);
+                const char* s = write_editor_buffer[y];
                 for (int x = start; x < end; ++x) {
                     if (write_editor_clipboard_len < (int)sizeof(write_editor_clipboard) - 1) {
-                        write_editor_clipboard[write_editor_clipboard_len++] = write_editor_buffer[y][x];
+                        write_editor_clipboard[write_editor_clipboard_len++] = s ? s[x] : 0;
                     }
                 }
                 if (y != fy) {
@@ -896,27 +2012,39 @@ static void write_editor_gui_mouse(int tile_idx, const mouse_event_t* me, void* 
                 if (ch == '\n') {
                     // simulate Enter
                     if (write_editor_num_lines < MAX_LINES) {
-                        int line_len = strlength(write_editor_buffer[write_editor_cursor_y]);
-                        char temp[MAX_LINE_LENGTH + 1];
-                        strcpy(temp, write_editor_buffer[write_editor_cursor_y] + write_editor_cursor_x);
-                        write_editor_buffer[write_editor_cursor_y][write_editor_cursor_x] = '\0';
-                        for (int k = write_editor_num_lines; k > write_editor_cursor_y + 1; k--) strcpy(write_editor_buffer[k], write_editor_buffer[k - 1]);
-                        strcpy(write_editor_buffer[write_editor_cursor_y + 1], temp);
-                        write_editor_num_lines++;
+                        int y = write_editor_cursor_y;
+                        int len = write_editor_line_len(y);
+                        if (write_editor_cursor_x > len) write_editor_cursor_x = len;
+                        char* line_ptr = write_editor_buffer[y];
+                        if (!line_ptr) {
+                            write_editor_ensure_line_cap(y, 1);
+                            line_ptr = write_editor_buffer[y];
+                            len = write_editor_line_len(y);
+                            if (write_editor_cursor_x > len) write_editor_cursor_x = len;
+                        }
+                        const char* tail = line_ptr ? &line_ptr[write_editor_cursor_x] : "";
+                        int tail_len = len - write_editor_cursor_x;
+                        if (tail_len < 0) tail_len = 0;
+                        if (line_ptr) line_ptr[write_editor_cursor_x] = '\0';
+                        write_editor_shift_lines_down(y + 1);
+                        write_editor_set_line_from_span(y + 1, tail, tail_len, NULL);
                         write_editor_cursor_y++;
                         write_editor_cursor_x = 0;
                     }
                 } else if (ch >= 32 && ch <= 126) {
-                    int line_len = strlength(write_editor_buffer[write_editor_cursor_y]);
-            if (line_len < MAX_LINE_LENGTH) {
-                /* Insert character at cursor by shifting tail right (including NUL) */
-                int tail_bytes = line_len - write_editor_cursor_x;
-                if (tail_bytes >= 0) {
-                    memmove(&write_editor_buffer[write_editor_cursor_y][write_editor_cursor_x + 1],
-                        &write_editor_buffer[write_editor_cursor_y][write_editor_cursor_x],
-                        (size_t)(tail_bytes + 1));
-                }
-                write_editor_buffer[write_editor_cursor_y][write_editor_cursor_x] = ch;
+                    int line_len = write_editor_line_len(write_editor_cursor_y);
+                    if (line_len < MAX_LINE_LENGTH) {
+                        int new_len = line_len + 1;
+                        if (write_editor_ensure_line_cap(write_editor_cursor_y, new_len + 1) != 0) continue;
+                        char* line_ptr = write_editor_buffer[write_editor_cursor_y];
+                        if (!line_ptr) continue;
+                        int tail_bytes = line_len - write_editor_cursor_x;
+                        if (tail_bytes >= 0) {
+                            memmove(&line_ptr[write_editor_cursor_x + 1],
+                                &line_ptr[write_editor_cursor_x],
+                                (size_t)(tail_bytes + 1));
+                        }
+                        line_ptr[write_editor_cursor_x] = ch;
                         write_editor_cursor_x++;
                     }
                 }
@@ -949,8 +2077,8 @@ void write_editor(const char* filename, uint8 disk) {
     write_editor_scroll_y = 0;
     write_editor_scroll_x = 0;
     write_editor_modified = 0;
-    write_editor_exit_prompt_active = 0;
-    write_editor_last_save_failed = 0;
+    write_editor_show_whitespace = 0;
+    write_editor_reset_ephemeral_state();
     if (load_file_to_write_editor(filename, disk) < 0) {
         printf("%cFailed to load file.\n", 255, 0, 0);
         return;

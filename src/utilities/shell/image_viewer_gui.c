@@ -787,7 +787,7 @@ static void viewer_gui_key(int tile_idx, int key, void* ud) {
         }
     }
     else if ((key=='l' || key=='L') && g_view.is_reiv && !g_view.loop_locked) { g_view.loop_enabled = !g_view.loop_enabled; changed = 1; }
-    else if (key==0x2002) { // Ctrl+X closes
+    else if (key==0x2101) { // Ctrl+Q closes
         viewer_free_resources();
         if (g_view.is_window) {
             wm_close_window(g_view.window_id);

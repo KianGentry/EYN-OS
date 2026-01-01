@@ -13,6 +13,9 @@ static int g_tm_initialized = 0;
 // allow sleeping the CPU when tiling manager is idle
 #include <sched.h>
 #include <watchdog.h>
+#include <ui_prefs.h>
+
+extern uint8_t g_current_drive;
 
 #define MAX_TILES 4
 #define MAX_WINDOWS 8
@@ -30,7 +33,7 @@ typedef struct {
     int x, y, width, height; // pixel coords
     int term_idx; // which virtual terminal index
     int active;
-    int status_visible; // whether the status bar is normally visible for this tile
+    int status_visible; // legacy: kept for compatibility; status overlay is Alt-held now
     int static_drawn; // whether static UI (title/status/border) has been drawn into backbuffer
     unsigned int last_drawn_version; // for incremental content redraw
     // cache of last content rect used for rendering (excludes title/status/borders)
@@ -55,6 +58,150 @@ static int g_force_full_redraw = 1;
 // Fullscreen state: -1 means normal, otherwise index of tile that is fullscreened
 static int fullscreen_tile = -1;
 
+// --- Status bar overlay (Alt-held) ---
+static inline int status_bar_height_px(void) {
+    int fh = vga_text_cell_h();
+    int h = fh + 4;
+    if (h < 12) h = 12;
+    return h;
+}
+
+static inline int status_overlay_visible(void) {
+    return (tui_alt_pressed != 0) || (ui_prefs_get_status_bar_mode() != 0);
+}
+
+// Fixed-rate marquee: ~3 characters per second regardless of frame rate.
+// Uses a bounce-with-pause pattern so the text reverses at ends.
+static inline uint32 status_scroll_steps(void) {
+    uint32 hz = sched_get_tick_hz();
+    if (!hz) hz = 50;
+    uint32 ticks = sched_get_tick_count();
+    // 3 chars/sec => steps = floor(ticks * 3 / hz)
+    uint32 q = ticks / hz;
+    uint32 r = ticks % hz;
+    return (q * 3u) + ((r * 3u) / hz);
+}
+
+static inline int status_bounce_offset(uint32 steps, int max_offset, int pause_steps) {
+    if (max_offset <= 0) return 0;
+    if (pause_steps < 0) pause_steps = 0;
+    int cycle = (max_offset * 2) + (pause_steps * 2);
+    if (cycle <= 0) return 0;
+    int p = (int)(steps % (uint32)cycle);
+    if (p < max_offset) return p;
+    p -= max_offset;
+    if (p < pause_steps) return max_offset;
+    p -= pause_steps;
+    if (p < max_offset) return (max_offset - p);
+    return 0;
+}
+
+static void draw_status_overlay_text(int x, int y, int w, int h,
+                                     const char* left_text,
+                                     const char* right_base,
+                                     const char* right_extra,
+                                     int base_is_red) {
+    wm_theme_t theme;
+    wm_theme_get(&theme);
+
+    int cw = vga_text_cell_w();
+    int fh = vga_text_cell_h();
+    if (w <= 8 || cw <= 0) return;
+
+    drawRect(x, y, w, h, theme.status_r, theme.status_g, theme.status_b);
+
+    int text_y = y + (h - fh) / 2;
+    int clip_min = x + 4;
+    int clip_max = x + w - 4;
+    if (clip_max <= clip_min) return;
+
+    int total_chars = (clip_max - clip_min) / cw;
+    if (total_chars <= 0) return;
+
+    // Right side: draw base controls (white), then optional extra (red) immediately to the left.
+    const char* base = right_base ? right_base : "";
+    const char* extra = right_extra ? right_extra : "";
+    int base_len = (int)strlen(base);
+    int extra_len = (int)strlen(extra);
+
+    // Truncate to avoid negative placement.
+    if (base_len > total_chars) base_len = total_chars;
+    // Render base as the tail if it doesn't fit (keeps ": Exit" visible).
+    const char* base_ptr = base;
+    int full_base_len = (int)strlen(base);
+    if (full_base_len > base_len) base_ptr = base + (full_base_len - base_len);
+
+    int base_start_x = clip_max - base_len * cw;
+    int base_r = base_is_red ? 255 : theme.status_text_r;
+    int base_g = base_is_red ? 0 : theme.status_text_g;
+    int base_b = base_is_red ? 0 : theme.status_text_b;
+
+    for (int i = 0; i < base_len; ++i) {
+        int cx = base_start_x + i * cw;
+        if (cx < clip_min || cx + cw > clip_max) continue;
+        drawCharAt(cx, text_y, (unsigned char)base_ptr[i], base_r, base_g, base_b);
+    }
+
+    int gap_chars = (base_len > 0 && extra_len > 0) ? 1 : 0;
+    int extra_room = total_chars - base_len - gap_chars;
+    if (extra_room < 0) extra_room = 0;
+
+    int extra_draw_len = extra_len;
+    if (extra_draw_len > extra_room) extra_draw_len = extra_room;
+    const char* extra_ptr = extra;
+    if (extra_len > extra_draw_len) {
+        // Keep tail visible for short markers like "[Modified]".
+        extra_ptr = extra + (extra_len - extra_draw_len);
+    }
+    int extra_start_x = base_start_x - gap_chars * cw - extra_draw_len * cw;
+    if (extra_draw_len > 0) {
+        int rr = base_is_red ? 255 : 255;
+        int rg = base_is_red ? 0 : 255;
+        int rb = base_is_red ? 0 : 255;
+        (void)rr; (void)rg; (void)rb;
+        // Extra is rendered in red to preserve existing warning/marker behavior.
+        for (int i = 0; i < extra_draw_len; ++i) {
+            int cx = extra_start_x + i * cw;
+            if (cx < clip_min || cx + cw > clip_max) continue;
+            drawCharAt(cx, text_y, (unsigned char)extra_ptr[i], 255, 0, 0);
+        }
+        // Optional gap
+        if (gap_chars) {
+            int gx = base_start_x - cw;
+            if (gx >= clip_min && gx + cw <= clip_max) drawCharAt(gx, text_y, (unsigned char)' ', theme.status_text_r, theme.status_text_g, theme.status_text_b);
+        }
+    }
+
+    // Left side: scroll if needed in remaining space.
+    int left_clip_max = extra_start_x - cw; // leave at least 1 char gap before right area
+    if (extra_draw_len == 0 && base_len > 0) left_clip_max = base_start_x - cw;
+    if (base_len == 0 && extra_draw_len == 0) left_clip_max = clip_max;
+    if (left_clip_max > clip_max) left_clip_max = clip_max;
+    if (left_clip_max <= clip_min) return;
+
+    int left_chars = (left_clip_max - clip_min) / cw;
+    if (left_chars <= 0) return;
+
+    const char* left = left_text ? left_text : "";
+    int left_len = (int)strlen(left);
+    if (left_len <= 0) return;
+
+    int start_idx = 0;
+    if (left_len > left_chars) {
+        int max_off = left_len - left_chars;
+        // Pause ~1s at each end (3 steps at 3 chars/sec).
+        start_idx = status_bounce_offset(status_scroll_steps(), max_off, 3);
+    }
+
+    for (int i = 0; i < left_chars; ++i) {
+        int idx = start_idx + i;
+        if (idx >= left_len) break;
+        int cx = clip_min + i * cw;
+        if (cx < clip_min || cx + cw > left_clip_max) continue;
+        drawCharAt(cx, text_y, (unsigned char)left[idx], theme.status_text_r, theme.status_text_g, theme.status_text_b);
+    }
+}
+
 // GUI client storage
 static tile_gui_draw_cb gui_draw_cb[MAX_TILES];
 static tile_gui_key_cb gui_key_cb[MAX_TILES];
@@ -63,7 +210,6 @@ static tile_gui_close_cb gui_close_cb[MAX_TILES];
 static void* gui_userdata[MAX_TILES];
 // Redraw gating for GUI clients: only redraw when invalidated or when rect/version/force changes
 static int gui_needs_redraw[MAX_TILES];
-// When set, a GUI client is redrawn every frame (subject to global FPS cap)
 static int gui_continuous_redraw[MAX_TILES];
 
 static int screen_w = 640; // pixels
@@ -255,11 +401,9 @@ static int win_title_height(const window_t* w) {
     return h;
 }
 static int win_status_height(const window_t* w) {
-    if (!(w->status_left || w->status_right)) return 0;
-    int fh = vga_text_cell_h();
-    int h = fh + 4;
-    if (h < 12) h = 12;
-    return h;
+    (void)w;
+    // Status is an Alt-held overlay and does not reserve layout space.
+    return 0;
 }
 
 // Forward declarations for window helpers used later in the main loop
@@ -456,7 +600,7 @@ static void wm_draw_decor(window_t* w, int is_focused) {
     // In low mode, draw simpler decorations: skip icons and minimize overdraw
     if (g_gui_low_mode) {
         int th = win_title_height(w);
-        int sh = win_status_height(w);
+        int sh = 0;
         // frame background
         drawRect(w->x, w->y, w->w, w->h, 0, 0, 0);
         // title bar
@@ -473,15 +617,7 @@ static void wm_draw_decor(window_t* w, int is_focused) {
             int start_x = w->x + 4;
             for (int i = 0; i < len; ++i) drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], color_r, color_g, color_b);
         }
-        // optional compact status
-        if (sh > 0) {
-            int sy = w->y + th;
-            drawRect(w->x, sy, w->w, sh, g_wm_theme.status_r, g_wm_theme.status_g, g_wm_theme.status_b);
-            const char* left = w->status_left ? w->status_left : "";
-            int max_chars = (w->w - 8) / cw; if (max_chars < 0) max_chars = 0;
-            int text_y = sy + (sh - fh) / 2;
-            for (int i = 0; left[i] && i < max_chars; ++i) drawCharAt(w->x + 4 + i * cw, text_y, (unsigned char)left[i], g_wm_theme.status_text_r, g_wm_theme.status_text_g, g_wm_theme.status_text_b);
-        }
+        (void)sh;
         // border
         int br = is_focused ? 120 : 60, bg = is_focused ? 120 : 60, bb = is_focused ? 80 : 60;
         drawRect(w->x, w->y, w->w, 1, br, bg, bb);
@@ -491,7 +627,7 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         return;
     }
     int th = win_title_height(w);
-    int sh = win_status_height(w);
+    int sh = 0;
     // frame background
     drawRect(w->x, w->y, w->w, w->h, 0, 0, 0);
     // title bar
@@ -587,23 +723,7 @@ static void wm_draw_decor(window_t* w, int is_focused) {
             }
         }
     }
-    // status bar
-    if (sh > 0) {
-        int sy = w->y + th;
-        drawRect(w->x, sy, w->w, sh, 32, 32, 32);
-        int text_y = sy + (sh - fh) / 2;
-        const char* left = w->status_left ? w->status_left : "";
-        for (int i = 0; left[i] && (w->x + 4 + i * cw) < w->x + w->w - 4; ++i) {
-            drawCharAt(w->x + 4 + i * cw, text_y, (unsigned char)left[i], 255, 255, 255);
-        }
-        if (w->status_right && w->status_right[0]) {
-            int rl = strlen(w->status_right);
-            int max_chars = (w->w - 8) / cw;
-            if (rl > max_chars) rl = max_chars - 1;
-            int start_x = w->x + w->w - rl * cw - 4;
-            for (int i = 0; i < rl; ++i) drawCharAt(start_x + i * cw, text_y, (unsigned char)w->status_right[i], 255, 0, 0);
-        }
-    }
+    (void)sh;
     // border
     int br = is_focused ? 140 : 60, bg = is_focused ? 140 : 60, bb = is_focused ? 90 : 60;
     drawRect(w->x, w->y, w->w, 1, br, bg, bb);
@@ -726,13 +846,10 @@ static void wm_draw_icon_into_button(const rei_image_t* icon, int loaded, int bx
 
 static void wm_mark_decor_dirty(const window_t* w) {
     int th = win_title_height(w);
-    int sh = win_status_height(w);
+    int sh = 0;
     if (rects_intersect(w->x, w->y, w->w, th, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
     vga_mark_dirty_rect(w->x, w->y, w->w, th);
-    if (sh) {
-        if (rects_intersect(w->x, w->y + th, w->w, sh, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
-        vga_mark_dirty_rect(w->x, w->y + th, w->w, sh);
-    }
+    (void)sh;
     if (rects_intersect(w->x, w->y, w->w, 1, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
     vga_mark_dirty_rect(w->x, w->y, w->w, 1);
     if (rects_intersect(w->x, w->y + w->h - 1, w->w, 1, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
@@ -745,7 +862,7 @@ static void wm_mark_decor_dirty(const window_t* w) {
 
 static void wm_draw_content(window_t* w) {
     int th = win_title_height(w);
-    int sh = win_status_height(w);
+    int sh = 0;
     int cx = w->x + 1;
     int cy = w->y + th + sh + 1;
     int cw = w->w - 2;
@@ -757,6 +874,21 @@ static void wm_draw_content(window_t* w) {
         }
         vga_mark_dirty_rect(cx, cy, cw, ch);
     }
+}
+
+static void wm_draw_status_overlay(window_t* w) {
+    if (!w || !w->used) return;
+    if (!status_overlay_visible()) return;
+    int th = win_title_height(w);
+    int sh = status_bar_height_px();
+    int sy = w->y + th;
+    if (sy + sh > w->y + w->h) return;
+    draw_status_overlay_text(w->x, sy, w->w, sh,
+                             w->status_left ? w->status_left : "",
+                             "Ctrl+Q: Exit",
+                             (w->status_right && w->status_right[0]) ? w->status_right : NULL,
+                             0);
+    vga_mark_dirty_rect(w->x, sy, w->w, sh);
 }
 
 static int wm_hit_test(int x, int y) {
@@ -1251,7 +1383,7 @@ static void draw_decorations(tile_t* t, int is_focused) {
     int cw = vga_text_cell_w();
     int fh = vga_text_cell_h();
     int title_h = get_title_height(t);
-    // In low mode, draw simpler title/status without scrolling text or fancy clipping
+    // In low mode, draw simpler title/borders (status is an Alt-held overlay drawn later)
     if (g_gui_low_mode) {
         if (title_h > 0) {
             int title_y = t->y;
@@ -1295,20 +1427,7 @@ static void draw_decorations(tile_t* t, int is_focused) {
                 }
             }
         }
-    int status_h = 0;
-        int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
-        if (show_status) {
-            int status_y = t->y + title_h;
-            status_h = fh + 4;
-            if (status_h < 12) status_h = 12;
-            drawRect(t->x, status_y, t->width, status_h, g_wm_theme.status_r, g_wm_theme.status_g, g_wm_theme.status_b);
-            const char* left_text = t->status_left ? t->status_left : "";
-            int left_len = (int)strlen(left_text);
-            int max_chars = (t->width - cw) / cw; if (max_chars < 0) max_chars = 0;
-            if (left_len > max_chars) left_len = max_chars;
-            int text_y = status_y + (status_h - fh) / 2;
-            for (int i = 0; i < left_len; ++i) drawCharAt(t->x + 4 + i * cw, text_y, (unsigned char)left_text[i], g_wm_theme.status_text_r, g_wm_theme.status_text_g, g_wm_theme.status_text_b);
-        }
+        // status overlay is drawn after content
         int border_r = is_focused ? 120 : 48, border_g = is_focused ? 120 : 48, border_b = is_focused ? 80 : 48;
         drawRect(t->x, t->y, t->width, 1, border_r, border_g, border_b);
         drawRect(t->x, t->y + t->height - 1, t->width, 1, border_r, border_g, border_b);
@@ -1364,96 +1483,7 @@ static void draw_decorations(tile_t* t, int is_focused) {
             }
         }
     }
-    // Status bar (repositioned at top if fullscreen hides title)
-    int status_h = 0;
-    int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
-    if (show_status) {
-        int status_y = t->y + title_h; // if title_h==0 this is top
-        status_h = fh + 4;
-        if (status_h < 12) status_h = 12;
-        drawRect(t->x, status_y, t->width, status_h, g_wm_theme.status_r, g_wm_theme.status_g, g_wm_theme.status_b);
-        const char* left_text = t->status_left ? t->status_left : "Super+n:New | Super+Arrow:Switch | Super+Q:Close";
-        int left_len = (int)strlen(left_text);
-        int avail_chars = (t->width - cw) / cw;
-        int text_y = status_y + (status_h - fh) / 2;
-        if (left_len <= avail_chars) {
-            int clip_min = t->x + 4;
-            int clip_max = t->x + t->width - 4;
-            for (int i = 0; i < left_len; ++i) {
-                int cx = clip_min + i * cw;
-                if (cx < clip_min) continue;
-                if (cx + cw > clip_max) break;
-                if (cx < 0 || cx + cw > screen_w) break;
-                drawCharAt(cx, text_y, (int)(unsigned char)left_text[i], g_wm_theme.status_text_r, g_wm_theme.status_text_g, g_wm_theme.status_text_b);
-            }
-        } else {
-            int window = avail_chars;
-            int speed = 6;
-            int period = left_len + window;
-            int pos = (g_tile_scroll_tick / speed) % period;
-            int clip_min = t->x + 4;
-            int clip_max = t->x + t->width - 4;
-            for (int i = 0; i < window; ++i) {
-                int idx = pos + i;
-                char ch = ' ';
-                if (idx < left_len) ch = left_text[idx];
-                else {
-                    int wrap_idx = idx - left_len;
-                    if (wrap_idx < left_len) ch = left_text[wrap_idx];
-                }
-                int cx = clip_min + i * cw;
-                if (cx < clip_min) continue;
-                if (cx + cw > clip_max) break;
-                if (cx < 0 || cx + cw > screen_w) break;
-                drawCharAt(cx, text_y, (int)(unsigned char)ch, g_wm_theme.status_text_r, g_wm_theme.status_text_g, g_wm_theme.status_text_b);
-            }
-        }
-        if (t->status_right && t->status_right[0]) {
-            int right_len = strlen(t->status_right);
-            int max_right_pixels = t->width - cw;
-            int max_right_chars = max_right_pixels / cw;
-            if (max_right_chars <= 0) max_right_chars = 0;
-            const char* right_ptr = t->status_right;
-            if (right_len > max_right_chars) {
-                int take = max_right_chars - 1;
-                if (take < 0) take = 0;
-                if (take == 0) {
-                    right_ptr = "";
-                    right_len = 0;
-                } else {
-                    right_ptr = t->status_right + (right_len - take);
-                    right_len = take;
-                }
-            }
-            int right_len_visible = right_len;
-            int max_chars = (t->width - cw) / cw;
-            if (right_len > max_chars) right_len_visible = max_chars - 1;
-            if (right_len_visible <= max_chars && right_len_visible > 0) {
-                int start_x = t->x + t->width - right_len_visible * cw - 4;
-                for (int ri = 0; ri < right_len_visible; ++ri) {
-                    int cx = start_x + ri * cw;
-                    int clip_left = t->x + 4;
-                    int clip_right = t->x + t->width - 4;
-                    if (cx < clip_left) continue;
-                    if (cx + cw > clip_right) break;
-                    if (cx < 0 || cx + cw > screen_w) break;
-                    drawCharAt(cx, text_y, (int)(unsigned char)right_ptr[ri], 255, 0, 0);
-                }
-            } else {
-                int tx = t->x + t->width - right_len * cw - 4;
-                if (tx < t->x + 4) tx = t->x + 4;
-                for (int ri = 0; ri < right_len; ++ri) {
-                    int cx = tx + ri * cw;
-                    int clip_left = t->x + 4;
-                    int clip_right = t->x + t->width - 4;
-                    if (cx < clip_left) continue;
-                    if (cx + cw > clip_right) break;
-                    if (cx < 0 || cx + cw > screen_w) break;
-                    drawCharAt(cx, text_y, (int)(unsigned char)right_ptr[ri], 255, 0, 0);
-                }
-            }
-        }
-    }
+    // status overlay is drawn after content
     // borders
     int border_r = is_focused ? 120 : 48;
     int border_g = is_focused ? 120 : 48;
@@ -1462,6 +1492,35 @@ static void draw_decorations(tile_t* t, int is_focused) {
     drawRect(t->x, t->y + t->height - 1, t->width, 1, border_r, border_g, border_b);
     drawRect(t->x, t->y, 1, t->height, border_r, border_g, border_b);
     drawRect(t->x + t->width - 1, t->y, 1, t->height, border_r, border_g, border_b);
+}
+
+static void draw_tile_status_overlay(tile_t* t) {
+    if (!t) return;
+    if (!status_overlay_visible()) return;
+    if (t->type == TILE_EMPTY) return;
+    if (fullscreen_tile == (t - tiles)) {
+        // Fullscreen hides titlebar; keep status directly at top.
+    }
+
+    int title_h = get_title_height(t);
+    int sh = status_bar_height_px();
+    int sy = t->y + title_h;
+    if (sy + sh > t->y + t->height) return;
+
+    const char* left = t->status_left;
+    if (!left || !left[0]) {
+        if (t->type == TILE_SHELL) {
+            left = "Super+n: New | Super+Arrow: Switch | Super+Q: Close/Exit";
+        } else {
+            left = "";
+        }
+    }
+
+    const char* base = (t->type == TILE_SHELL) ? "" : "Ctrl+Q: Exit";
+    const char* extra = (t->status_right && t->status_right[0]) ? t->status_right : NULL;
+
+    draw_status_overlay_text(t->x, sy, t->width, sh, left, base, extra, 0);
+    vga_mark_dirty_rect(t->x, sy, t->width, sh);
 }
 
 static void draw_static_tile(tile_t* t, int is_focused) {
@@ -1475,8 +1534,8 @@ static void draw_static_tile(tile_t* t, int is_focused) {
     t->last_status_left_ptr = t->status_left;
     t->last_status_right_ptr = t->status_right;
     int title_h = get_title_height(t);
-    int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
-    t->last_show_status = show_status;
+    (void)title_h;
+    t->last_show_status = status_overlay_visible();
     t->last_focused = is_focused;
 }
 
@@ -1484,21 +1543,15 @@ static void draw_static_tile(tile_t* t, int is_focused) {
 static void draw_tile_content(const tile_t* t) {
     if (t->type == TILE_EMPTY) return;
     int title_h = get_title_height(t);
-    int status_h = 0;
-    int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
     int cw = vga_text_cell_w();
     int fh = vga_text_cell_h();
-    if (show_status) {
-        status_h = fh + 4;
-        if (status_h < 12) status_h = 12;
-    }
     // Keep a 1px margin for the border so clears don't overwrite border pixels
     int content_x = t->x + 1;
-    int content_y = t->y + title_h + status_h + 1;
+    int content_y = t->y + title_h + 1;
     int line_h = fh;
-    int max_lines = (t->height - (title_h + status_h + 2)) / line_h;
+    int max_lines = (t->height - (title_h + 2)) / line_h;
     int content_w = t->width - 2; // leave 1px border on left/right
-    int content_h = t->height - (title_h + status_h) - 2; // leave 1px top/bottom border
+    int content_h = t->height - (title_h) - 2; // leave 1px top/bottom border
     int bg_bright = -1; // -1 unknown; 0=dark; 1=bright
     if (content_w > 0 && content_h > 0) {
         // Always start with a clean content area to avoid any residuals around centered/scaled images
@@ -1912,13 +1965,11 @@ void tile_get_content_rect(int tile_idx, int* out_x, int* out_y, int* out_w, int
     if (t->type == TILE_EMPTY) return;
 
     int title_h = (fullscreen_tile == tile_idx) ? 0 : 16;
-    int show_status = (t->status_left != NULL) || (t->status_right != NULL) || (t->status_visible) || (tui_alt_pressed);
-    int status_h = show_status ? 12 : 0;
 
     int cx = t->x + 1;
-    int cy = t->y + title_h + status_h + 1;
+    int cy = t->y + title_h + 1;
     int cw = t->width - 2;
-    int ch = t->height - (title_h + status_h) - 2;
+    int ch = t->height - (title_h) - 2;
     if (cw < 0) cw = 0;
     if (ch < 0) ch = 0;
 
@@ -2061,6 +2112,7 @@ void tile_render_once(void) {
             draw_static_tile(&tiles[i], i == focused);
         }
         draw_tile_content(&tiles[i]);
+        if (status_overlay_visible()) draw_tile_status_overlay(&tiles[i]);
         tiles[i].last_drawn_version = vterm_get_version(tiles[i].term_idx);
     }
 
@@ -2083,7 +2135,52 @@ int tile_pump_input_once(void) {
     if (tile_count <= 0) return 0;
 
     int key = tui_read_key();
+
+    // Shift+Alt toggles pinned status overlay (persisted). Must run even if key==0.
+    {
+        static int prev_alt = 0;
+        static int prev_shift = 0;
+        int cur_alt = tui_alt_pressed ? 1 : 0;
+        int cur_shift = tui_shift_pressed ? 1 : 0;
+        int alt_rise = (cur_alt && !prev_alt);
+        int shift_rise = (cur_shift && !prev_shift);
+        if ((alt_rise && cur_shift) || (shift_rise && cur_alt)) {
+            int new_mode = ui_prefs_get_status_bar_mode() ? 0 : 1;
+            ui_prefs_set_status_bar_mode(new_mode);
+            (void)ui_prefs_save((uint8)g_current_drive);
+
+            g_force_full_redraw = 1;
+            g_tiles_full_content_redraw = 1;
+            for (int ti = 0; ti < tile_count; ++ti) tiles[ti].static_drawn = 0;
+            for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                if (g_windows[wi].used && !g_windows[wi].minimized) {
+                    g_windows[wi].needs_redraw = 1;
+                    g_windows[wi].static_drawn = 0;
+                }
+            }
+        }
+        prev_alt = cur_alt;
+        prev_shift = cur_shift;
+    }
+
+    // If there's no actual key event to route, we're done.
     if (!key) return 0;
+
+    // If status overlay visibility toggles, force redraw to restore any covered pixels.
+    // This input pump path is called while ring3 tasks are running.
+    static int last_overlay_state = -1;
+    int overlay_now = status_overlay_visible();
+    if (last_overlay_state != overlay_now) {
+        last_overlay_state = overlay_now;
+        g_force_full_redraw = 1;
+        g_tiles_full_content_redraw = 1;
+        for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+            if (g_windows[wi].used && !g_windows[wi].minimized) {
+                g_windows[wi].needs_redraw = 1;
+                g_windows[wi].static_drawn = 0;
+            }
+        }
+    }
 
     // While a ring3 task is running, Ctrl+C is reserved as the user-task abort.
     // Important: do NOT have a separate poller consume scancodes concurrently.
@@ -2124,19 +2221,16 @@ int tile_pump_input_once(void) {
                 }
                 // Add to stdin buffer
                 vterm_stdin_putchar(term, ch);
-                g_user_task_ui_dirty = 1;
                 return 1;
             }
         }
     }
-
     // If modal is active, handle it first.
     if (g_bg_modal.active) {
         (void)handle_bg_modal_key(key);
         return 1;
     }
 
-    // Super-modified keys (tui_read_key encodes Super by OR'ing 0x4000).
     // Note: when a ring3 task is running, we rely on this pump path (invoked
     // from the PIT IRQ) to keep the UI responsive; it must therefore implement
     // the same global hotkeys as the full tiler loop.
@@ -2171,7 +2265,7 @@ int tile_pump_input_once(void) {
             if (fullscreen_tile == -1) {
                 fullscreen_tile = focused;
             } else {
-                fullscreen_tile = -1;
+                fullscreen_tile = -1; // exit fullscreen
                 layout_tiles();
             }
             g_force_full_redraw = 1;
@@ -2384,6 +2478,24 @@ void start_tiling_manager() {
         // UI loop heartbeat for the watchdog
         watchdog_kick("wm-loop");
 
+        // If status overlay visibility toggles, force redraw to restore any covered pixels.
+        static int last_overlay_state = -1;
+        int overlay_now = status_overlay_visible();
+        if (last_overlay_state != overlay_now) {
+            last_overlay_state = overlay_now;
+            g_force_full_redraw = 1;
+            g_tiles_full_content_redraw = 1;
+            for (int ti = 0; ti < tile_count; ++ti) {
+                tiles[ti].static_drawn = 0;
+            }
+            for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                if (g_windows[wi].used && !g_windows[wi].minimized) {
+                    g_windows[wi].needs_redraw = 1;
+                    g_windows[wi].static_drawn = 0;
+                }
+            }
+        }
+
         // Ensure UI/icon assets match current font metrics (8x8 vs 16x16 icon sets).
         maybe_update_icon_mode(0);
         // 1 Hz GUI heartbeat: invalidate GUI tiles once per second so they can update time-based views
@@ -2422,36 +2534,6 @@ void start_tiling_manager() {
     // draw all tiles
     // Avoid clearing the entire screen each frame to reduce flicker. Only clear the regions we will redraw (each tile).
     // Quick heuristic: clear each tile's rectangle before drawing it.
-        // If Alt held, draw a help/status bar on the main shell tile (index 0 if active)
-        if (tui_alt_pressed) {
-            // Build status text
-            static char alt_help[128];
-            snprintf(alt_help, sizeof(alt_help), "Super+n: New | Super+Arrow: Switch | Super+Q: Close/Exit | Alt: Help");
-            // Draw as status on tile 0 if it exists
-                if (tile_count > 0 && tiles[0].type != TILE_EMPTY) {
-                    int title_h = 16;
-                    int status_y = tiles[0].y + title_h;
-                    drawRect(tiles[0].x, status_y, tiles[0].width, 12, 32, 32, 32);
-                    // draw alt_help clipped to tile 0 area
-                    int clip_min = tiles[0].x + 4;
-                    int clip_max = tiles[0].x + tiles[0].width - 4;
-                    for (const char* p = alt_help; *p; ++p) {
-                        int cx = clip_min + (int)(p - alt_help) * 8;
-                        if (cx + 7 > clip_max) break;
-                        drawCharAt(cx, status_y + 2, (int)(unsigned char)*p, 255, 255, 255);
-                    }
-                } else {
-                    // fallback: draw at top of screen
-                    drawRect(0, 0, screen_w, 12, 32, 32, 32);
-                    int clip_min = 4;
-                    int clip_max = screen_w - 4;
-                    for (const char* p = alt_help; *p; ++p) {
-                        int cx = clip_min + (int)(p - alt_help) * 8;
-                        if (cx + 7 > clip_max) break;
-                        drawCharAt(cx, 2, (int)(unsigned char)*p, 255, 255, 255);
-                    }
-        }
-    }
     for (int i = 0; i < tile_count; ++i) {
         if (g_force_full_redraw) tiles[i].static_drawn = 0; // force static re-render
         int decor_fresh = 0;
@@ -2461,33 +2543,27 @@ void start_tiling_manager() {
             if (g_gui_low_mode) {
                 need_redraw_decor = 0;
                 int th_now_dec = get_title_height(&tiles[i]);
-                int show_status_now_dec = (tiles[i].status_left != NULL) || (tiles[i].status_right != NULL) || (tiles[i].status_visible) || (tui_alt_pressed);
                 if (!tiles[i].static_drawn || tiles[i].last_title_ptr != tiles[i].title ||
                     tiles[i].last_status_left_ptr != tiles[i].status_left || tiles[i].last_status_right_ptr != tiles[i].status_right ||
-                    tiles[i].last_show_status != show_status_now_dec || tiles[i].last_focused != (i == focused)) {
+                    tiles[i].last_focused != (i == focused)) {
                     need_redraw_decor = 1;
                 }
             }
             int th_now_dec = get_title_height(&tiles[i]);
-            int show_status_now_dec = (tiles[i].status_left != NULL) || (tiles[i].status_right != NULL) || (tiles[i].status_visible) || (tui_alt_pressed);
             // We still maintain caches for potential future optimization
             if (need_redraw_decor) {
                 draw_decorations(&tiles[i], i == focused);
                 tiles[i].last_title_ptr = tiles[i].title;
                 tiles[i].last_status_left_ptr = tiles[i].status_left;
                 tiles[i].last_status_right_ptr = tiles[i].status_right;
-                tiles[i].last_show_status = show_status_now_dec;
                 tiles[i].last_focused = (i == focused);
             }
             // Compute current content rect for this tile
-            int show_status_now = (tiles[i].status_left != NULL) || (tiles[i].status_right != NULL) || (tiles[i].status_visible) || (tui_alt_pressed);
             int th_now = get_title_height(&tiles[i]);
-            int sh_now = 0;
-            if (show_status_now) sh_now = 12;
             int cx_now = tiles[i].x + 1;
-            int cy_now = tiles[i].y + th_now + sh_now + 1;
+            int cy_now = tiles[i].y + th_now + 1;
             int cw_now = tiles[i].width - 2;
-            int ch_now = tiles[i].height - (th_now + sh_now) - 2;
+            int ch_now = tiles[i].height - (th_now) - 2;
             // Only redraw content if the vterm version changed since last draw, rect changed, or GUI was invalidated
             unsigned int cur_ver = vterm_get_version(tiles[i].term_idx);
             int content_redrew = 0;
@@ -2515,9 +2591,7 @@ void start_tiling_manager() {
             // Mark only the UI decoration areas (titlebar, statusbar, and 1px borders)
             // so the blit stays small while ensuring decorations are kept in sync.
             int th = get_title_height(&tiles[i]);
-            int sh = 0;
-            int show_status = (tiles[i].status_left != NULL) || (tiles[i].status_right != NULL) || (tiles[i].status_visible) || (tui_alt_pressed);
-            if (show_status) sh = 12;
+            int sh = status_overlay_visible() ? status_bar_height_px() : 0;
             // Mark decorations dirty only if we redrew them this frame
             if (need_redraw_decor || decor_fresh) {
                 if (th > 0) {
@@ -2552,6 +2626,11 @@ void start_tiling_manager() {
             } else {
                 // no new content, nothing to mark beyond borders/title/status
             }
+
+            // Draw status overlay on top of tile content.
+            if (status_overlay_visible()) {
+                draw_tile_status_overlay(&tiles[i]);
+            }
         }
         // Draw floating windows on top of tiles (back-to-front)
         if (g_window_count > 0) {
@@ -2572,6 +2651,11 @@ void start_tiling_manager() {
                 if (w->needs_redraw || w->continuous_redraw || g_force_full_redraw || g_any_tile_content_redrew) {
                     wm_draw_content(w);
                     if (!w->continuous_redraw) w->needs_redraw = 0;
+                }
+
+                // Draw status overlay on top of window content.
+                if (status_overlay_visible()) {
+                    wm_draw_status_overlay(w);
                 }
             }
         }
@@ -2916,11 +3000,11 @@ void start_tiling_manager() {
             if (hit2 >= 0 && hit2 < tile_count) {
                 tile_t* tt = &tiles[hit2];
                 int title_h2 = get_title_height(tt);
-                int show_status2 = (tt->status_left != NULL) || (tt->status_right != NULL) || (tt->status_visible) || (tui_alt_pressed);
-                if (show_status2) {
+                int sh2 = status_overlay_visible() ? status_bar_height_px() : 0;
+                if (sh2 > 0) {
                     int sy = tt->y + title_h2;
-                    if (me.y >= sy && me.y < sy + 12) {
-                        vga_mark_dirty_rect(tt->x, sy, tt->width, 12);
+                    if (me.y >= sy && me.y < sy + sh2) {
+                        vga_mark_dirty_rect(tt->x, sy, tt->width, sh2);
                     }
                 }
             }
@@ -2930,6 +3014,36 @@ after_mouse_handling:
 
     int key = tui_read_key();
     if (key) { watchdog_kick("wm-key"); }
+
+        // Shift+Alt toggles pinned status overlay (persisted in ui.cfg).
+        // Note: modifier scancodes return 0 from tui_read_key(), so this must run even when key==0.
+        {
+            static int prev_alt = 0;
+            static int prev_shift = 0;
+            int cur_alt = tui_alt_pressed ? 1 : 0;
+            int cur_shift = tui_shift_pressed ? 1 : 0;
+            int alt_rise = (cur_alt && !prev_alt);
+            int shift_rise = (cur_shift && !prev_shift);
+
+            if ((alt_rise && cur_shift) || (shift_rise && cur_alt)) {
+                int new_mode = ui_prefs_get_status_bar_mode() ? 0 : 1;
+                ui_prefs_set_status_bar_mode(new_mode);
+                (void)ui_prefs_save((uint8)g_current_drive);
+
+                g_force_full_redraw = 1;
+                g_tiles_full_content_redraw = 1;
+                for (int ti = 0; ti < tile_count; ++ti) tiles[ti].static_drawn = 0;
+                for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                    if (g_windows[wi].used && !g_windows[wi].minimized) {
+                        g_windows[wi].needs_redraw = 1;
+                        g_windows[wi].static_drawn = 0;
+                    }
+                }
+            }
+
+            prev_alt = cur_alt;
+            prev_shift = cur_shift;
+        }
         // If modal is active, handle it first and skip routing
         if (g_bg_modal.active) {
             if (handle_bg_modal_key(key)) { continue; }
@@ -3040,14 +3154,28 @@ after_mouse_handling:
             }
         }
 
-        // Esc to exit
+        // Esc: when a GUI client/window is focused, route it instead of exiting the WM.
+        // This allows in-app dialogs (e.g., cancel prompts) to work.
         if (key == 27) {
+            if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
+                window_t* wfocus = &g_windows[g_win_focused];
+                if (wfocus->key_cb) { wfocus->key_cb(-1, key & 0xFFFF, wfocus->userdata); wfocus->needs_redraw = 1; }
+                continue;
+            }
+            int term = tiles[focused].term_idx;
+            if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
+                gui_key_cb[term](focused, key & 0xFFFF, gui_userdata[term]);
+                gui_needs_redraw[term] = 1;
+                g_any_tile_content_redrew = 1;
+                continue;
+            }
+            // No GUI/window focused: Esc exits WM
             running = 0;
             break;
         }
 
-        // Ctrl+X: close focused window (global) or default-exit focused GUI tile
-        if (key == 0x2002) {
+        // Ctrl+Q: close focused window (global) or default-exit focused GUI tile
+        if (key == 0x2101) {
             if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
                 wm_close_window(g_win_focused);
                 g_win_focused = -1;
