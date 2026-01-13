@@ -1138,22 +1138,33 @@ void vmm_init(uint32 total_ram_bytes) {
      * low memory (BIOS, VGA, etc.) during transition.
      */
     
-    /* Create page tables for first 16MB identity mapped */
+    /*
+     * Create page tables for first 16MB identity mapped.
+     * IMPORTANT: do NOT share the same PT between the low and high mappings.
+     * User tasks are mapped into low user space (e.g. 0x00400000). If the low
+     * and high-half identity maps share a PT, those user mappings would
+     * overwrite/unmap the kernel's high-half alias (0xC0400000 etc.), causing
+     * kernel page faults when the kernel uses KERNEL_BASE + phys pointers.
+     */
     for (uint32 pdi = 0; pdi < 4; pdi++) {  /* 4 PDEs = 16MB */
-        page_table_t* pt = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
-        memset(pt, 0, sizeof(page_table_t));
-        
-        /* Fill page table: map VA to same PA (identity) */
+        page_table_t* pt_low = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
+        page_table_t* pt_high = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
+        memset(pt_low, 0, sizeof(page_table_t));
+        memset(pt_high, 0, sizeof(page_table_t));
+
+        /* Fill both page tables with identical identity mappings */
         for (uint32 pti = 0; pti < ENTRIES_PER_TABLE; pti++) {
             uint32 pa = (pdi * ENTRIES_PER_TABLE + pti) * PAGE_SIZE;
-            pt->entries[pti] = pa | PTE_PRESENT | PTE_RW;
+            uint32 ent = pa | PTE_PRESENT | PTE_RW;
+            pt_low->entries[pti] = ent;
+            pt_high->entries[pti] = ent;
         }
-        
+
         /* Low mapping (0x00000000+) */
-        kernel_pd->entries[pdi] = (uint32)pt | PTE_PRESENT | PTE_RW;
-        
+        kernel_pd->entries[pdi] = (uint32)pt_low | PTE_PRESENT | PTE_RW;
+
         /* High mapping (0xC0000000+) - kernel's preferred addresses */
-        kernel_pd->entries[768 + pdi] = (uint32)pt | PTE_PRESENT | PTE_RW;
+        kernel_pd->entries[768 + pdi] = (uint32)pt_high | PTE_PRESENT | PTE_RW;
     }
     
     /*

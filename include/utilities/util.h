@@ -22,6 +22,8 @@ extern volatile int g_user_task_ui_dirty;
 // Last user-task mapping info (for cleanup on exit/abort)
 extern volatile uint32 g_user_code_base;
 extern volatile uint32 g_user_code_pages;
+// Bottom (lowest VA) of the mapped user stack region.
+// Historically this was a single page at USER_STACK_TOP-PAGE_SIZE.
 extern volatile uint32 g_user_stack_page;
 
 void user_task_cleanup_mappings(void);

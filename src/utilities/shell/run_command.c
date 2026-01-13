@@ -28,6 +28,23 @@ void run_command(string arg) {
     while (arg[i] && arg[i] != ' ' && j < 63) filename[j++] = arg[i++];
     filename[j] = 0;
 
+    // Parse remaining args (space-separated; no quoting support).
+    const int MAX_ARGS = 16;
+    char arg_buf[MAX_ARGS][64];
+    const char* argv[MAX_ARGS];
+    int argc = 0;
+    while (arg[i] && arg[i] == ' ') i++;
+    while (arg[i] && argc < MAX_ARGS) {
+        int k = 0;
+        while (arg[i] && arg[i] != ' ' && k < 63) {
+            arg_buf[argc][k++] = arg[i++];
+        }
+        arg_buf[argc][k] = 0;
+        argv[argc] = arg_buf[argc];
+        argc++;
+        while (arg[i] && arg[i] == ' ') i++;
+    }
+
     // check file extension to determine execution method; if missing, treat as flat binary
     const char* ext = strrchr(filename, '.');
     
@@ -41,7 +58,7 @@ void run_command(string arg) {
         result = execute_shell_script(abspath);
     } else if (ext && strcmp(ext, ".uelf") == 0) {
         // execute as ring3 ELF using the EYN-OS syscall ABI
-        (void)user_elf_run(g_current_drive, abspath);
+        (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
         return;
     } else if ((ext && strcmp(ext, ".eyn") == 0) || (ext && strcmp(ext, ".bin") == 0) || (ext && strcmp(ext, ".flat") == 0) || !ext) {
         // execute as native program

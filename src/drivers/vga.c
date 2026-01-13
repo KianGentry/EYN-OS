@@ -870,16 +870,20 @@ void drawText(int charnum, int r, int g, int b)
 	}
 }
 
-// Minimal formatter for kernel printf.
-// Supports: %s %d %c %% %x %X and zero-padded widths like %08X.
+// Kernel printf formatter.
+// Supports: %s %c %% %d %i %u %x %X %p and basic length modifiers: l, ll, z.
+// Also supports zero-padded widths like %08X.
 static int vga_format_to_buffer(char* out, int out_cap, const char* fmt, va_list ap_in) {
 	if (!out || out_cap <= 0) return 0;
+
 	int pos = 0;
 	va_list ap;
 	va_copy(ap, ap_in);
-	for (const char* p = fmt; p && *p && pos < out_cap - 1; ++p) {
+
+	const char* p = fmt;
+	while (p && *p && pos < out_cap - 1) {
 		if (*p != '%') {
-			out[pos++] = *p;
+			out[pos++] = *p++;
 			continue;
 		}
 		++p;
@@ -897,16 +901,25 @@ static int vga_format_to_buffer(char* out, int out_cap, const char* fmt, va_list
 		}
 		if (!*p) break;
 
+		enum { LEN_NONE, LEN_L, LEN_LL, LEN_Z } len = LEN_NONE;
+		if (*p == 'l') {
+			len = LEN_L;
+			++p;
+			if (*p == 'l') {
+				len = LEN_LL;
+				++p;
+			}
+		} else if (*p == 'z') {
+			len = LEN_Z;
+			++p;
+		}
+		if (!*p) break;
+
 		switch (*p) {
 			case 's': {
 				char* str = va_arg(ap, char*);
 				if (!str) str = "(null)";
 				while (*str && pos < out_cap - 1) out[pos++] = *str++;
-				break;
-			}
-			case 'd': {
-				char* num_str = int_to_string(va_arg(ap, int));
-				while (num_str && *num_str && pos < out_cap - 1) out[pos++] = *num_str++;
 				break;
 			}
 			case 'c': {
@@ -917,25 +930,107 @@ static int vga_format_to_buffer(char* out, int out_cap, const char* fmt, va_list
 				out[pos++] = '%';
 				break;
 			}
-			case 'x':
-			case 'X': {
-				unsigned int v = va_arg(ap, unsigned int);
-				char tmp[9];
+			case 'd':
+			case 'i': {
+				int v;
+				if (len == LEN_LL) v = (int)va_arg(ap, long long);
+				else if (len == LEN_L) v = (int)va_arg(ap, long);
+				else v = va_arg(ap, int);
+
+				unsigned int uv;
+				int neg = 0;
+				if (v < 0) {
+					neg = 1;
+					uv = (unsigned int)(-v);
+				} else {
+					uv = (unsigned int)v;
+				}
+
+				char tmp[16];
 				int nd = 0;
 				do {
-					unsigned int d = v & 0xF;
-					char c;
-					if (d < 10) c = (char)('0' + d);
-					else c = (char)((*p == 'X' ? 'A' : 'a') + (d - 10));
-					tmp[nd++] = c;
-					v >>= 4;
-				} while (v != 0 && nd < 8);
+					tmp[nd++] = (char)('0' + (uv % 10U));
+					uv /= 10U;
+				} while (uv != 0U && nd < (int)sizeof(tmp));
 
-				if (field_width > 8) field_width = 8;
+				int content = nd + (neg ? 1 : 0);
+				int pad = field_width - content;
+				if (!zero_pad) pad = 0;
+				if (neg && pos < out_cap - 1) out[pos++] = '-';
+				while (pad-- > 0 && pos < out_cap - 1) out[pos++] = '0';
+				while (nd-- > 0 && pos < out_cap - 1) out[pos++] = tmp[nd];
+				break;
+			}
+			case 'u': {
+				unsigned int uv;
+				if (len == LEN_LL) uv = (unsigned int)va_arg(ap, unsigned long long);
+				else if (len == LEN_L) uv = (unsigned int)va_arg(ap, unsigned long);
+				else if (len == LEN_Z) uv = (unsigned int)va_arg(ap, size_t);
+				else uv = va_arg(ap, unsigned int);
+
+				char tmp[16];
+				int nd = 0;
+				do {
+					tmp[nd++] = (char)('0' + (uv % 10U));
+					uv /= 10U;
+				} while (uv != 0U && nd < (int)sizeof(tmp));
+
 				int pad = field_width - nd;
 				if (!zero_pad) pad = 0;
 				while (pad-- > 0 && pos < out_cap - 1) out[pos++] = '0';
 				while (nd-- > 0 && pos < out_cap - 1) out[pos++] = tmp[nd];
+				break;
+			}
+			case 'x':
+			case 'X': {
+				if (len == LEN_LL) {
+					unsigned long long uv = va_arg(ap, unsigned long long);
+					int started = 0;
+					int nd = 0;
+					for (int i = 15; i >= 0 && pos < out_cap - 1; --i) {
+						unsigned int d = (unsigned int)((uv >> (i * 4)) & 0xFULL);
+						if (!started && d == 0 && i != 0) continue;
+						started = 1;
+						char c;
+						if (d < 10) c = (char)('0' + d);
+						else c = (char)((*p == 'X' ? 'A' : 'a') + (d - 10));
+						out[pos++] = c;
+						nd++;
+					}
+					(void)nd;
+				} else {
+					unsigned int uv;
+					if (len == LEN_L) uv = (unsigned int)va_arg(ap, unsigned long);
+					else if (len == LEN_Z) uv = (unsigned int)va_arg(ap, size_t);
+					else uv = va_arg(ap, unsigned int);
+
+					char tmp[9];
+					int nd = 0;
+					do {
+						unsigned int d = uv & 0xF;
+						char c;
+						if (d < 10) c = (char)('0' + d);
+						else c = (char)((*p == 'X' ? 'A' : 'a') + (d - 10));
+						tmp[nd++] = c;
+						uv >>= 4;
+					} while (uv != 0 && nd < 8);
+
+					if (field_width > 8) field_width = 8;
+					int pad = field_width - nd;
+					if (!zero_pad) pad = 0;
+					while (pad-- > 0 && pos < out_cap - 1) out[pos++] = '0';
+					while (nd-- > 0 && pos < out_cap - 1) out[pos++] = tmp[nd];
+				}
+				break;
+			}
+			case 'p': {
+				uintptr_t uv = (uintptr_t)va_arg(ap, void*);
+				if (pos < out_cap - 1) out[pos++] = '0';
+				if (pos < out_cap - 1) out[pos++] = 'x';
+				for (int i = 7; i >= 0 && pos < out_cap - 1; --i) {
+					unsigned int d = (unsigned int)((uv >> (i * 4)) & 0xF);
+					out[pos++] = (char)(d < 10 ? ('0' + d) : ('a' + (d - 10)));
+				}
 				break;
 			}
 			default: {
@@ -945,7 +1040,10 @@ static int vga_format_to_buffer(char* out, int out_cap, const char* fmt, va_list
 				break;
 			}
 		}
+
+		++p;
 	}
+
 	out[pos] = '\0';
 	va_end(ap);
 	return pos;

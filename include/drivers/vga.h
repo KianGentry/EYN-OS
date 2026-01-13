@@ -106,9 +106,13 @@ extern int shell_redirect_icon_count;
 void shell_register_redirect_icon(const char* ext);
 
 // Shell logging variables
+extern int shell_log_active;
 extern char* shell_log_buf;
 extern int shell_log_buf_size;
 extern int shell_log_pos;
+extern int shell_log_line_count;
+extern int shell_log_line_starts[1001];
+extern int shell_log_current_line_start;
 #define LOG_BUF_SIZE 65536
 
 // Double buffer integration

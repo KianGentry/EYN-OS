@@ -206,6 +206,7 @@ int tui_read_key() {
     // Ctrl combos
     if (ctrl_pressed) {
         if (scancode == 46) return 0x2206; // Ctrl+C (abort / interrupt)
+        if (scancode == 47) return 0x2207; // Ctrl+V (paste)
         if (scancode == 24) return 0x2001; // Ctrl+O (save)
         if (scancode == 31) return 0x2001; // Ctrl+S (save)
         if (scancode == 45) return 0x210B; // Ctrl+X (cut)

@@ -16,4 +16,14 @@ typedef enum {
 // function declarations
 exec_result_t execute_shell_script(const char* filename);
 
+// Script driver helpers for the interactive shell loop.
+// When a .shell script is started via execute_shell_script(), the main shell loop
+// should call shell_script_next_command() to retrieve the next command to execute.
+// This design allows scripts to continue after running ring3 programs (.uelf).
+int shell_script_is_active(void);
+
+// Writes the next executable command into out (NUL-terminated).
+// Returns 1 if a command was produced, 0 if the script has finished.
+int shell_script_next_command(char* out, uint32 outsz);
+
 #endif // SHELL_SCRIPT_H

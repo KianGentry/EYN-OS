@@ -333,6 +333,24 @@ def main():
                     with open(src_file, 'rb') as infile:
                         data = infile.read()
                     add_file(f, sb, dir_block, file, data)
+
+        # Also copy userland/include into /include so userland compilers can
+        # resolve #include <...> without depending on repo layout.
+        userland_include_dir = os.path.join(repo_root, 'userland', 'include')
+        if os.path.isdir(userland_include_dir):
+            for root, dirs, files in os.walk(userland_include_dir):
+                rel_dir = os.path.relpath(root, userland_include_dir)
+                eynfs_path = 'include' if rel_dir == '.' else ('include/' + rel_dir.replace('\\', '/'))
+                parent_path = os.path.dirname(eynfs_path)
+                parent_block = find_dir_block(f, sb, parent_path)
+                if eynfs_path and parent_block is not None:
+                    add_dir(f, sb, parent_block, os.path.basename(eynfs_path))
+                dir_block = find_dir_block(f, sb, eynfs_path)
+                for file in files:
+                    src_file = os.path.join(root, file)
+                    with open(src_file, 'rb') as infile:
+                        data = infile.read()
+                    add_file(f, sb, dir_block, file, data)
     
     print(f"Successfully copied '{source_dir}' to '{img_file}'")
 

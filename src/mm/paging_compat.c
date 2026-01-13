@@ -5,6 +5,7 @@
 #include <mm/vmm.h>
 #include <isr.h>
 #include <vga.h>
+#include <mm/user_access.h>
 
 /* Legacy page fault handler signature used by ISR 14. */
 void page_fault_handler(regs_t* r) {
@@ -21,6 +22,26 @@ void page_fault_handler(regs_t* r) {
          printf("ESI: 0x%X  EDI: 0x%X  EBP: 0x%X  EFLAGS: 0x%X\n",
              (unsigned)r->esi, (unsigned)r->edi, (unsigned)r->ebp, (unsigned)r->eflags);
         printf("Error: 0x%X\n", (unsigned)r->err_code);
+
+        // If the faulting code uses a frame pointer, we can often recover caller context.
+        // On i386 cdecl with a typical prologue:
+        //   [ebp+0] saved ebp
+        //   [ebp+4] return address
+        //   [ebp+8] first arg
+        uint32 saved_ebp = 0;
+        uint32 ret_eip = 0;
+        uint32 arg0 = 0;
+        int ok_saved = copyin(&saved_ebp, (const void*)(uint32)r->ebp, sizeof(saved_ebp)) == 0;
+        int ok_ret = copyin(&ret_eip, (const void*)((uint32)r->ebp + 4u), sizeof(ret_eip)) == 0;
+        int ok_arg = copyin(&arg0, (const void*)((uint32)r->ebp + 8u), sizeof(arg0)) == 0;
+
+        if (ok_saved || ok_ret || ok_arg) {
+            printf("Frame: ");
+            if (ok_saved) printf("saved_ebp=0x%X ", (unsigned)saved_ebp);
+            if (ok_ret) printf("ret=0x%X ", (unsigned)ret_eip);
+            if (ok_arg) printf("arg0=0x%X", (unsigned)arg0);
+            printf("\n");
+        }
     }
     vmm_page_fault_handler(r->err_code, fault_addr, r->eip);
 }

@@ -8,6 +8,7 @@
 #include <string.h>
 #include <eynfs.h>
 #include <types.h>
+#include <utilities/shell/alias.h>
 
 // Global variables
 file_descriptor_t g_file_descriptors[MAX_FDS];
@@ -312,8 +313,43 @@ command_t* parse_command(const char* cmd_str) {
         free(input_copy);
         return NULL;
     }
-    
+
     cmd->name = cmd->args[0];
+
+    // Alias expansion for pipeline segments (simple commands only).
+    // Do not override built-in commands.
+    if (find_command(cmd->name) == NULL) {
+        char linebuf[256];
+        linebuf[0] = '\0';
+        for (int a = 0; a < cmd->argc && cmd->args[a]; a++) {
+            if (a != 0)
+                strcat(linebuf, " ");
+            strcat(linebuf, cmd->args[a]);
+        }
+
+        char expanded[256];
+        int rc = shell_alias_expand_line(linebuf, expanded, (int)sizeof(expanded));
+        if (rc == 1) {
+            // Reject expansions that would require re-parsing pipeline/redirection.
+            for (int x = 0; expanded[x]; x++) {
+                if (expanded[x] == '|' || expanded[x] == '<' || expanded[x] == '>' || expanded[x] == '&') {
+                    free_args(cmd->args, cmd->argc);
+                    free(cmd);
+                    free(input_copy);
+                    return NULL;
+                }
+            }
+
+            free_args(cmd->args, cmd->argc);
+            cmd->args = split_command(expanded, &cmd->argc);
+            if (!cmd->args || cmd->argc == 0) {
+                free(cmd);
+                free(input_copy);
+                return NULL;
+            }
+            cmd->name = cmd->args[0];
+        }
+    }
     cmd->type = PIPELINE_CMD_SIMPLE;
     
     free(input_copy);

@@ -23,6 +23,7 @@
 #include <gdt.h>
 #include <ata.h>
 #include <ui_prefs.h>
+#include <cpu/fpu.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
@@ -51,6 +52,9 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
 
     // Full initialization - all services
     isr_install();
+
+    // Enable x87 FPU early so ring3 programs can use float/double.
+    fpu_init();
     clearScreen();
     
     printf("EYN-OS Release 15\n");
@@ -62,8 +66,7 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     // address and can be overwritten by early_alloc(), corrupting heap
     // metadata and later causing copyout/page faults in user mode.
     uint32 ram = detect_available_memory();
-    printf("Detected %u MB of RAM.\n", ram / (1024 * 1024));
-    printf("Starting memory manager...");
+    printf("Starting memory manager...\n");
     vmm_init(ram);
     vmm_enable_paging();
     printf("Done.\n");
@@ -152,6 +155,7 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     printf("Done.\n");
     
     // Launch tiling manager by default; it provides the graphical shell UI
+    printf("Starting Tiling Manager...");
     start_tiling_manager();
 
     // Pre-initialize help UI state (build sorted command list) so the help UI

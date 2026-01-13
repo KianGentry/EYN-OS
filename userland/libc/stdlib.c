@@ -1,0 +1,288 @@
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
+
+// Simple bump allocator with size headers.
+// free() is a no-op; realloc() allocates a new block and copies.
+
+#ifndef USERLAND_HEAP_SIZE
+#define USERLAND_HEAP_SIZE (1024 * 1024)
+#endif
+
+static uint8_t g_heap[USERLAND_HEAP_SIZE];
+static size_t g_heap_used = 0;
+
+static size_t align_up(size_t v, size_t a) {
+    return (v + (a - 1)) & ~(a - 1);
+}
+
+void* malloc(size_t n) {
+    if (n == 0) n = 1;
+
+    // Header stores requested size.
+    size_t total = sizeof(uint32_t) + n;
+    total = align_up(total, 8);
+
+    if (g_heap_used + total > sizeof(g_heap)) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    uint8_t* p = &g_heap[g_heap_used];
+    *(uint32_t*)p = (uint32_t)n;
+    void* ret = p + sizeof(uint32_t);
+    g_heap_used += total;
+    return ret;
+}
+
+void free(void* p) {
+    (void)p;
+}
+
+void* calloc(size_t nmemb, size_t size) {
+    if (nmemb == 0 || size == 0) return malloc(1);
+    size_t n = nmemb * size;
+    if (size != 0 && n / size != nmemb) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    void* p = malloc(n);
+    if (!p) return NULL;
+    memset(p, 0, n);
+    return p;
+}
+
+void* realloc(void* p, size_t n) {
+    if (!p) return malloc(n);
+    if (n == 0) n = 1;
+
+    uint8_t* raw = (uint8_t*)p - sizeof(uint32_t);
+    uint32_t oldsz = *(uint32_t*)raw;
+
+    void* np = malloc(n);
+    if (!np) return NULL;
+
+    size_t copy = oldsz < n ? oldsz : n;
+    memcpy(np, p, copy);
+    return np;
+}
+
+int atexit(void (*fn)(void)) {
+    (void)fn;
+    return 0;
+}
+
+char* getenv(const char* name) {
+    (void)name;
+    return NULL;
+}
+
+void abort(void) {
+    _exit(1);
+}
+
+void exit(int code) {
+    _exit(code);
+}
+
+unsigned long strtoul(const char* nptr, char** endptr, int base) {
+    if (!nptr) {
+        if (endptr) *endptr = (char*)nptr;
+        return 0;
+    }
+
+    const char* p = nptr;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+
+    if (base == 0) {
+        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { base = 16; p += 2; }
+        else if (p[0] == '0') { base = 8; p += 1; }
+        else base = 10;
+    } else if (base == 16) {
+        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+    }
+
+    unsigned long v = 0;
+    for (;;) {
+        int d;
+        char c = *p;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else break;
+        if (d >= base) break;
+        v = v * (unsigned long)base + (unsigned long)d;
+        p++;
+    }
+
+    if (endptr) *endptr = (char*)p;
+    return v;
+}
+
+static int is_space_char(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+long double strtold(const char* nptr, char** endptr) {
+    const char* p = nptr;
+    if (!p) {
+        if (endptr) *endptr = (char*)nptr;
+        return 0.0L;
+    }
+
+    while (is_space_char(*p)) p++;
+
+    int sign = 1;
+    if (*p == '+') {
+        p++;
+    } else if (*p == '-') {
+        sign = -1;
+        p++;
+    }
+
+    const char* start = p;
+
+    // Hex float: 0x...p...
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+        p += 2;
+
+        long double mant = 0.0L;
+        int frac_digits = 0;
+        int saw_digit = 0;
+
+        while (1) {
+            int d = hex_digit(*p);
+            if (d < 0) break;
+            saw_digit = 1;
+            mant = mant * 16.0L + (long double)d;
+            p++;
+        }
+
+        if (*p == '.') {
+            p++;
+            while (1) {
+                int d = hex_digit(*p);
+                if (d < 0) break;
+                saw_digit = 1;
+                mant = mant * 16.0L + (long double)d;
+                frac_digits++;
+                p++;
+            }
+        }
+
+        if (!saw_digit) {
+            if (endptr) *endptr = (char*)nptr;
+            return 0.0L;
+        }
+
+        // Scale down by 16^frac_digits.
+        for (int i = 0; i < frac_digits && i < 1024; i++)
+            mant /= 16.0L;
+
+        int exp2 = 0;
+        if (*p == 'p' || *p == 'P') {
+            p++;
+            int esign = 1;
+            if (*p == '+') p++;
+            else if (*p == '-') { esign = -1; p++; }
+
+            int any = 0;
+            while (*p >= '0' && *p <= '9') {
+                any = 1;
+                exp2 = exp2 * 10 + (*p - '0');
+                p++;
+                if (exp2 > 4096) exp2 = 4096;
+            }
+            if (!any) {
+                // Invalid exponent; stop before 'p' token.
+                p--; 
+            } else {
+                exp2 *= esign;
+            }
+        }
+
+        if (exp2 > 0) {
+            for (int i = 0; i < exp2 && i < 1024; i++)
+                mant *= 2.0L;
+        } else if (exp2 < 0) {
+            for (int i = 0; i < -exp2 && i < 1024; i++)
+                mant /= 2.0L;
+        }
+
+        if (endptr) *endptr = (char*)p;
+        return (long double)sign * mant;
+    }
+
+    // Decimal float.
+    long double val = 0.0L;
+    int saw_digit = 0;
+
+    while (*p >= '0' && *p <= '9') {
+        saw_digit = 1;
+        val = val * 10.0L + (long double)(*p - '0');
+        p++;
+    }
+
+    int frac = 0;
+    if (*p == '.') {
+        p++;
+        while (*p >= '0' && *p <= '9') {
+            saw_digit = 1;
+            val = val * 10.0L + (long double)(*p - '0');
+            frac++;
+            p++;
+            if (frac > 1024) frac = 1024;
+        }
+    }
+
+    if (!saw_digit) {
+        if (endptr) *endptr = (char*)nptr;
+        return 0.0L;
+    }
+
+    for (int i = 0; i < frac; i++)
+        val /= 10.0L;
+
+    int exp10 = 0;
+    if (*p == 'e' || *p == 'E') {
+        p++;
+        int esign = 1;
+        if (*p == '+') p++;
+        else if (*p == '-') { esign = -1; p++; }
+
+        int any = 0;
+        while (*p >= '0' && *p <= '9') {
+            any = 1;
+            exp10 = exp10 * 10 + (*p - '0');
+            p++;
+            if (exp10 > 4096) exp10 = 4096;
+        }
+        if (any) exp10 *= esign;
+        else {
+            // Roll back if exponent has no digits.
+            p--;
+            exp10 = 0;
+        }
+    }
+
+    if (exp10 > 0) {
+        for (int i = 0; i < exp10 && i < 1024; i++)
+            val *= 10.0L;
+    } else if (exp10 < 0) {
+        for (int i = 0; i < -exp10 && i < 1024; i++)
+            val /= 10.0L;
+    }
+
+    if (endptr) *endptr = (char*)p;
+    (void)start;
+    return (long double)sign * val;
+}

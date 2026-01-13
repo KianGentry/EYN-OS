@@ -113,8 +113,10 @@ uint32 link_calc_file_size(const LinkConfig *cfg) {
     
     uint32 text_offset = PAGE_SIZE;  // .text at 0x1000
     uint32 text_size = cfg->text.size;
-    
-    uint32 rodata_offset = 2 * PAGE_SIZE;  // .rodata at 0x2000
+
+    // Place .rodata immediately after .text, aligned to a page boundary.
+    // (The previous fixed 0x2000 offset breaks when .text exceeds 0x1000 bytes.)
+    uint32 rodata_offset = align_up(text_offset + text_size, PAGE_SIZE);
     uint32 rodata_size = cfg->rodata.size;
     
     // Calculate sizes for metadata sections
@@ -156,8 +158,10 @@ int link_write_uelf(const LinkConfig *cfg, const char *output_path) {
     // Calculate layout
     uint32 text_offset = PAGE_SIZE;
     uint32 text_size = cfg->text.size;
-    
-    uint32 rodata_offset = 2 * PAGE_SIZE;
+
+    // Place .rodata immediately after .text, aligned to a page boundary.
+    // (The previous fixed 0x2000 offset breaks when .text exceeds 0x1000 bytes.)
+    uint32 rodata_offset = align_up(text_offset + text_size, PAGE_SIZE);
     uint32 rodata_size = cfg->rodata.size;
     
     uint32 symtab_size = (cfg->symbol_count + 1) * sizeof(Elf32_Sym);

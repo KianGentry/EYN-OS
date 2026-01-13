@@ -15,6 +15,14 @@ volatile int g_abort_to_shell = 0;
 volatile int g_user_task_term = -1;
 volatile int g_user_task_ui_dirty = 0;
 
+// User-task console color state (used by ring3 stdout/stderr). Defaults to white.
+volatile int g_user_task_color_r = 255;
+volatile int g_user_task_color_g = 255;
+volatile int g_user_task_color_b = 255;
+// Parser state for 0xFF,r,g,b control sequences that may be split across writes.
+volatile uint8 g_user_task_color_state = 0;
+volatile uint8 g_user_task_color_bytes[3] = {0, 0, 0};
+
 volatile uint32 g_user_code_base = 0;
 volatile uint32 g_user_code_pages = 0;
 volatile uint32 g_user_stack_page = 0;
@@ -24,19 +32,31 @@ void user_task_cleanup_mappings(void) {
     uint32 base = g_user_code_base;
     uint32 pages = g_user_code_pages;
     uint32 stack_page = g_user_stack_page;
+    uint32 stack_bottom = vmm_kernel_as.stack_bottom;
 
     if (base && pages) {
         for (uint32 i = 0; i < pages; ++i) {
             (void)vmm_unmap_page(&vmm_kernel_as, base + i * PAGE_SIZE);
         }
     }
-    if (stack_page) {
+
+    // Unmap user stack pages. The VMM can grow the stack on-demand, so we use
+    // the current stack_bottom as the lower bound when it looks valid.
+    if (stack_bottom >= USER_STACK_BASE && stack_bottom < USER_STACK_TOP) {
+        for (uint32 va = stack_bottom; va < USER_STACK_TOP; va += PAGE_SIZE) {
+            (void)vmm_unmap_page(&vmm_kernel_as, va);
+        }
+    } else if (stack_page) {
+        // Back-compat: older callers only tracked a single stack page.
         (void)vmm_unmap_page(&vmm_kernel_as, stack_page);
     }
 
     g_user_code_base = 0;
     g_user_code_pages = 0;
     g_user_stack_page = 0;
+
+    // Reset stack metadata for the kernel address space.
+    vmm_kernel_as.stack_bottom = USER_STACK_TOP - PAGE_SIZE;
 
     syscall_reset_user_fds();
 }
@@ -48,6 +68,11 @@ void ui_return_from_user_task(void) {
     g_user_task_active = 0;
     g_user_task_term = -1;
     g_user_task_ui_dirty = 0;
+
+    g_user_task_color_r = 255;
+    g_user_task_color_g = 255;
+    g_user_task_color_b = 255;
+    g_user_task_color_state = 0;
 
     // Prefer the graphical tiling-manager shell when it's been initialized.
     if (tile_is_tiling_active()) {
@@ -216,6 +241,7 @@ typedef struct {
 #define BLOCK_HEADER_SIZE ((uint32)sizeof(block_header_t))
 
 static uint8* heap_start = (uint8*)0;
+static uint32 heap_phys_start = 0;
 static uint32 heap_size = HEAP_SIZE_DEFAULT;  // Dynamic heap size
 static uint32 first_block = 0;
 static int memory_initialized = 0;
@@ -422,19 +448,26 @@ void check_stack_overflow() {
 void init_memory_manager() {
     if (memory_initialized) return;
 
-    // Pick a heap start that cannot overlap the kernel image OR the VMM's
-    // boot-time allocations (page tables, etc.). The VMM uses a bump allocator
-    // starting right after __kernel_end; starting our heap there would clobber
-    // paging structures and crash immediately.
-    if (!heap_start || heap_start == (uint8*)0) {
+    // Choose a heap start that cannot overlap the VMM's boot-time allocations
+    // (page tables, etc.). IMPORTANT: user tasks are mapped into the *low* user
+    // range (starting at USER_CODE_BASE = 0x00400000). If the kernel heap also
+    // lives in the low identity range, loading a user task can overwrite/unmap
+    // heap pages and corrupt the allocator.
+    //
+    // To avoid that, we keep the heap in the kernel high-half by using the
+    // KERNEL_BASE alias of low physical memory.
+    if (heap_phys_start == 0) {
         uint32 boot_end = vmm_get_boot_alloc_end();
         if (boot_end != 0) {
-            heap_start = (uint8*)boot_end;
+            heap_phys_start = boot_end;
         } else {
             // Fallback (should only happen if malloc is used before vmm_init())
             uint32 end = (uint32)&__kernel_end;
-            heap_start = (uint8*)align_up_u32(end + 0x10000, 0x1000);
+            heap_phys_start = align_up_u32(end + 0x10000, 0x1000);
         }
+    }
+    if (!heap_start || heap_start == (uint8*)0) {
+        heap_start = (uint8*)(KERNEL_BASE + heap_phys_start);
     }
     
     // Try to detect available memory and adjust heap size accordingly
@@ -443,15 +476,15 @@ void init_memory_manager() {
     // Use the new generous heap sizing for zero-copy operations
     calculate_optimal_heap_size();
     
-    // Basic sanity check
-    if ((uint32)heap_start < 0x100000) {
+    // Basic sanity check (physical)
+    if (heap_phys_start < 0x100000) {
         return;
     }
     
-    // Initialize heap with calculated size
-    // Reserve this region in the VMM frame allocator so paging/frame_alloc
-    // will never hand out frames that overlap the heap.
-    vmm_reserve_phys_range((uint32)heap_start, (uint32)heap_start + heap_size);
+    // Initialize heap with calculated size.
+    // Reserve the physical region so paging/frame_alloc will never hand out
+    // frames that overlap the heap.
+    vmm_reserve_phys_range(heap_phys_start, heap_phys_start + heap_size);
 
     memset(heap_start, 0, heap_size);
     

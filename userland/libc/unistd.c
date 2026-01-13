@@ -17,6 +17,12 @@ int close(int fd) {
     return eyn_syscall1(EYN_SYSCALL_CLOSE, fd);
 }
 
+int writefile(const char* path, const void* buf, size_t len) {
+    if (!path || !buf) return -1;
+    if (len > 0x7fffffffU) len = 0x7fffffffU;
+    return eyn_syscall3_ppi(EYN_SYSCALL_WRITEFILE, path, buf, (int)len);
+}
+
 __attribute__((noreturn)) void _exit(int code) {
     (void)eyn_syscall1(EYN_SYSCALL_EXIT, code);
     for (;;) {

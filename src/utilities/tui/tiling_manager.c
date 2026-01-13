@@ -560,10 +560,10 @@ static void maybe_update_icon_mode(uint8 disk) {
 }
 
 // Try a few candidate paths for an icon with given extension and load into cache entry
-static rei_image_t* load_icon_for_ext(const char* ext) {
+static rei_image_t* load_icon_for_ext_mode(const char* ext, int want16) {
     if (!ext) return NULL;
 
-    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
+    want16 = want16 ? 1 : 0;
     char cache_key[24];
     snprintf(cache_key, sizeof(cache_key), "%s|%s", want16 ? "16" : "8", ext);
     cache_key[sizeof(cache_key) - 1] = '\0';
@@ -641,6 +641,11 @@ static rei_image_t* load_icon_for_ext(const char* ext) {
     }
     g_icon_cache[idx].loaded = 0;
     return NULL;
+}
+
+static rei_image_t* load_icon_for_ext(const char* ext) {
+    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
+    return load_icon_for_ext_mode(ext, want16);
 }
 
 // Draw an REI image into the backbuffer at (x,y). Honor alpha for RGBA and use blending.
@@ -939,7 +944,7 @@ static void wm_mark_decor_dirty(const window_t* w) {
 
 static void wm_draw_content(window_t* w) {
     int th = win_title_height(w);
-    int sh = 0;
+    int sh = status_overlay_visible() ? status_bar_height_px() : 0;
     int cx = w->x + 1;
     int cy = w->y + th + sh + 1;
     int cw = w->w - 2;
@@ -1774,15 +1779,16 @@ static void draw_static_tile(tile_t* t, int is_focused) {
 static void draw_tile_content(const tile_t* t) {
     if (t->type == TILE_EMPTY) return;
     int title_h = get_title_height(t);
+    int sh = status_overlay_visible() ? status_bar_height_px() : 0;
     int cw = vga_text_cell_w();
     int fh = vga_text_cell_h();
     // Keep a 1px margin for the border so clears don't overwrite border pixels
     int content_x = t->x + 1;
-    int content_y = t->y + title_h + 1;
+    int content_y = t->y + title_h + sh + 1;
     int line_h = fh;
-    int max_lines = (t->height - (title_h + 2)) / line_h;
+    int max_lines = (t->height - (title_h + sh + 2)) / line_h;
     int content_w = t->width - 2; // leave 1px border on left/right
-    int content_h = t->height - (title_h) - 2; // leave 1px top/bottom border
+    int content_h = t->height - (title_h + sh) - 2; // leave 1px top/bottom border
     int bg_bright = -1; // -1 unknown; 0=dark; 1=bright
     if (content_w > 0 && content_h > 0) {
         // Always start with a clean content area to avoid any residuals around centered/scaled images
@@ -1875,21 +1881,42 @@ static void draw_tile_content(const tile_t* t) {
             for (int w = wraps - 1; w >= 0 && vis_row >= 0; --w) {
                 int start_col = w * cols;
                 int line_indent_px = 0;
-                int line_anchor_col = 0;
-                const char* line_icon_key = vterm_get_line_icon_key(t->term_idx, abs_row, &line_indent_px, &line_anchor_col);
-                if (!line_icon_key) line_indent_px = 0;
-
-                // If this wrapped segment contains the anchor column, draw the icon once on this visual row.
-                if (line_icon_key && line_anchor_col >= start_col && line_anchor_col < start_col + cols) {
+                // Icons are anchored to character columns within this line.
+                // Draw every icon whose anchor column falls within this wrapped segment.
+                int icon_count = vterm_get_line_icon_count(t->term_idx, abs_row);
+                if (icon_count > 0) {
                     int py_icon = content_y + vis_row * line_h;
-                    rei_image_t* icon = load_icon_for_ext(line_icon_key);
-                    if (!icon) icon = load_icon_for_ext("file_none");
-                    if (icon) {
-                        int icon_x = content_x;
-                        int icon_y = py_icon;
-                        int ih = icon->header.height;
-                        if (fh > ih) icon_y = py_icon + (fh - ih) / 2;
-                        draw_rei_at(icon, icon_x, icon_y);
+                    for (int ii = 0; ii < icon_count; ++ii) {
+                        int icon_anchor_col = 0;
+                        const char* line_icon_key = vterm_get_line_icon_key_n(t->term_idx, abs_row, ii, &icon_anchor_col);
+                        if (!line_icon_key) continue;
+                        if (icon_anchor_col < start_col || icon_anchor_col >= start_col + cols) continue;
+
+                        // If we're in 16x mode, only use 16x16 icons when the text stream
+                        // reserved enough character cells (typically two spaces for 16px-wide icons
+                        // in an 8px-wide text grid). This keeps older output readable after font/icon
+                        // mode changes.
+                        int want16_global = (vga_text_cell_h() >= 16) ? 1 : 0;
+                        int want16_icon = want16_global;
+                        if (want16_global) {
+                            if (icon_anchor_col < 0 || icon_anchor_col + 1 >= TERM_COLS) {
+                                want16_icon = 0;
+                            } else {
+                                char c0 = src[icon_anchor_col];
+                                char c1 = src[icon_anchor_col + 1];
+                                if (c0 != ' ' || c1 != ' ') want16_icon = 0;
+                            }
+                        }
+
+                        rei_image_t* icon = load_icon_for_ext_mode(line_icon_key, want16_icon);
+                        if (!icon) icon = load_icon_for_ext_mode("file_none", want16_icon);
+                        if (icon) {
+                            int icon_x = content_x + (icon_anchor_col - start_col) * cw;
+                            int icon_y = py_icon;
+                            int ih = icon->header.height;
+                            if (fh > ih) icon_y = py_icon + (fh - ih) / 2;
+                            draw_rei_at(icon, icon_x, icon_y);
+                        }
                     }
                 }
 
@@ -2365,6 +2392,49 @@ int tile_pump_input_once(void) {
     if (!g_tm_initialized) return 0;
     if (tile_count <= 0) return 0;
 
+    // Also poll + route mouse while a ring3 task is running (the main tiler loop is paused).
+    // This enables GUI user programs to receive GUI_EVENT_MOUSE events.
+    if (g_user_task_active) {
+        mouse_poll();
+        // mouse_read_event() always succeeds and clears deltas, so only read/dispatch
+        // when something actually changed.
+        int have_mouse = 0;
+        if (g_mouse_state.delta_x || g_mouse_state.delta_y || g_mouse_state.wheel_delta) {
+            have_mouse = 1;
+        }
+        if ((g_mouse_state.buttons ^ g_mouse_state.prev_buttons) != 0) {
+            have_mouse = 1;
+        }
+
+        mouse_event_t me;
+        if (have_mouse && mouse_read_event(&me) == 0) {
+            // Route to focused window if any; else to the active user task's tile.
+            if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
+                window_t* wfocus = &g_windows[g_win_focused];
+                if (wfocus->mouse_cb) {
+                    wfocus->mouse_cb(-1, (const mouse_event_t*)&me, wfocus->userdata);
+                    wfocus->needs_redraw = 1;
+                }
+                return 1;
+            }
+
+            int target_tile = focused;
+            if (g_user_task_term >= 0) {
+                int tt = tile_find_by_term(g_user_task_term);
+                if (tt >= 0 && tt < tile_count) target_tile = tt;
+            }
+
+            int term = tiles[target_tile].term_idx;
+            if (term < 0 || term >= MAX_TILES) term = 0;
+
+            if (gui_mouse_cb[term]) {
+                gui_mouse_cb[term](target_tile, (const mouse_event_t*)&me, gui_userdata[term]);
+                gui_needs_redraw[term] = 1;
+                return 1;
+            }
+        }
+    }
+
     int key = tui_read_key();
 
     // Shift+Alt toggles pinned status overlay (persisted). Must run even if key==0.
@@ -2425,6 +2495,11 @@ int tile_pump_input_once(void) {
     // instead of the normal vterm command handling.
     if (g_user_task_active && g_user_task_term >= 0) {
         int term = g_user_task_term;
+        // If this ring3 task has attached a GUI key handler, prefer routing keys
+        // to the GUI event queue instead of hijacking them into stdin.
+        if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
+            // fall through to normal routing
+        } else {
         // Skip Super-modified keys (they go to tiler hotkeys below)
         if (!(key & 0x4000)) {
             char ch = 0;
@@ -2444,7 +2519,7 @@ int tile_pump_input_once(void) {
             if (ch) {
                 // Echo the character to the vterm display
                 if (ch == '\b') {
-                    // For backspace, we could implement echo but for now just update stdin buffer
+                    vterm_backspace_output(term);
                 } else if (ch == '\n') {
                     vterm_write_char(term, '\n');
                 } else {
@@ -2454,6 +2529,7 @@ int tile_pump_input_once(void) {
                 vterm_stdin_putchar(term, ch);
                 return 1;
             }
+        }
         }
     }
     // If modal is active, handle it first.

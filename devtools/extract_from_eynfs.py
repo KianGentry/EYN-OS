@@ -30,11 +30,17 @@ def read_superblock(f):
 
 print(f"DIRENT_SIZE (Python): {DIRENT_SIZE}")
 
+
+def blk_off(block):
+    # EYNFS block numbers in the superblock are relative to the start of the
+    # EYNFS partition, which begins at SUPERBLOCK_LBA.
+    return (SUPERBLOCK_LBA + block) * EYNFS_BLOCK_SIZE
+
 def read_dir_table(f, start_block):
     entries = []
     current_block = start_block
     while current_block:
-        f.seek(current_block * EYNFS_BLOCK_SIZE)
+        f.seek(blk_off(current_block))
         block_data = f.read(EYNFS_BLOCK_SIZE)
         if len(block_data) < EYNFS_BLOCK_SIZE:
             break
@@ -72,7 +78,7 @@ def extract_file(f, entry, out_path):
         # Each filesystem block starts with a 4-byte next-block pointer, followed by payload
         payload_size = EYNFS_BLOCK_SIZE - 4
         while size > 0 and block != 0:
-            f.seek(block * EYNFS_BLOCK_SIZE)
+            f.seek(blk_off(block))
             block_data = f.read(EYNFS_BLOCK_SIZE)
             if not block_data or len(block_data) < 4:
                 break
@@ -96,7 +102,7 @@ def main():
             print("Not a valid EYNFS image.")
             sys.exit(1)
         # Print raw bytes of first 4 directory entries
-        f.seek(sb['root_dir_block'] * EYNFS_BLOCK_SIZE)
+        f.seek(blk_off(sb['root_dir_block']))
         print("First 4 raw directory entries:")
         for i in range(4):
             data = f.read(DIRENT_SIZE)

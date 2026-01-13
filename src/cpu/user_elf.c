@@ -61,10 +61,86 @@ typedef struct {
 
 #define PT_LOAD 1
 
+// Keep the loader simple and memory-bounded: we currently read the full ELF into RAM.
+// This cap is intentionally conservative for low-memory QEMU configs.
+#define USER_ELF_MAX_FILE_BYTES (2u * 1024u * 1024u)
+
+// Initial user stack mapping. The VMM can still grow the stack on-demand via #PF.
+#define USER_ELF_INITIAL_STACK_PAGES 32u  // 128KB
+
 static inline uint32 align_down(uint32 v, uint32 a) { return v & ~(a - 1); }
 static inline uint32 align_up(uint32 v, uint32 a) { return (v + a - 1) & ~(a - 1); }
 
-int user_elf_run(uint8 drive, const char* abspath) {
+// Bounds for argv copying to user stack. Keep small for low-memory configs.
+#define USER_ELF_MAX_ARGC 32
+#define USER_ELF_MAX_ARG_BYTES 2048
+
+static uint32 user_stack_build_argv(uint32 user_stack_top, const char* prog_abspath,
+                                   int argc, const char* const* argv) {
+    // Build a SysV-like initial stack:
+    //   argc
+    //   argv[0..argc-1]
+    //   NULL
+    // Strings live below.
+    // Returns new user ESP, or 0 on failure.
+
+    const char* local_argv[USER_ELF_MAX_ARGC];
+    int local_argc = 0;
+
+    // Always provide argv[0].
+    local_argv[local_argc++] = (prog_abspath && prog_abspath[0]) ? prog_abspath : "";
+
+    if (argc > 0 && argv) {
+        for (int i = 0; i < argc && local_argc < USER_ELF_MAX_ARGC; i++) {
+            if (!argv[i]) continue;
+            local_argv[local_argc++] = argv[i];
+        }
+    }
+
+    uint32 sp = user_stack_top;
+    uint32 argv_ptrs[USER_ELF_MAX_ARGC];
+    uint32 total_bytes = 0;
+
+    // Copy strings top-down.
+    for (int i = local_argc - 1; i >= 0; i--) {
+        const char* s = local_argv[i];
+        uint32 len = 0;
+        while (s[len]) len++;
+        len += 1; // NUL
+
+        total_bytes += len;
+        if (total_bytes > USER_ELF_MAX_ARG_BYTES) return 0;
+
+        sp -= len;
+        if (sp < USER_STACK_BASE) return 0;
+        memcpy((void*)sp, s, len);
+        argv_ptrs[i] = sp;
+    }
+
+    // Align for pointer pushes.
+    sp = align_down(sp, 4);
+
+    // Push argv NULL terminator.
+    sp -= 4;
+    if (sp < USER_STACK_BASE) return 0;
+    *(uint32*)sp = 0;
+
+    // Push argv pointers.
+    for (int i = local_argc - 1; i >= 0; i--) {
+        sp -= 4;
+        if (sp < USER_STACK_BASE) return 0;
+        *(uint32*)sp = argv_ptrs[i];
+    }
+
+    // Push argc.
+    sp -= 4;
+    if (sp < USER_STACK_BASE) return 0;
+    *(uint32*)sp = (uint32)local_argc;
+
+    return sp;
+}
+
+int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
     if (!abspath || !abspath[0]) return -1;
 
     vfs_stat_t st;
@@ -74,8 +150,8 @@ int user_elf_run(uint8 drive, const char* abspath) {
     }
 
     // Keep it small for now; avoids big allocations in low-memory configs.
-    if ((uint32)st.size > 512 * 1024) {
-        printf("%cError: ELF too large (max 512KB for now).\n", 255, 0, 0);
+    if ((uint32)st.size > USER_ELF_MAX_FILE_BYTES) {
+        printf("%cError: ELF too large (max %u KB for now).\n", 255, 0, 0, (unsigned)(USER_ELF_MAX_FILE_BYTES / 1024u));
         return -1;
     }
 
@@ -174,6 +250,16 @@ int user_elf_run(uint8 drive, const char* abspath) {
     g_user_task_term = tile_is_tiling_active() ? tile_get_focused() : -1;
     if (g_user_task_term < 0) g_user_task_term = 0;
     g_user_task_ui_dirty = 1;
+
+    // Default user program output color to white (programs can change it).
+    extern volatile int g_user_task_color_r;
+    extern volatile int g_user_task_color_g;
+    extern volatile int g_user_task_color_b;
+    extern volatile uint8 g_user_task_color_state;
+    g_user_task_color_r = 255;
+    g_user_task_color_g = 255;
+    g_user_task_color_b = 255;
+    g_user_task_color_state = 0;
     
     // Clear the stdin buffer for this terminal so the user task starts fresh
     vterm_stdin_clear(g_user_task_term);
@@ -198,28 +284,36 @@ int user_elf_run(uint8 drive, const char* abspath) {
         invalidate_tlb_entry(va);
     }
 
-    // Map user stack (one page for now).
-    const uint32 user_stack_page = USER_STACK_TOP - PAGE_SIZE;
+    // Map user stack (initial N pages; can grow further on page faults).
+    const uint32 user_stack_pages = USER_ELF_INITIAL_STACK_PAGES;
+    const uint32 user_stack_page = USER_STACK_TOP - user_stack_pages * PAGE_SIZE;
     const uint32 user_stack_top = USER_STACK_TOP - 0x10;
-    uint32 stack_frame = frame_alloc();
-    if (stack_frame == 0) {
-        printf("%cError: out of physical frames.\n", 255, 0, 0);
-        user_task_cleanup_mappings();
-        free(file);
-        return -1;
+    for (uint32 spi = 0; spi < user_stack_pages; ++spi) {
+        uint32 va = user_stack_page + spi * PAGE_SIZE;
+        uint32 frame = frame_alloc();
+        if (frame == 0) {
+            printf("%cError: out of physical frames.\n", 255, 0, 0);
+            user_task_cleanup_mappings();
+            free(file);
+            return -1;
+        }
+        if (vmm_map_page(&vmm_kernel_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
+            printf("%cError: failed to map user stack.\n", 255, 0, 0);
+            frame_free(frame);
+            user_task_cleanup_mappings();
+            free(file);
+            return -1;
+        }
+        invalidate_tlb_entry(va);
     }
-    if (vmm_map_page(&vmm_kernel_as, user_stack_page, stack_frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
-        printf("%cError: failed to map user stack.\n", 255, 0, 0);
-        frame_free(stack_frame);
-        user_task_cleanup_mappings();
-        free(file);
-        return -1;
-    }
-    invalidate_tlb_entry(user_stack_page);
+
+    // Enable VMM stack growth for the current address space.
+    vmm_kernel_as.stack_bottom = user_stack_page;
 
     // Record mappings for cleanup on exit/abort.
     g_user_code_base = map_start;
     g_user_code_pages = pages;
+    // Bottom of mapped stack region (not necessarily a single page anymore).
     g_user_stack_page = user_stack_page;
 
     // Zero the full mapped region and apply PT_LOAD contents.
@@ -244,16 +338,34 @@ int user_elf_run(uint8 drive, const char* abspath) {
         memcpy((void*)ph->p_vaddr, file + ph->p_offset, ph->p_filesz);
     }
 
-    memset((void*)user_stack_page, 0, PAGE_SIZE);
+    memset((void*)user_stack_page, 0, user_stack_pages * PAGE_SIZE);
 
     // Save entry before releasing the ELF buffer.
     uint32 entry = eh->e_entry;
+    if (entry == 0 || entry < map_start || entry >= map_end) {
+        printf("%cError: invalid ELF entrypoint: 0x%X\n", 255, 0, 0, (unsigned)entry);
+        user_task_cleanup_mappings();
+        free(file);
+        return -1;
+    }
     free(file);
+
+    // Build initial user stack with argv.
+    uint32 user_esp = user_stack_build_argv(user_stack_top, abspath, argc, argv);
+    if (user_esp == 0) {
+        printf("%cError: argv too large.\n", 255, 0, 0);
+        user_task_cleanup_mappings();
+        return -1;
+    }
 
     // Enter ring3 at ELF entry.
     printf("%c[elfrun] entering user mode: %s (entry=0x%X)\n", 0, 255, 0, abspath, (unsigned)entry);
     tss_set_kernel_stack((uint32)&stack_space);
-    enter_user_mode(entry, user_stack_top);
+    enter_user_mode(entry, user_esp);
 
     return 0;
+}
+
+int user_elf_run(uint8 drive, const char* abspath) {
+    return user_elf_run_argv(drive, abspath, 0, NULL);
 }

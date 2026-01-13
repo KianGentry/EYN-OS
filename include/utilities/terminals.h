@@ -3,6 +3,9 @@
 
 void vterm_init_all();
 void vterm_write_char(int idx, char ch);
+// Erase a single previously echoed output character (used for interactive stdin echo).
+void vterm_backspace_output(int idx);
+// Get the text for an absolute row index (includes scrollback history).
 const char* vterm_get_line(int idx, int row);
 void vterm_feed_input(int idx, int key);
 void vterm_set_active(int idx, int active);
@@ -19,7 +22,7 @@ void vterm_stream_redirect_char(int idx, char ch, int r, int g, int b);
 void vterm_print_prompt(int idx);
 // Clear the virtual terminal buffer and reset cursor
 void vterm_clear(int idx);
-// Get the current cursor row (0..TERM_ROWS-1)
+// Get the current cursor row (absolute row index; includes scrollback history)
 int vterm_get_cursor_row(int idx);
 // Get the current cursor column (0..TERM_COLS-1)
 int vterm_get_cursor_col(int idx);
@@ -35,9 +38,15 @@ void vterm_get_tail_line_color(int idx, int visible_index, int visible_count, in
 void vterm_get_tail_char_color(int idx, int visible_index, int visible_count, int char_col, int* out_r, int* out_g, int* out_b);
 
 // Per-line icon metadata for rendering small file/dir icons alongside text.
-// Returns NULL if no icon is associated with the line.
-// If non-NULL, out_indent_px is typically 10 and out_anchor_col is the text start column.
+// Icons are anchored to a character column (cell start) and are not meant to
+// shift text in pixels. The shell/ls output typically prints one or two leading
+// spaces to reserve room for the icon.
+//
+// Backward-compatible: returns the first icon (if any).
 const char* vterm_get_line_icon_key(int idx, int row, int* out_indent_px, int* out_anchor_col);
+// New: multiple icons per line (needed for columnar listings).
+int vterm_get_line_icon_count(int idx, int row);
+const char* vterm_get_line_icon_key_n(int idx, int row, int n, int* out_anchor_col);
 
 // Absolute helpers for rendering/wrapping
 // Get per-character color at absolute (row, col) indices

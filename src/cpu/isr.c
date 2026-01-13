@@ -16,6 +16,7 @@
 #include <mm/user_access.h>
 #include <fs/vfs.h>
 #include <fs_commands.h>
+#include <eynfs.h>
 extern multiboot_info_t *g_mbi;
 
 // Global error tracking
@@ -220,6 +221,15 @@ void isr_dispatch(regs_t* regs) {
         return;
     }
 
+    // ISR 7: #NM (Device Not Available). Used for lazy x87 enabling (CR0.TS).
+    // Even if we don't use lazy switching yet, handling this avoids spurious
+    // fatal errors if firmware/boot code left TS set.
+    if (regs->int_no == 7) {
+        extern void fpu_handle_nm(void);
+        fpu_handle_nm();
+        return;
+    }
+
     /* Page faults should be handled by the VMM (demand paging / COW / swap). */
     if (regs->int_no == 14) {
         extern void page_fault_handler(regs_t* r);
@@ -265,6 +275,10 @@ uint32 get_last_error_eip() {
 #define SYSCALL_GUI_DRAW_LINE 18
 #define SYSCALL_GUI_GET_CONTENT_SIZE 19
 #define SYSCALL_GUI_SET_FONT 20
+
+// Write an entire file (create/overwrite) from ring3.
+// args: (const char* path, const void* buf, int len)
+#define SYSCALL_WRITEFILE 21
 
 typedef struct {
     uint32 type;
@@ -516,7 +530,12 @@ void syscall_reset_user_guis(void) {
     }
 
     // Reset handle 0 "attached" GUI state too.
+    // Important: unregister the GUI client so the tile returns to normal vterm rendering.
     if (g_user_guis[0].used) {
+        int tile_idx0 = g_user_guis[0].tile_idx;
+        if (tile_is_tiling_active() && tile_idx0 >= 0) {
+            tile_unregister_gui_client(tile_idx0);
+        }
         if (g_user_guis[0].font_handle > 0) {
             vga_font_release(g_user_guis[0].font_handle);
             g_user_guis[0].font_handle = 0;
@@ -648,6 +667,27 @@ static int syscall_getdents_cb(const char* name, int is_dir, uint32 size, void* 
 // focused virtual terminal so output is visible in the graphical shell.
 static void syscall_console_write(const char* buf, int len) {
     if (!buf || len <= 0) return;
+
+    // For user-task output, explicitly control the vterm color so it does not
+    // inherit shell capture/redirect colors. Programs can change it by writing
+    // the byte sequence: 0xFF, r, g, b.
+    extern volatile int g_user_task_color_r;
+    extern volatile int g_user_task_color_g;
+    extern volatile int g_user_task_color_b;
+    extern volatile uint8 g_user_task_color_state;
+    extern volatile uint8 g_user_task_color_bytes[3];
+    extern int shell_redirect_color_r;
+    extern int shell_redirect_color_g;
+    extern int shell_redirect_color_b;
+
+    int prev_r = shell_redirect_color_r;
+    int prev_g = shell_redirect_color_g;
+    int prev_b = shell_redirect_color_b;
+
+    // Start with current user-task color (default white).
+    shell_redirect_color_r = (int)g_user_task_color_r;
+    shell_redirect_color_g = (int)g_user_task_color_g;
+    shell_redirect_color_b = (int)g_user_task_color_b;
     if (tile_is_tiling_active()) {
         int term = tile_get_focused();
         if (g_user_task_active) {
@@ -655,11 +695,40 @@ static void syscall_console_write(const char* buf, int len) {
         }
         if (term < 0) term = 0;
         for (int i = 0; i < len; ++i) {
-            vterm_write_char(term, buf[i]);
+            uint8 ch = (uint8)buf[i];
+
+            if (g_user_task_color_state == 0) {
+                if (ch == 0xFF) {
+                    g_user_task_color_state = 1;
+                    continue;
+                }
+            } else {
+                // Collect r,g,b across bytes (sequence may be split across writes).
+                int idx = (int)g_user_task_color_state - 1;
+                if (idx >= 0 && idx < 3) {
+                    g_user_task_color_bytes[idx] = ch;
+                }
+                g_user_task_color_state++;
+                if (g_user_task_color_state == 4) {
+                    g_user_task_color_r = (int)g_user_task_color_bytes[0];
+                    g_user_task_color_g = (int)g_user_task_color_bytes[1];
+                    g_user_task_color_b = (int)g_user_task_color_bytes[2];
+                    shell_redirect_color_r = (int)g_user_task_color_r;
+                    shell_redirect_color_g = (int)g_user_task_color_g;
+                    shell_redirect_color_b = (int)g_user_task_color_b;
+                    g_user_task_color_state = 0;
+                }
+                continue;
+            }
+
+            vterm_write_char(term, (char)ch);
         }
         if (g_user_task_active) {
             g_user_task_ui_dirty = 1;
         }
+        shell_redirect_color_r = prev_r;
+        shell_redirect_color_g = prev_g;
+        shell_redirect_color_b = prev_b;
         return;
     }
     // Fallback: use kernel printf (serial/text console)
@@ -673,6 +742,10 @@ static void syscall_console_write(const char* buf, int len) {
         printf("%s", out);
         pos += chunk;
     }
+
+    shell_redirect_color_r = prev_r;
+    shell_redirect_color_g = prev_g;
+    shell_redirect_color_b = prev_b;
 }
 
 static void syscall_maybe_render_ui(void) {
@@ -688,6 +761,11 @@ static void syscall_maybe_render_ui(void) {
 // Set to 1 to enable verbose syscall I/O debugging on serial.
 #ifndef SYSCALL_DEBUG
 #define SYSCALL_DEBUG 0
+#endif
+
+// Focused tracing for file creation/writes from ring3.
+#ifndef SYSCALL_WRITEFILE_DEBUG
+#define SYSCALL_WRITEFILE_DEBUG 0
 #endif
 
 // C dispatcher called by the assembly stub. Returns value in EAX to user.
@@ -975,6 +1053,104 @@ uint32 syscall_dispatch(regs_t* regs) {
             int rc = vfs_listdir(ufd->drive, ufd->path, syscall_getdents_cb, &ctx);
             if (rc < 0) { regs->eax = (uint32)-1; break; }
             regs->eax = (uint32)(ctx.written * (int)sizeof(eyn_dirent_t));
+            break;
+        }
+
+        case SYSCALL_WRITEFILE: {
+            const char* user_path = (const char*)arg1;
+            const void* user_buf = (const void*)arg2;
+            int len = (int)arg3;
+
+            if (!user_path || !user_buf || len < 0) { regs->eax = (uint32)-1; break; }
+            if (len == 0) { regs->eax = 0; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+            trim_trailing_crlf(path);
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                cwd = vterm_get_cwd(g_user_task_term);
+            }
+            if (!cwd || cwd[0] != '/') {
+                cwd = "/";
+            }
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            extern uint8 g_current_drive;
+            uint8 drive = g_current_drive;
+
+            if (SYSCALL_WRITEFILE_DEBUG) {
+                printf("[SYSCALL:WRITEFILE] req='%s' cwd='%s' => '%s' len=%d drive=%d\n",
+                       path, cwd ? cwd : "(null)", abspath, len, (int)drive);
+            }
+
+            // Stream the user buffer into the filesystem to avoid large kernel allocations.
+            // For now, implement streaming writes on EYNFS. FAT32 falls back to the
+            // whole-buffer write path.
+            if (vfs_detect(drive) == VFS_FS_EYNFS) {
+                eynfs_stream_t s;
+                if (eynfs_stream_begin(drive, abspath, &s) != 0) {
+                    if (SYSCALL_WRITEFILE_DEBUG) {
+                        printf("[SYSCALL:WRITEFILE] eynfs_stream_begin failed for '%s'\n", abspath);
+                    }
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+
+                int rc = 0;
+                int pos = 0;
+                while (pos < len) {
+                    int chunk = len - pos;
+                    if (chunk > 4096) chunk = 4096;
+                    uint8 tmp[4096];
+                    if (copyin(tmp, (const uint8*)user_buf + pos, (size_t)chunk) != 0) {
+                        rc = -1;
+                        break;
+                    }
+                    if (eynfs_stream_write(&s, tmp, (size_t)chunk) < 0) {
+                        rc = -1;
+                        break;
+                    }
+                    pos += chunk;
+                }
+
+                if (rc == 0) {
+                    if (eynfs_stream_end(&s) != 0) {
+                        rc = -1;
+                    }
+                }
+
+                if (SYSCALL_WRITEFILE_DEBUG) {
+                    printf("[SYSCALL:WRITEFILE] eynfs rc=%d wrote=%d\n", rc, (rc == 0) ? len : -1);
+                }
+                regs->eax = (rc == 0) ? (uint32)len : (uint32)-1;
+                break;
+            }
+
+            // FAT32 (or unknown FS): fall back to whole-buffer write.
+            // Keep memory usage bounded; EYN-OS often runs with small RAM.
+            const int max_len = 256 * 1024;
+            if (len > max_len) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            uint8* kbuf = (uint8*)malloc((size_t)len);
+            if (!kbuf) { regs->eax = (uint32)-1; break; }
+            if (copyin(kbuf, user_buf, (size_t)len) != 0) {
+                free(kbuf);
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            int written = vfs_write_file(drive, abspath, kbuf, (uint32)len);
+            free(kbuf);
+            if (SYSCALL_WRITEFILE_DEBUG) {
+                printf("[SYSCALL:WRITEFILE] vfs_write_file rc=%d\n", written);
+            }
+            regs->eax = (uint32)written;
             break;
         }
         case SYSCALL_GUI_CREATE: {
@@ -1315,10 +1491,6 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_EXIT: {
-            // Keep this visible in the graphical shell too.
-            char msg[64];
-            int n = snprintf(msg, sizeof(msg), "[SYSCALL] Program exited with code %d\n", (int)arg1);
-            if (n > 0) syscall_console_write(msg, n);
             // Clean up any GUI resources created by this user task.
             syscall_reset_user_guis();
             g_user_task_active = 0;

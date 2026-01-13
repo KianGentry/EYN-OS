@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <help_tui.h>
 #include <fs/vfs.h>
+#include <terminals.h>
 
 // Forward declarations for command handlers
 void ls_cmd(string arg);
@@ -123,6 +124,49 @@ typedef struct {
     char dir_path[128];
 } ls_ctx_t;
 
+typedef struct {
+    int icon_pad;
+    int max_item_width;
+    int count;
+} ls_measure_t;
+
+typedef struct {
+    uint8 disk;
+    char dir_path[128];
+    int icon_pad;
+    int col_width;
+} ls_cols_ctx_t;
+
+typedef struct {
+    char name[64];
+    int is_dir;
+} ls_entry_t;
+
+typedef struct {
+    uint8 disk;
+    char dir_path[128];
+    int icon_pad;
+    int max_item_width;
+    int count;
+    ls_entry_t entries[MAX_ENTRIES];
+} ls_collect_t;
+
+static void ls_print_spaces(int n) {
+    for (int i = 0; i < n; ++i) putchar(' ');
+}
+
+static int ls_icon_pad_cols(void) {
+    // Icons are either 8x8 or 16x16 pixels. Reserve enough character cells
+    // to cover the icon width based on the current text cell width.
+    int cell_w = vga_text_cell_w();
+    if (cell_w <= 0) cell_w = 8;
+
+    int icon_px = (vga_text_cell_h() >= 16) ? 16 : 8;
+    int pad = (icon_px + cell_w - 1) / cell_w;
+    if (pad < 1) pad = 1;
+    return pad;
+}
+
 static int ls_any_cb(const char* name, int is_dir, uint32 size, void* user) {
     (void)name; (void)is_dir; (void)size;
     int* found = (int*)user;
@@ -201,7 +245,98 @@ static void ls_icon_key_for_entry(uint8 disk, const char* parent_dir, const char
     safe_strcpy(out_key, key, 16);
 }
 
+static int vfs_ls_measure_cb(const char* name, int is_dir, uint32 size, void* user) {
+    (void)size;
+    ls_measure_t* m = (ls_measure_t*)user;
+    if (!m) return 0;
+
+    int w = m->icon_pad;
+    w += (int)strlen(name);
+    if (is_dir) w += 1; // trailing '/'
+
+    if (w > m->max_item_width) m->max_item_width = w;
+    m->count++;
+    return 0;
+}
+
+static void ls_print_entry_cols(const ls_cols_ctx_t* ctx, const char* name, int is_dir) {
+    if (!ctx || !name) return;
+
+    char icon_key[16];
+    ls_icon_key_for_entry(ctx->disk, ctx->dir_path, name, is_dir, icon_key);
+    shell_register_redirect_icon(icon_key);
+
+    ls_print_spaces(ctx->icon_pad);
+
+    if (is_dir) {
+        printf("%c%s/", 120, 120, 255, name);
+    } else {
+        printf("%c%s", 255, 255, 255, name);
+    }
+}
+
+static int vfs_ls_collect_cb(const char* name, int is_dir, uint32 size, void* user) {
+    (void)size;
+    ls_collect_t* c = (ls_collect_t*)user;
+    if (!c || !name) return 0;
+    if (c->count >= MAX_ENTRIES) return 1; // stop
+
+    ls_entry_t* e = &c->entries[c->count++];
+    safe_strcpy(e->name, name, sizeof(e->name));
+    e->is_dir = is_dir;
+
+    int w = c->icon_pad + (int)strlen(e->name) + (is_dir ? 1 : 0);
+    if (w > c->max_item_width) c->max_item_width = w;
+    return 0;
+}
+
+static int ls_tolower_ascii(int c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 'a';
+    return c;
+}
+
+static int ls_name_cmp(const char* a, const char* b) {
+    // Case-insensitive ASCII compare; ties broken by original bytes.
+    if (!a) a = "";
+    if (!b) b = "";
+    for (int i = 0; a[i] || b[i]; ++i) {
+        int ca = ls_tolower_ascii((unsigned char)a[i]);
+        int cb = ls_tolower_ascii((unsigned char)b[i]);
+        if (ca != cb) return (ca < cb) ? -1 : 1;
+        // identical lower-case; use original for stable-ish ordering
+        if ((unsigned char)a[i] != (unsigned char)b[i]) {
+            return ((unsigned char)a[i] < (unsigned char)b[i]) ? -1 : 1;
+        }
+        if (!a[i] || !b[i]) break;
+    }
+    return 0;
+}
+
+static void ls_sort_entries(ls_entry_t* entries, int count) {
+    // Simple insertion sort (MAX_ENTRIES is small). Directories first, then alphabetical.
+    for (int i = 1; i < count; ++i) {
+        ls_entry_t key = entries[i];
+        int j = i - 1;
+        while (j >= 0) {
+            int ad = entries[j].is_dir;
+            int bd = key.is_dir;
+            int cmp = 0;
+            if (ad != bd) {
+                // directories first
+                cmp = (ad > bd) ? -1 : 1;
+            } else {
+                cmp = ls_name_cmp(entries[j].name, key.name);
+            }
+            if (cmp <= 0) break;
+            entries[j + 1] = entries[j];
+            --j;
+        }
+        entries[j + 1] = key;
+    }
+}
+
 // VFS-based ls: prints name and registers per-line icon marker for GUI rendering
+__attribute__((unused))
 static int vfs_ls_print_cb(const char* name, int is_dir, uint32 size, void* user) {
     (void)size;
     ls_ctx_t* ctx = (ls_ctx_t*)user;
@@ -210,10 +345,17 @@ static int vfs_ls_print_cb(const char* name, int is_dir, uint32 size, void* user
     // Tell the shell redirect pipeline which icon to draw for this output line.
     shell_register_redirect_icon(icon_key);
 
+    // Reserve icon width in the text stream instead of shifting the whole line in pixels.
+    int icon_pad = ls_icon_pad_cols();
+
     if (is_dir) {
-        printf("%c%s/\n", 120, 120, 255, name);
+        printf("%c", 120, 120, 255);
+        ls_print_spaces(icon_pad);
+        printf("%s/\n", name);
     } else {
-        printf("%c%s\n", 255, 255, 255, name);
+        printf("%c", 255, 255, 255);
+        ls_print_spaces(icon_pad);
+        printf("%s\n", name);
     }
     return 0;
 }
@@ -247,11 +389,73 @@ void ls(string input) {
     }
     
     // List directory contents
-    ls_ctx_t ctx;
+    const int icon_pad = ls_icon_pad_cols();
+    const int col_sep = 2;
+
+    // Collect entries first so we can print in a taller (column-major) layout.
+    // NOTE: This buffer is intentionally static to avoid blowing the kernel stack.
+    // `ls_collect_t` is ~10KB due to the MAX_ENTRIES array.
+    static ls_collect_t col;
+    col.disk = disk;
+    safe_strcpy(col.dir_path, abspath, sizeof(col.dir_path));
+    col.icon_pad = icon_pad;
+    col.max_item_width = 0;
+    col.count = 0;
+
+    if (vfs_listdir(disk, abspath, vfs_ls_collect_cb, &col) != 0) {
+        printf("%cFailed to list directory: %s\n", 255, 0, 0, abspath);
+        return;
+    }
+    if (col.count == 0) return;
+
+    ls_sort_entries(col.entries, col.count);
+
+    // Prefer taller columns (fill down the screen) instead of producing lots of short columns.
+    int col_width = col.max_item_width + col_sep;
+    if (col_width < 1) col_width = 1;
+    int max_cols = TERM_COLS / col_width;
+    if (max_cols < 1) max_cols = 1;
+
+    // Reserve one line for the prompt so `ls` doesn't push it off-screen.
+    int max_rows = TERM_ROWS;
+    if (max_rows > 1) max_rows -= 1;
+    if (max_rows < 1) max_rows = 1;
+
+    // Choose enough columns so we fill down the screen first.
+    int cols = (col.count + max_rows - 1) / max_rows;
+    if (cols < 1) cols = 1;
+    if (cols > max_cols) cols = max_cols;
+
+    // Print only the rows we actually need (prevents huge blank gaps).
+    int rows = (col.count + cols - 1) / cols;
+    if (rows < 1) rows = 1;
+
+    ls_cols_ctx_t ctx;
     ctx.disk = disk;
     safe_strcpy(ctx.dir_path, abspath, sizeof(ctx.dir_path));
-    if (vfs_listdir(disk, abspath, vfs_ls_print_cb, &ctx) != 0) {
-        printf("%cFailed to list directory: %s\n", 255, 0, 0, abspath);
+    ctx.icon_pad = icon_pad;
+    ctx.col_width = col_width;
+
+    for (int r = 0; r < rows; ++r) {
+        for (int cidx = 0; cidx < cols; ++cidx) {
+            int idx = cidx * rows + r;
+            if (idx >= col.count) {
+                // Keep alignment for intermediate columns.
+                if (cidx < cols - 1) ls_print_spaces(col_width);
+                continue;
+            }
+
+            const ls_entry_t* e = &col.entries[idx];
+            ls_print_entry_cols(&ctx, e->name, e->is_dir);
+
+            if (cidx < cols - 1) {
+                int item_w = ctx.icon_pad + (int)strlen(e->name) + (e->is_dir ? 1 : 0);
+                int pad = ctx.col_width - item_w;
+                if (pad < 1) pad = 1;
+                ls_print_spaces(pad);
+            }
+        }
+        putchar('\n');
     }
 }
 

@@ -47,6 +47,7 @@ static int write_editor_clipboard_len = 0;
 static void write_editor_update_tile_modified(void);
 static int write_editor_ensure_line_cap(int idx, int need_chars_including_nul);
 static int write_editor_line_len(int idx);
+static int write_editor_copy_range_text(int start_y, int start_x, int finish_y, int finish_x, char* out, int out_cap, int* out_len);
 static void write_editor_set_line_from_span(int idx, const char* s, int len, int* out_truncated);
 static void write_editor_shift_lines_down(int at_idx);
 static void write_editor_delete_line_at(int idx);
@@ -96,6 +97,20 @@ static void write_editor_set_status(const char* msg) {
     snprintf(write_editor_status_msg, sizeof(write_editor_status_msg), "%s", msg);
 }
 
+static void write_editor_copy_selection_to_clipboard(void) {
+    write_editor_clipboard_len = 0;
+    if (!write_editor_sel_active) {
+        write_editor_clipboard[0] = '\0';
+        return;
+    }
+    int sel_sy = write_editor_sel_ay, sel_sx = write_editor_sel_ax;
+    int sel_fy = write_editor_sel_fy, sel_fx = write_editor_sel_fx;
+    if (sel_fy < sel_sy || (sel_fy == sel_sy && sel_fx < sel_sx)) { int ty = sel_sy; sel_sy = sel_fy; sel_fy = ty; int tx = sel_sx; sel_sx = sel_fx; sel_fx = tx; }
+    (void)write_editor_copy_range_text(sel_sy, sel_sx, sel_fy, sel_fx, write_editor_clipboard, (int)sizeof(write_editor_clipboard) - 1, &write_editor_clipboard_len);
+    if (write_editor_clipboard_len < 0) write_editor_clipboard_len = 0;
+    write_editor_clipboard[write_editor_clipboard_len] = '\0';
+}
+
 static void write_editor_clear_status(void) {
     write_editor_status_msg[0] = '\0';
 }
@@ -131,30 +146,30 @@ static int write_editor_redo_push(write_editor_undo_t rec) {
     return 0;
 }
 
-static int write_editor_copy_range_text(int sy, int sx, int fy, int fx, char* out, int out_cap, int* out_len) {
+static int write_editor_copy_range_text(int start_y, int start_x, int finish_y, int finish_x, char* out, int out_cap, int* out_len) {
     if (out_len) *out_len = 0;
     if (!out || out_cap <= 0) return -1;
     out[0] = '\0';
-    if (sy < 0) sy = 0;
-    if (fy < 0) fy = 0;
-    if (sy >= write_editor_num_lines) sy = write_editor_num_lines - 1;
-    if (fy >= write_editor_num_lines) fy = write_editor_num_lines - 1;
-    int s_len = write_editor_line_len(sy);
-    int f_len = write_editor_line_len(fy);
-    if (sx < 0) sx = 0;
-    if (fx < 0) fx = 0;
-    if (sx > s_len) sx = s_len;
-    if (fx > f_len) fx = f_len;
+    if (start_y < 0) start_y = 0;
+    if (finish_y < 0) finish_y = 0;
+    if (start_y >= write_editor_num_lines) start_y = write_editor_num_lines - 1;
+    if (finish_y >= write_editor_num_lines) finish_y = write_editor_num_lines - 1;
+    int s_len = write_editor_line_len(start_y);
+    int f_len = write_editor_line_len(finish_y);
+    if (start_x < 0) start_x = 0;
+    if (finish_x < 0) finish_x = 0;
+    if (start_x > s_len) start_x = s_len;
+    if (finish_x > f_len) finish_x = f_len;
     int w = 0;
-    for (int y = sy; y <= fy; ++y) {
-        int start = (y == sy) ? sx : 0;
-        int end = (y == fy) ? fx : write_editor_line_len(y);
+    for (int y = start_y; y <= finish_y; ++y) {
+        int start = (y == start_y) ? start_x : 0;
+        int end = (y == finish_y) ? finish_x : write_editor_line_len(y);
         const char* s = write_editor_buffer[y] ? write_editor_buffer[y] : "";
         for (int x = start; x < end; ++x) {
             if (w >= out_cap) { if (out_len) *out_len = w; return -1; }
             out[w++] = s[x];
         }
-        if (y != fy) {
+        if (y != finish_y) {
             if (w >= out_cap) { if (out_len) *out_len = w; return -1; }
             out[w++] = '\n';
         }
@@ -519,52 +534,52 @@ static const char* get_basename(const char* path) {
 // Delete current selection (if any). Returns 1 if something was deleted and state updated; 0 if no active selection.
 static int write_editor_delete_active_selection(void) {
     if (!write_editor_sel_active) return 0;
-    int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
-    int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
-    if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
+    int sel_sy = write_editor_sel_ay, sel_sx = write_editor_sel_ax;
+    int sel_fy = write_editor_sel_fy, sel_fx = write_editor_sel_fx;
+    if (sel_fy < sel_sy || (sel_fy == sel_sy && sel_fx < sel_sx)) { int ty = sel_sy; sel_sy = sel_fy; sel_fy = ty; int tx = sel_sx; sel_sx = sel_fx; sel_fx = tx; }
     // clamp within bounds
-    if (sy < 0) sy = 0;
-    if (sy >= write_editor_num_lines) sy = write_editor_num_lines - 1;
-    if (fy < 0) fy = 0;
-    if (fy >= write_editor_num_lines) fy = write_editor_num_lines - 1;
-    int s_len = write_editor_line_len(sy); if (sx < 0) sx = 0; if (sx > s_len) sx = s_len;
-    int f_len = write_editor_line_len(fy); if (fx < 0) fx = 0; if (fx > f_len) fx = f_len;
-    if (sy == fy) {
+    if (sel_sy < 0) sel_sy = 0;
+    if (sel_sy >= write_editor_num_lines) sel_sy = write_editor_num_lines - 1;
+    if (sel_fy < 0) sel_fy = 0;
+    if (sel_fy >= write_editor_num_lines) sel_fy = write_editor_num_lines - 1;
+    int s_len = write_editor_line_len(sel_sy); if (sel_sx < 0) sel_sx = 0; if (sel_sx > s_len) sel_sx = s_len;
+    int f_len = write_editor_line_len(sel_fy); if (sel_fx < 0) sel_fx = 0; if (sel_fx > f_len) sel_fx = f_len;
+    if (sel_sy == sel_fy) {
         // single-line delete
-        char* line = write_editor_buffer[sy];
+        char* line = write_editor_buffer[sel_sy];
         if (!line) {
-            write_editor_ensure_line_cap(sy, 1);
-            line = write_editor_buffer[sy];
+            write_editor_ensure_line_cap(sel_sy, 1);
+            line = write_editor_buffer[sel_sy];
         }
-        int len = write_editor_line_len(sy);
-        if (line) memmove(&line[sx], &line[fx], (size_t)((len - fx) + 1));
-        write_editor_cursor_y = sy; write_editor_cursor_x = sx;
+        int len = write_editor_line_len(sel_sy);
+        if (line) memmove(&line[sel_sx], &line[sel_fx], (size_t)((len - sel_fx) + 1));
+        write_editor_cursor_y = sel_sy; write_editor_cursor_x = sel_sx;
     } else {
         // multi-line: keep prefix of start line up to sx, then append tail of fy from fx
-        char* sline = write_editor_buffer[sy];
+        char* sline = write_editor_buffer[sel_sy];
         if (!sline) {
-            write_editor_ensure_line_cap(sy, 1);
-            sline = write_editor_buffer[sy];
+            write_editor_ensure_line_cap(sel_sy, 1);
+            sline = write_editor_buffer[sel_sy];
         }
-        char* fline = write_editor_buffer[fy];
-        int pre_len = sx;
-        int tail_len = f_len - fx;
+        char* fline = write_editor_buffer[sel_fy];
+        int pre_len = sel_sx;
+        int tail_len = f_len - sel_fx;
         if (pre_len < 0) pre_len = 0;
         if (tail_len < 0) tail_len = 0;
         int new_len = pre_len + tail_len;
         if (new_len > MAX_LINE_LENGTH) new_len = MAX_LINE_LENGTH;
-        if (write_editor_ensure_line_cap(sy, new_len + 1) == 0 && sline) {
-            if (pre_len > write_editor_line_len(sy)) pre_len = write_editor_line_len(sy);
+        if (write_editor_ensure_line_cap(sel_sy, new_len + 1) == 0 && sline) {
+            if (pre_len > write_editor_line_len(sel_sy)) pre_len = write_editor_line_len(sel_sy);
             sline[pre_len] = '\0';
             int can_copy = MAX_LINE_LENGTH - pre_len;
             int copy = (tail_len < can_copy) ? tail_len : can_copy;
-            if (copy > 0 && fline) memcpy(&sline[pre_len], &fline[fx], (size_t)copy);
+            if (copy > 0 && fline) memcpy(&sline[pre_len], &fline[sel_fx], (size_t)copy);
             sline[pre_len + copy] = '\0';
         }
         // delete lines sy+1 .. fy (inclusive)
-        int remove = fy - sy;
-        while (remove-- > 0) write_editor_delete_line_at(sy + 1);
-        write_editor_cursor_y = sy; write_editor_cursor_x = sx;
+        int remove = sel_fy - sel_sy;
+        while (remove-- > 0) write_editor_delete_line_at(sel_sy + 1);
+        write_editor_cursor_y = sel_sy; write_editor_cursor_x = sel_sx;
         // We only ever draw up to write_editor_num_lines, so clearing beyond that is unnecessary.
     }
     write_editor_sel_active = 0;
@@ -1040,16 +1055,16 @@ static void write_editor_gui_draw(int tile_idx, int content_x, int content_y, in
             int is_sel = 0;
             if (write_editor_sel_active) {
                 // Normalize selection endpoints
-                int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
-                int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
-                if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
-                if (abs_line > sy && abs_line < fy) is_sel = 1; // fully inside selected lines
-                else if (abs_line == sy && abs_line == fy) {
-                    if (src_idx >= sx && src_idx < fx) is_sel = 1;
-                } else if (abs_line == sy) {
-                    if (src_idx >= sx) is_sel = 1;
-                } else if (abs_line == fy) {
-                    if (src_idx < fx) is_sel = 1;
+                int sel_sy = write_editor_sel_ay, sel_sx = write_editor_sel_ax;
+                int sel_fy = write_editor_sel_fy, sel_fx = write_editor_sel_fx;
+                if (sel_fy < sel_sy || (sel_fy == sel_sy && sel_fx < sel_sx)) { int ty = sel_sy; sel_sy = sel_fy; sel_fy = ty; int tx = sel_sx; sel_sx = sel_fx; sel_fx = tx; }
+                if (abs_line > sel_sy && abs_line < sel_fy) is_sel = 1; // fully inside selected lines
+                else if (abs_line == sel_sy && abs_line == sel_fy) {
+                    if (src_idx >= sel_sx && src_idx < sel_fx) is_sel = 1;
+                } else if (abs_line == sel_sy) {
+                    if (src_idx >= sel_sx) is_sel = 1;
+                } else if (abs_line == sel_fy) {
+                    if (src_idx < sel_fx) is_sel = 1;
                 }
             }
             // Cursor handling: draw an underscore '_' at the cursor position (overlay, no displacement)
@@ -1398,35 +1413,21 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
         }
 
         // Copy selection to clipboard
-        write_editor_clipboard_len = 0;
-        int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
-        int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
-        if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
-        for (int y = sy; y <= fy; ++y) {
-            int start = (y == sy) ? sx : 0;
-            int end = (y == fy) ? fx : write_editor_line_len(y);
-            const char* s = write_editor_buffer[y];
-            for (int x = start; x < end; ++x) {
-                if (write_editor_clipboard_len < (int)sizeof(write_editor_clipboard) - 1) {
-                    write_editor_clipboard[write_editor_clipboard_len++] = s ? s[x] : 0;
-                }
-            }
-            if (y != fy) {
-                if (write_editor_clipboard_len < (int)sizeof(write_editor_clipboard) - 1) write_editor_clipboard[write_editor_clipboard_len++] = '\n';
-            }
-        }
-        write_editor_clipboard[write_editor_clipboard_len] = '\0';
+        write_editor_copy_selection_to_clipboard();
 
         // Record selection deletion for undo when bounded
         char before[WRITE_EDITOR_UNDO_TEXT_MAX];
         int before_len = 0;
-        int ok = (write_editor_copy_range_text(sy, sx, fy, fx, before, (int)sizeof(before) - 1, &before_len) == 0);
+        int sel_sy = write_editor_sel_ay, sel_sx = write_editor_sel_ax;
+        int sel_fy = write_editor_sel_fy, sel_fx = write_editor_sel_fx;
+        if (sel_fy < sel_sy || (sel_fy == sel_sy && sel_fx < sel_sx)) { int ty = sel_sy; sel_sy = sel_fy; sel_fy = ty; int tx = sel_sx; sel_sx = sel_fx; sel_fx = tx; }
+        int ok = (write_editor_copy_range_text(sel_sy, sel_sx, sel_fy, sel_fx, before, (int)sizeof(before) - 1, &before_len) == 0);
         if (write_editor_delete_active_selection()) {
             if (ok) {
                 write_editor_undo_t rec;
                 memset(&rec, 0, sizeof(rec));
-                rec.y = (uint16)sy;
-                rec.x = (uint16)sx;
+                rec.y = (uint16)sel_sy;
+                rec.x = (uint16)sel_sx;
                 rec.before_len = (uint16)before_len;
                 memcpy(rec.before, before, (size_t)before_len);
                 rec.after_len = 0;
@@ -1436,6 +1437,89 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
                 write_editor_undo_clear();
             }
         }
+        tile_invalidate_gui(write_editor_gui_tile);
+        return;
+    }
+
+    // Ctrl+C copy (selection only)
+    if (key == 0x2206) {
+        write_editor_clear_status();
+        if (!write_editor_sel_active) {
+            write_editor_set_status("Copy: no selection");
+            tile_invalidate_gui(write_editor_gui_tile);
+            return;
+        }
+        write_editor_copy_selection_to_clipboard();
+        write_editor_set_status("Copied");
+        tile_invalidate_gui(write_editor_gui_tile);
+        return;
+    }
+
+    // Ctrl+V paste
+    if (key == 0x2207) {
+        write_editor_clear_status();
+        if (write_editor_clipboard_len <= 0) {
+            write_editor_set_status("Paste: empty");
+            tile_invalidate_gui(write_editor_gui_tile);
+            return;
+        }
+
+        int ins_y = write_editor_cursor_y;
+        int ins_x = write_editor_cursor_x;
+
+        int replaced_selection = 0;
+
+        char before[WRITE_EDITOR_UNDO_TEXT_MAX];
+        int before_len = 0;
+        int ok_before = 0;
+
+        if (write_editor_sel_active) {
+            replaced_selection = 1;
+            int sel_sy = write_editor_sel_ay, sel_sx = write_editor_sel_ax;
+            int sel_fy = write_editor_sel_fy, sel_fx = write_editor_sel_fx;
+            if (sel_fy < sel_sy || (sel_fy == sel_sy && sel_fx < sel_sx)) { int ty = sel_sy; sel_sy = sel_fy; sel_fy = ty; int tx = sel_sx; sel_sx = sel_fx; sel_fx = tx; }
+            ins_y = sel_sy;
+            ins_x = sel_sx;
+            ok_before = (write_editor_copy_range_text(sel_sy, sel_sx, sel_fy, sel_fx, before, (int)sizeof(before) - 1, &before_len) == 0);
+            if (!write_editor_delete_active_selection()) {
+                tile_invalidate_gui(write_editor_gui_tile);
+                return;
+            }
+        }
+
+        int end_y = ins_y;
+        int end_x = ins_x;
+        if (write_editor_insert_text_at(ins_y, ins_x, write_editor_clipboard, write_editor_clipboard_len, &end_y, &end_x) != 0) {
+            write_editor_set_status("Paste failed");
+            tile_invalidate_gui(write_editor_gui_tile);
+            return;
+        }
+
+        // Cursor moves to end of pasted text
+        write_editor_cursor_y = end_y;
+        write_editor_cursor_x = end_x;
+        write_editor_sel_active = 0;
+
+        // Record undo when bounded
+        if ((write_editor_clipboard_len <= WRITE_EDITOR_UNDO_TEXT_MAX) && (!replaced_selection || ok_before)) {
+            write_editor_undo_t rec;
+            memset(&rec, 0, sizeof(rec));
+            rec.y = (uint16)ins_y;
+            rec.x = (uint16)ins_x;
+            rec.before_len = (uint16)(ok_before ? before_len : 0);
+            if (ok_before && before_len > 0) memcpy(rec.before, before, (size_t)before_len);
+            rec.after_len = (uint16)write_editor_clipboard_len;
+            memcpy(rec.after, write_editor_clipboard, (size_t)write_editor_clipboard_len);
+            (void)write_editor_undo_push(rec);
+        } else {
+            write_editor_set_status("Undo disabled (paste too big)");
+            write_editor_undo_clear();
+        }
+
+        write_editor_modified = 1;
+        write_editor_update_tile_modified();
+        if (write_editor_cursor_y < write_editor_scroll_y) write_editor_scroll_y = write_editor_cursor_y;
+        if (write_editor_cursor_y >= write_editor_scroll_y + visible_rows) write_editor_scroll_y = write_editor_cursor_y - visible_rows + 1;
         tile_invalidate_gui(write_editor_gui_tile);
         return;
     }
@@ -1528,10 +1612,10 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
             // If selection covers entire buffer, clear all quickly
             int all = 0;
             if (write_editor_sel_active) {
-                int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
-                int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
-                if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
-                if (sy == 0 && sx == 0 && fy == write_editor_num_lines - 1 && fx == write_editor_line_len(fy)) all = 1;
+                int sel_sy = write_editor_sel_ay, sel_sx = write_editor_sel_ax;
+                int sel_fy = write_editor_sel_fy, sel_fx = write_editor_sel_fx;
+                if (sel_fy < sel_sy || (sel_fy == sel_sy && sel_fx < sel_sx)) { int ty = sel_sy; sel_sy = sel_fy; sel_fy = ty; int tx = sel_sx; sel_sx = sel_fx; sel_fx = tx; }
+                if (sel_sy == 0 && sel_sx == 0 && sel_fy == write_editor_num_lines - 1 && sel_fx == write_editor_line_len(sel_fy)) all = 1;
             }
             if (all) {
                 write_editor_free_all_lines();
@@ -1548,16 +1632,16 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
             // Record selection deletion for undo (bounded)
             char before[WRITE_EDITOR_UNDO_TEXT_MAX];
             int before_len = 0;
-            int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
-            int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
-            if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
-            int ok = (write_editor_copy_range_text(sy, sx, fy, fx, before, (int)sizeof(before) - 1, &before_len) == 0);
+            int sel_sy = write_editor_sel_ay, sel_sx = write_editor_sel_ax;
+            int sel_fy = write_editor_sel_fy, sel_fx = write_editor_sel_fx;
+            if (sel_fy < sel_sy || (sel_fy == sel_sy && sel_fx < sel_sx)) { int ty = sel_sy; sel_sy = sel_fy; sel_fy = ty; int tx = sel_sx; sel_sx = sel_fx; sel_fx = tx; }
+            int ok = (write_editor_copy_range_text(sel_sy, sel_sx, sel_fy, sel_fx, before, (int)sizeof(before) - 1, &before_len) == 0);
             if (write_editor_delete_active_selection()) {
                 if (ok) {
                     write_editor_undo_t rec;
                     memset(&rec, 0, sizeof(rec));
-                    rec.y = (uint16)sy;
-                    rec.x = (uint16)sx;
+                    rec.y = (uint16)sel_sy;
+                    rec.x = (uint16)sel_sx;
                     rec.before_len = (uint16)before_len;
                     memcpy(rec.before, before, (size_t)before_len);
                     rec.after_len = 0;
@@ -1638,17 +1722,17 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
             // Record selection replace (selection -> "\n") when bounded
             char before[WRITE_EDITOR_UNDO_TEXT_MAX];
             int before_len = 0;
-            int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
-            int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
-            if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
-            int ok = (write_editor_copy_range_text(sy, sx, fy, fx, before, (int)sizeof(before) - 1, &before_len) == 0);
+            int sel_sy = write_editor_sel_ay, sel_sx = write_editor_sel_ax;
+            int sel_fy = write_editor_sel_fy, sel_fx = write_editor_sel_fx;
+            if (sel_fy < sel_sy || (sel_fy == sel_sy && sel_fx < sel_sx)) { int ty = sel_sy; sel_sy = sel_fy; sel_fy = ty; int tx = sel_sx; sel_sx = sel_fx; sel_fx = tx; }
+            int ok = (write_editor_copy_range_text(sel_sy, sel_sx, sel_fy, sel_fx, before, (int)sizeof(before) - 1, &before_len) == 0);
             if (!write_editor_delete_active_selection()) return;
             // After deletion, cursor is at (sy,sx)
             if (ok) {
                 write_editor_undo_t rec;
                 memset(&rec, 0, sizeof(rec));
-                rec.y = (uint16)sy;
-                rec.x = (uint16)sx;
+                rec.y = (uint16)sel_sy;
+                rec.x = (uint16)sel_sx;
                 rec.before_len = (uint16)before_len;
                 memcpy(rec.before, before, (size_t)before_len);
                 rec.after_len = 1;
@@ -1739,10 +1823,10 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
             // Record selection replace (selection -> spaces) if bounded
             char before[WRITE_EDITOR_UNDO_TEXT_MAX];
             int before_len = 0;
-            int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
-            int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
-            if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
-            int ok = (write_editor_copy_range_text(sy, sx, fy, fx, before, (int)sizeof(before) - 1, &before_len) == 0);
+            int sel_sy = write_editor_sel_ay, sel_sx = write_editor_sel_ax;
+            int sel_fy = write_editor_sel_fy, sel_fx = write_editor_sel_fx;
+            if (sel_fy < sel_sy || (sel_fy == sel_sy && sel_fx < sel_sx)) { int ty = sel_sy; sel_sy = sel_fy; sel_fy = ty; int tx = sel_sx; sel_sx = sel_fx; sel_fx = tx; }
+            int ok = (write_editor_copy_range_text(sel_sy, sel_sx, sel_fy, sel_fx, before, (int)sizeof(before) - 1, &before_len) == 0);
             if (!write_editor_delete_active_selection()) { /* continue */ }
             // We'll push a combined record after we compute the space count below.
             // Store selection info in locals.
@@ -1800,16 +1884,16 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
             // Record selection replace (selection -> single char) if bounded
             char before[WRITE_EDITOR_UNDO_TEXT_MAX];
             int before_len = 0;
-            int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
-            int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
-            if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
-            int ok = (write_editor_copy_range_text(sy, sx, fy, fx, before, (int)sizeof(before) - 1, &before_len) == 0);
+            int sel_sy = write_editor_sel_ay, sel_sx = write_editor_sel_ax;
+            int sel_fy = write_editor_sel_fy, sel_fx = write_editor_sel_fx;
+            if (sel_fy < sel_sy || (sel_fy == sel_sy && sel_fx < sel_sx)) { int ty = sel_sy; sel_sy = sel_fy; sel_fy = ty; int tx = sel_sx; sel_sx = sel_fx; sel_fx = tx; }
+            int ok = (write_editor_copy_range_text(sel_sy, sel_sx, sel_fy, sel_fx, before, (int)sizeof(before) - 1, &before_len) == 0);
             if (!write_editor_delete_active_selection()) { /* fallthrough */ }
             if (ok) {
                 write_editor_undo_t rec;
                 memset(&rec, 0, sizeof(rec));
-                rec.y = (uint16)sy;
-                rec.x = (uint16)sx;
+                rec.y = (uint16)sel_sy;
+                rec.x = (uint16)sel_sx;
                 rec.before_len = (uint16)before_len;
                 memcpy(rec.before, before, (size_t)before_len);
                 rec.after_len = 1;
@@ -1981,26 +2065,7 @@ static void write_editor_gui_mouse(int tile_idx, const mouse_event_t* me, void* 
 
     // Right-click: copy selection to clipboard
     if ((changed & MOUSE_BUTTON_RIGHT) && rb) {
-        write_editor_clipboard_len = 0;
-        if (write_editor_sel_active) {
-            int sy = write_editor_sel_ay, sx = write_editor_sel_ax;
-            int fy = write_editor_sel_fy, fx = write_editor_sel_fx;
-            if (fy < sy || (fy == sy && fx < sx)) { int ty = sy; sy = fy; fy = ty; int tx = sx; sx = fx; fx = tx; }
-            for (int y = sy; y <= fy; ++y) {
-                int start = (y == sy) ? sx : 0;
-                int end = (y == fy) ? fx : write_editor_line_len(y);
-                const char* s = write_editor_buffer[y];
-                for (int x = start; x < end; ++x) {
-                    if (write_editor_clipboard_len < (int)sizeof(write_editor_clipboard) - 1) {
-                        write_editor_clipboard[write_editor_clipboard_len++] = s ? s[x] : 0;
-                    }
-                }
-                if (y != fy) {
-                    if (write_editor_clipboard_len < (int)sizeof(write_editor_clipboard) - 1) write_editor_clipboard[write_editor_clipboard_len++] = '\n';
-                }
-            }
-            write_editor_clipboard[write_editor_clipboard_len] = '\0';
-        }
+        write_editor_copy_selection_to_clipboard();
         tile_invalidate_gui(write_editor_gui_tile);
         return;
     }

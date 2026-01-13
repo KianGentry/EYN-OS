@@ -230,13 +230,45 @@ static int eynfs_binary_search_dir(const eynfs_dir_entry_t* entries, int count, 
 }
 
 // Helper: Read the free block bitmap
-static int eynfs_read_bitmap(uint8 drive, const eynfs_superblock_t *sb, uint8 *bitmap) {
-    return ata_read_sector(drive, eynfs_block_to_lba(sb->free_block_map), bitmap);
+static uint32_t eynfs_bitmap_block_count(const eynfs_superblock_t *sb) {
+    // 1 bit per filesystem block.
+    uint32_t bitmap_bytes = (sb->total_blocks + 7u) / 8u;
+    return (bitmap_bytes + EYNFS_BLOCK_SIZE - 1u) / EYNFS_BLOCK_SIZE;
 }
 
-// Helper: Write the free block bitmap
-static int eynfs_write_bitmap(uint8 drive, const eynfs_superblock_t *sb, const uint8 *bitmap) {
-    return ata_write_sector(drive, eynfs_block_to_lba(sb->free_block_map), bitmap);
+static int eynfs_read_bitmap_block(uint8 drive, const eynfs_superblock_t *sb, uint32_t bitmap_block_idx, uint8 *bitmap_block) {
+    uint32_t fs_block = sb->free_block_map + bitmap_block_idx;
+    return ata_read_sector(drive, eynfs_block_to_lba(fs_block), bitmap_block);
+}
+
+static int eynfs_write_bitmap_block(uint8 drive, const eynfs_superblock_t *sb, uint32_t bitmap_block_idx, const uint8 *bitmap_block) {
+    uint32_t fs_block = sb->free_block_map + bitmap_block_idx;
+    return ata_write_sector(drive, eynfs_block_to_lba(fs_block), bitmap_block);
+}
+
+static int eynfs_bitmap_set_used(uint8 drive, const eynfs_superblock_t *sb, uint32_t fs_block_num, uint8 used) {
+    if (fs_block_num >= sb->total_blocks) return -1;
+
+    uint32_t byte_index = fs_block_num / 8u;
+    uint32_t bit_index = fs_block_num % 8u;
+
+    uint32_t bitmap_block_idx = byte_index / EYNFS_BLOCK_SIZE;
+    uint32_t offset_in_block = byte_index % EYNFS_BLOCK_SIZE;
+
+    uint32_t bitmap_blocks = eynfs_bitmap_block_count(sb);
+    if (bitmap_block_idx >= bitmap_blocks) return -1;
+
+    uint8 bitmap[EYNFS_BLOCK_SIZE];
+    if (eynfs_read_bitmap_block(drive, sb, bitmap_block_idx, bitmap) != 0) return -1;
+
+    if (used) {
+        bitmap[offset_in_block] |= (uint8)(1u << bit_index);
+    } else {
+        bitmap[offset_in_block] &= (uint8)~(1u << bit_index);
+    }
+
+    if (eynfs_write_bitmap_block(drive, sb, bitmap_block_idx, bitmap) != 0) return -1;
+    return 0;
 }
 
 // Optimized block allocation using free block cache
@@ -247,16 +279,23 @@ static int eynfs_alloc_block_optimized(uint8 drive, eynfs_superblock_t *sb) {
         return block;
     }
     
-    // Refill cache
-    uint8 bitmap[EYNFS_BLOCK_SIZE];
-    if (eynfs_read_bitmap(drive, sb, bitmap) != 0) return -1;
-    
+    // Refill cache (bitmap can span multiple blocks)
     free_block_cache_count = 0;
-    for (uint32_t i = 0; i < EYNFS_BLOCK_SIZE * 8 && i < sb->total_blocks && free_block_cache_count < EYNFS_FREE_BLOCK_CACHE_SIZE; ++i) {
-        uint32_t byte = i / 8;
-        uint8_t bit = i % 8;
-        if (!(bitmap[byte] & (1 << bit))) {
-            free_block_cache[free_block_cache_count++] = i;
+    uint32_t bitmap_blocks = eynfs_bitmap_block_count(sb);
+
+    for (uint32_t b = 0; b < bitmap_blocks && free_block_cache_count < EYNFS_FREE_BLOCK_CACHE_SIZE; ++b) {
+        uint8 bitmap[EYNFS_BLOCK_SIZE];
+        if (eynfs_read_bitmap_block(drive, sb, b, bitmap) != 0) return -1;
+
+        for (uint32_t byte = 0; byte < EYNFS_BLOCK_SIZE && free_block_cache_count < EYNFS_FREE_BLOCK_CACHE_SIZE; ++byte) {
+            if (bitmap[byte] == 0xFF) continue;
+            for (uint32_t bit = 0; bit < 8 && free_block_cache_count < EYNFS_FREE_BLOCK_CACHE_SIZE; ++bit) {
+                if (bitmap[byte] & (1u << bit)) continue;
+
+                uint32_t fs_block_num = (b * EYNFS_BLOCK_SIZE + byte) * 8u + bit;
+                if (fs_block_num >= sb->total_blocks) break;
+                free_block_cache[free_block_cache_count++] = fs_block_num;
+            }
         }
     }
     
@@ -497,114 +536,78 @@ int eynfs_alloc_block(uint8 drive, eynfs_superblock_t *sb) {
     // Use optimized allocation with caching
     int block = eynfs_alloc_block_optimized(drive, sb);
     if (block >= 0) {
-        // Mark as used in bitmap
-        uint8 bitmap[EYNFS_BLOCK_SIZE];
-        if (eynfs_read_bitmap(drive, sb, bitmap) != 0) return -1;
-        uint32_t byte = block / 8;
-        uint8_t bit = block % 8;
-        bitmap[byte] |= (1 << bit);
-        if (eynfs_write_bitmap(drive, sb, bitmap) != 0) return -1;
+        if (eynfs_bitmap_set_used(drive, sb, (uint32_t)block, 1) != 0) {
+            // Conservative: invalidate cache so we don't hand out the same block again.
+            free_block_cache_valid = 0;
+            free_block_cache_count = 0;
+            return -1;
+        }
         return block;
     }
-    
-    // Fallback to original method if cache is empty
-    uint8 bitmap[EYNFS_BLOCK_SIZE];
-    if (eynfs_read_bitmap(drive, sb, bitmap) != 0) return -1;
-    for (uint32_t i = 0; i < EYNFS_BLOCK_SIZE * 8 && i < sb->total_blocks; ++i) {
-        uint32_t byte = i / 8;
-        uint8_t bit = i % 8;
-        if (!(bitmap[byte] & (1 << bit))) {
-            // Mark as used
-            bitmap[byte] |= (1 << bit);
-            if (eynfs_write_bitmap(drive, sb, bitmap) != 0) return -1;
-            return i;
-        }
-    }
+
     return -1; // No free block found
 }
 
 // Free a block (mark as unused in the bitmap)
 int eynfs_free_block(uint8 drive, eynfs_superblock_t *sb, uint32_t block) {
     if (block >= sb->total_blocks) return -1;
-    uint8 bitmap[EYNFS_BLOCK_SIZE];
-    if (eynfs_read_bitmap(drive, sb, bitmap) != 0) return -1;
-    uint32_t byte = block / 8;
-    uint8_t bit = block % 8;
-    bitmap[byte] &= ~(1 << bit);
-    if (eynfs_write_bitmap(drive, sb, bitmap) != 0) return -1;
+    if (eynfs_bitmap_set_used(drive, sb, block, 0) != 0) return -1;
+
+    // The cache may now be stale.
+    free_block_cache_valid = 0;
+    free_block_cache_count = 0;
     return 0;
 }
 
 // Find an entry by name in a directory block
 // Returns 0 if found, -1 if not found
 int eynfs_find_in_dir(uint8 drive, const eynfs_superblock_t *sb, uint32_t dir_block, const char *name, eynfs_dir_entry_t *out_entry, uint32_t *out_index) {
-    // Check directory cache first
+    if (!sb || !name || !name[0]) return -1;
+
+    // Check directory cache first (best-effort). The cache may be partial (4KB),
+    // so a cache miss must fall back to a full on-disk scan.
     eynfs_dir_cache_entry_t* cache_entry = eynfs_dir_cache_find(dir_block);
     if (cache_entry) {
-        // Use linear search on cached entries
         for (int i = 0; i < cache_entry->count; ++i) {
-            if (cache_entry->entries[i].name[0] == '\0') continue; // Empty slot
+            if (cache_entry->entries[i].name[0] == '\0') continue;
             if (strncmp(cache_entry->entries[i].name, name, EYNFS_NAME_MAX) == 0) {
                 if (out_entry) *out_entry = cache_entry->entries[i];
-                if (out_index) *out_index = i;
+                if (out_index) *out_index = (uint32_t)i;
                 return 0;
             }
         }
-        return -1;
+        // fall through to full scan
     }
-    
-    // Count entries first, then allocate exactly what we need
-    int entry_count = eynfs_count_dir_entries(drive, dir_block);
-    if (entry_count < 0) return -1;
-    
-    // Allocate exactly the number of entries we need
-    size_t allocation_size = sizeof(eynfs_dir_entry_t) * entry_count;
-    
-    // Safety check: limit allocation to prevent memory exhaustion
-    if (allocation_size > 4096) { // 4KB limit for directory operations
-        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 4KB\n", 255, 165, 0, allocation_size);
-        entry_count = 4096 / sizeof(eynfs_dir_entry_t);
-        allocation_size = 4096;
-    }
-    
-    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(allocation_size);
-    if (!entries) return -1;
-    int count = eynfs_read_dir_table(drive, dir_block, entries, entry_count);
-    if (count < 0) {
-        free(entries);
-        return -1;
-    }
-    
-    // Try linear search first
-    for (int i = 0; i < count; ++i) {
-        if (entries[i].name[0] == '\0') continue; // Empty slot
-        if (strncmp(entries[i].name, name, EYNFS_NAME_MAX) == 0) {
-            if (out_entry) *out_entry = entries[i];
-            if (out_index) *out_index = i;
-            free(entries);
-            return 0;
-        }
-    }
-    
-    // Cache the directory entries for future use
-    if (count > 0) {
-        eynfs_dir_cache_entry_t* new_cache = eynfs_dir_cache_alloc();
-        if (new_cache) {
-            new_cache->dir_block = dir_block;
-            new_cache->count = count;
-            
-            // Bounds check for memory copy
-            size_t copy_size = count * sizeof(eynfs_dir_entry_t);
-            if (copy_size <= 4096) {
-                memcpy(new_cache->entries, entries, copy_size);
-                new_cache->sorted = 0; // Not sorted, use linear search
-            } else {
-                printf("%cWarning: Cache copy size too large (%d bytes)\n", 255, 165, 0, copy_size);
+
+    // Stream-scan the directory table by walking the on-disk block chain.
+    // This avoids large allocations and works for large directories.
+    const uint32_t entries_per_block = (uint32_t)((EYNFS_BLOCK_SIZE - 4) / sizeof(eynfs_dir_entry_t));
+    uint32_t current_block = dir_block;
+    uint32_t base_index = 0;
+    int block_count = 0;
+    const int max_blocks = 4096; // safety bound
+
+    while (current_block && block_count < max_blocks) {
+        uint8 buf[EYNFS_BLOCK_SIZE];
+        if (eynfs_cache_get_block(drive, current_block, buf) != 0) return -1;
+
+        uint32_t next_block = *(uint32_t*)buf;
+        const eynfs_dir_entry_t* entries = (const eynfs_dir_entry_t*)(buf + 4);
+
+        for (uint32_t i = 0; i < entries_per_block; ++i) {
+            if (entries[i].name[0] == '\0') continue;
+            if (strncmp(entries[i].name, name, EYNFS_NAME_MAX) == 0) {
+                if (out_entry) *out_entry = entries[i];
+                if (out_index) *out_index = base_index + i;
+                return 0;
             }
         }
+
+        base_index += entries_per_block;
+        current_block = next_block;
+        block_count++;
     }
-    
-    free(entries);
+
     return -1;
 }
 
@@ -652,71 +655,134 @@ int eynfs_traverse_path(uint8 drive, const eynfs_superblock_t *sb, const char *p
 
 // Create a file or directory entry in the given parent directory
 int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_block, const char *name, uint8_t type) {
+    if (!sb) return -1;
     if (!name || !name[0]) return -1;
     if (type != EYNFS_TYPE_FILE && type != EYNFS_TYPE_DIR) return -1;
-    
-    // Use stack-local buffer to avoid heap allocations (heap may be unavailable/corrupt)
-    enum { CREATE_MAX_ENTRIES = 64 };
-    eynfs_dir_entry_t entries[CREATE_MAX_ENTRIES];
-    memset(entries, 0, sizeof(entries));
-    
-    int entry_count = eynfs_count_dir_entries(drive, parent_block);
-    if (entry_count < 0) return -1;
-    if (entry_count > CREATE_MAX_ENTRIES) entry_count = CREATE_MAX_ENTRIES;
-    
-    int count = eynfs_read_dir_table(drive, parent_block, entries, entry_count);
-    if (count < 0) return -1;
-    
-    // Check if entry already exists
-    for (int i = 0; i < count; ++i) {
-        if (entries[i].name[0] != '\0' && strncmp(entries[i].name, name, EYNFS_NAME_MAX) == 0) {
-            return -1; // Entry already exists
+    if (parent_block == 0) return -1;
+
+    // Create without heap allocations: scan the directory-table block chain looking
+    // for an empty slot; if none, append a new directory-table block.
+    const size_t entries_per_block = (EYNFS_BLOCK_SIZE - 4) / sizeof(eynfs_dir_entry_t);
+    uint32_t cur = parent_block;
+    uint32_t last = 0;
+
+    while (cur != 0) {
+        uint8 buf[EYNFS_BLOCK_SIZE];
+        if (eynfs_cache_get_block(drive, cur, buf) != 0) return -1;
+
+        uint32_t next = *(uint32_t*)buf;
+        eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)(buf + 4);
+
+        int free_idx = -1;
+        for (size_t i = 0; i < entries_per_block; ++i) {
+            // Empty slot
+            if (entries[i].name[0] == '\0') {
+                if (free_idx < 0) free_idx = (int)i;
+                continue;
+            }
+            // Existing entry
+            if (strncmp(entries[i].name, name, EYNFS_NAME_MAX) == 0) {
+                return -1; // already exists
+            }
         }
-    }
-    
-    int free_idx = -1;
-    for (int i = 0; i < count; ++i) {
-        if (entries[i].name[0] == '\0') {
-            free_idx = i;
-            break;
+
+        if (free_idx >= 0) {
+            int new_block = eynfs_alloc_block(drive, sb);
+            if (new_block < 0) return -1;
+
+            memset(&entries[free_idx], 0, sizeof(eynfs_dir_entry_t));
+            strncpy(entries[free_idx].name, name, EYNFS_NAME_MAX - 1);
+            entries[free_idx].name[EYNFS_NAME_MAX - 1] = '\0';
+            entries[free_idx].type = type;
+            entries[free_idx].first_block = (uint32_t)new_block;
+            entries[free_idx].size = 0;
+
+            if (type == EYNFS_TYPE_DIR) {
+                uint8 zero_block[EYNFS_BLOCK_SIZE] = {0};
+                if (ata_write_sector(drive, eynfs_block_to_lba((uint32_t)new_block), zero_block) != 0) {
+                    eynfs_free_block(drive, sb, (uint32_t)new_block);
+                    return -1;
+                }
+            }
+
+            if (eynfs_cache_write_block(drive, cur, buf) != 0) {
+                eynfs_free_block(drive, sb, (uint32_t)new_block);
+                return -1;
+            }
+
+            // Directory contents and path traversal results are cached.
+            eynfs_dir_cache_invalidate(parent_block);
+            eynfs_cache_flush(drive);
+            return 0;
         }
+
+        last = cur;
+        cur = next;
     }
-    if (free_idx == -1) {
-        // Need to add a new entry
-        if (count >= CREATE_MAX_ENTRIES) {
-            return -1; // Directory full
-        }
-        free_idx = count;
-        count = count + 1;
-    }
-    
-    int new_block = eynfs_alloc_block(drive, sb);
-    if (new_block < 0) return -1;
-    
-    memset(&entries[free_idx], 0, sizeof(eynfs_dir_entry_t));
-    strncpy(entries[free_idx].name, name, EYNFS_NAME_MAX-1);
-    entries[free_idx].name[EYNFS_NAME_MAX-1] = '\0';
-    entries[free_idx].type = type;
-    entries[free_idx].first_block = new_block;
-    entries[free_idx].size = 0;
-    
-    if (type == EYNFS_TYPE_DIR) {
-        uint8 zero_block[EYNFS_BLOCK_SIZE] = {0};
-        if (ata_write_sector(drive, eynfs_block_to_lba((uint32_t)new_block), zero_block) != 0) { 
-            eynfs_free_block(drive, sb, new_block);
-            return -1; 
-        }
-    }
-    
-    int res = eynfs_write_dir_table(drive, parent_block, entries, count);
-    if (res < 0) {
-        eynfs_free_block(drive, sb, new_block);
+
+    // No free slots: append a new directory-table block to the chain.
+    if (last == 0) return -1;
+
+    int new_dir_block = eynfs_alloc_block(drive, sb);
+    if (new_dir_block < 0) return -1;
+
+    // Allocate the data/child block for the new entry.
+    int new_entry_block = eynfs_alloc_block(drive, sb);
+    if (new_entry_block < 0) {
+        eynfs_free_block(drive, sb, (uint32_t)new_dir_block);
         return -1;
     }
-    
-    // Clear cache to ensure new entries are visible
-    eynfs_cache_clear();
-    
+
+    // Link the last directory-table block to the new directory-table block.
+    {
+        uint8 last_buf[EYNFS_BLOCK_SIZE];
+        if (eynfs_cache_get_block(drive, last, last_buf) != 0) {
+            eynfs_free_block(drive, sb, (uint32_t)new_entry_block);
+            eynfs_free_block(drive, sb, (uint32_t)new_dir_block);
+            return -1;
+        }
+        *(uint32_t*)last_buf = (uint32_t)new_dir_block;
+        if (eynfs_cache_write_block(drive, last, last_buf) != 0) {
+            eynfs_free_block(drive, sb, (uint32_t)new_entry_block);
+            eynfs_free_block(drive, sb, (uint32_t)new_dir_block);
+            return -1;
+        }
+    }
+
+    // Initialize the new directory-table block and install the entry at index 0.
+    {
+        uint8 new_buf[EYNFS_BLOCK_SIZE];
+        memset(new_buf, 0, sizeof(new_buf));
+        *(uint32_t*)new_buf = 0; // next = 0
+        eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)(new_buf + 4);
+        memset(&entries[0], 0, sizeof(eynfs_dir_entry_t));
+        strncpy(entries[0].name, name, EYNFS_NAME_MAX - 1);
+        entries[0].name[EYNFS_NAME_MAX - 1] = '\0';
+        entries[0].type = type;
+        entries[0].first_block = (uint32_t)new_entry_block;
+        entries[0].size = 0;
+
+        if (type == EYNFS_TYPE_DIR) {
+            uint8 zero_block[EYNFS_BLOCK_SIZE] = {0};
+            if (ata_write_sector(drive, eynfs_block_to_lba((uint32_t)new_entry_block), zero_block) != 0) {
+                // Best-effort cleanup: unlinking is complex, just free blocks.
+                eynfs_free_block(drive, sb, (uint32_t)new_entry_block);
+                eynfs_free_block(drive, sb, (uint32_t)new_dir_block);
+                return -1;
+            }
+        }
+
+        // Ensure any stale cached version of this block can't be served.
+        eynfs_cache_invalidate_block((uint32_t)new_dir_block);
+        if (eynfs_cache_write_block(drive, (uint32_t)new_dir_block, new_buf) != 0) {
+            eynfs_free_block(drive, sb, (uint32_t)new_entry_block);
+            eynfs_free_block(drive, sb, (uint32_t)new_dir_block);
+            return -1;
+        }
+    }
+
+    eynfs_dir_cache_invalidate(parent_block);
+    eynfs_cache_flush(drive);
     return 0;
 }
 
@@ -1200,17 +1266,27 @@ int eynfs_alloc_block_fast(uint8 drive, eynfs_superblock_t *sb) {
 } 
 
 // Streaming writer implementation ---
+#ifndef EYNFS_STREAM_DEBUG
+#define EYNFS_STREAM_DEBUG 0
+#endif
+
 int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
     if (!s || !path) return -1;
     memset(s, 0, sizeof(*s));
     s->drive = drive;
-    if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &s->sb) != 0) return -1;
+    if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &s->sb) != 0) {
+        if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] read_superblock failed\n");
+        return -1;
+    }
     // Determine parent dir and file name
     char parent_path[256];
     const char* filename = strrchr(path, '/');
     if (filename) {
         size_t plen = filename - path;
-        if (plen >= sizeof(parent_path)) return -1;
+        if (plen >= sizeof(parent_path)) {
+            if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] parent path too long\n");
+            return -1;
+        }
         memcpy(parent_path, path, plen);
         parent_path[plen] = '\0';
         filename++;
@@ -1221,19 +1297,50 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
     }
     eynfs_dir_entry_t parent_entry;
     uint32_t parent_block, entry_idx;
-    if (eynfs_traverse_path(drive, &s->sb, parent_path, &parent_entry, &parent_block, NULL) != 0) return -1;
+    if (eynfs_traverse_path(drive, &s->sb, parent_path, &parent_entry, &parent_block, NULL) != 0) {
+        if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] traverse parent failed: '%s'\n", parent_path);
+        return -1;
+    }
+    if (parent_entry.type != EYNFS_TYPE_DIR) {
+        if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] parent not dir: '%s'\n", parent_path);
+        return -1;
+    }
     // If file exists, delete it to simplify streaming overwrite
     eynfs_dir_entry_t tmp;
     if (eynfs_find_in_dir(drive, &s->sb, parent_entry.first_block, filename, &tmp, &entry_idx) == 0) {
-        eynfs_delete_entry(drive, &s->sb, parent_entry.first_block, filename);
+        int delrc = eynfs_delete_entry(drive, &s->sb, parent_entry.first_block, filename);
+        if (EYNFS_STREAM_DEBUG) {
+            printf("[EYNFS:stream_begin] overwriting '%s/%s' delrc=%d\n", parent_path, filename, delrc);
+        }
     }
-    if (eynfs_create_entry(drive, &s->sb, parent_entry.first_block, filename, EYNFS_TYPE_FILE) != 0) return -1;
-    if (eynfs_find_in_dir(drive, &s->sb, parent_entry.first_block, filename, &s->entry, &s->entry_index) != 0) return -1;
+    int cr = eynfs_create_entry(drive, &s->sb, parent_entry.first_block, filename, EYNFS_TYPE_FILE);
+    if (cr != 0) {
+        if (EYNFS_STREAM_DEBUG) {
+            printf("[EYNFS:stream_begin] create_entry failed parent='%s' name='%s' rc=%d\n", parent_path, filename, cr);
+        }
+        return -1;
+    }
+    if (eynfs_find_in_dir(drive, &s->sb, parent_entry.first_block, filename, &s->entry, &s->entry_index) != 0) {
+        if (EYNFS_STREAM_DEBUG) {
+            printf("[EYNFS:stream_begin] find-after-create failed parent='%s' name='%s'\n", parent_path, filename);
+        }
+        return -1;
+    }
     s->parent_block = parent_entry.first_block;
-    s->curr_block = 0;
-    s->first_block = 0;
+    // `eynfs_create_entry()` allocates a data block for files. Reuse it as the
+    // first streaming block to avoid leaking an unreferenced block.
+    s->curr_block = s->entry.first_block;
+    s->first_block = s->entry.first_block;
     s->size = 0;
     s->pos_in_block = 0;
+
+    // Initialize the first block: next=0 and data cleared.
+    if (s->curr_block != 0) {
+        uint8 block[EYNFS_BLOCK_SIZE] = {0};
+        *(uint32_t*)block = 0;
+        eynfs_cache_invalidate_block(s->curr_block);
+        if (eynfs_cache_write_block(s->drive, s->curr_block, block) != 0) return -1;
+    }
     return 0;
 }
 
@@ -1247,16 +1354,18 @@ int eynfs_stream_write(eynfs_stream_t* s, const void* buf, size_t size) {
         if (s->curr_block == 0 || s->pos_in_block >= (EYNFS_BLOCK_SIZE - 4)) {
             int new_block = eynfs_alloc_block(s->drive, &s->sb);
             if (new_block < 0) return -1;
+            eynfs_cache_invalidate_block((uint32_t)new_block);
             // Initialize the new block's link to 0 and clear data area
             uint8 block[EYNFS_BLOCK_SIZE] = {0};
             *(uint32_t*)block = 0;
-            if (ata_write_sector(s->drive, new_block, block) != 0) return -1;
+            if (eynfs_cache_write_block(s->drive, (uint32_t)new_block, block) != 0) return -1;
             // Link from previous current block if it exists
             if (s->curr_block != 0) {
                 uint8 prev[EYNFS_BLOCK_SIZE];
-                if (ata_read_sector(s->drive, s->curr_block, prev) != 0) return -1;
-                *(uint32_t*)prev = new_block;
-                if (ata_write_sector(s->drive, s->curr_block, prev) != 0) return -1;
+                if (eynfs_cache_get_block(s->drive, s->curr_block, prev) != 0) return -1;
+                *(uint32_t*)prev = (uint32_t)new_block; // store block number, not LBA
+                eynfs_cache_invalidate_block(s->curr_block);
+                if (eynfs_cache_write_block(s->drive, s->curr_block, prev) != 0) return -1;
             }
             s->curr_block = (uint32_t)new_block;
             if (s->first_block == 0) s->first_block = s->curr_block;
@@ -1264,11 +1373,12 @@ int eynfs_stream_write(eynfs_stream_t* s, const void* buf, size_t size) {
         }
         // Write into current block at current position
         uint8 block[EYNFS_BLOCK_SIZE];
-        if (ata_read_sector(s->drive, s->curr_block, block) != 0) return -1;
+        if (eynfs_cache_get_block(s->drive, s->curr_block, block) != 0) return -1;
         size_t space = (EYNFS_BLOCK_SIZE - 4) - s->pos_in_block;
         size_t chunk = remaining < space ? remaining : space;
         memcpy(block + 4 + s->pos_in_block, p + total_written, chunk);
-        if (ata_write_sector(s->drive, s->curr_block, block) != 0) return -1;
+        eynfs_cache_invalidate_block(s->curr_block);
+        if (eynfs_cache_write_block(s->drive, s->curr_block, block) != 0) return -1;
         s->pos_in_block += (uint16_t)chunk;
         s->size += chunk;
         total_written += chunk;
@@ -1279,21 +1389,33 @@ int eynfs_stream_write(eynfs_stream_t* s, const void* buf, size_t size) {
 
 int eynfs_stream_end(eynfs_stream_t* s) {
     if (!s) return -1;
-    // Update entry and dir table
+    // Update entry size/first_block.
+    // NOTE: The directory table can span multiple blocks; do not read it into a
+    // fixed 4KB buffer (that can miss the entry in large directories).
     s->entry.first_block = s->first_block;
     s->entry.size = s->size;
-    int entry_count = eynfs_count_dir_entries(s->drive, s->parent_block);
-    if (entry_count < 0) return -1;
-    // Avoid heap allocations in streaming finalize.
-    enum { STREAM_END_MAX_BYTES = 4096 };
-    enum { STREAM_END_MAX_ENTRIES = STREAM_END_MAX_BYTES / (int)sizeof(eynfs_dir_entry_t) };
-    eynfs_dir_entry_t entries[STREAM_END_MAX_ENTRIES];
-    int max_entries = entry_count;
-    if (max_entries > STREAM_END_MAX_ENTRIES) max_entries = STREAM_END_MAX_ENTRIES;
-    int count = eynfs_read_dir_table(s->drive, s->parent_block, entries, max_entries);
-    if (count < 0) return -1;
-    if (s->entry_index >= (uint32_t)count) s->entry_index = count - 1;
-    entries[s->entry_index] = s->entry;
-    int res = eynfs_write_dir_table(s->drive, s->parent_block, entries, count);
-    return (res < 0) ? -1 : 0;
+
+    const uint32_t entries_per_block = (uint32_t)((EYNFS_BLOCK_SIZE - 4) / sizeof(eynfs_dir_entry_t));
+    const uint32_t block_steps = s->entry_index / entries_per_block;
+    const uint32_t slot = s->entry_index % entries_per_block;
+
+    uint32_t cur = s->parent_block;
+    const uint32_t max_blocks = 4096; // safety bound
+    for (uint32_t i = 0; i < block_steps; ++i) {
+        if (cur == 0 || i >= max_blocks) return -1;
+        uint8 buf[EYNFS_BLOCK_SIZE];
+        if (eynfs_cache_get_block(s->drive, cur, buf) != 0) return -1;
+        cur = *(uint32_t*)buf;
+    }
+    if (cur == 0) return -1;
+
+    uint8 dirblk[EYNFS_BLOCK_SIZE];
+    if (eynfs_cache_get_block(s->drive, cur, dirblk) != 0) return -1;
+    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)(dirblk + 4);
+    entries[slot] = s->entry;
+
+    eynfs_cache_invalidate_block(cur);
+    if (eynfs_cache_write_block(s->drive, cur, dirblk) != 0) return -1;
+    eynfs_dir_cache_invalidate(s->parent_block);
+    return 0;
 }

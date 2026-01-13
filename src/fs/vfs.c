@@ -294,18 +294,36 @@ int vfs_listdir(uint8 drive, const char* path,
         // Resolve path to directory
         eynfs_dir_entry_t dir; if (strcmp(path, "/") == 0) { dir.type = EYNFS_TYPE_DIR; dir.first_block = sb.root_dir_block; }
         else if (eynfs_traverse_path(drive, &sb, path, &dir, NULL, NULL) != 0 || dir.type != EYNFS_TYPE_DIR) return -2;
-        // Use heap allocation instead of stack to avoid stack overflow (128 entries * 84 bytes = 10,752 bytes)
-        const int max_entries = 48; // Limit to ~4KB heap allocation
-        eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(max_entries * sizeof(eynfs_dir_entry_t));
-        if (!entries) return -3;
-        int count = eynfs_read_dir_table(drive, dir.first_block, entries, max_entries);
-        if (count < 0) { free(entries); return -3; }
-        for (int i = 0; i < count; ++i) {
-            if (entries[i].name[0] == '\0') continue;
-            int stop = cb(entries[i].name, entries[i].type == EYNFS_TYPE_DIR, entries[i].size, user);
-            if (stop) break;
+
+        // Stream the directory table by walking the on-disk block chain.
+        // This avoids a fixed MAX_ENTRIES cap and keeps memory usage constant.
+        uint32_t current_block = dir.first_block;
+        uint8 buf[512];
+        int block_count = 0;
+        const int max_blocks = 4096; // safety bound; still allows tens of thousands of entries
+
+        while (current_block && block_count < max_blocks) {
+            if (ata_read_sector(drive, EYNFS_SUPERBLOCK_LBA + current_block, buf) != 0) return -3;
+
+            uint32_t next_block = *(uint32_t*)buf;
+            const eynfs_dir_entry_t* entries = (const eynfs_dir_entry_t*)(buf + 4);
+            const int entry_count = (int)((512 - 4) / sizeof(eynfs_dir_entry_t));
+
+            for (int i = 0; i < entry_count; ++i) {
+                if (entries[i].name[0] == '\0') continue;
+
+                char name[EYNFS_NAME_MAX];
+                memcpy(name, entries[i].name, EYNFS_NAME_MAX);
+                name[EYNFS_NAME_MAX - 1] = '\0';
+
+                int stop = cb(name, entries[i].type == EYNFS_TYPE_DIR, entries[i].size, user);
+                if (stop) return 0;
+            }
+
+            current_block = next_block;
+            block_count++;
         }
-        free(entries);
+
         return 0;
     }
     // FAT32 dir list
@@ -332,10 +350,10 @@ int vfs_listdir(uint8 drive, const char* path,
                 if (entries[i].Attr & 0x08) continue; // skip volume label
                 if (entries[i].Name[0] == 0xE5) continue; // deleted
                 // Build friendly 8.3 display name
-                char base[9]; int bi=0; for (int j=0;j<8 && entries[i].Name[j] != ' '; ++j) base[bi++] = entries[i].Name[j]; base[bi] = '\0';
+                char name_base[9]; int bi=0; for (int j=0;j<8 && entries[i].Name[j] != ' '; ++j) name_base[bi++] = entries[i].Name[j]; name_base[bi] = '\0';
                 char ext[4]; int ei=0; for (int j=0;j<3 && entries[i].Name[8+j] != ' '; ++j) ext[ei++] = entries[i].Name[8+j]; ext[ei] = '\0';
                 char disp[13]; disp[0]='\0';
-                strncpy(disp, base, sizeof(disp)-1); disp[sizeof(disp)-1]='\0';
+                strncpy(disp, name_base, sizeof(disp)-1); disp[sizeof(disp)-1]='\0';
                 if (ei > 0) { strncat(disp, ".", sizeof(disp)-strlen(disp)-1); strncat(disp, ext, sizeof(disp)-strlen(disp)-1); }
                 if (disp[0] == '.' && (disp[1] == '\0' || (disp[1]=='.' && disp[2]=='\0'))) continue; // skip . and ..
                 int is_dir = (entries[i].Attr & 0x10) ? 1 : 0;
@@ -576,13 +594,29 @@ int vfs_rmdir(uint8 drive, const char* path) {
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; uint32_t pb, idx;
         if (eynfs_traverse_path(drive, &sb, path, &ent, &pb, &idx) != 0 || ent.type != EYNFS_TYPE_DIR) return -2;
-        // Check empty - use heap allocation instead of stack (64*84=5376 bytes would overflow)
-        const int max_entries = 16; // Small allocation just to check if empty
-        eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(max_entries * sizeof(eynfs_dir_entry_t));
-        if (!entries) return -2;
-        int count = eynfs_read_dir_table(drive, ent.first_block, entries, max_entries);
-        for (int i=0;i<count;i++) { if (entries[i].name[0] != '\0') { free(entries); return -3; } }
-        free(entries);
+
+        // Check empty by scanning the full directory block chain.
+        uint32_t current_block = ent.first_block;
+        uint8 buf[512];
+        int block_count = 0;
+        const int max_blocks = 4096;
+        while (current_block && block_count < max_blocks) {
+            if (ata_read_sector(drive, EYNFS_SUPERBLOCK_LBA + current_block, buf) != 0) return -2;
+            uint32_t next_block = *(uint32_t*)buf;
+            const eynfs_dir_entry_t* entries = (const eynfs_dir_entry_t*)(buf + 4);
+            const int entry_count = (int)((512 - 4) / sizeof(eynfs_dir_entry_t));
+            for (int i = 0; i < entry_count; ++i) {
+                if (entries[i].name[0] != '\0') return -3;
+            }
+            current_block = next_block;
+            block_count++;
+        }
+
+        if (block_count >= max_blocks && current_block) {
+            // Treat as non-empty on suspicion of corruption.
+            return -3;
+        }
+
         return (eynfs_delete_entry(drive, &sb, pb, ent.name) == 0) ? 0 : -4;
     }
     // FAT32

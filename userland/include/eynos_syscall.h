@@ -29,6 +29,10 @@ enum {
 
     // Set the active bitmap font for a GUI handle (path to .hex). Empty/NULL resets.
     EYN_SYSCALL_GUI_SET_FONT = 20,
+
+    // Write an entire file (create/overwrite) from ring3.
+    // args: (const char* path, const void* buf, int len)
+    EYN_SYSCALL_WRITEFILE = 21,
 };
 
 static inline int eyn_syscall3(int n, int a1, const void* a2, int a3) {
@@ -43,6 +47,17 @@ static inline int eyn_syscall3(int n, int a1, const void* a2, int a3) {
 }
 
 static inline int eyn_syscall3_pii(int n, const void* a1, int a2, int a3) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(n), "b"(a1), "c"(a2), "d"(a3)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_syscall3_ppi(int n, const void* a1, const void* a2, int a3) {
     int ret;
     __asm__ __volatile__(
         "int $0x80"

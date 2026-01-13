@@ -6,33 +6,17 @@
 #include <kb.h>
 #include <math.h>
 #include <multiboot.h>
+#include <utilities/shell/shell_command_info.h>
+#include <utilities/shell/alias.h>
+#include <utilities/shell/pipeline.h>
+#include <utilities/shell/fs_commands.h>
+#include <utilities/shell/run_command.h>
+#include <utilities/shell/shell_commands.h>
+#include <utilities/assemble.h>
+#include <fs/vfs.h>
+#include <cpu/user_elf.h>
 #include <vga.h>
 #include <fat32.h>
-#include <eynfs.h>
-#include <shell_commands.h>
-#include <fs_commands.h>
-#include <fdisk_commands.h>
-#include <format_command.h>
-#include <write_editor.h>
-#include <help_tui.h>
-#include <run_command.h>
-#include <assemble.h>
-#include <subcommands.h>
-#include <tui.h>
-#include <shell_command_info.h>
-#include <pipeline.h>
-
-// Circular buffer variables for logging
-extern int shell_log_current_line_start;
-extern int shell_log_line_count;
-extern int shell_log_line_starts[1001];
-
-// LOG_BUF_SIZE is already defined in vga.h
-
-extern int shell_log_active;
-
-// Command hash table for O(1) lookups
-// Increased size to reduce collision rate; bounded probing prevents hangs
 #define COMMAND_HASH_SIZE 256
 typedef struct {
     const char* name;                 // command name key
@@ -86,6 +70,7 @@ void write_cmd(string arg);
 void handler_exit(string arg);
 void handler_assemble(string arg);
 void joke_spam();
+void spam_cmd(string arg);
 void help_cmd(string arg);
 void echo_cmd(string arg);
 void ver_cmd(string arg);
@@ -96,22 +81,179 @@ void lsata_cmd(string arg);
 void clear_cmd(string arg);
 void catram_cmd(string arg);
 void lsram_cmd(string arg);
-void random_cmd(string arg);
 void sort_cmd(string arg);
 void game_cmd(string arg);
 void ls_cmd(string arg);
-void read_cmd(string arg);
-void write_cmd(string arg);
 void cd(string arg);
 void makedir(string arg);
-void deldir(string arg);
 void copy_cmd(string arg);
 void move_cmd(string arg);
 void format_cmd_handler(string arg);
-void fdisk_cmd_handler(string arg);
-void handler_assemble(string arg);
 void history_cmd(string arg);
 void run_cmd(string arg);
+void handler_cmd(string arg);
+
+// Auto-run support: if a command isn't recognized, search for a matching .uelf and run it.
+static int has_slash(const char* s) {
+    for (int i = 0; s && s[i]; i++) if (s[i] == '/') return 1;
+    return 0;
+}
+
+static int ends_with_uelf(const char* s) {
+    if (!s) return 0;
+    int n = (int)strlen(s);
+    if (n < 5) return 0;
+    return strcmp(s + (n - 5), ".uelf") == 0;
+}
+
+typedef struct {
+    uint8 drive;
+    const char* target_name;
+    char* out_path;
+    int out_cap;
+    int found;
+    char cur_dir[128];
+    char dirs[48][64];
+    int ndirs;
+} uelf_find_ctx_t;
+
+static int uelf_list_cb(const char* name, int is_dir, uint32 size, void* user) {
+    (void)size;
+    uelf_find_ctx_t* ctx = (uelf_find_ctx_t*)user;
+    if (!name || !name[0]) return 0;
+
+    if (!is_dir) {
+        if (strcmp(name, ctx->target_name) == 0) {
+            // Build absolute path.
+            if (strcmp(ctx->cur_dir, "/") == 0)
+                snprintf(ctx->out_path, (size_t)ctx->out_cap, "/%s", name);
+            else
+                snprintf(ctx->out_path, (size_t)ctx->out_cap, "%s/%s", ctx->cur_dir, name);
+            ctx->found = 1;
+            return 1; // stop
+        }
+        return 0;
+    }
+
+    // Record subdirectories to traverse.
+    if (ctx->ndirs < (int)(sizeof(ctx->dirs) / sizeof(ctx->dirs[0]))) {
+        int i = 0;
+        while (name[i] && i < 63) {
+            ctx->dirs[ctx->ndirs][i] = name[i];
+            i++;
+        }
+        ctx->dirs[ctx->ndirs][i] = 0;
+        ctx->ndirs++;
+    }
+    return 0;
+}
+
+static int find_uelf_recursive(uint8 drive, const char* dir, const char* target_name,
+                              int depth, char* out_path, int out_cap) {
+    if (depth > 12) return 0;
+    uelf_find_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.drive = drive;
+    ctx.target_name = target_name;
+    ctx.out_path = out_path;
+    ctx.out_cap = out_cap;
+    strncpy(ctx.cur_dir, dir, sizeof(ctx.cur_dir) - 1);
+    ctx.cur_dir[sizeof(ctx.cur_dir) - 1] = 0;
+
+    int r = vfs_listdir(drive, dir, uelf_list_cb, &ctx);
+    (void)r;
+    if (ctx.found) return 1;
+
+    for (int i = 0; i < ctx.ndirs; i++) {
+        const char* dname = ctx.dirs[i];
+        if (!strcmp(dname, ".") || !strcmp(dname, "..")) continue;
+
+        char child[128];
+        if (strcmp(dir, "/") == 0)
+            snprintf(child, sizeof(child), "/%s", dname);
+        else
+            snprintf(child, sizeof(child), "%s/%s", dir, dname);
+
+        if (find_uelf_recursive(drive, child, target_name, depth + 1, out_path, out_cap))
+            return 1;
+    }
+    return 0;
+}
+
+static int try_run_unknown_as_uelf(const char* input) {
+    if (!input) return 0;
+
+    // Tokenize: cmd + args
+    char cmd[64];
+    int i = 0;
+    while (input[i] && input[i] != ' ' && i < (int)sizeof(cmd) - 1) {
+        cmd[i] = input[i];
+        i++;
+    }
+    cmd[i] = 0;
+    if (!cmd[0]) return 0;
+
+    // Parse args
+    const int MAX_ARGS = 16;
+    char arg_buf[MAX_ARGS][64];
+    const char* argv[MAX_ARGS];
+    int argc = 0;
+
+    while (input[i] && input[i] == ' ') i++;
+    while (input[i] && argc < MAX_ARGS) {
+        int k = 0;
+        while (input[i] && input[i] != ' ' && k < 63) {
+            arg_buf[argc][k++] = input[i++];
+        }
+        arg_buf[argc][k] = 0;
+        argv[argc] = arg_buf[argc];
+        argc++;
+        while (input[i] && input[i] == ' ') i++;
+    }
+
+    // Determine target filename (.uelf).
+    char target_name[72];
+    if (ends_with_uelf(cmd)) {
+        strncpy(target_name, cmd, sizeof(target_name) - 1);
+        target_name[sizeof(target_name) - 1] = 0;
+    } else {
+        snprintf(target_name, sizeof(target_name), "%s.uelf", cmd);
+    }
+
+    // If the user provided a path, just resolve and try it.
+    char abspath[128];
+    if (has_slash(cmd)) {
+        resolve_path(cmd, shell_current_path, abspath, sizeof(abspath));
+        if (!ends_with_uelf(abspath)) {
+            char tmp[128];
+            snprintf(tmp, sizeof(tmp), "%s.uelf", abspath);
+            strncpy(abspath, tmp, sizeof(abspath) - 1);
+            abspath[sizeof(abspath) - 1] = 0;
+        }
+        vfs_stat_t st;
+        if (vfs_stat(g_current_drive, abspath, &st) == 0 && st.type == VFS_NODE_FILE) {
+            (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
+            return 1;
+        }
+        return 0;
+    }
+
+    // Try current directory first.
+    resolve_path(target_name, shell_current_path, abspath, sizeof(abspath));
+    vfs_stat_t st;
+    if (vfs_stat(g_current_drive, abspath, &st) == 0 && st.type == VFS_NODE_FILE) {
+        (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
+        return 1;
+    }
+
+    // Fall back to a bounded recursive search from root.
+    char found_path[128];
+    if (find_uelf_recursive(g_current_drive, "/", target_name, 0, found_path, (int)sizeof(found_path))) {
+        (void)user_elf_run_argv(g_current_drive, found_path, argc, argv);
+        return 1;
+    }
+    return 0;
+}
 
 // Wrapper function for joke_spam to match expected signature
 void spam_cmd(string arg) {
@@ -119,31 +261,6 @@ void spam_cmd(string arg) {
 }
 
 // Filesystem commands
-void format_cmd_handler(string arg);
-void fdisk_cmd_handler(string arg);
-void fscheck(string arg);
-void copy_cmd(string arg);
-void move_cmd(string arg);
-void del(string arg);
-void cd(string arg);
-void makedir(string arg);
-void deldir(string arg);
-
-// Additional commands
-void random_cmd(string arg);
-void history_cmd(string arg);
-void sort_cmd(string arg);
-void game_cmd(string arg);
-void size(string arg);
-void log_cmd(string arg);
-void hexdump_cmd(string arg);
-void draw_cmd_handler(string arg);
-// ...existing code...
-
-// RAM disk commands
-void catram_cmd(string arg);
-void lsram_cmd(string arg);
-
 // Subcommands
 void search_size_cmd(string arg);
 void search_type_cmd(string arg);
@@ -176,8 +293,6 @@ void run_cmd(string arg) { run_command(arg); }
 // RAM disk command wrappers
 void catram_cmd(string arg) { catram(arg); }
 void lsram_cmd(string arg) { lsram(arg); }
-
-typedef void (*shell_cmd_handler_t)(string arg);
 
 // Command registration is now handled by the linker section .shellcmds
 // All command information is stored in shell_command_info_t structures
@@ -334,9 +449,9 @@ static int validate_command_arguments(const char* cmd) {
     return 1;
 }
 
-static void safe_command_execution(const char* input, shell_cmd_handler_t handler) {
+static void safe_command_execution(string input, shell_cmd_handler_t handler) {
     // Validate command before execution
-    if (!validate_command_arguments(input)) {
+    if (!validate_command_arguments((const char*)input)) {
         printf("%c[SAFETY] Invalid command arguments\n", 255, 0, 0);
         command_execution_errors++;
         return;
@@ -395,7 +510,6 @@ void handler_assemble(string arg) {
     }
     
     // Set verbosity
-    extern int g_asm_verbose;
     g_asm_verbose = verbose;
 
     // Call the actual assembler
@@ -409,28 +523,63 @@ void handler_assemble(string arg) {
 
 // Enhanced command handling with unified registration
 void handle_shell_command(string input) {
-    // Parse the input command
-    char cmd[256];
-    int i = 0;
-    while (input[i] && input[i] != ' ' && i < 255) {
-        cmd[i] = input[i];
-        i++;
+    // Expand aliases (up to a small depth to avoid loops), then dispatch.
+    const char* current = input;
+    char expanded_a[256];
+    char expanded_b[256];
+    char* out = expanded_a;
+
+    for (int depth = 0; depth < 4; depth++) {
+        // Parse the command name
+        char cmd[256];
+        int i = 0;
+        while (current[i] && current[i] != ' ' && i < 255) {
+            cmd[i] = current[i];
+            i++;
+        }
+        cmd[i] = '\0';
+
+        // If empty input (just Enter), do nothing
+        if (cmd[0] == '\0') {
+            return;
+        }
+
+        // Find and execute built-in commands
+        shell_cmd_handler_t handler = find_command(cmd);
+        if (handler) {
+            safe_command_execution((string)current, handler);
+            return;
+        }
+
+        // If not a built-in command, try alias expansion
+        int rc = shell_alias_expand_line(current, out, 256);
+        if (rc == 1) {
+            current = out;
+            out = (out == expanded_a) ? expanded_b : expanded_a;
+            continue;
+        }
+        if (rc < 0) {
+            printf("%cError: alias expansion failed\n", 255, 0, 0);
+            return;
+        }
+
+        // No alias; stop expanding
+        break;
     }
-    cmd[i] = '\0';
-    
-    // If empty input (just Enter), do nothing
-    if (cmd[0] == '\0') {
+
+    // If not a built-in command or alias, try auto-running a matching .uelf.
+    if (try_run_unknown_as_uelf((string)current))
         return;
+
+    // Command not found
+    char cmd2[256];
+    int k = 0;
+    while (current[k] && current[k] != ' ' && k < 255) {
+        cmd2[k] = current[k];
+        k++;
     }
-    
-    // Find and execute the command using unified lookup
-    shell_cmd_handler_t handler = find_command(cmd);
-    if (handler) {
-        safe_command_execution(input, handler); // Pass full input, not just cmd
-        return;
-    }
-    // Command not found: print a friendly message and avoid any undefined handler calls
-    printf("%cCommand not found: %s\n", 255, 0, 0, cmd);
+    cmd2[k] = '\0';
+    printf("%cCommand not found: %s\n", 255, 0, 0, cmd2);
 }
 
 // Command safety status functions
@@ -439,7 +588,15 @@ int get_command_execution_errors() {
 }
 
 string get_last_failed_command() {
-    return last_failed_command;
+    static char snapshot[64];
+    int i = 0;
+    for (; i < 63; i++) {
+        char c = (char)last_failed_command[i];
+        snapshot[i] = c;
+        if (c == '\0') break;
+    }
+    if (i == 63) snapshot[63] = '\0';
+    return snapshot;
 }
 
 // Streaming command management
@@ -481,8 +638,6 @@ void launch_shell(int n) {
         
         // Initialize dynamic log buffer if logging is active
         if (shell_log_active && shell_log_buf == NULL) {
-            // Call the initialization function from vga.c
-            extern void init_dynamic_log_buffer(void);
             init_dynamic_log_buffer();
         }
         if (shell_log_active) {

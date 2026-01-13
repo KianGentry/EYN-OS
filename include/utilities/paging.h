@@ -1,5 +1,10 @@
 #ifndef PAGING_H
 #define PAGING_H
+#include <isr.h>
+
+// Legacy ISR14 page-fault entrypoint used by src/mm/paging_compat.c.
+void page_fault_handler(regs_t* r);
+
 
 /* Compatibility shim over the new VMM. */
 

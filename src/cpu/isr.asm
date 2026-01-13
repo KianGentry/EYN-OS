@@ -5,6 +5,10 @@
 bits 32
 
 extern isr_dispatch
+extern g_abort_to_shell
+extern g_user_task_active
+extern stack_space
+extern ui_return_from_user_task
 
 section .text
 
@@ -31,6 +35,25 @@ isr_common_stub:
     push eax
     call isr_dispatch
     add esp, 4
+
+    ; If requested, abandon return-to-context and jump back into the shell/UI.
+    cmp dword [g_abort_to_shell], 0
+    je .no_abort
+    mov dword [g_abort_to_shell], 0
+    mov dword [g_user_task_active], 0
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, stack_space
+    sti
+    call ui_return_from_user_task
+.halt:
+    hlt
+    jmp .halt
+.no_abort:
 
     popa
 

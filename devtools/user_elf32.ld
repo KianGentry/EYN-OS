@@ -16,6 +16,20 @@ SECTIONS
     *(.rdata*)
   }
 
+  .data : ALIGN(0x1000)
+  {
+    *(.data*)
+    *(.sdata*)
+    *(.got*)
+  }
+
+  .bss : ALIGN(0x1000)
+  {
+    *(COMMON)
+    *(.bss*)
+    *(.sbss*)
+  }
+
   /* Keep the image simple for the minimal kernel ELF loader. */
   /DISCARD/ :
   {

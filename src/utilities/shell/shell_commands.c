@@ -979,7 +979,7 @@ void ring3_cmd(string ch) {
     if (g_user_task_term < 0) g_user_task_term = 0;
     g_user_task_ui_dirty = 1;
 
-    const uint32 user_code_va = USER_CODE_BASE;              // 0x00400000
+    const uint32 user_code_va = USER_CODE_BASE;                // 0x00400000
     const uint32 user_stack_page = USER_STACK_TOP - PAGE_SIZE; // 0xBFFFF000
     const uint32 user_stack_top = USER_STACK_TOP - 0x10;
 
@@ -1004,6 +1004,9 @@ void ring3_cmd(string ch) {
     g_user_code_base = user_code_va;
     g_user_code_pages = 1;
     g_user_stack_page = user_stack_page;
+
+    // Enable stack growth for this task (even though this stub only maps one page).
+    vmm_kernel_as.stack_bottom = user_stack_page;
 
     memset((void*)user_code_va, 0, PAGE_SIZE);
     memset((void*)user_stack_page, 0, PAGE_SIZE);
@@ -1094,7 +1097,8 @@ void userrun_cmd(string ch) {
     g_user_task_ui_dirty = 1;
 
     const uint32 user_code_va = USER_CODE_BASE;
-    const uint32 user_stack_page = USER_STACK_TOP - PAGE_SIZE;
+    const uint32 user_stack_pages = 32; // 128KB initial; VMM can grow further on #PF
+    const uint32 user_stack_page = USER_STACK_TOP - user_stack_pages * PAGE_SIZE;
     const uint32 user_stack_top = USER_STACK_TOP - 0x10;
 
     uint32 pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -1119,32 +1123,38 @@ void userrun_cmd(string ch) {
         invalidate_tlb_entry(user_code_va + pi * PAGE_SIZE);
     }
 
-    // Allocate and map user stack
-    uint32 stack_frame = frame_alloc();
-    if (stack_frame == 0) {
-        printf("%cError: out of physical frames\n", 255, 0, 0);
-        free(buf);
-        user_task_cleanup_mappings();
-        return;
+    // Allocate and map user stack (initial N pages)
+    for (uint32 spi = 0; spi < user_stack_pages; ++spi) {
+        uint32 va = user_stack_page + spi * PAGE_SIZE;
+        uint32 frame = frame_alloc();
+        if (frame == 0) {
+            printf("%cError: out of physical frames\n", 255, 0, 0);
+            free(buf);
+            user_task_cleanup_mappings();
+            return;
+        }
+        if (vmm_map_page(&vmm_kernel_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
+            printf("%cError: failed to map user stack\n", 255, 0, 0);
+            frame_free(frame);
+            free(buf);
+            user_task_cleanup_mappings();
+            return;
+        }
+        invalidate_tlb_entry(va);
     }
-    if (vmm_map_page(&vmm_kernel_as, user_stack_page, stack_frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
-        printf("%cError: failed to map user stack\n", 255, 0, 0);
-        frame_free(stack_frame);
-        free(buf);
-        user_task_cleanup_mappings();
-        return;
-    }
-    invalidate_tlb_entry(user_stack_page);
 
     // Record mappings for cleanup on exit/abort
     g_user_code_base = user_code_va;
     g_user_code_pages = pages;
     g_user_stack_page = user_stack_page;
 
+    // Enable VMM stack growth for this task.
+    vmm_kernel_as.stack_bottom = user_stack_page;
+
     // Copy file into mapped user code region
     memset((void*)user_code_va, 0, pages * PAGE_SIZE);
     memcpy((void*)user_code_va, buf, size);
-    memset((void*)user_stack_page, 0, PAGE_SIZE);
+    memset((void*)user_stack_page, 0, user_stack_pages * PAGE_SIZE);
     free(buf);
 
     printf("%c[userrun] entering user mode: %s (%d bytes)\n", 0, 255, 0, abspath, (int)size);

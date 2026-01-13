@@ -2,6 +2,7 @@ import sys, struct, os
 
 EYNFS_MAGIC = 0x45594E46
 EYNFS_BLOCK_SIZE = 512
+SUPERBLOCK_LBA = 2048
 
 DIR_ENTRY_NAME_MAX = 32
 DIR_ENTRY_SIZE = 32 + 1 + 1 + 2 + 4 + 4 + 8  # matches packed struct in eynfs.h
@@ -12,6 +13,11 @@ def rd(f, off, size):
     if len(data) != size:
         raise IOError(f"Short read at {off} for {size} bytes")
     return data
+
+
+def blk_off(blk):
+    # EYNFS block numbers are relative to the start of the EYNFS partition.
+    return (SUPERBLOCK_LBA + blk) * EYNFS_BLOCK_SIZE
 
 def bit_get(bmap, idx):
     byte = idx // 8
@@ -45,7 +51,7 @@ def walk_dir_chain(f, start_block, total_blocks):
             return chain, [f"Cycle detected in dir chain at block {blk}"] , seen
         seen.add(blk)
         chain.append(blk)
-        raw = rd(f, blk * EYNFS_BLOCK_SIZE, EYNFS_BLOCK_SIZE)
+        raw = rd(f, blk_off(blk), EYNFS_BLOCK_SIZE)
         (next_blk,) = struct.unpack('<I', raw[:4])
         blk = next_blk
         limit -= 1
@@ -55,7 +61,7 @@ def walk_dir_chain(f, start_block, total_blocks):
 
 def check_dir_entries(f, dir_block, total_blocks):
     errs = []
-    raw = rd(f, dir_block * EYNFS_BLOCK_SIZE, EYNFS_BLOCK_SIZE)
+    raw = rd(f, blk_off(dir_block), EYNFS_BLOCK_SIZE)
     entries_bytes = raw[4:]
     per_block = (EYNFS_BLOCK_SIZE - 4) // DIR_ENTRY_SIZE
     for i in range(per_block):
@@ -91,12 +97,14 @@ def main():
         print(f"Image not found: {img}")
         return 2
     size = os.path.getsize(img)
-    total_blocks = size // EYNFS_BLOCK_SIZE
+    # Total blocks in the partition is recorded in the superblock. We keep the
+    # raw file-derived total blocks as a sanity check only.
+    file_total_blocks = size // EYNFS_BLOCK_SIZE
     errs = []
     warns = []
     with open(img, 'rb') as f:
         # Superblock expected at LBA 2048
-        sb_off = 2048 * EYNFS_BLOCK_SIZE
+        sb_off = SUPERBLOCK_LBA * EYNFS_BLOCK_SIZE
         sb_raw = rd(f, sb_off, EYNFS_BLOCK_SIZE)
         sb = parse_superblock(sb_raw)
         print(f"Superblock: magic=0x{sb['magic']:08X} ver={sb['version']} block={sb['block_size']} total_blocks={sb['total_blocks']} root={sb['root_dir_block']} bitmap={sb['free_block_map']} nametab={sb['name_table_block']}")
@@ -104,17 +112,17 @@ def main():
             errs.append("Bad magic in superblock")
         if sb['block_size'] != EYNFS_BLOCK_SIZE:
             errs.append(f"Unexpected block size {sb['block_size']}")
-        if sb['total_blocks'] > total_blocks:
-            warns.append(f"Superblock total_blocks {sb['total_blocks']} exceeds image size {total_blocks}")
+        if (SUPERBLOCK_LBA + sb['total_blocks']) > file_total_blocks:
+            warns.append(f"Superblock total_blocks {sb['total_blocks']} exceeds image size ({file_total_blocks - SUPERBLOCK_LBA} blocks available after partition start)")
         # Bitmap
-        bmap = rd(f, sb['free_block_map'] * EYNFS_BLOCK_SIZE, EYNFS_BLOCK_SIZE)
+        bmap = rd(f, blk_off(sb['free_block_map']), EYNFS_BLOCK_SIZE)
         # Expect metadata LBAs reserved; formatter currently reserves first 4 only; flag that
         meta = [2048, 2049, 2050, 2051]
         for m in meta:
             if bit_get(bmap, m) != 1:
                 warns.append(f"Bitmap does not mark metadata block {m} as used")
         # Walk root directory chain
-        chain, derrs, _ = walk_dir_chain(f, sb['root_dir_block'], total_blocks)
+        chain, derrs, _ = walk_dir_chain(f, sb['root_dir_block'], sb['total_blocks'])
         errs.extend(derrs)
         if chain:
             print(f"Root directory chain blocks: {chain}")

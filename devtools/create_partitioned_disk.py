@@ -95,16 +95,21 @@ def create_eynfs_superblock(total_blocks, root_lba, bitmap_lba, nametable_lba):
     return bytes(sb)
 
 
-def create_eynfs_bitmap(used_blocks):
-    """Create EYNFS free block bitmap."""
-    bitmap = bytearray(512)
-    
+def create_eynfs_bitmap(total_blocks, used_blocks):
+    """Create EYNFS free block bitmap.
+
+    The bitmap spans as many 512-byte blocks as needed to cover total_blocks.
+    """
+    bitmap_bytes = (total_blocks + 7) // 8
+    bitmap_blocks = (bitmap_bytes + SECTOR_SIZE - 1) // SECTOR_SIZE
+    bitmap = bytearray(bitmap_blocks * SECTOR_SIZE)
+
     for block in used_blocks:
         byte_idx = block // 8
         bit_idx = block % 8
-        if byte_idx < 512:
+        if 0 <= byte_idx < len(bitmap):
             bitmap[byte_idx] |= (1 << bit_idx)
-    
+
     return bytes(bitmap)
 
 
@@ -187,21 +192,24 @@ def create_partitioned_disk(filename, total_size_mb=10, part1_size_mb=5, part2_s
         # === Format Partition 1 as EYNFS ===
         # EYNFS layout within partition:
         #   Sector 0: Superblock
-        #   Sector 1: Free block bitmap
-        #   Sector 2: Name table
-        #   Sector 3: Root directory
+        #   Sector 1..N: Free block bitmap (N depends on partition size)
+        #   Sector (1+N): Name table
+        #   Sector (2+N): Root directory
         
         sb_lba = part1_start
-        bitmap_lba = part1_start + 1
-        nametable_lba = part1_start + 2
-        rootdir_lba = part1_start + 3
 
-        # On-disk EYNFS fields store *filesystem-relative* block numbers:
-        #   0=superblock, 1=bitmap, 2=nametable, 3=rootdir
+        # On-disk EYNFS fields store *filesystem-relative* block numbers.
         sb_block = 0
         bitmap_block = 1
-        nametable_block = 2
-        rootdir_block = 3
+
+        bitmap_bytes = (part1_sectors + 7) // 8
+        bitmap_blocks = (bitmap_bytes + SECTOR_SIZE - 1) // SECTOR_SIZE
+        nametable_block = bitmap_block + bitmap_blocks
+        rootdir_block = nametable_block + 1
+
+        bitmap_lba = part1_start + bitmap_block
+        nametable_lba = part1_start + nametable_block
+        rootdir_lba = part1_start + rootdir_block
         
         # Write superblock
         f.seek(sb_lba * SECTOR_SIZE)
@@ -209,9 +217,11 @@ def create_partitioned_disk(filename, total_size_mb=10, part1_size_mb=5, part2_s
             part1_sectors, rootdir_block, bitmap_block, nametable_block
         ))
         
-        # Write bitmap (mark first 4 blocks as used)
+        # Write bitmap.
+        # Reserve: superblock, bitmap blocks, name table, root dir.
+        reserved_blocks = list(range(0, rootdir_block + 1))
         f.seek(bitmap_lba * SECTOR_SIZE)
-        f.write(create_eynfs_bitmap([0, 1, 2, 3]))
+        f.write(create_eynfs_bitmap(part1_sectors, reserved_blocks))
         
         # Name table and root directory are already zeroed
         
@@ -230,8 +240,8 @@ def create_partitioned_disk(filename, total_size_mb=10, part1_size_mb=5, part2_s
 def main():
     output_file = sys.argv[1] if len(sys.argv) > 1 else 'eynfs.img'
     
-    # Default: 10MB total, 5MB EYNFS, 5MB Swap
-    create_partitioned_disk(output_file, total_size_mb=10, part1_size_mb=5, part2_size_mb=5)
+    # Default: 50MB total, 40MB EYNFS, 10MB Swap
+    create_partitioned_disk(output_file, total_size_mb=50, part1_size_mb=40, part2_size_mb=10)
 
 
 if __name__ == '__main__':
