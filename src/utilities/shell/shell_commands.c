@@ -24,6 +24,7 @@
 #include <tile_manager.h>
 #include <rei.h>
 #include <drivers/pci.h>
+#include <drivers/e1000.h>
 
 // Forward declarations for command handlers
 void help_cmd(string arg);
@@ -49,6 +50,8 @@ void validate_cmd(string arg);
 void portable_cmd(string arg);
 void init_cmd(string arg);
 void pciscan_cmd(string arg);
+void e1000probe_cmd(string arg);
+void e1000_cmd(string arg);
 // Diagnostics/testing commands
 void panic_cmd(string arg);
 void assertfail_cmd(string arg);
@@ -770,6 +773,8 @@ REGISTER_SHELL_COMMAND(validate, "validate", validate_cmd, CMD_STREAMING, "Displ
 REGISTER_SHELL_COMMAND(portable, "portable", portable_cmd, CMD_ESSENTIAL, "Display portability optimizations and memory usage.\nUsage: portable [stats|optimize]", "portable");
 REGISTER_SHELL_COMMAND(init, "init", init_cmd, CMD_ESSENTIAL, "Initialize full system services (ATA drives, etc.).\nUsage: init", "init");
 REGISTER_SHELL_COMMAND(pciscan_cmd_info, "pciscan", pciscan_cmd, CMD_DIAGNOSTIC, "Scan PCI devices and print vendor/device IDs and BAR0.\nUsage: pciscan [net]\nTip: e1000 usually shows as 8086:100E.", "pciscan net");
+REGISTER_SHELL_COMMAND(e1000probe_cmd_info, "e1000probe", e1000probe_cmd, CMD_DIAGNOSTIC, "Probe the Intel e1000 NIC (read-only MMIO sanity check).\nUsage: e1000probe", "e1000probe");
+REGISTER_SHELL_COMMAND(e1000_cmd_info, "e1000", e1000_cmd, CMD_DIAGNOSTIC, "Intel e1000 utilities (probe + simple self-tests).\nUsage: e1000 probe | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx]", "e1000 test --expect-link up");
 
 typedef struct pciscan_ctx {
     uint32 count;
@@ -780,7 +785,7 @@ typedef struct pciscan_ctx {
 static void pciscan_cb(const pci_device_info* info, void* user)
 {
     // Bring-up helper: keep this output stable and low-risk.
-    // Note: the kernel printf supports %d/%x/%s/%c (not %u), so avoid unsigned-only specifiers.
+    // Note: printf() is a small kernel formatter; keep specifiers simple and consistent with argument types.
     pciscan_ctx* ctx = (pciscan_ctx*)user;
     if (!ctx || !info) return;
 
@@ -826,6 +831,165 @@ void pciscan_cmd(string arg)
     printf("PCI scan (%s):\n", ctx.filter_net_only ? "net" : "all");
     pci_enumerate(pciscan_cb, &ctx);
     printf("Found %d device functions (%d shown).\n", (int)ctx.count, (int)ctx.shown);
+}
+
+void e1000probe_cmd(string arg)
+{
+    (void)arg;
+    (void)e1000_probe_and_print();
+}
+
+static int hex_digit_val(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+static int parse_mac(const char* s, unsigned char out_mac[6])
+{
+    if (!s || !out_mac) return -1;
+
+    // Strict format: xx:xx:xx:xx:xx:xx
+    for (int i = 0; i < 6; i++) {
+        int hi = hex_digit_val(s[0]);
+        int lo = hex_digit_val(s[1]);
+        if (hi < 0 || lo < 0) return -1;
+        out_mac[i] = (unsigned char)((hi << 4) | lo);
+        s += 2;
+        if (i != 5) {
+            if (*s != ':') return -1;
+            s++;
+        }
+    }
+    if (*s != '\0' && *s != ' ') return -1;
+    return 0;
+}
+
+static const char* skip_spaces(const char* s)
+{
+    while (s && *s == ' ') s++;
+    return s;
+}
+
+static int token_eq(const char* s, const char* tok)
+{
+    int i = 0;
+    while (tok[i]) {
+        if (!s[i] || s[i] != tok[i]) return 0;
+        i++;
+    }
+    // token boundary
+    return (s[i] == '\0' || s[i] == ' ');
+}
+
+static const char* next_token(const char* s)
+{
+    s = skip_spaces(s);
+    while (s && *s && *s != ' ') s++;
+    return skip_spaces(s);
+}
+
+static int extract_value_after(const char* s, const char* key, char* out, int out_cap)
+{
+    if (!s || !key || !out || out_cap <= 1) return -1;
+    if (!token_eq(s, key)) return -1;
+
+    s = next_token(s);
+    if (!s || !*s) return -1;
+
+    int n = 0;
+    while (s[n] && s[n] != ' ' && n < out_cap - 1) {
+        out[n] = s[n];
+        n++;
+    }
+    out[n] = '\0';
+    return 0;
+}
+
+void e1000_cmd(string arg)
+{
+    // Command form is: "e1000 <subcmd> [flags...]".
+    // shell passes the full input line; skip the command name first.
+    const char* s = (const char*)arg;
+    if (!s) {
+        printf("Usage: e1000 probe | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx]\n");
+        return;
+    }
+    while (*s && *s != ' ') s++;
+    s = skip_spaces(s);
+
+    if (!*s || token_eq(s, "probe")) {
+        (void)e1000_probe_and_print();
+        return;
+    }
+
+    if (token_eq(s, "test")) {
+        e1000_probe_info info;
+        int rc = e1000_probe(&info);
+        if (rc != 0) {
+            printf("%cFAIL: e1000 probe failed (%d).\n", 255, 0, 0, rc);
+            return;
+        }
+
+        int want_link = -1; // -1 = don't care, 0 = down, 1 = up
+        unsigned char want_mac[6];
+        int want_mac_set = 0;
+
+        // Parse flags linearly; keep it simple.
+        const char* p = next_token(s);
+        while (p && *p) {
+            char val[32];
+            if (extract_value_after(p, "--expect-link", val, (int)sizeof(val)) == 0) {
+                if (val[0] == 'u' && val[1] == 'p' && val[2] == '\0') want_link = 1;
+                else if (val[0] == 'd' && val[1] == 'o' && val[2] == 'w' && val[3] == 'n' && val[4] == '\0') want_link = 0;
+                else {
+                    printf("%cError: --expect-link must be up or down.\n", 255, 0, 0);
+                    return;
+                }
+                p = next_token(next_token(p));
+                continue;
+            }
+            if (extract_value_after(p, "--expect-mac", val, (int)sizeof(val)) == 0) {
+                if (parse_mac(val, want_mac) != 0) {
+                    printf("%cError: --expect-mac must be xx:xx:xx:xx:xx:xx.\n", 255, 0, 0);
+                    return;
+                }
+                want_mac_set = 1;
+                p = next_token(next_token(p));
+                continue;
+            }
+
+            // Unknown token.
+            printf("%cError: unknown flag. Usage: e1000 test [--expect-link up|down] [--expect-mac xx:..]\n", 255, 0, 0);
+            return;
+        }
+
+        if (want_link != -1 && info.link_up != want_link) {
+            printf("%cFAIL: link is %s (expected %s).\n", 255, 0, 0,
+                   info.link_up ? "up" : "down", want_link ? "up" : "down");
+            return;
+        }
+
+        if (want_mac_set) {
+            int mac_ok = 1;
+            for (int i = 0; i < 6; i++) {
+                if (info.mac[i] != want_mac[i]) { mac_ok = 0; break; }
+            }
+            if (!mac_ok) {
+                printf("%cFAIL: MAC mismatch (got %02x:%02x:%02x:%02x:%02x:%02x).\n", 255, 0, 0,
+                       (unsigned)info.mac[0], (unsigned)info.mac[1], (unsigned)info.mac[2],
+                       (unsigned)info.mac[3], (unsigned)info.mac[4], (unsigned)info.mac[5]);
+                return;
+            }
+        }
+
+        printf("%cPASS: e1000 probe looks good.\n", 0, 255, 0);
+        return;
+    }
+
+    printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 test ...\n", 255, 0, 0);
 }
 
 // Diagnostics/testing command implementations

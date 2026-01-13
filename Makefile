@@ -45,6 +45,7 @@ OBJS += obj/tiling_manager.o obj/tiling_cmd.o obj/theme_cmd.o obj/ui_prefs.o
 OBJS += obj/terminals.o
 OBJS += obj/partition.o obj/diskmgr.o
 OBJS += obj/pci.o
+OBJS += obj/e1000.o
 OUTPUT = tmp/boot/kernel.bin
 
 # Source files to object files
@@ -123,6 +124,9 @@ obj/serial.o:src/drivers/serial.c
 
 obj/pci.o:src/drivers/pci.c
 	$(COMPILER) $(CFLAGS) src/drivers/pci.c -o obj/pci.o
+
+obj/e1000.o:src/drivers/e1000.c
+	$(COMPILER) $(CFLAGS) src/drivers/e1000.c -o obj/e1000.o
 
 obj/panic.o:src/misc/panic.c
 	$(COMPILER) $(CFLAGS) src/misc/panic.c -o obj/panic.o
