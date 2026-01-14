@@ -989,6 +989,64 @@ void e1000_cmd(string arg)
         return;
     }
 
+    if (token_eq(s, "tx-test")) {
+        // Optional message token after tx-test.
+        const char* p = next_token(s);
+        if (p && *p) {
+            // Treat the next token as the message (keep parsing simple for now).
+            char msg[64];
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(msg) - 1) {
+                msg[n] = p[n];
+                n++;
+            }
+            msg[n] = '\0';
+            (void)e1000_tx_test_send(msg);
+        } else {
+            (void)e1000_tx_test_send(0);
+        }
+        return;
+    }
+
+    if (token_eq(s, "rx-poll")) {
+        // Usage: e1000 rx-poll [count] [spins]
+        // count = max packets to print, spins = polling iterations
+        int count = 5;
+        int spins = 1000000;
+
+        const char* p = next_token(s);
+        if (p && *p) {
+            // parse count (decimal)
+            int v = 0;
+            int any = 0;
+            while (*p >= '0' && *p <= '9') {
+                any = 1;
+                v = (v * 10) + (*p - '0');
+                p++;
+            }
+            if (any) count = v;
+            p = skip_spaces(p);
+        }
+        if (p && *p) {
+            int v = 0;
+            int any = 0;
+            while (*p >= '0' && *p <= '9') {
+                any = 1;
+                v = (v * 10) + (*p - '0');
+                p++;
+            }
+            if (any) spins = v;
+        }
+
+        int rc = e1000_rx_poll_and_print(count, spins);
+        if (rc < 0) {
+            printf("%cRX poll failed (%d).\n", 255, 0, 0, rc);
+        } else {
+            printf("RX poll done (%d packets).\n", rc);
+        }
+        return;
+    }
+
     printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 test ...\n", 255, 0, 0);
 }
 

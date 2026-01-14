@@ -31,4 +31,12 @@ int e1000_probe(e1000_probe_info* out);
 
 int e1000_probe_and_print(void);
 
+// Transmit-path bring-up helper.
+// Sends a single small Ethernet frame via the TX ring and polls for completion.
+int e1000_tx_test_send(const char* message);
+
+// Receive-path bring-up helper.
+// Polls the RX ring and prints a short Ethernet header summary for each frame.
+int e1000_rx_poll_and_print(int max_packets, int spin_limit);
+
 #endif
