@@ -3,6 +3,7 @@
 #include <mm/vmm.h>
 #include <vga.h>
 #include <string.h>
+#include <misc/types.h>
 
 // e1000 register offsets (subset).
 //
@@ -30,6 +31,9 @@
 #define E1000_REG_RDH    0x2810
 #define E1000_REG_RDT    0x2818
 #define E1000_REG_RCTL   0x0100
+
+// Interrupt registers (useful for debugging even in polling mode)
+#define E1000_REG_ICR    0x00C0
 
 // Use a fixed high kernel VA window for device MMIO.
 //
@@ -107,9 +111,94 @@ typedef struct __attribute__((packed)) eth_hdr {
     uint16 ethertype_be;
 } eth_hdr;
 
+typedef struct __attribute__((packed)) arp_pkt {
+    uint16 htype_be;
+    uint16 ptype_be;
+    uint8 hlen;
+    uint8 plen;
+    uint16 oper_be;
+    uint8 sha[6];
+    uint8 spa[4];
+    uint8 tha[6];
+    uint8 tpa[4];
+} arp_pkt;
+
 static uint16 be16(uint16 x)
 {
     return (uint16)((x >> 8) | (x << 8));
+}
+
+static void print_ipv4_bytes(const uint8 ip[4])
+{
+    printf("%d.%d.%d.%d", (int)ip[0], (int)ip[1], (int)ip[2], (int)ip[3]);
+}
+
+// Forward declarations: used by early bring-up helpers below.
+static inline uint32 e1000_mmio_read32(uint32 reg);
+static inline void e1000_mmio_write32(uint32 reg, uint32 value);
+
+// Ring init helpers are defined later but used by `e1000_init()`.
+static int e1000_rx_init_once(void);
+static int e1000_tx_init_once(void);
+
+static void e1000_program_rar0_from_mac(void)
+{
+    // Why we do this explicitly:
+    // - e1000 will drop unicast frames unless a Receive Address Register entry is valid.
+    // - QEMU typically pre-programs it, but being explicit avoids "RX is dead" confusion.
+    uint32 ral = (uint32)g_e1000.mac[0]
+        | ((uint32)g_e1000.mac[1] << 8)
+        | ((uint32)g_e1000.mac[2] << 16)
+        | ((uint32)g_e1000.mac[3] << 24);
+    uint32 rah = (uint32)g_e1000.mac[4]
+        | ((uint32)g_e1000.mac[5] << 8)
+        | (1u << 31); // AV (address valid)
+
+    e1000_mmio_write32(E1000_REG_RAL0, ral);
+    e1000_mmio_write32(E1000_REG_RAH0, rah);
+}
+
+void e1000_debug_regs_print(void)
+{
+    // Safe read-only snapshot of a few registers used in bring-up.
+    // Useful when RX appears "silent".
+    uint32 status = e1000_mmio_read32(E1000_REG_STATUS);
+    uint32 tctl = e1000_mmio_read32(E1000_REG_TCTL);
+    uint32 rctl = e1000_mmio_read32(E1000_REG_RCTL);
+
+    uint32 tdbal = e1000_mmio_read32(E1000_REG_TDBAL);
+    uint32 tdlen = e1000_mmio_read32(E1000_REG_TDLEN);
+    uint32 tdh = e1000_mmio_read32(E1000_REG_TDH);
+    uint32 tdt = e1000_mmio_read32(E1000_REG_TDT);
+
+    uint32 rdbal = e1000_mmio_read32(E1000_REG_RDBAL);
+    uint32 rdlen = e1000_mmio_read32(E1000_REG_RDLEN);
+    uint32 rdh = e1000_mmio_read32(E1000_REG_RDH);
+    uint32 rdt = e1000_mmio_read32(E1000_REG_RDT);
+
+    uint32 ral0 = e1000_mmio_read32(E1000_REG_RAL0);
+    uint32 rah0 = e1000_mmio_read32(E1000_REG_RAH0);
+    uint32 icr = e1000_mmio_read32(E1000_REG_ICR);
+
+    printf("e1000 regs: STATUS=%08x\n", (unsigned)status);
+    printf("  TX: TCTL=%08x TDBAL=%08x TDLEN=%08x TDH=%08x TDT=%08x\n",
+           (unsigned)tctl, (unsigned)tdbal, (unsigned)tdlen, (unsigned)tdh, (unsigned)tdt);
+    printf("  RX: RCTL=%08x RDBAL=%08x RDLEN=%08x RDH=%08x RDT=%08x\n",
+           (unsigned)rctl, (unsigned)rdbal, (unsigned)rdlen, (unsigned)rdh, (unsigned)rdt);
+    printf("  RAR0: RAL=%08x RAH=%08x ICR=%08x\n", (unsigned)ral0, (unsigned)rah0, (unsigned)icr);
+}
+
+int e1000_init(void)
+{
+    // Single entrypoint to get the NIC into a known-good state.
+    // Why:
+    // - Lets `e1000 regs` reflect post-init state.
+    // - Avoids ordering mistakes (RX should be enabled before we rely on it).
+    int rc = e1000_rx_init_once();
+    if (rc != 0) return rc;
+    rc = e1000_tx_init_once();
+    if (rc != 0) return rc;
+    return 0;
 }
 
 static void print_mac(const uint8 mac[6])
@@ -438,8 +527,15 @@ static int e1000_rx_init_once(void)
     // BSIZE=2048 (00)
     uint32 rctl = 0;
     rctl |= (1u << 1);   // EN
+    // Promiscuous bits during bring-up to make RX validation easier.
+    // We'll tighten this later once ARP/IP is stable.
+    rctl |= (1u << 3);   // UPE (unicast promiscuous)
+    rctl |= (1u << 4);   // MPE (multicast promiscuous)
     rctl |= (1u << 15);  // BAM
     rctl |= (1u << 26);  // SECRC
+
+    // Ensure the NIC knows our MAC for unicast filtering (even if we leave UPE on for now).
+    e1000_program_rar0_from_mac();
     e1000_mmio_write32(E1000_REG_RCTL, rctl);
 
     g_e1000.rx_ready = 1;
@@ -473,6 +569,18 @@ int e1000_rx_poll_and_print(int max_packets, int spin_limit)
             print_mac(eh->dst);
             printf(" src=");
             print_mac(eh->src);
+
+            // Decode just enough to be useful while bringing up RX.
+            if (et == 0x0806u && len >= (uint32)(sizeof(eth_hdr) + sizeof(arp_pkt))) {
+                arp_pkt* a = (arp_pkt*)(buf + sizeof(eth_hdr));
+                uint16 oper = be16(a->oper_be);
+                printf(" arp=%s sha=", (oper == 1u) ? "req" : (oper == 2u) ? "rep" : "?");
+                print_mac(a->sha);
+                printf(" spa=");
+                print_ipv4_bytes(a->spa);
+                printf(" tpa=");
+                print_ipv4_bytes(a->tpa);
+            }
             printf("\n");
         } else {
             printf("RX %d bytes\n", (int)len);
@@ -490,6 +598,54 @@ int e1000_rx_poll_and_print(int max_packets, int spin_limit)
     }
 
     return printed;
+}
+
+int e1000_arp_test_send(uint8 sender_ip[4], uint8 target_ip[4])
+{
+    // Emit a single ARP request: "who has <target_ip>? tell <sender_ip>".
+    //
+    // Why ARP next:
+    // - Link-local, tiny, and doesn't require any IP/UDP implementation.
+    // - Produces an immediate RX packet if the target exists.
+    if (!sender_ip || !target_ip) return -1;
+
+    // Ensure RX is enabled before TX so we don't miss a fast reply.
+    // This matters under emulation where responses can come back immediately.
+    if (e1000_rx_init_once() != 0) return -2;
+    if (e1000_tx_init_once() != 0) return -3;
+
+    uint8 frame[64];
+    memset(frame, 0, sizeof(frame));
+
+    // Ethernet: dst=broadcast, src=our MAC, type=ARP
+    for (int i = 0; i < 6; i++) frame[i] = 0xFF;
+    for (int i = 0; i < 6; i++) frame[6 + i] = g_e1000.mac[i];
+    frame[12] = 0x08;
+    frame[13] = 0x06;
+
+    arp_pkt* a = (arp_pkt*)(frame + sizeof(eth_hdr));
+    a->htype_be = be16(1u);
+    a->ptype_be = be16(0x0800u);
+    a->hlen = 6;
+    a->plen = 4;
+    a->oper_be = be16(1u);
+    for (int i = 0; i < 6; i++) a->sha[i] = g_e1000.mac[i];
+    for (int i = 0; i < 4; i++) a->spa[i] = sender_ip[i];
+    for (int i = 0; i < 6; i++) a->tha[i] = 0;
+    for (int i = 0; i < 4; i++) a->tpa[i] = target_ip[i];
+
+    uint32 total_len = (uint32)(sizeof(eth_hdr) + sizeof(arp_pkt));
+    if (total_len < 60u) total_len = 60u;
+
+    int rc = e1000_tx_send_frame(frame, total_len);
+    if (rc == 0) {
+        printf("ARP who-has ");
+        print_ipv4_bytes(target_ip);
+        printf(" tell ");
+        print_ipv4_bytes(sender_ip);
+        printf(" (TX ok)\n");
+    }
+    return rc;
 }
 
 int e1000_tx_test_send(const char* message)

@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2026-01-13 11:45:34
+This document is auto-generated from the source code. Last updated: 2026-01-14 07:57:31
 
-**Total Commands:** 62
+**Total Commands:** 63
 
 ## Table of Contents
 
@@ -183,6 +183,25 @@ Clear background image for the focused tile.
 **Example:**
 ```bash
 clearbg
+```
+
+---
+
+### e1000
+
+**Handler:** `e1000_cmd`
+
+**Type:** CMD_DIAGNOSTIC
+
+**File:** `shell_commands.c`
+
+**Description:**
+Intel e1000 utilities (probe + bring-up helpers).
+Usage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx]
+
+**Example:**
+```bash
+e1000 init
 ```
 
 ---
@@ -1207,7 +1226,7 @@ run user_hello.uelf
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 30 |
+| Streaming Commands | 31 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |

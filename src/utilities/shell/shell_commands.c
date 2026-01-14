@@ -774,7 +774,7 @@ REGISTER_SHELL_COMMAND(portable, "portable", portable_cmd, CMD_ESSENTIAL, "Displ
 REGISTER_SHELL_COMMAND(init, "init", init_cmd, CMD_ESSENTIAL, "Initialize full system services (ATA drives, etc.).\nUsage: init", "init");
 REGISTER_SHELL_COMMAND(pciscan_cmd_info, "pciscan", pciscan_cmd, CMD_DIAGNOSTIC, "Scan PCI devices and print vendor/device IDs and BAR0.\nUsage: pciscan [net]\nTip: e1000 usually shows as 8086:100E.", "pciscan net");
 REGISTER_SHELL_COMMAND(e1000probe_cmd_info, "e1000probe", e1000probe_cmd, CMD_DIAGNOSTIC, "Probe the Intel e1000 NIC (read-only MMIO sanity check).\nUsage: e1000probe", "e1000probe");
-REGISTER_SHELL_COMMAND(e1000_cmd_info, "e1000", e1000_cmd, CMD_DIAGNOSTIC, "Intel e1000 utilities (probe + simple self-tests).\nUsage: e1000 probe | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx]", "e1000 test --expect-link up");
+REGISTER_SHELL_COMMAND(e1000_cmd_info, "e1000", e1000_cmd, CMD_DIAGNOSTIC, "Intel e1000 utilities (probe + bring-up helpers).\nUsage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx]", "e1000 init");
 
 typedef struct pciscan_ctx {
     uint32 count;
@@ -867,6 +867,28 @@ static int parse_mac(const char* s, unsigned char out_mac[6])
     return 0;
 }
 
+static int parse_ipv4(const char* s, unsigned char out_ip[4])
+{
+    // Strict dotted-decimal: a.b.c.d (0-255)
+    if (!s || !out_ip) return -1;
+    for (int part = 0; part < 4; part++) {
+        if (*s < '0' || *s > '9') return -1;
+        int v = 0;
+        while (*s >= '0' && *s <= '9') {
+            v = (v * 10) + (*s - '0');
+            if (v > 255) return -1;
+            s++;
+        }
+        out_ip[part] = (unsigned char)v;
+        if (part != 3) {
+            if (*s != '.') return -1;
+            s++;
+        }
+    }
+    if (*s != '\0' && *s != ' ') return -1;
+    return 0;
+}
+
 static const char* skip_spaces(const char* s)
 {
     while (s && *s == ' ') s++;
@@ -922,6 +944,27 @@ void e1000_cmd(string arg)
 
     if (!*s || token_eq(s, "probe")) {
         (void)e1000_probe_and_print();
+        return;
+    }
+
+    if (token_eq(s, "init")) {
+        int rc = e1000_init();
+        if (rc == 0) {
+            printf("e1000 init ok\n");
+        } else {
+            printf("%cError%c: e1000 init failed (%d)\n", 255, 0, 0, 255, 255, 255, rc);
+        }
+        return;
+    }
+
+    if (token_eq(s, "regs")) {
+        // Snapshot a few useful registers while debugging RX/TX bring-up.
+        e1000_probe_info info;
+        if (e1000_probe(&info) != 0) {
+            printf("%cError: e1000 probe failed.\n", 255, 0, 0);
+            return;
+        }
+        e1000_debug_regs_print();
         return;
     }
 
@@ -1043,6 +1086,68 @@ void e1000_cmd(string arg)
             printf("%cRX poll failed (%d).\n", 255, 0, 0, rc);
         } else {
             printf("RX poll done (%d packets).\n", rc);
+        }
+        return;
+    }
+
+    if (token_eq(s, "arp-test")) {
+        // Usage: e1000 arp-test [target_ip] [sender_ip] [rxcount] [spins]
+        // Defaults match QEMU user-net: guest=10.0.2.15, gateway=10.0.2.2.
+        // Ensure rings are configured so we can RX the reply.
+        (void)e1000_init();
+
+        unsigned char target_ip[4] = {10, 0, 2, 2};
+        unsigned char sender_ip[4] = {10, 0, 2, 15};
+        int rxcount = 5;
+        int spins = 12000000;
+
+        const char* p = next_token(s);
+        if (p && *p) {
+            char ipstr[32];
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(ipstr) - 1) { ipstr[n] = p[n]; n++; }
+            ipstr[n] = '\0';
+            if (parse_ipv4(ipstr, target_ip) != 0) {
+                printf("%cError: target_ip must be a.b.c.d\n", 255, 0, 0);
+                return;
+            }
+            p = skip_spaces(p + n);
+        }
+        if (p && *p) {
+            char ipstr[32];
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(ipstr) - 1) { ipstr[n] = p[n]; n++; }
+            ipstr[n] = '\0';
+            if (parse_ipv4(ipstr, sender_ip) != 0) {
+                printf("%cError: sender_ip must be a.b.c.d\n", 255, 0, 0);
+                return;
+            }
+            p = skip_spaces(p + n);
+        }
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any) rxcount = v;
+            p = skip_spaces(p);
+        }
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any) spins = v;
+        }
+
+        int rc = e1000_arp_test_send(sender_ip, target_ip);
+        if (rc != 0) {
+            printf("%cARP test send failed (%d).\n", 255, 0, 0, rc);
+            return;
+        }
+
+        // Immediately poll RX to catch the reply.
+        int rx = e1000_rx_poll_and_print(rxcount, spins);
+        if (rx < 0) {
+            printf("%cRX poll failed (%d).\n", 255, 0, 0, rx);
+        } else {
+            printf("ARP test done (rx %d packets).\n", rx);
         }
         return;
     }

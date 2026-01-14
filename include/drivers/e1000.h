@@ -39,4 +39,14 @@ int e1000_tx_test_send(const char* message);
 // Polls the RX ring and prints a short Ethernet header summary for each frame.
 int e1000_rx_poll_and_print(int max_packets, int spin_limit);
 
+// ARP bring-up helper.
+// Sends an ARP request (who-has) so you can observe an inbound ARP reply via rx-poll.
+int e1000_arp_test_send(unsigned char sender_ip[4], unsigned char target_ip[4]);
+
+// Debug helper for bring-up: prints key RX/TX registers.
+void e1000_debug_regs_print(void);
+
+// Initializes RX+TX rings into a known-good state.
+int e1000_init(void);
+
 #endif
