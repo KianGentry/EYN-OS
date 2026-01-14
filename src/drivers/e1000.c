@@ -201,6 +201,18 @@ int e1000_init(void)
     return 0;
 }
 
+int e1000_get_mac(uint8 out_mac[6])
+{
+    if (!out_mac) return -1;
+
+    // Ensure g_e1000.mac is populated.
+    e1000_probe_info info;
+    if (e1000_probe(&info) != 0) return -2;
+
+    for (int i = 0; i < 6; i++) out_mac[i] = g_e1000.mac[i];
+    return 0;
+}
+
 static void print_mac(const uint8 mac[6])
 {
     printf("%02x:%02x:%02x:%02x:%02x:%02x",
@@ -475,6 +487,11 @@ static int e1000_tx_send_frame(const void* frame, uint32 len)
     return -3;
 }
 
+int e1000_send_frame(const void* frame, uint32 len)
+{
+    return e1000_tx_send_frame(frame, len);
+}
+
 static int e1000_rx_init_once(void)
 {
     if (g_e1000.rx_ready) return 0;
@@ -600,52 +617,36 @@ int e1000_rx_poll_and_print(int max_packets, int spin_limit)
     return printed;
 }
 
-int e1000_arp_test_send(uint8 sender_ip[4], uint8 target_ip[4])
+int e1000_rx_poll_frame(uint8* out_buf, uint32 out_buf_cap, uint32* out_len, int spin_limit)
 {
-    // Emit a single ARP request: "who has <target_ip>? tell <sender_ip>".
-    //
-    // Why ARP next:
-    // - Link-local, tiny, and doesn't require any IP/UDP implementation.
-    // - Produces an immediate RX packet if the target exists.
-    if (!sender_ip || !target_ip) return -1;
-
-    // Ensure RX is enabled before TX so we don't miss a fast reply.
-    // This matters under emulation where responses can come back immediately.
+    if (!out_buf || out_buf_cap == 0 || !out_len) return -1;
+    if (spin_limit <= 0) spin_limit = 1000000;
     if (e1000_rx_init_once() != 0) return -2;
-    if (e1000_tx_init_once() != 0) return -3;
 
-    uint8 frame[64];
-    memset(frame, 0, sizeof(frame));
+    for (int spin = 0; spin < spin_limit; spin++) {
+        uint32 idx = g_e1000.rx_cur % E1000_RX_RING_COUNT;
+        e1000_rx_desc* d = &g_e1000.rx_ring[idx];
+        if (!(d->status & 0x01u)) continue;
 
-    // Ethernet: dst=broadcast, src=our MAC, type=ARP
-    for (int i = 0; i < 6; i++) frame[i] = 0xFF;
-    for (int i = 0; i < 6; i++) frame[6 + i] = g_e1000.mac[i];
-    frame[12] = 0x08;
-    frame[13] = 0x06;
+        uint8* buf = g_e1000.rx_bufs + (idx * E1000_RX_BUF_SIZE);
+        uint32 len = (uint32)d->length;
 
-    arp_pkt* a = (arp_pkt*)(frame + sizeof(eth_hdr));
-    a->htype_be = be16(1u);
-    a->ptype_be = be16(0x0800u);
-    a->hlen = 6;
-    a->plen = 4;
-    a->oper_be = be16(1u);
-    for (int i = 0; i < 6; i++) a->sha[i] = g_e1000.mac[i];
-    for (int i = 0; i < 4; i++) a->spa[i] = sender_ip[i];
-    for (int i = 0; i < 6; i++) a->tha[i] = 0;
-    for (int i = 0; i < 4; i++) a->tpa[i] = target_ip[i];
+        uint32 copy_len = len;
+        if (copy_len > out_buf_cap) copy_len = out_buf_cap;
+        memcpy(out_buf, buf, copy_len);
+        *out_len = len;
 
-    uint32 total_len = (uint32)(sizeof(eth_hdr) + sizeof(arp_pkt));
-    if (total_len < 60u) total_len = 60u;
+        // Hand the descriptor back to hardware.
+        d->status = 0;
+        d->length = 0;
+        e1000_compiler_barrier();
+        e1000_mmio_write32(E1000_REG_RDT, idx);
+        g_e1000.rx_cur = (idx + 1) % E1000_RX_RING_COUNT;
 
-    int rc = e1000_tx_send_frame(frame, total_len);
-    if (rc == 0) {
-        printf("ARP who-has ");
-        print_ipv4_bytes(target_ip);
-        printf(" tell ");
-        print_ipv4_bytes(sender_ip);
-        printf(" (TX ok)\n");
+        return 1;
     }
-    return rc;
+
+    return 0;
 }
 
 int e1000_tx_test_send(const char* message)

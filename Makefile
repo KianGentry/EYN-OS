@@ -46,6 +46,7 @@ OBJS += obj/terminals.o
 OBJS += obj/partition.o obj/diskmgr.o
 OBJS += obj/pci.o
 OBJS += obj/e1000.o
+OBJS += obj/netstack.o
 OUTPUT = tmp/boot/kernel.bin
 
 # Source files to object files
@@ -127,6 +128,9 @@ obj/pci.o:src/drivers/pci.c
 
 obj/e1000.o:src/drivers/e1000.c
 	$(COMPILER) $(CFLAGS) src/drivers/e1000.c -o obj/e1000.o
+
+obj/netstack.o:src/network/netstack.c
+	$(COMPILER) $(CFLAGS) src/network/netstack.c -o obj/netstack.o
 
 obj/panic.o:src/misc/panic.c
 	$(COMPILER) $(CFLAGS) src/misc/panic.c -o obj/panic.o
@@ -372,7 +376,7 @@ run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
-	-netdev user,id=net0 \
+	-netdev user,id=net0,hostfwd=udp::10000-:9999 \
 	-device e1000,netdev=net0 \
 	-m 9M
 
@@ -383,7 +387,7 @@ qemu-debug: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
-	-netdev user,id=net0 \
+	-netdev user,id=net0,hostfwd=udp::10000-:9999 \
 	-device e1000,netdev=net0 \
 	-serial stdio \
 	-d int,cpu_reset -D tmp/qemu-debug.log \

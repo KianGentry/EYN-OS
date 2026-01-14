@@ -1,6 +1,8 @@
 #ifndef E1000_H
 #define E1000_H
 
+#include <misc/types.h>
+
 // Minimal Intel e1000 driver surface for early bring-up.
 //
 // Why this exists:
@@ -39,14 +41,22 @@ int e1000_tx_test_send(const char* message);
 // Polls the RX ring and prints a short Ethernet header summary for each frame.
 int e1000_rx_poll_and_print(int max_packets, int spin_limit);
 
-// ARP bring-up helper.
-// Sends an ARP request (who-has) so you can observe an inbound ARP reply via rx-poll.
-int e1000_arp_test_send(unsigned char sender_ip[4], unsigned char target_ip[4]);
-
 // Debug helper for bring-up: prints key RX/TX registers.
 void e1000_debug_regs_print(void);
 
 // Initializes RX+TX rings into a known-good state.
 int e1000_init(void);
+
+// Returns the NIC MAC address (ensures probe has run).
+int e1000_get_mac(uint8 out_mac[6]);
+
+// Raw Ethernet frame TX/RX for the network stack.
+//
+// The driver stays responsible for ring/DMA/MMIO; higher layers build Ethernet/ARP/IP/UDP.
+int e1000_send_frame(const void* frame, uint32 len);
+
+// Polls until a single frame is available (or spin_limit is exhausted).
+// Returns: 1 if a frame was copied, 0 if no frame, <0 on error.
+int e1000_rx_poll_frame(uint8* out_buf, uint32 out_buf_cap, uint32* out_len, int spin_limit);
 
 #endif

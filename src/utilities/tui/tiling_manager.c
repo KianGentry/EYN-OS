@@ -10,6 +10,7 @@ static int g_tm_initialized = 0;
 #include <rei.h>
 #include <eynfs.h>
 #include <utilities/util.h>
+#include <misc/types.h>
 // allow sleeping the CPU when tiling manager is idle
 #include <sched.h>
 #include <watchdog.h>

@@ -25,6 +25,7 @@
 #include <rei.h>
 #include <drivers/pci.h>
 #include <drivers/e1000.h>
+#include <network/netstack.h>
 
 // Forward declarations for command handlers
 void help_cmd(string arg);
@@ -1093,8 +1094,7 @@ void e1000_cmd(string arg)
     if (token_eq(s, "arp-test")) {
         // Usage: e1000 arp-test [target_ip] [sender_ip] [rxcount] [spins]
         // Defaults match QEMU user-net: guest=10.0.2.15, gateway=10.0.2.2.
-        // Ensure rings are configured so we can RX the reply.
-        (void)e1000_init();
+        // Note: rxcount is legacy/ignored now; netstack consumes the reply internally.
 
         unsigned char target_ip[4] = {10, 0, 2, 2};
         unsigned char sender_ip[4] = {10, 0, 2, 15};
@@ -1136,23 +1136,188 @@ void e1000_cmd(string arg)
             if (any) spins = v;
         }
 
-        int rc = e1000_arp_test_send(sender_ip, target_ip);
-        if (rc != 0) {
-            printf("%cARP test send failed (%d).\n", 255, 0, 0, rc);
-            return;
-        }
+        (void)rxcount;
 
-        // Immediately poll RX to catch the reply.
-        int rx = e1000_rx_poll_and_print(rxcount, spins);
-        if (rx < 0) {
-            printf("%cRX poll failed (%d).\n", 255, 0, 0, rx);
-        } else {
-            printf("ARP test done (rx %d packets).\n", rx);
+        int rc = net_arp_test_send(sender_ip, target_ip, spins);
+        if (rc != 0) {
+            printf("%cARP test failed (%d).\n", 255, 0, 0, rc);
         }
         return;
     }
 
-    printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 test ...\n", 255, 0, 0);
+    if (token_eq(s, "udp-send")) {
+        // Usage: e1000 udp-send <dst_ip> <dst_port> <message> [src_ip] [src_port] [arpspins]
+        // Quickstart for QEMU user-net host receive:
+        //   host:  nc -u -l 9999
+        //   guest: e1000 udp-send 10.0.2.2 9999 hello
+        unsigned char dst_ip[4] = {10, 0, 2, 2};
+        unsigned char src_ip[4] = {10, 0, 2, 15};
+        int dst_port = 9999;
+        int src_port = 12345;
+        int arp_spins = 12000000;
+
+        const char* p = next_token(s);
+        if (!p || !*p) {
+            printf("Usage: e1000 udp-send <dst_ip> <dst_port> <message> [src_ip] [src_port] [arpspins]\n");
+            return;
+        }
+
+        // dst_ip
+        {
+            char ipstr[32];
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(ipstr) - 1) { ipstr[n] = p[n]; n++; }
+            ipstr[n] = '\0';
+            if (parse_ipv4(ipstr, dst_ip) != 0) {
+                printf("%cError: dst_ip must be a.b.c.d\n", 255, 0, 0);
+                return;
+            }
+            p = skip_spaces(p + n);
+        }
+
+        // dst_port
+        if (!p || !*p) {
+            printf("%cError: missing dst_port\n", 255, 0, 0);
+            return;
+        }
+        {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (!any || v <= 0 || v > 65535) {
+                printf("%cError: dst_port must be 1..65535\n", 255, 0, 0);
+                return;
+            }
+            dst_port = v;
+            p = skip_spaces(p);
+        }
+
+        // message (single token)
+        if (!p || !*p) {
+            printf("%cError: missing message token\n", 255, 0, 0);
+            return;
+        }
+        char msg[256];
+        {
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(msg) - 1) { msg[n] = p[n]; n++; }
+            msg[n] = '\0';
+            p = skip_spaces(p + n);
+        }
+
+        // Optional src_ip
+        if (p && *p) {
+            char ipstr[32];
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(ipstr) - 1) { ipstr[n] = p[n]; n++; }
+            ipstr[n] = '\0';
+            if (parse_ipv4(ipstr, src_ip) != 0) {
+                printf("%cError: src_ip must be a.b.c.d\n", 255, 0, 0);
+                return;
+            }
+            p = skip_spaces(p + n);
+        }
+
+        // Optional src_port
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (!any || v <= 0 || v > 65535) {
+                printf("%cError: src_port must be 1..65535\n", 255, 0, 0);
+                return;
+            }
+            src_port = v;
+            p = skip_spaces(p);
+        }
+
+        // Optional arp spins
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any && v > 0) arp_spins = v;
+        }
+
+        int rc = net_udp_send(src_ip, (uint16)src_port, dst_ip, (uint16)dst_port, (const uint8*)msg, (uint32)strlen(msg), arp_spins);
+        if (rc == 0) {
+            printf("%cUDP sent to ", 0, 255, 0);
+            printf("%d.%d.%d.%d", (int)dst_ip[0], (int)dst_ip[1], (int)dst_ip[2], (int)dst_ip[3]);
+            printf(":%d (%d bytes)\n", dst_port, (int)strlen(msg));
+        } else {
+            printf("%cUDP send failed (%d)", 255, 0, 0, rc);
+            printf("\n");
+        }
+        return;
+    }
+
+    if (token_eq(s, "udp-listen")) {
+        // Usage: e1000 udp-listen [local_port] [local_ip] [count] [spins]
+        // Host->guest quickstart (uses QEMU hostfwd set in Makefile):
+        //   guest: e1000 udp-listen 9999
+        //   host:  echo hi | nc -u -w1 127.0.0.1 10000
+        // Notes:
+        //   count == 0 => listen until Ctrl-C
+        //   spins == 0 => listen until Ctrl-C
+        unsigned char local_ip[4] = {10, 0, 2, 15};
+        int local_port = 9999;
+        int count = 0;
+        int spins = 0;
+
+        const char* p = next_token(s);
+
+        // Optional local_port
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any) {
+                if (v <= 0 || v > 65535) {
+                    printf("%cError: local_port must be 1..65535\n", 255, 0, 0);
+                    return;
+                }
+                local_port = v;
+            }
+            p = skip_spaces(p);
+        }
+
+        // Optional local_ip
+        if (p && *p) {
+            char ipstr[32];
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(ipstr) - 1) { ipstr[n] = p[n]; n++; }
+            ipstr[n] = '\0';
+            if (parse_ipv4(ipstr, local_ip) != 0) {
+                printf("%cError: local_ip must be a.b.c.d\n", 255, 0, 0);
+                return;
+            }
+            p = skip_spaces(p + n);
+        }
+
+        // Optional count
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any) count = v;
+            p = skip_spaces(p);
+        }
+
+        // Optional spins
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any) spins = v;
+        }
+
+        printf("Listening for UDP on %d.%d.%d.%d:%d (Ctrl-C to stop)...\n",
+               (int)local_ip[0], (int)local_ip[1], (int)local_ip[2], (int)local_ip[3], local_port);
+
+        int rc = net_udp_listen(local_ip, (uint16)local_port, count, spins);
+        if (rc < 0) {
+            printf("%cUDP listen failed (%d).\n", 255, 0, 0, rc);
+        } else {
+            printf("UDP listen stopped (%d packets).\n", rc);
+        }
+        return;
+    }
+
+    printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 init | e1000 regs | e1000 arp-test | e1000 udp-send | e1000 udp-listen ...\n", 255, 0, 0);
 }
 
 // Diagnostics/testing command implementations
