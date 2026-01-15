@@ -111,26 +111,9 @@ typedef struct __attribute__((packed)) eth_hdr {
     uint16 ethertype_be;
 } eth_hdr;
 
-typedef struct __attribute__((packed)) arp_pkt {
-    uint16 htype_be;
-    uint16 ptype_be;
-    uint8 hlen;
-    uint8 plen;
-    uint16 oper_be;
-    uint8 sha[6];
-    uint8 spa[4];
-    uint8 tha[6];
-    uint8 tpa[4];
-} arp_pkt;
-
-static uint16 be16(uint16 x)
+static uint16 bswap16(uint16 x)
 {
     return (uint16)((x >> 8) | (x << 8));
-}
-
-static void print_ipv4_bytes(const uint8 ip[4])
-{
-    printf("%d.%d.%d.%d", (int)ip[0], (int)ip[1], (int)ip[2], (int)ip[3]);
 }
 
 // Forward declarations: used by early bring-up helpers below.
@@ -580,24 +563,12 @@ int e1000_rx_poll_and_print(int max_packets, int spin_limit)
 
         if (len >= (uint32)sizeof(eth_hdr)) {
             eth_hdr* eh = (eth_hdr*)buf;
-            uint16 et = be16(eh->ethertype_be);
+            uint16 et = bswap16(eh->ethertype_be);
 
             printf("RX %d bytes et=0x%04x dst=", (int)len, (unsigned)et);
             print_mac(eh->dst);
             printf(" src=");
             print_mac(eh->src);
-
-            // Decode just enough to be useful while bringing up RX.
-            if (et == 0x0806u && len >= (uint32)(sizeof(eth_hdr) + sizeof(arp_pkt))) {
-                arp_pkt* a = (arp_pkt*)(buf + sizeof(eth_hdr));
-                uint16 oper = be16(a->oper_be);
-                printf(" arp=%s sha=", (oper == 1u) ? "req" : (oper == 2u) ? "rep" : "?");
-                print_mac(a->sha);
-                printf(" spa=");
-                print_ipv4_bytes(a->spa);
-                printf(" tpa=");
-                print_ipv4_bytes(a->tpa);
-            }
             printf("\n");
         } else {
             printf("RX %d bytes\n", (int)len);

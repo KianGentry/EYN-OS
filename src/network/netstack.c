@@ -5,7 +5,12 @@
 #include <vga.h>
 #include <system.h>
 #include <utilities/tile_manager.h>
+#include <utilities/util.h>
 #include <watchdog.h>
+
+// The shell command blocks the normal input pump, so we must poll Ctrl-C
+// ourselves while listening.
+extern void poll_keyboard_for_ctrl_c(void);
 
 typedef struct __attribute__((packed)) eth_hdr {
     uint8 dst[6];
@@ -51,11 +56,19 @@ typedef struct arp_cache_entry {
     uint8 valid;
 } arp_cache_entry;
 
+typedef struct udp_rx_slot {
+    uint8 valid;
+    net_udp_rx_packet pkt;
+} udp_rx_slot;
+
 static struct {
     int inited;
     uint8 mac[6];
     const netdev* dev;
     arp_cache_entry arp_cache[4];
+
+    udp_rx_slot udp_rxq[8];
+    net_udp_stats udp_stats;
 } g_net;
 
 static uint16 be16(uint16 x)
@@ -126,6 +139,51 @@ static void arp_cache_update(const uint8 ip[4], const uint8 mac[6])
     g_net.arp_cache[0].valid = 1;
 }
 
+static int arp_send_reply_silent(const uint8 target_mac[6],
+                                const uint8 sender_ip[4], const uint8 sender_mac[6],
+                                const uint8 target_ip[4]);
+
+static void udp_rxq_clear(void)
+{
+    for (int i = 0; i < (int)(sizeof(g_net.udp_rxq) / sizeof(g_net.udp_rxq[0])); i++) {
+        g_net.udp_rxq[i].valid = 0;
+    }
+    g_net.udp_stats.udp_rx_enqueued = 0;
+    g_net.udp_stats.udp_rx_dropped = 0;
+    g_net.udp_stats.udp_rx_truncated = 0;
+}
+
+static int udp_rxq_enqueue(const uint8 src_ip[4], uint16 src_port,
+                           const uint8 dst_ip[4], uint16 dst_port,
+                           const uint8* payload, uint32 payload_len)
+{
+    for (int i = 0; i < (int)(sizeof(g_net.udp_rxq) / sizeof(g_net.udp_rxq[0])); i++) {
+        if (!g_net.udp_rxq[i].valid) {
+            udp_rx_slot* s = &g_net.udp_rxq[i];
+            s->valid = 1;
+            for (int j = 0; j < 4; j++) s->pkt.src_ip[j] = src_ip[j];
+            for (int j = 0; j < 4; j++) s->pkt.dst_ip[j] = dst_ip[j];
+            s->pkt.src_port = src_port;
+            s->pkt.dst_port = dst_port;
+
+            uint32 copy_len = payload_len;
+            if (copy_len > NET_UDP_MAX_PAYLOAD) {
+                copy_len = NET_UDP_MAX_PAYLOAD;
+                g_net.udp_stats.udp_rx_truncated++;
+            }
+            s->pkt.payload_len = copy_len;
+            if (copy_len != 0u) {
+                memcpy(s->pkt.payload, payload, copy_len);
+            }
+            g_net.udp_stats.udp_rx_enqueued++;
+            return 0;
+        }
+    }
+
+    g_net.udp_stats.udp_rx_dropped++;
+    return -1;
+}
+
 int net_init_e1000_default(void)
 {
     static netdev e1000_dev;
@@ -145,8 +203,136 @@ int net_init(const netdev* dev)
     if (dev->get_mac(g_net.mac) != 0) return -2;
 
     g_net.dev = dev;
+    udp_rxq_clear();
     g_net.inited = 1;
     return 0;
+}
+
+int net_is_inited(void)
+{
+    return g_net.inited ? 1 : 0;
+}
+
+net_udp_stats net_udp_get_stats(void)
+{
+    return g_net.udp_stats;
+}
+
+uint32 net_udp_queue_count(uint16 local_port)
+{
+    if (!g_net.inited) return 0;
+    if (local_port == 0) return 0;
+    uint32 count = 0;
+    for (int i = 0; i < (int)(sizeof(g_net.udp_rxq) / sizeof(g_net.udp_rxq[0])); i++) {
+        if (g_net.udp_rxq[i].valid && g_net.udp_rxq[i].pkt.dst_port == local_port) {
+            count++;
+        }
+    }
+    return count;
+}
+
+uint32 net_udp_queue_clear(uint16 local_port)
+{
+    if (!g_net.inited) return 0;
+    if (local_port == 0) return 0;
+    uint32 cleared = 0;
+    for (int i = 0; i < (int)(sizeof(g_net.udp_rxq) / sizeof(g_net.udp_rxq[0])); i++) {
+        if (g_net.udp_rxq[i].valid && g_net.udp_rxq[i].pkt.dst_port == local_port) {
+            g_net.udp_rxq[i].valid = 0;
+            cleared++;
+        }
+    }
+    return cleared;
+}
+
+int net_udp_recv(uint16 local_port, net_udp_rx_packet* out)
+{
+    if (!g_net.inited || !g_net.dev) return -1;
+    if (!out) return -2;
+    if (local_port == 0) return -3;
+
+    for (int i = 0; i < (int)(sizeof(g_net.udp_rxq) / sizeof(g_net.udp_rxq[0])); i++) {
+        if (g_net.udp_rxq[i].valid && g_net.udp_rxq[i].pkt.dst_port == local_port) {
+            *out = g_net.udp_rxq[i].pkt;
+            g_net.udp_rxq[i].valid = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int net_poll(const uint8 local_ip[4], uint32 budget_frames)
+{
+    if (!local_ip) return -1;
+    if (!g_net.inited || !g_net.dev) {
+        if (net_init_e1000_default() != 0) return -2;
+    }
+
+    if (budget_frames == 0u) budget_frames = 64u;
+
+    uint8 frame[1600];
+    uint32 len = 0;
+    uint32 processed = 0;
+
+    for (uint32 i = 0; i < budget_frames; i++) {
+        int got = g_net.dev->rx_poll_frame(frame, (uint32)sizeof(frame), &len, 1);
+        if (got < 0) return -3;
+        if (got == 0) break;
+        processed++;
+
+        // ARP: learn and respond to requests for our IP.
+        if (len >= (uint32)(sizeof(eth_hdr) + sizeof(arp_pkt))) {
+            eth_hdr* eh0 = (eth_hdr*)frame;
+            if (be16(eh0->ethertype_be) == 0x0806u) {
+                arp_pkt* a0 = (arp_pkt*)(frame + sizeof(eth_hdr));
+                uint16 oper0 = be16(a0->oper_be);
+                if (oper0 == 1u) {
+                    arp_cache_update(a0->spa, a0->sha);
+                    if (ipv4_eq(a0->tpa, local_ip)) {
+                        (void)arp_send_reply_silent(a0->sha, local_ip, g_net.mac, a0->spa);
+                    }
+                } else if (oper0 == 2u) {
+                    arp_cache_update(a0->spa, a0->sha);
+                }
+                continue;
+            }
+        }
+
+        // IPv4 + UDP: enqueue.
+        if (len < (uint32)(sizeof(eth_hdr) + sizeof(ipv4_hdr))) continue;
+        eth_hdr* eh = (eth_hdr*)frame;
+        if (be16(eh->ethertype_be) != 0x0800u) continue;
+
+        ipv4_hdr* ip = (ipv4_hdr*)(frame + sizeof(eth_hdr));
+        uint8 ver = (uint8)(ip->ver_ihl >> 4);
+        uint8 ihl_words = (uint8)(ip->ver_ihl & 0x0Fu);
+        if (ver != 4 || ihl_words < 5) continue;
+
+        uint32 ip_hdr_len = (uint32)ihl_words * 4u;
+        if (len < (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(udp_hdr)) continue;
+        if (ip->proto != 17) continue;
+        if (!ipv4_eq(ip->dst, local_ip)) continue;
+
+        udp_hdr* udp = (udp_hdr*)(frame + sizeof(eth_hdr) + ip_hdr_len);
+        uint16 src_port = be16(udp->src_port_be);
+        uint16 dst_port = be16(udp->dst_port_be);
+        if (dst_port == 0 || src_port == 0) continue;
+
+        uint32 udp_total_len = (uint32)be16(udp->len_be);
+        if (udp_total_len < (uint32)sizeof(udp_hdr)) continue;
+
+        uint32 payload_off = (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(udp_hdr);
+        uint32 payload_len = udp_total_len - (uint32)sizeof(udp_hdr);
+        if (payload_off > len) continue;
+        if (payload_off + payload_len > len) {
+            if (len > payload_off) payload_len = len - payload_off;
+            else payload_len = 0;
+        }
+
+        (void)udp_rxq_enqueue(ip->src, src_port, ip->dst, dst_port, frame + payload_off, payload_len);
+    }
+
+    return (int)processed;
 }
 
 static int arp_send_request_silent(const uint8 sender_ip[4], const uint8 target_ip[4])
@@ -286,7 +472,8 @@ int net_udp_send(const uint8 src_ip[4], uint16 src_port,
                  const uint8* payload, uint32 payload_len,
                  int arp_spins)
 {
-    if (!src_ip || !dst_ip || !payload) return -1;
+    if (!src_ip || !dst_ip) return -1;
+    if (payload_len != 0u && !payload) return -1;
     if (payload_len > 1400u) return -2;
     if (src_port == 0 || dst_port == 0) return -3;
 
@@ -355,15 +542,11 @@ int net_udp_listen(const uint8 local_ip[4], uint16 local_port, int max_packets, 
     if (net_init_e1000_default() != 0) return -3;
 
     int printed = 0;
-    uint8 frame[1600];
-    uint32 len = 0;
 
-    extern volatile int g_user_interrupt;
     g_user_interrupt = 0;
 
     // The shell command blocks the normal input pump, so we must poll Ctrl-C
     // ourselves while listening.
-    extern void poll_keyboard_for_ctrl_c(void);
 
     const int unlimited_packets = (max_packets == 0);
     const int unlimited_spins = (spin_limit == 0);
@@ -373,7 +556,7 @@ int net_udp_listen(const uint8 local_ip[4], uint16 local_port, int max_packets, 
     uint32 ui_ticks = 0;
 
     // Batch polling helps amortize overhead while still staying responsive.
-    const int poll_batch = 64;
+    const uint32 poll_budget = 64u;
 
     for (;;) {
         watchdog_kick("net-udp-listen");
@@ -396,89 +579,135 @@ int net_udp_listen(const uint8 local_ip[4], uint16 local_port, int max_packets, 
 
         int did_work = 0;
 
-        for (int b = 0; b < poll_batch; b++) {
-            if (!unlimited_packets && printed >= max_packets) break;
-            if (!unlimited_spins && spin >= (uint32)spin_limit) break;
-            poll_keyboard_for_ctrl_c();
-            if (g_user_interrupt) break;
+        spin++;
+        int rc = net_poll(local_ip, poll_budget);
+        if (rc < 0) return -4;
+        if (rc > 0) did_work = 1;
 
-            spin++;
-            int got = g_net.dev->rx_poll_frame(frame, (uint32)sizeof(frame), &len, 1);
-            if (got < 0) return -4;
-            if (got == 0) continue;
-            did_work = 1;
-
-            // Reply to ARP requests for our IP so QEMU's router can deliver inbound UDP.
-            if (len >= (uint32)(sizeof(eth_hdr) + sizeof(arp_pkt))) {
-                eth_hdr* eh0 = (eth_hdr*)frame;
-                if (be16(eh0->ethertype_be) == 0x0806u) {
-                    arp_pkt* a0 = (arp_pkt*)(frame + sizeof(eth_hdr));
-                    uint16 oper0 = be16(a0->oper_be);
-                    if (oper0 == 1u) {
-                        // Cache the requester.
-                        arp_cache_update(a0->spa, a0->sha);
-                        if (ipv4_eq(a0->tpa, local_ip)) {
-                            (void)arp_send_reply_silent(a0->sha, local_ip, g_net.mac, a0->spa);
-                        }
-                    } else if (oper0 == 2u) {
-                        // Cache any replies we see too.
-                        arp_cache_update(a0->spa, a0->sha);
-                    }
-                    continue;
-                }
-            }
-
-            if (len < (uint32)(sizeof(eth_hdr) + sizeof(ipv4_hdr))) continue;
-
-            eth_hdr* eh = (eth_hdr*)frame;
-            if (be16(eh->ethertype_be) != 0x0800u) continue;
-
-            ipv4_hdr* ip = (ipv4_hdr*)(frame + sizeof(eth_hdr));
-            uint8 ver = (uint8)(ip->ver_ihl >> 4);
-            uint8 ihl_words = (uint8)(ip->ver_ihl & 0x0Fu);
-            if (ver != 4 || ihl_words < 5) continue;
-
-            uint32 ip_hdr_len = (uint32)ihl_words * 4u;
-            if (len < (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(udp_hdr)) continue;
-            if (ip->proto != 17) continue; // UDP
-            if (!ipv4_eq(ip->dst, local_ip)) continue;
-
-            udp_hdr* udp = (udp_hdr*)(frame + sizeof(eth_hdr) + ip_hdr_len);
-            uint16 dstp = be16(udp->dst_port_be);
-            if (dstp != local_port) continue;
-
-            uint32 udp_total_len = (uint32)be16(udp->len_be);
-            if (udp_total_len < (uint32)sizeof(udp_hdr)) continue;
-
-            uint32 payload_off = (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(udp_hdr);
-            uint32 payload_len = udp_total_len - (uint32)sizeof(udp_hdr);
-            if (payload_off > len) continue;
-            if (payload_off + payload_len > len) {
-                // Truncated RX buffer or inconsistent lengths; clamp.
-                if (len > payload_off) payload_len = len - payload_off;
-                else payload_len = 0;
-            }
+        // Drain any queued UDP packets for our port.
+        for (;;) {
+            net_udp_rx_packet pkt;
+            int gotp = net_udp_recv(local_port, &pkt);
+            if (gotp < 0) return -5;
+            if (gotp == 0) break;
 
             printf("%cUDP RX ", 0, 255, 0);
-            print_ipv4_bytes(ip->src);
-            printf(":%d -> ", (int)be16(udp->src_port_be));
-            print_ipv4_bytes(ip->dst);
-            printf(":%d (%d bytes): ", (int)local_port, (int)payload_len);
+            print_ipv4_bytes(pkt.src_ip);
+            printf(":%d -> ", (int)pkt.src_port);
+            print_ipv4_bytes(pkt.dst_ip);
+            printf(":%d (%d bytes): ", (int)local_port, (int)pkt.payload_len);
 
-            // Print payload as best-effort ASCII.
-            // NOTE: Do NOT print byte-by-byte with printf("%c", ...): this kernel
-            // uses "%c" as a color-prefix convention and expects RGB args.
             char ascii[260];
-            uint32 show_len = payload_len;
+            uint32 show_len = pkt.payload_len;
             if (show_len > 256u) show_len = 256u;
             for (uint32 i = 0; i < show_len; i++) {
-                char c = (char)frame[payload_off + i];
+                char c = (char)pkt.payload[i];
                 if (c < 32 || c > 126) c = '.';
                 ascii[i] = c;
             }
             ascii[show_len] = 0;
             printf("%s", ascii);
-            if (payload_len > show_len) {
+            if (pkt.payload_len > show_len) {
+                printf("...");
+            }
+            printf("\n");
+            if (tile_is_tiling_active()) {
+                tile_render_once();
+            }
+            printed++;
+            did_work = 1;
+
+            if (!unlimited_packets && printed >= max_packets) break;
+        }
+
+        // If we saw nothing, sleep briefly to keep the host/VM responsive.
+        if (!did_work) {
+            // Use a simple busy delay here (not HLT-based) because some shell
+            // contexts may have interrupts temporarily disabled.
+            sleep(1);
+        }
+    }
+
+    return printed;
+}
+
+int net_udp_echo(const uint8 local_ip[4], uint16 local_port, int max_packets, int spin_limit)
+{
+    if (!local_ip) return -1;
+    if (local_port == 0) return -2;
+    // max_packets == 0 => unlimited
+    // spin_limit  == 0 => unlimited
+    if (max_packets < 0) max_packets = 1;
+    if (spin_limit < 0) spin_limit = 12000000;
+
+    if (net_init_e1000_default() != 0) return -3;
+
+    int printed = 0;
+
+    g_user_interrupt = 0;
+
+    // The shell command blocks the normal input pump, so we must poll Ctrl-C
+    // ourselves while listening.
+
+    const int unlimited_packets = (max_packets == 0);
+    const int unlimited_spins = (spin_limit == 0);
+    uint32 spin = 0;
+
+    // UI refresh pacing: keep the tile display updating while we block.
+    uint32 ui_ticks = 0;
+
+    const uint32 poll_budget = 64u;
+
+    for (;;) {
+        watchdog_kick("net-udp-echo");
+
+        // Keep UI rendering while shell is blocked.
+        if (tile_is_tiling_active()) {
+            if ((ui_ticks++ & 0x1F) == 0) {
+                tile_render_once();
+            }
+        }
+
+        // Detect Ctrl-C while the normal UI loop is blocked.
+        poll_keyboard_for_ctrl_c();
+        if (g_user_interrupt) {
+            g_user_interrupt = 0;
+            break;
+        }
+        if (!unlimited_packets && printed >= max_packets) break;
+        if (!unlimited_spins && spin >= (uint32)spin_limit) break;
+
+        int did_work = 0;
+
+        spin++;
+        int rc = net_poll(local_ip, poll_budget);
+        if (rc < 0) return -4;
+        if (rc > 0) did_work = 1;
+
+        // Drain any queued UDP packets for our port, print and echo.
+        for (;;) {
+            net_udp_rx_packet pkt;
+            int gotp = net_udp_recv(local_port, &pkt);
+            if (gotp < 0) return -5;
+            if (gotp == 0) break;
+
+            printf("%cUDP RX ", 0, 255, 0);
+            print_ipv4_bytes(pkt.src_ip);
+            printf(":%d -> ", (int)pkt.src_port);
+            print_ipv4_bytes(pkt.dst_ip);
+            printf(":%d (%d bytes): ", (int)local_port, (int)pkt.payload_len);
+
+            char ascii[260];
+            uint32 show_len = pkt.payload_len;
+            if (show_len > 256u) show_len = 256u;
+            for (uint32 i = 0; i < show_len; i++) {
+                char c = (char)pkt.payload[i];
+                if (c < 32 || c > 126) c = '.';
+                ascii[i] = c;
+            }
+            ascii[show_len] = 0;
+            printf("%s", ascii);
+            if (pkt.payload_len > show_len) {
                 printf("...");
             }
             printf("\n");
@@ -486,7 +715,18 @@ int net_udp_listen(const uint8 local_ip[4], uint16 local_port, int max_packets, 
                 tile_render_once();
             }
 
+            // Echo payload back to sender. Note payload was already truncated to NET_UDP_MAX_PAYLOAD.
+            if (pkt.payload_len == 0u) {
+                static const uint8 empty_msg[1] = { '\n' };
+                (void)net_udp_send(local_ip, local_port, pkt.src_ip, pkt.src_port, empty_msg, 1u, 800000);
+            } else {
+                (void)net_udp_send(local_ip, local_port, pkt.src_ip, pkt.src_port, pkt.payload, pkt.payload_len, 800000);
+            }
+
             printed++;
+            did_work = 1;
+
+            if (!unlimited_packets && printed >= max_packets) break;
         }
 
         // If we saw nothing, sleep briefly to keep the host/VM responsive.

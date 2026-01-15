@@ -15,6 +15,7 @@ static int g_tm_initialized = 0;
 #include <sched.h>
 #include <watchdog.h>
 #include <ui_prefs.h>
+#include <network/netstack.h>
 
 extern uint8_t g_current_drive;
 
@@ -2787,6 +2788,17 @@ void start_tiling_manager() {
     while (running) {
         // UI loop heartbeat for the watchdog
         watchdog_kick("wm-loop");
+
+        // Background networking: pump RX/ARP/UDP enqueue at most once per tick.
+        // This keeps host->guest delivery working even when the user isn't
+        // running a dedicated udp-listen command.
+        static uint32 last_net_tick = 0;
+        uint32 now_net_tick = sched_get_tick_count();
+        if (net_is_inited() && now_net_tick != last_net_tick) {
+            last_net_tick = now_net_tick;
+            static const uint8 local_ip_default[4] = {10, 0, 2, 15};
+            (void)net_poll(local_ip_default, 32);
+        }
 
         // If status overlay visibility toggles, force redraw to restore any covered pixels.
         static int last_overlay_state = -1;

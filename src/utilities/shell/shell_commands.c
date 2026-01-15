@@ -949,9 +949,11 @@ void e1000_cmd(string arg)
     }
 
     if (token_eq(s, "init")) {
-        int rc = e1000_init();
+        // Initialize both the NIC and the netstack binding.
+        // The UDP RX queue + background polling are gated on net_is_inited().
+        int rc = net_init_e1000_default();
         if (rc == 0) {
-            printf("e1000 init ok\n");
+            printf("e1000 init ok (netstack ready)\n");
         } else {
             printf("%cError%c: e1000 init failed (%d)\n", 255, 0, 0, 255, 255, 255, rc);
         }
@@ -1317,7 +1319,178 @@ void e1000_cmd(string arg)
         return;
     }
 
-    printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 init | e1000 regs | e1000 arp-test | e1000 udp-send | e1000 udp-listen ...\n", 255, 0, 0);
+    if (token_eq(s, "udp-echo")) {
+        // Usage: e1000 udp-echo [local_port] [local_ip] [count] [spins]
+        // Host->guest quickstart (uses QEMU hostfwd set in Makefile):
+        //   guest: e1000 udp-echo 9999
+        //   host:  nc -u 127.0.0.1 10000
+        // Notes:
+        //   count == 0 => echo until Ctrl-C
+        //   spins == 0 => echo until Ctrl-C
+        unsigned char local_ip[4] = {10, 0, 2, 15};
+        int local_port = 9999;
+        int count = 0;
+        int spins = 0;
+
+        const char* p = next_token(s);
+
+        // Optional local_port
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any) {
+                if (v <= 0 || v > 65535) {
+                    printf("%cError: local_port must be 1..65535\n", 255, 0, 0);
+                    return;
+                }
+                local_port = v;
+            }
+            p = skip_spaces(p);
+        }
+
+        // Optional local_ip
+        if (p && *p) {
+            char ipstr[32];
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(ipstr) - 1) { ipstr[n] = p[n]; n++; }
+            ipstr[n] = '\0';
+            if (parse_ipv4(ipstr, local_ip) != 0) {
+                printf("%cError: local_ip must be a.b.c.d\n", 255, 0, 0);
+                return;
+            }
+            p = skip_spaces(p + n);
+        }
+
+        // Optional count
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any) count = v;
+            p = skip_spaces(p);
+        }
+
+        // Optional spins
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any) spins = v;
+        }
+
+        printf("Echoing UDP on %d.%d.%d.%d:%d (Ctrl-C to stop)...\n",
+               (int)local_ip[0], (int)local_ip[1], (int)local_ip[2], (int)local_ip[3], local_port);
+
+        int rc = net_udp_echo(local_ip, (uint16)local_port, count, spins);
+        if (rc < 0) {
+            printf("%cUDP echo failed (%d).\n", 255, 0, 0, rc);
+        } else {
+            printf("UDP echo stopped (%d packets).\n", rc);
+        }
+        return;
+    }
+
+    if (token_eq(s, "udp-stats")) {
+        // Usage: e1000 udp-stats [local_port]
+        // Shows queue and drop/truncation counters for the UDP RX queue.
+        int local_port = 9999;
+        const char* p = next_token(s);
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any) {
+                if (v <= 0 || v > 65535) {
+                    printf("%cError: local_port must be 1..65535\n", 255, 0, 0);
+                    return;
+                }
+                local_port = v;
+            }
+        }
+
+         if (!net_is_inited()) {
+             printf("%cNote%c: networking is not initialized yet; run: e1000 init\n",
+                 255, 255, 255, 255, 255, 255);
+         }
+
+         // Print stats even if the netstack isn't initialized yet.
+        net_udp_stats st = net_udp_get_stats();
+        uint32 queued = net_udp_queue_count((uint16)local_port);
+        printf("UDP RX queue for port %d: queued=%d\n", local_port, (int)queued);
+        printf("UDP stats: enqueued=%d dropped=%d truncated=%d\n",
+               (int)st.udp_rx_enqueued, (int)st.udp_rx_dropped, (int)st.udp_rx_truncated);
+        return;
+    }
+
+    if (token_eq(s, "udp-drain")) {
+        // Usage: e1000 udp-drain [local_port] [max]
+        // Drains already-queued UDP packets for local_port and prints them.
+        unsigned char local_ip[4] = {10, 0, 2, 15};
+        int local_port = 9999;
+        int max = 32;
+
+        const char* p = next_token(s);
+
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any) {
+                if (v <= 0 || v > 65535) {
+                    printf("%cError: local_port must be 1..65535\n", 255, 0, 0);
+                    return;
+                }
+                local_port = v;
+            }
+            p = skip_spaces(p);
+        }
+
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any && v > 0) max = v;
+        }
+
+        if (!net_is_inited()) {
+            printf("%cError%c: networking is not initialized yet; run: e1000 init\n",
+                   255, 0, 0, 255, 255, 255);
+            return;
+        }
+
+        // Pump a small amount right now too (in case packets are pending in the NIC).
+        (void)net_poll(local_ip, 64);
+
+        int printed = 0;
+        for (; printed < max; printed++) {
+            net_udp_rx_packet pkt;
+            int got = net_udp_recv((uint16)local_port, &pkt);
+            if (got < 0) {
+                printf("%cUDP drain failed (%d).\n", 255, 0, 0, got);
+                return;
+            }
+            if (got == 0) break;
+
+            printf("%cUDP RX ", 0, 255, 0);
+            printf("%d.%d.%d.%d:%d -> %d.%d.%d.%d:%d (%d bytes): ",
+                   (int)pkt.src_ip[0], (int)pkt.src_ip[1], (int)pkt.src_ip[2], (int)pkt.src_ip[3], (int)pkt.src_port,
+                   (int)pkt.dst_ip[0], (int)pkt.dst_ip[1], (int)pkt.dst_ip[2], (int)pkt.dst_ip[3], (int)pkt.dst_port,
+                   (int)pkt.payload_len);
+
+            char ascii[260];
+            uint32 show_len = pkt.payload_len;
+            if (show_len > 256u) show_len = 256u;
+            for (uint32 i = 0; i < show_len; i++) {
+                char c = (char)pkt.payload[i];
+                if (c < 32 || c > 126) c = '.';
+                ascii[i] = c;
+            }
+            ascii[show_len] = 0;
+            printf("%s", ascii);
+            if (pkt.payload_len > show_len) printf("...");
+            printf("\n");
+        }
+
+        printf("UDP drain: %d packet(s)\n", printed);
+        return;
+    }
+
+    printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 init | e1000 regs | e1000 arp-test | e1000 udp-send | e1000 udp-listen | e1000 udp-echo | e1000 udp-stats | e1000 udp-drain ...\n", 255, 0, 0);
 }
 
 // Diagnostics/testing command implementations
