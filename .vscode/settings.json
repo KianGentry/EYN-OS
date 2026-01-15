@@ -1,6 +1,0 @@
-{
-    "files.associations": {
-        "game_engine.h": "c",
-        "shell_command_info.h": "c"
-    }
-}
