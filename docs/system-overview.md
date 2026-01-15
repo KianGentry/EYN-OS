@@ -33,13 +33,15 @@ Think of EYN-OS as a custom-built house. Instead of buying pre-made rooms (libra
 │    (VGA, Keyboard, ATA Disk, Serial, Timer, Interrupts)      │
 └──────────────────────────────────────────────────────────────┘
 ```
+![multiple processes](image-2.png)
 
 ### Target Platform
-- **Architecture**: Intel x86 (32-bit)
+- **Architecture**: Intel x86 (32-bit, i386 or higher)
 - **Bootloader**: GRUB (Multiboot 1.0 compliant)
-- **Memory Model**: Flat memory model (Paging/Virtual Memory supported)
-- **Target Hardware**: Low-end systems (3MB RAM minimum), i386 or higher
-- **ISO Size**: ~8MB
+- **Memory Model**: Flat memory model with optional paging/virtual memory
+- **Privilege Separation**: Ring 0 (kernel) and Ring 3 (userspace) with syscall interface
+- **Target Hardware**: Low-end systems (9MB RAM minimum)
+- **ISO Size**: ~8-10MB (includes EYNFS disk image)
 
 ### Core Design Principles
 1. **Freestanding Environment**: No dependency on standard C libraries
@@ -73,9 +75,12 @@ Think of EYN-OS as a custom-built house. Instead of buying pre-made rooms (libra
 
 ### Filesystem Layer
 - **EYNFS**: Native filesystem with custom design
-- **FAT32 Support**: Compatibility with existing filesystems
+- **MBR Partitioning**: Support for partitioned disks (primary partitions)
+- **FAT32 Support**: Read/write compatibility with FAT32 filesystems
+- **VFS Layer**: Virtual filesystem abstraction (`vfs_*` API)
 - **File Operations**: Read, write, create, delete, directory traversal
 - **Dynamic Buffering**: Adaptive file reading with up to 64KB buffers
+- **Multiple Drives**: Support for switching between ATA drives (`drive` command)
 
 ### User Interface
 - **TUI Framework**: Text-based user interface system
@@ -94,9 +99,14 @@ EYN-OS renders text using a bitmap **system font** provided by the VGA driver.
 Important limitation: most UI/terminal code renders **bytes (0–255)** as glyph indices. Unicode-indexed `.hex` fonts are supported for loading, but full Unicode text rendering/mapping is not yet implemented.
 
 ### Development Tools
-- **Assembler**: Built-in NASM-compatible assembler
-- **Executable Format**: Custom EYN format for user programs
-- **Program Loader**: Safe execution of user programs with process isolation
+- **Assembler**: Built-in NASM-compatible assembler for assembly development
+- **C Compiler**: Integrated chibicc compiler for C development (C11 compliant)
+- **Executable Formats**: 
+  - Native flat binaries (`.eyn`)
+  - UELF format (`.uelf`) - ELF32-based ring-3 userspace programs
+- **Program Loader**: Ring-3 execution with syscall interface (int 0x80)
+- **Userland Support**: Full C runtime (`crt0.S`), syscalls, stdio
+- **Linker**: Custom linker for UELF programs (`devtools/user_elf32.ld`)
 
 ### Applications
 - **Game Engine**: Framework for built-in games (Snake, Maze Runner)
@@ -177,15 +187,18 @@ Imagine the computer's RAM as a long street with addresses from 0 to 4,294,967,2
 ## Hardware Support
 
 ### Supported Devices
-- **VGA**: Text mode display (80x25 characters)
-- **PS/2 Keyboard**: Basic keyboard input
-- **ATA/IDE**: Hard disk and CD-ROM access
-- **Serial**: Basic serial port communication
+- **VGA**: Text mode display (80x25 characters) with bitmap font rendering
+- **PS/2 Keyboard**: Full keyboard input with command-line editing
+- **PS/2 Mouse**: Mouse support for GUI/tiling manager
+- **ATA/IDE**: Hard disk and CD-ROM access with DMA support
+- **Intel e1000**: Network interface card (82540EM and compatible)
+- **Serial**: Debug output and logging (COM1)
+- **PCI**: Device enumeration and configuration
 
 ### Memory Requirements
-- **Minimum**: 3MB RAM
-- **Recommended**: 8MB+ RAM (for comfortable usage with all features)
-- **Note**: GRUB bootloader requires additional memory for its internal scripting system. This is why it requires 3MB.
+- **Minimum**: 9MB RAM (QEMU default: `-m 9M`)
+- **Debug/Development**: 64MB RAM (`make qemu-gdb` uses `-m 64M`)
+- **Note**: Memory budget is intentionally kept small; system uses fixed/stack buffers and streaming commands to operate efficiently
 
 ## Streaming Command Architecture
 
@@ -216,16 +229,52 @@ Loaded on-demand to conserve memory:
 - **Error Handling**: Graceful error recovery where possible
 - **Professional Output**: Clean, informative user messages
 
-## Future Directions
+## Networking
 
-### Planned Features
-- **Protected Mode**: Full 32-bit protected mode with paging
-- **Multitasking**: Basic process scheduling
-- **Network Support**: TCP/IP stack
-- **GUI System**: Graphical user interface
-- **More Games**: Additional built-in games
+### Network Stack
+- **Driver**: Intel e1000 NIC driver (MMIO-based, descriptor rings)
+- **Link Layer**: Ethernet frame handling (send/receive)
+- **ARP**: Address Resolution Protocol for MAC/IP mapping
+- **IPv4**: Basic IPv4 packet handling (no fragmentation yet)
+- **UDP**: Full UDP socket-like interface for userspace
+- **Statistics**: Per-protocol statistics (`udp stats`, `udp drain`)
 
-### Extensibility
-- **Module System**: Loadable kernel modules
-- **Plugin Architecture**: Extensible application framework
-- **API Stability**: Stable programming interfaces
+### Network Commands
+- `e1000 probe|init|regs|test` - NIC diagnostics and initialization
+- `udp listen <port>` - Listen for UDP packets
+- `udp send <ip> <port> <message>` - Send UDP packets
+- `udp stats` - Display UDP statistics
+- `pci scan` - Enumerate PCI devices
+
+## Robustness Features
+
+### Watchdog Timer
+- **Purpose**: Detect and recover from kernel hangs
+- **Implementation**: IRQ-based with configurable timeout
+- **Usage**: Long loops must kick watchdog (`watchdog_kick("context")`)
+- **Documentation**: [docs/general/watchdog.md](general/watchdog.md)
+
+### Panic System
+- **Stop Codes**: Unique identifiers for each panic condition (e.g., `EYNOS_00000001`)
+- **Stack Traces**: Automatic backtrace via serial output (frame pointers preserved)
+- **Recovery**: Some ISRs attempt intelligent recovery before panicking
+- **Documentation**: [docs/stop-codes.md](stop-codes.md)
+
+### Memory Protection
+- **Heap Guards**: Magic numbers and checksums for corruption detection
+- **Bounds Checking**: Validation of memory operations
+- **Ring-3 Isolation**: User programs run in protected mode with limited privileges
+- **Stack Canaries**: Protected return addresses in critical paths
+
+## Recent Developments (Last 3 Months)
+
+- **Networking** (Jan 2026): UDP/IPv4 stack, e1000 NIC driver, ARP support
+- **Compiler** (Jan 2026): Integrated chibicc for on-system C development
+- **Userland** (Dec 2025): Ring-3 separation, UELF format, syscalls, full C runtime
+- **Aliases** (Jan 2026): Persistent command aliases with parameter substitution
+- **Window Resizing** (Jan 2026): Dynamic window sizing in tiling manager
+- **REIV Format** (Dec 2025): Video/GIF playback support (MP4→REIV converter)
+- **Theme Customization** (Jan 2026): Customizable tiling manager colors and fonts
+- **Watchdog** (Dec 2025): Hang detection and recovery system
+- **Partitioning** (Dec 2025): MBR partition support, multi-partition disk images
+- **PCI Enumeration** (Dec 2025): Device scanning and identification

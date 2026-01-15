@@ -4,15 +4,21 @@ EYN-OS is a small, educational operating system for 32‑bit x86 built entirely 
 
 ## What it provides
 
-- A freestanding 32‑bit kernel with a straightforward boot path
-- Basic drivers (display, keyboard, storage) and a simple userspace model
-- A native filesystem alongside compatibility with common layouts
-- A text‑first user interface with optional graphical elements
-- Bitmap font loading (`.hex`) and runtime system-font switching
-- Built‑in developer tools and sample applications
-- Strong emphasis on robustness and portable, low‑memory operation
+- A freestanding 32‑bit kernel with a straightforward boot path (Multiboot‑compatible via GRUB)
+- Hardware drivers: VGA display, PS/2 keyboard, ATA/IDE storage, Intel e1000 NIC, serial output
+- Networking: UDP/IPv4 stack with ARP support for basic network communication
+- Ring‑3 userspace: proper privilege separation with syscall interface (int 0x80)
+- Native EYNFS filesystem with MBR partitioning support, plus FAT32 compatibility
+- Text‑based shell and TUI framework with customizable tiling window manager
+- Bitmap font loading (`.hex` format, 8×8 or 8×16) with runtime system-font switching
+- Built‑in C compiler (chibicc) for native development and userland ELF programs (`.uelf`)
+- Developer tools: assembler, linker, program loader, debugger facilities
+- Robustness features: watchdog timer, panic recovery, memory protection
+- REIV video format support for playing MP4/GIF animations in the viewer
+- Alias system for custom shell commands with parameter substitution
+- Strong emphasis on portability and low‑memory operation (runs on 9MB RAM)
 
-Rather than relying on external libraries, EYN-OS includes minimal, well‑documented implementations of core facilities such as memory management, interrupts/exceptions, basic device I/O, and simple graphics/text rendering.
+Rather than relying on external libraries, EYN-OS includes minimal, well‑documented implementations of core facilities such as memory management, interrupts/exceptions, device I/O, networking, and graphics/text rendering.
 
 ## Architecture and philosophy
 
@@ -30,41 +36,71 @@ EYN-OS follows a “learnable core” approach:
 
 ## Architecture at a glance
 
-- Target: 32‑bit x86, Multiboot‑compatible boot (via GRUB)
-- Memory: flat memory model with a compact heap and consistency checks
-- Drivers: VGA‑style display, keyboard input, ATA/IDE storage, serial output
-- Filesystems: native EYNFS plus simple interop paths for common formats
-- UI: text‑based shell and TUI building blocks with a lightweight graphics layer
+- **Target:** 32‑bit x86, Multiboot‑compatible boot (via GRUB)
+- **Memory:** Flat memory model with paging support, compact heap with corruption detection
+- **Drivers:** VGA display, PS/2 keyboard/mouse, ATA/IDE storage, Intel e1000 NIC, serial debug
+- **Networking:** UDP/IPv4 stack with ARP, basic socket-like interface for userland
+- **Filesystems:** Native EYNFS with MBR partitioning, FAT32 read/write support
+- **Userspace:** Ring-3 privilege separation with syscall API (int 0x80), ELF32-based UELF format
+- **Compiler:** Integrated chibicc C compiler for on-system development
+- **UI:** Shell with command streaming, customizable tiling manager, bitmap font rendering (8×8, 8×16)
+- **Robustness:** Watchdog timer for hang detection, panic recovery, memory integrity checks
 
-The codebase is organized by domain (CPU, drivers, misc, utilities) with public headers under `include/` and implementation in `src/`.
+The codebase is organized by domain (CPU, drivers, misc, utilities, network) with public headers under `include/` and implementation in `src/`.
 
 ## Getting started
 
-Build from a Linux host with standard toolchain components:
+Build from a Linux host with standard toolchain components (GCC, NASM, GRUB):
 
 ```bash
+make build      # build ISO and disk images
 make run        # build and run in QEMU
+make qemu-gdb   # launch with GDB support (halted at startup, attach to :1234)
 ```
 
-To try it on real hardware, write `EYNOS.iso` to a USB drive and boot on a 32‑bit compatible machine.
+Inside EYN-OS, try these commands:
+```bash
+init            # initialize ATA drives
+ls              # list files
+help            # interactive help system
+e1000 init      # initialize network (if e1000 NIC present)
+chibicc --help  # C compiler help (chibicc.uelf needs to be in root)
+run hello.uelf  # run a userland program
+```
+
+To try it on real hardware, write `EYNOS.iso` to a USB drive or CD and boot on a 32‑bit compatible machine.
 
 ## System requirements
 
-- 32‑bit x86 CPU
-- ~3 MB RAM or more (depending on boot method and use)
+- 32‑bit x86 CPU (i386 or higher)
+- ~9 MB RAM minimum (QEMU default configuration)
 - VGA‑compatible display
+- PS/2 keyboard (mouse optional but supported)
+- ATA/IDE storage device
+- VGA capable graphics processor
+- (Optional) Intel e1000-compatible NIC for networking
 
 ## Documentation
 
-The `docs/` directory contains the full project documentation, including architecture notes, UI and filesystem descriptions, and API references:
+The `docs/` directory contains comprehensive project documentation:
 
-- System overview and design goals
-- Boot, memory, interrupts/exceptions
-- User interface and shell
-- Filesystems and tools
-- Public headers and APIs
+- **[docs/README.md](docs/README.md)** - Documentation index and navigation
+- **[docs/system-overview.md](docs/system-overview.md)** - Architecture and design philosophy
+- **[docs/QUICK-DEBUG.md](docs/QUICK-DEBUG.md)** - One-page debugging reference (keep this open!)
+- **[docs/command-reference.md](docs/command-reference.md)** - Complete shell command reference (auto-generated)
+- **[docs/quick-reference.md](docs/quick-reference.md)** - Quick command cheat sheet
+- **[docs/stop-codes.md](docs/stop-codes.md)** - Panic stop code reference
 
-Start here: `docs/README.md`.
+Key topics:
+- **Debugging:** Quick debug card, stop codes, GDB integration, serial logging
+- **UI & Shell:** Tiling manager, TUI system, shell scripting, help system
+- **Filesystems:** EYNFS specification, FAT32 support, partitioning
+- **Development:** Assembler, chibicc compiler, UELF format, syscalls
+- **Networking:** e1000 driver, UDP/IPv4 stack (docs/network/)
+- **Memory:** Paging, virtual memory, heap management
+- **Hardware:** Watchdog timer, PCI enumeration, device drivers
+
+Start here: **[docs/README.md](docs/README.md)**
 
 ## Contributing
 

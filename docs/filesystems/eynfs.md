@@ -4,6 +4,10 @@ EYNFS is the native filesystem for EYN-OS, designed for simplicity and performan
 
 ## Overview
 
+![fdisk](image.png)
+
+![ls](image-1.png)
+
 EYNFS is a simple, block-based filesystem that supports:
 - Files and directories
 - Multi-block directory chains (supports up to 128 entries per directory)

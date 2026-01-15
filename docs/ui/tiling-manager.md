@@ -4,6 +4,8 @@ The EYN-OS GUI layer now includes a tiling front-end and an experimental floatin
 
 ## Overview
 
+![EYN-OS tiling manager showing write, theme, help, and ls](image.png)
+
 ### Beginner's Guide: The Screen Layout
 EYN-OS uses a "Tiling" window manager. This means windows don't overlap randomly like papers on a messy desk. Instead, they are arranged in a neat grid, like tiles on a floor.
 - **Tiles**: The main work areas. They split the screen evenly.

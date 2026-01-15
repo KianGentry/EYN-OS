@@ -67,9 +67,11 @@ status          # Check which commands are loaded
 |---------|-------------|---------|
 | `drive` | Switch disk drive | `drive 1` |
 | `lsata` | List ATA drives | `lsata` |
+| `pci` | PCI device scan | `pci scan` |
 | `ver` | Show version | `ver` |
 | `help` | Show help | `help` |
 | `history` | Show command history | `history` |
+| `alias` | Create command alias | `alias ll ls -la` |
 | `exit` | Exit EYN-OS | `exit` |
 
 ## Development Tools
@@ -77,7 +79,9 @@ status          # Check which commands are loaded
 | Command | Description | Example |
 |---------|-------------|---------|
 | `assemble` | Assemble code | `assemble test.asm test.eyn` |
-| `run` | Execute program | `run program.eyn` |
+| `run` | Execute program | `run program.eyn` or `run program.uelf` |
+| `ring3` | Test ring-3 stub | `ring3 yes` |
+| `chibicc` | C compiler | `chibicc hello.c -o hello.uelf` |
 | `calc` | Calculator | `calc 2+2` |
 | `hexdump` | Hex dump | `hexdump file.bin` |
 
@@ -99,9 +103,61 @@ status          # Check which commands are loaded
 | `search` | Universal search (filesystem/command/pipeline) | `search test.txt` |
 | `spam` | Spam EYN-OS | `spam` |
 
-## Pipeline and Redirection (In Development)
+## Networking Commands
 
-**Note**: These features are currently in development. Only basic functionality is available.
+| Command | Description | Example |
+|---------|-------------|---------|
+| `e1000` | E1000 NIC control | `e1000 init` |
+| `e1000probe` | Probe e1000 NIC | `e1000probe` |
+| `pci` | PCI device scan | `pci scan` |
+| `udp` | UDP operations | `udp listen 10000` |
+
+### Network Examples
+```bash
+# Initialize network
+e1000 init
+
+# Listen for UDP packets on port 10000
+udp listen 10000
+
+# Send UDP packet
+udp send 10.0.2.2 5000 Hello from EYN-OS
+
+# Check UDP statistics
+udp stats
+
+# Clear receive queue
+udp drain
+```
+
+## UI & Tiling Manager Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `tile` | Tiling manager control | `tile focus 1` |
+| `theme` | Customize UI theme | `theme color fg 255 255 255` |
+| `setfont` | Change system font | `setfont /fonts/unscii-16.hex` |
+| `setbg` | Set background image | `setbg image.rei` |
+| `clearbg` | Clear background | `clearbg` |
+
+### Tiling Manager Examples
+```bash
+# Focus different tiles
+tile focus 1
+tile focus 2
+
+# Resize windows
+tile resize 400 300
+
+# Set custom theme colors
+theme color fg 255 255 255
+theme color bg 0 0 0
+theme color accent 0 150 255
+```
+
+## Pipeline and Redirection
+
+**Note**: Basic functionality is available.
 
 | Operator | Description | Example |
 |----------|-------------|---------|
@@ -141,6 +197,10 @@ view logo.rei        # REI image (tile viewer)
 vieww logo.rei       # REI image (window viewer)
 ```
 
+![Reading text file.](image.png)
+
+![Viewer showing eynos.rei](image-1.png)
+
 ### Copying Files
 ```bash
 copy source.txt dest.txt  # Copy file
@@ -162,23 +222,26 @@ deldir directory     # Delete directory
 ## Image Handling
 
 ### REI Image Format
-EYN-OS supports the custom REI (Raw EYN Image) format for pixel-perfect image display.
+EYN-OS supports the custom REI (Raw EYN Image) format and REIV (REI Video) for animations.
 
 ```bash
 view image.rei              # Display REI image in a tile
 vieww image.rei             # Display REI image in a window
+view animation.reiv         # Play REIV video/animation
 ```
 
 ### Supported Formats
-- **REI** (`.rei`) - Native EYN-OS format with pixel-perfect rendering
-- **PNG** (`.png`) - Placeholder support (conversion recommended)
-- **JPEG** (`.jpg`, `.jpeg`) - Placeholder support (conversion recommended)
+- **REI** (`.rei`) - Native EYN-OS image format with pixel-perfect rendering
+- **REIV** (`.reiv`) - Native video/animation format (converted from MP4/GIF)
 
-### Converting Images
-Use the conversion tool to create REI files:
+### Converting Images & Videos
 ```bash
+# Convert PNG to REI
 python3 devtools/png_to_rei.py image.png -o image.rei
-python3 devtools/png_to_rei.py --test -o test.rei
+
+# Convert video to REIV
+python3 devtools/png_to_rei.py video.mp4 -o video.reiv
+python3 devtools/png_to_rei.py animation.gif -o animation.reiv
 ```
 
 ## Memory Management
@@ -200,11 +263,19 @@ portable optimize # Optimize for current system
 
 ### Setting Up Development
 ```bash
-makedir projects     # Create projects directory
-cd projects          # Navigate to projects
-write hello.asm      # Create assembly file
-assemble hello.asm hello.eyn  # Assemble code
-run hello.eyn        # Execute program
+makedir projects                  # Create projects directory
+cd projects                       # Navigate to projects
+write hello.c                     # Create C source file
+chibicc hello.c -o hello.uelf    # Compile to UELF
+run hello.uelf                    # Execute program
+
+# Or assembly:
+write hello.asm                   # Create assembly file
+assemble hello.asm hello.eyn     # Assemble code
+run hello.eyn                     # Execute program
+
+# Test ring-3 userspace
+ring3 yes                         # Run test stub
 ```
 
 ### File Management
@@ -300,10 +371,9 @@ status              # Check command loading status
 - **High Memory**: 0x00800000+ (if available)
 
 ### Memory Requirements
-- **Minimum**: 3MB RAM (with GRUB bootloader), 1MB RAM (with direct boot)
-- **Recommended**: 8MB+ RAM (for comfortable usage with all features)
-- **Optimal**: 16MB+ RAM (for full performance and multitasking)
-- **Note**: GRUB bootloader requires additional memory for its internal scripting system
+- **Minimum**: 9MB RAM (QEMU default configuration)
+- **Debug**: 64MB RAM (`make qemu-gdb` configuration)
+- **Note**: System uses streaming commands and fixed buffers to operate efficiently on minimal RAM
 
 ### Filesystem
 - **EYNFS**: Native filesystem
@@ -312,10 +382,13 @@ status              # Check command loading status
 - **Superblock**: LBA 2048
 
 ### Hardware Support
-- **VGA**: 80x25 text mode
-- **PS/2 Keyboard**: Full keyboard support
-- **ATA/IDE**: Hard disk access
-- **Serial**: Basic serial communication
+- **VGA**: 80x25 text mode with bitmap fonts (8x8, 8x16)
+- **PS/2 Keyboard**: Full keyboard support with history
+- **PS/2 Mouse**: Mouse support for GUI/tiling manager
+- **ATA/IDE**: Hard disk access with DMA
+- **Intel e1000**: Network interface card
+- **Serial**: Debug output and logging (COM1)
+- **PCI**: Device enumeration
 
 ## Advanced Features
 
