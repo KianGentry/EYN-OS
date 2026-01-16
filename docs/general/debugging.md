@@ -18,7 +18,7 @@ When something goes wrong:
 
 1. **Check serial output** (`make qemu-debug`)
 2. **Run with GDB** (`make qemu-gdb`)
-3. **Check system stats** (`memory stats`, `udp stats`)
+3. **Check system stats** (`memory stats`, `e1000 udp-stats`, `netstat`)
 4. **Verify initialization** (`init` command)
 5. **Test minimal case** (reduce to simplest reproduction)
 6. **Check recent changes** (`git diff`)
@@ -258,7 +258,10 @@ e1000 init
 ### UDP Statistics
 
 ```bash
-udp stats
+e1000 udp-stats
+
+# Quick status dump
+netstat
 
 # Shows:
 # - RX/TX packet counts
@@ -284,9 +287,9 @@ This logs:
 
 | Symptom | Check | Fix |
 |---------|-------|-----|
-| "No e1000 device" | `pci scan` | Verify QEMU config |
+| "No e1000 device" | `pciscan net` | Verify QEMU config |
 | "ARP timeout" | Destination IP | Use 10.0.2.x in QEMU |
-| "Queue full" | `udp stats` | `udp drain` |
+| "Queue full" | `e1000 udp-stats` | `e1000 udp-drain` |
 | Packets not received | Link status | `e1000 regs` check bit 1 of STATUS |
 
 ## Filesystem Debugging
@@ -451,12 +454,12 @@ printf("Rate: %d packets/sec\n", packets * HZ / elapsed);
 | Serial output | Panic traces, logging | `make qemu-debug` |
 | GDB | Live debugging, breakpoints | `make qemu-gdb` |
 | `memory stats` | Heap analysis | In shell |
-| `udp stats` | Network profiling | In shell |
+| `e1000 udp-stats` | Network profiling | In shell |
 | `e1000 regs` | NIC diagnostics | In shell |
 | `fscheck` | Filesystem validation | In shell |
 | `panic` | Test panic system | In shell |
 | `assertfail` | Test assertions | In shell |
-| `pci scan` | Hardware enumeration | In shell |
+| `pciscan` | Hardware enumeration | In shell |
 | `fdisk` | Partition inspection | In shell |
 
 ## Best Practices

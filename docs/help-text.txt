@@ -24,10 +24,13 @@ Streaming Commands:
   mmap            - Memory map a file for zero-copy access
   msync           - Synchronize memory-mapped file to disk
   munmap          - Unmap a memory-mapped file
+  netcfg          - Network configuration (defaults match QEMU user-net).
+  netstat         - Network status (netstack + ARP + UDP + ICMP).
   pagingguards    - Install optional paging guards (null-page, .text/.rodata RO).
   panic           - Trigger a kernel panic to test diagnostics.
   pciscan         - Scan PCI devices and print vendor/device IDs and BAR0.
   pf              - Intentionally trigger a page fault (read/write/exec a chosen address).
+  ping            - Send ICMP echo request(s).
   predict         - Predictive memory management
   rect            - Draw a rectangle.
   ring3           - Switch to ring 3 and run a tiny user-mode stub (prints via int 0x80).

@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2026-01-15 22:44:37
+This document is auto-generated from the source code. Last updated: 2026-01-16 19:34:38
 
-**Total Commands:** 63
+**Total Commands:** 66
 
 ## Table of Contents
 
@@ -354,6 +354,46 @@ munmap <address>
 
 ---
 
+### netcfg
+
+**Handler:** `netcfg_cmd`
+
+**Type:** CMD_DIAGNOSTIC
+
+**File:** `shell_commands.c`
+
+**Description:**
+Network configuration (defaults match QEMU user-net).
+Usage: netcfg show | netcfg defaults | netcfg set ip <a.b.c.d> | netcfg set gw <a.b.c.d> | netcfg set mask <a.b.c.d> | netcfg set dns <a.b.c.d> | netcfg save [path] | netcfg load [path]
+Default path: /config/net.cfg
+
+**Example:**
+```bash
+netcfg show
+```
+
+---
+
+### netstat
+
+**Handler:** `netstat_cmd`
+
+**Type:** CMD_DIAGNOSTIC
+
+**File:** `shell_commands.c`
+
+**Description:**
+Network status (netstack + ARP + UDP + ICMP).
+Usage: netstat
+Note: run 'e1000 init' first for full info.
+
+**Example:**
+```bash
+netstat
+```
+
+---
+
 ### pagingguards
 
 **Handler:** `pagingguards_cmd`
@@ -427,6 +467,27 @@ Usage: pf yes [addr] [r|w|x]
 **Example:**
 ```bash
 pf yes 0x0 r
+```
+
+---
+
+### ping
+
+**Handler:** `ping_cmd`
+
+**Type:** CMD_DIAGNOSTIC
+
+**File:** `shell_commands.c`
+
+**Description:**
+Send ICMP echo request(s).
+Usage: ping <dst_ip> [count] [local_ip]
+Example: ping 10.0.2.2
+Note: run 'e1000 init' first.
+
+**Example:**
+```bash
+ping 10.0.2.2
 ```
 
 ---
@@ -1226,7 +1287,7 @@ run user_hello.uelf
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 31 |
+| Streaming Commands | 34 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |

@@ -304,12 +304,12 @@ Hardware → e1000_receive() → net_poll_rx() →
 
 **Debugging**:
 - Enable `#define NET_DEBUG 1`
-- Use `udp stats` for counters
+- Use `e1000 udp-stats` for counters
 - Check ARP cache: modify code to print entries
 - Verify checksums: IPv4 header checksum
 
 **Common Issues**:
-- **Queue full**: RX overrun, call `udp drain`
+- **Queue full**: RX overrun, call `e1000 udp-drain`
 - **ARP timeout**: Bad IP or network config
 - **Checksum error**: Corrupted packet or bug
 
@@ -408,7 +408,7 @@ See [api/userland-uelf-abi.md](../api/userland-uelf-abi.md) for format specifica
 | Heap | `memory stats` | `mm/heap.c` | Heap corruption |
 | Paging | GDB `info registers` | `mm/vmm.c` | Page fault |
 | E1000 | `e1000 regs` | `drivers/e1000.c` | Descriptor error |
-| Network | `udp stats` | `network/netstack.c` | Queue full |
+| Network | `e1000 udp-stats` | `network/netstack.c` | Queue full |
 | Filesystem | `fscheck` | `fs/eynfs.c` | Magic mismatch |
 | Watchdog | Check serial log | `misc/watchdog.c` | Hang timeout |
 | UELF | `run` simple prog | `cpu/user_elf.c` | Invalid ELF |

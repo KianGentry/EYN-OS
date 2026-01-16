@@ -297,13 +297,13 @@ while (packets_remaining) {
 ```bash
 e1000 regs        # Check NIC registers
 e1000 test        # Run diagnostics
-udp stats         # Check packet stats
-pci scan          # Verify e1000 detected
+e1000 udp-stats   # Check packet stats
+pciscan net       # Verify e1000 detected
 ```
 
 **Common Fixes**:
 - Reinitialize NIC: `e1000 init`
-- Clear receive queue: `udp drain`
+- Clear receive queue: `e1000 udp-drain`
 - Check QEMU network config
 - Reduce traffic rate
 
@@ -395,8 +395,8 @@ Backtrace:
 Steps to Reproduce:
 1. init
 2. e1000 init
-3. udp listen 10000
-4. Send packet from host with nc -u 10.0.2.15 10000
+3. e1000 udp-listen 9999
+4. Send packet from host with nc -u 127.0.0.1 10000
 5. Crash occurs
 
 Environment: QEMU 6.2.0, -m 9M, dev branch commit 8dac2bd

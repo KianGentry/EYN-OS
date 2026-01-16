@@ -2796,8 +2796,9 @@ void start_tiling_manager() {
         uint32 now_net_tick = sched_get_tick_count();
         if (net_is_inited() && now_net_tick != last_net_tick) {
             last_net_tick = now_net_tick;
-            static const uint8 local_ip_default[4] = {10, 0, 2, 15};
-            (void)net_poll(local_ip_default, 32);
+            uint8 local_ip[4];
+            net_get_local_ip(local_ip);
+            (void)net_poll(local_ip, 32);
         }
 
         // If status overlay visibility toggles, force redraw to restore any covered pixels.

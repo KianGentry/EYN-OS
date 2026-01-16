@@ -50,17 +50,17 @@ Category: [ASSERT|PAGING|FILESYSTEM|IRQ|GENERAL]
 
 | Problem | Check | Fix |
 |---------|-------|-----|
-| "No e1000 device" | `pci scan` | Verify QEMU: `-device e1000` |
+| "No e1000 device" | `pciscan net` | Verify QEMU: `-device e1000` |
 | "ARP timeout" | Destination IP | Use 10.0.2.x in QEMU |
-| "Queue full" | `udp stats` | `udp drain` |
+| "Queue full" | `e1000 udp-stats` | `e1000 udp-drain` |
 | No packets | `e1000 regs` | Check STATUS bit 1 (link) |
 
 **Debug Commands**:
 ```bash
 e1000 init            # Initialize NIC
 e1000 regs            # Check registers
-udp stats             # Check packet counts
-udp drain             # Clear queue
+e1000 udp-stats       # Check packet counts
+e1000 udp-drain       # Clear queue
 ```
 
 ---
@@ -153,9 +153,9 @@ init              # Initialize system
 memory stats      # Heap status
 e1000 init        # Start network
 e1000 regs        # NIC registers
-udp stats         # Network stats
+e1000 udp-stats   # Network stats
 fscheck           # Filesystem check
-pci scan          # List PCI devices
+pciscan net       # List PCI devices
 lsata             # List ATA drives
 panic             # Test panic screen
 assertfail yes    # Test assertions
@@ -245,7 +245,7 @@ serial_write(SERIAL_COM1, buf, strlen(buf));
 
 ### Network Stack
 - **File**: `src/network/netstack.c`
-- **Stats**: `udp stats`, `udp drain`
+- **Stats**: `e1000 udp-stats`, `e1000 udp-drain`
 - **Enable debug**: Set `NET_DEBUG 1` in source
 - **Check**: ARP cache, packet queues
 

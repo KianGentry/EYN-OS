@@ -22,6 +22,29 @@ int net_init(const netdev* dev);
 // Returns non-zero if netstack has been initialized.
 int net_is_inited(void);
 
+// --- Net configuration ---
+// Stored in the netstack and used as defaults for commands/background polling.
+// Default values match QEMU user-net (slirp):
+//   local_ip = 10.0.2.15
+//   gateway  = 10.0.2.2
+//   netmask  = 255.255.255.0
+//   dns      = 10.0.2.3
+typedef struct net_config {
+    uint8 local_ip[4];
+    uint8 gateway_ip[4];
+    uint8 netmask[4];
+    uint8 dns_ip[4];
+} net_config;
+
+// Get/set the active configuration.
+// These do not require the netstack to be initialized.
+void net_config_get(net_config* out);
+int net_config_set(const net_config* in);
+void net_config_set_defaults(void);
+
+// Convenience: copy out the configured local IP.
+void net_get_local_ip(uint8 out_ip[4]);
+
 int net_arp_test_send(const uint8 sender_ip[4], const uint8 target_ip[4], int rx_spins);
 
 int net_udp_send(const uint8 src_ip[4], uint16 src_port,
@@ -89,5 +112,46 @@ int net_udp_listen(const uint8 local_ip[4], uint16 local_port, int max_packets, 
 // Like net_udp_listen, but also replies to the sender with the same payload.
 // Useful for validating bidirectional UDP through QEMU user-net hostfwd.
 int net_udp_echo(const uint8 local_ip[4], uint16 local_port, int max_packets, int spin_limit);
+
+// --- ICMP (Ping) ---
+
+// Snapshot of a single ARP cache entry for diagnostics.
+typedef struct net_arp_entry {
+    uint8 ip[4];
+    uint8 mac[6];
+    uint8 valid;
+} net_arp_entry;
+
+// Snapshot of ICMP counters for diagnostics.
+typedef struct net_icmp_stats {
+    uint32 echo_req_rx;
+    uint32 echo_rep_rx;
+    uint32 echo_rep_tx;
+    uint32 echo_rep_dropped;
+} net_icmp_stats;
+
+// Returns cached MAC address after init.
+// Returns 0 on success, <0 if netstack is not initialized.
+int net_get_mac(uint8 out_mac[6]);
+
+// Copies current ARP cache snapshot into out (up to out_cap entries).
+// Returns number of entries written (may be 0).
+uint32 net_get_arp_cache(net_arp_entry* out, uint32 out_cap);
+
+// Returns total number of queued UDP packets across all ports.
+uint32 net_udp_queue_total(void);
+
+// Returns a snapshot of current ICMP stats.
+net_icmp_stats net_icmp_get_stats(void);
+
+// Sends ICMP echo request(s) and waits for reply.
+//
+// count:
+// - <=0 defaults to 4
+// timeout_spins:
+// - <=0 defaults to a reasonable wait loop
+//
+// Returns number of replies received (>=0), or <0 on error.
+int net_icmp_ping(const uint8 local_ip[4], const uint8 dst_ip[4], int count, int timeout_spins);
 
 #endif

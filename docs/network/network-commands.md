@@ -12,7 +12,7 @@ e1000 init
 ```
 
 **What it does**:
-1. Detects e1000 device via PCI scan
+1. Detects e1000 device via PCI enumeration
 2. Enables bus mastering
 3. Reads MAC address from EEPROM
 4. Performs software reset
@@ -101,11 +101,11 @@ e1000 test --expect-mac 52:54:00:12:34:56
 
 ## PCI Commands
 
-### pci scan
-Enumerate all PCI devices on the system.
+### pciscan
+Enumerate PCI devices on the system.
 
 ```bash
-pci scan
+pciscan
 ```
 
 **Output**:
@@ -121,15 +121,20 @@ PCI Devices Found:
 
 **Tip**: e1000 usually shows as `8086:100E`.
 
+To filter to likely networking devices:
+```bash
+pciscan net
+```
+
 ---
 
-## UDP Commands
+## UDP Commands (e1000)
 
-### udp listen
+### e1000 udp-listen
 Listen for incoming UDP packets on a specified port.
 
 ```bash
-udp listen <port>
+e1000 udp-listen [local_port] [local_ip] [count] [spins]
 ```
 
 **Arguments**:
@@ -137,7 +142,7 @@ udp listen <port>
 
 **Example**:
 ```bash
-udp listen 10000
+e1000 udp-listen 9999
 ```
 
 **Behavior**:
@@ -150,7 +155,7 @@ udp listen 10000
 ```
 UDP packet received:
   From: 10.0.2.2:5000
-  To: 10.0.2.15:10000
+  To: 10.0.2.15:9999
   Length: 12 bytes
   Data: Hello World!
 ```
@@ -159,11 +164,8 @@ UDP packet received:
 
 **Testing from host**:
 ```bash
-# On host machine (Linux/Mac):
+# With Makefile `make run` (QEMU user-net with hostfwd UDP 10000 -> guest 9999):
 echo "test message" | nc -u 127.0.0.1 10000
-
-# Or using Python:
-python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.sendto(b'Hello', ('10.0.2.15', 10000))"
 ```
 
 **Notes**:
@@ -173,11 +175,11 @@ python3 -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s
 
 ---
 
-### udp send
+### e1000 udp-send
 Send a UDP packet to a remote host.
 
 ```bash
-udp send <ip> <port> <message>
+e1000 udp-send <dst_ip> <dst_port> <message> [src_ip] [src_port] [arpspins]
 ```
 
 **Arguments**:
@@ -187,7 +189,7 @@ udp send <ip> <port> <message>
 
 **Example**:
 ```bash
-udp send 10.0.2.2 5000 Hello from EYN-OS
+e1000 udp-send 10.0.2.2 5000 Hello from EYN-OS
 ```
 
 **What it does**:
@@ -212,11 +214,11 @@ UDP: Sent 17 bytes to 10.0.2.2:5000
 
 ---
 
-### udp stats
+### e1000 udp-stats
 Display UDP statistics.
 
 ```bash
-udp stats
+e1000 udp-stats
 ```
 
 **Output**:
@@ -229,7 +231,7 @@ UDP Statistics:
   Queue Usage:     2/8
 ```
 
-![udp stats showing queue usage](image-3.png)
+![e1000 udp-stats showing queue usage](image-3.png)
 
 **Fields**:
 - **RX Packets**: Total packets received
@@ -240,11 +242,11 @@ UDP Statistics:
 
 ---
 
-### udp drain
+### e1000 udp-drain
 Clear the UDP receive queue.
 
 ```bash
-udp drain
+e1000 udp-drain
 ```
 
 **Output**:
@@ -268,16 +270,16 @@ Typical startup sequence:
 init
 
 # 2. Scan PCI to verify NIC present
-pci scan
+pciscan net
 
 # 3. Initialize e1000 NIC
 e1000 init
 
-# 4. Test connectivity
-udp send 10.0.2.2 5000 ping
+# 4. Test connectivity (ICMP echo)
+ping 10.0.2.2
 
-# 5. Listen for responses
-udp listen 5001
+# 5. Send a UDP packet to the host
+e1000 udp-send 10.0.2.2 5000 Hello
 ```
 
 ---
@@ -286,12 +288,10 @@ udp listen 5001
 
 ### Echo Server (Simple)
 ```bash
-# In one terminal (EYN-OS):
-while true; do
-    udp listen 10000
-done
+# In EYN-OS:
+e1000 udp-echo 9999
 
-# In another terminal (host):
+# On the host (with Makefile hostfwd UDP 10000 -> guest 9999):
 echo "test" | nc -u 127.0.0.1 10000
 ```
 
@@ -299,22 +299,22 @@ echo "test" | nc -u 127.0.0.1 10000
 ```bash
 # EYN-OS side:
 e1000 init
-udp listen 10000
+e1000 udp-listen 9999
 
 # Host side:
-nc -u 10.0.2.15 10000
-type messages and press Enter
+nc -u 127.0.0.1 10000
+echo "hello" and press Enter
 ```
 
 ### Statistics Monitoring
 ```bash
 # Send some packets
-udp send 10.0.2.2 5000 test1
-udp send 10.0.2.2 5000 test2
-udp send 10.0.2.2 5000 test3
+e1000 udp-send 10.0.2.2 5000 test1
+e1000 udp-send 10.0.2.2 5000 test2
+e1000 udp-send 10.0.2.2 5000 test3
 
 # Check stats
-udp stats
+e1000 udp-stats
 ```
 
 ---
@@ -333,7 +333,7 @@ udp stats
 
 ### "UDP: Queue full"
 - **Cause**: Receive queue overflow (8 packets max)
-- **Fix**: Call `udp drain` to clear queue
+- **Fix**: Call `e1000 udp-drain` to clear queue
 - **Future**: Increase queue size or process packets faster
 
 ### "Link is DOWN"
@@ -343,22 +343,31 @@ udp stats
   - Check `e1000 regs` for STATUS register
   - Verify QEMU network configuration
 
-### "Command not found: udp"
-- **Cause**: Network commands not loaded
-- **Fix**: Run `load` to load streaming commands
+### "Command not found" (net commands)
+- **Cause**: Streaming commands not loaded
+- **Fix**: Run `load`, then `status` to verify
 
 ---
 
 ## Configuration
 
 ### Default Network Settings
-Currently hardcoded in `src/network/netstack.c`:
+Defaults match QEMU user-mode networking (slirp). Runtime configuration is available via `netcfg`:
 
-```c
-Local IP:   10.0.2.15
-Gateway:    10.0.2.2
-Netmask:    255.255.255.0
+```bash
+netcfg show
+netcfg set ip 10.0.2.15
+netcfg set gw 10.0.2.2
+netcfg set mask 255.255.255.0
+netcfg set dns 10.0.2.3
+
+# Persist configuration (default path is /config/net.cfg)
+netcfg save
+# Or manually load a file (also loaded automatically on `init`)
+netcfg load
 ```
+
+Persisted network configuration is stored as a small text file with `key=value` lines. The default path is `/config/net.cfg` (with a fallback of `/net.cfg`).
 
 ### QEMU User-Mode Networking
 Default QEMU network topology:
@@ -371,8 +380,8 @@ Guest:    10.0.2.15 (EYN-OS)
 
 Port forwarding (host → guest):
 ```bash
-qemu-system-i386 ... -netdev user,id=net0,hostfwd=udp::5555-:10000
-# Now host port 5555 forwards to EYN-OS port 10000
+qemu-system-i386 ... -netdev user,id=net0,hostfwd=udp::10000-:9999
+# Now host UDP port 10000 forwards to EYN-OS UDP port 9999
 ```
 
 ---
@@ -381,8 +390,8 @@ qemu-system-i386 ... -netdev user,id=net0,hostfwd=udp::5555-:10000
 
 1. **Minimize ARP requests**: Packets to same host use cached MAC
 2. **Batch operations**: Send multiple packets without delay
-3. **Clear queue**: Use `udp drain` before important receive operations
-4. **Monitor stats**: Check `udp stats` for dropped packets
+3. **Clear queue**: Use `e1000 udp-drain` before important receive operations
+4. **Monitor stats**: Check `e1000 udp-stats` for dropped packets
 
 ---
 
@@ -403,8 +412,16 @@ qemu-system-i386 ... -netdev user,id=net0,hostfwd=udp::5555-:10000
 | `e1000 probe` | Probe NIC | `e1000probe` |
 | `e1000 regs` | Dump registers | `e1000 regs` |
 | `e1000 test` | Run diagnostics | `e1000 test --expect-link up` |
-| `pci scan` | List PCI devices | `pci scan` |
-| `udp listen` | Receive packets | `udp listen 10000` |
-| `udp send` | Send packet | `udp send 10.0.2.2 5000 msg` |
-| `udp stats` | Show statistics | `udp stats` |
-| `udp drain` | Clear queue | `udp drain` |
+| `pciscan` | List PCI devices | `pciscan net` |
+| `e1000 udp-listen` | Receive packets | `e1000 udp-listen 9999` |
+| `e1000 udp-send` | Send packet | `e1000 udp-send 10.0.2.2 5000 msg` |
+| `e1000 udp-stats` | Show statistics | `e1000 udp-stats` |
+| `e1000 udp-drain` | Clear queue | `e1000 udp-drain` |
+| `netcfg` | Configure network | `netcfg save` |
+
+Additional commands:
+- `ping 10.0.2.2`
+- `netstat`
+- `netcfg show`
+- `netcfg save`
+- `netcfg load`

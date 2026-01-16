@@ -6,7 +6,7 @@
 #include <types.h>
 #include <vga.h>
 #include <util.h>
-#include <math.h>
+#include <misc/math.h>
 #include <system.h>
 #include <string.h>
 #include <eynfs.h>
@@ -665,12 +665,91 @@ void joke_spam()
 // ver implementation
 void ver() 
 {
-    printf("%c#######  ##    ##  ###     ##          ######    #####\n", 255, 0, 255);
-    printf("%c###       ##  ##   ####    ##         ##    ##  ##\n");
-    printf("%c#######     ##     ##  ##  ##  #####  ##    ##   #####\n");
-    printf("%c###         ##     ##    ####         ##    ##       ##\n");
-    printf("%c#######     ##     ##      ##          ######    #####\n");
-    printf("%c(Release 14)\n", 200, 200, 200);
+    int rei_displayed = 0;
+    
+    // Check if shell output is being redirected (e.g., running inside a tiled vterm)
+    extern int shell_redirect_active;
+    
+    // Try to load and display eynos.rei image only if not redirected
+    if (!shell_redirect_active) {
+        vfs_stat_t st;
+        if (vfs_stat(g_current_drive, "/eynos.rei", &st) == 0 && st.size > 0) {
+            void* buffer = malloc(st.size);
+            if (buffer) {
+                uint32 bytes_read = vfs_read_file(g_current_drive, "/eynos.rei", buffer, st.size);
+                if (bytes_read > 0) {
+                    rei_image_t rei_image;
+                    if (rei_parse_image((const uint8_t*)buffer, bytes_read, &rei_image) == 0) {
+                        // Successfully parsed REI image
+                        int img_width = rei_image.header.width;
+                        int img_height = rei_image.header.height;
+                        int depth = rei_image.header.depth;
+                        
+                        // Draw REI image directly to framebuffer at a fixed position (centered horizontally, near top)
+                        extern multiboot_info_t *g_mbi;
+                        int x_pos = 10;  // Default left margin
+                        int y_pos = 10;  // Top margin
+                        
+                        if (g_mbi && g_mbi->framebuffer_width > 0) {
+                            // Center horizontally
+                            x_pos = (g_mbi->framebuffer_width - img_width) / 2;
+                            if (x_pos < 0) x_pos = 10;
+                        }
+                        
+                        // Draw pixels directly
+                        for (int py = 0; py < img_height; ++py) {
+                            for (int px = 0; px < img_width; ++px) {
+                                int off = (py * img_width + px) * depth;
+                                if (off >= 0 && (uint32)(off + depth) <= rei_image.data_size) {
+                                    uint8 sr = 0, sg = 0, sb = 0, sa = 255;
+                                    if (depth == REI_DEPTH_MONO) {
+                                        sr = sg = sb = rei_image.data[off];
+                                    } else if (depth == REI_DEPTH_RGB) {
+                                        sr = rei_image.data[off];
+                                        sg = rei_image.data[off + 1];
+                                        sb = rei_image.data[off + 2];
+                                    } else if (depth == REI_DEPTH_RGBA) {
+                                        sr = rei_image.data[off];
+                                        sg = rei_image.data[off + 1];
+                                        sb = rei_image.data[off + 2];
+                                        sa = rei_image.data[off + 3];
+                                    }
+                                    
+                                    // Draw pixel (skip fully transparent pixels for RGBA)
+                                    if (depth != REI_DEPTH_RGBA || sa > 0) {
+                                        drawPixel(x_pos + px, y_pos + py, sr, sg, sb);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Calculate how many text lines the image occupies and move cursor down
+                        int lines_needed = (img_height + 15) / 16;  // Round up to nearest line (assuming 16px line height)
+                        
+                        // Print blank lines to move the output position below the image
+                        for (int i = 0; i < lines_needed; i++) {
+                            printf("\n");
+                        }
+                        
+                        rei_displayed = 1;
+                        rei_free_image(&rei_image);
+                    }
+                }
+                free(buffer);
+            }
+        }
+    }
+    
+    // Fallback to ASCII art if REI image failed to load or display (or if redirected)
+    if (!rei_displayed) {
+        printf("%c#######  ##    ##  ###     ##          ######    #####\n", 255, 0, 255);
+        printf("%c###       ##  ##   ####    ##         ##    ##  ##\n");
+        printf("%c#######     ##     ##  ##  ##  #####  ##    ##   #####\n");
+        printf("%c###         ##     ##    ####         ##    ##       ##\n");
+        printf("%c#######     ##     ##      ##          ######    #####\n");
+    }
+    
+    printf("%c(Release 15)\n", 200, 200, 200);
 }
 
 // help implementation
@@ -776,6 +855,13 @@ REGISTER_SHELL_COMMAND(init, "init", init_cmd, CMD_ESSENTIAL, "Initialize full s
 REGISTER_SHELL_COMMAND(pciscan_cmd_info, "pciscan", pciscan_cmd, CMD_DIAGNOSTIC, "Scan PCI devices and print vendor/device IDs and BAR0.\nUsage: pciscan [net]\nTip: e1000 usually shows as 8086:100E.", "pciscan net");
 REGISTER_SHELL_COMMAND(e1000probe_cmd_info, "e1000probe", e1000probe_cmd, CMD_DIAGNOSTIC, "Probe the Intel e1000 NIC (read-only MMIO sanity check).\nUsage: e1000probe", "e1000probe");
 REGISTER_SHELL_COMMAND(e1000_cmd_info, "e1000", e1000_cmd, CMD_DIAGNOSTIC, "Intel e1000 utilities (probe + bring-up helpers).\nUsage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx]", "e1000 init");
+
+static void ping_cmd(string ch);
+static void netstat_cmd(string ch);
+static void netcfg_cmd(string ch);
+REGISTER_SHELL_COMMAND(ping_cmd_info, "ping", ping_cmd, CMD_DIAGNOSTIC, "Send ICMP echo request(s).\nUsage: ping <dst_ip> [count] [local_ip]\nExample: ping 10.0.2.2\nNote: run 'e1000 init' first.", "ping 10.0.2.2");
+REGISTER_SHELL_COMMAND(netstat_cmd_info, "netstat", netstat_cmd, CMD_DIAGNOSTIC, "Network status (netstack + ARP + UDP + ICMP).\nUsage: netstat\nNote: run 'e1000 init' first for full info.", "netstat");
+REGISTER_SHELL_COMMAND(netcfg_cmd_info, "netcfg", netcfg_cmd, CMD_DIAGNOSTIC, "Network configuration (defaults match QEMU user-net).\nUsage: netcfg show | netcfg defaults | netcfg set ip <a.b.c.d> | netcfg set gw <a.b.c.d> | netcfg set mask <a.b.c.d> | netcfg set dns <a.b.c.d> | netcfg save [path] | netcfg load [path]\nDefault path: /config/net.cfg", "netcfg show");
 
 typedef struct pciscan_ctx {
     uint32 count;
@@ -888,6 +974,145 @@ static int parse_ipv4(const char* s, unsigned char out_ip[4])
     }
     if (*s != '\0' && *s != ' ') return -1;
     return 0;
+}
+
+#define NETCFG_PATH_PRIMARY "/config/net.cfg"
+#define NETCFG_PATH_FALLBACK "/net.cfg"
+
+static int netcfg_ensure_config_dir(uint8 drive)
+{
+    vfs_stat_t st;
+    if (vfs_stat(drive, "/config", &st) == 0 && st.type == VFS_NODE_DIR) return 0;
+    return vfs_mkdir(drive, "/config");
+}
+
+static char* netcfg_trim_left_ws(char* s)
+{
+    while (s && (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')) s++;
+    return s;
+}
+
+static void netcfg_trim_right_ws(char* s)
+{
+    if (!s) return;
+    int n = (int)strlen(s);
+    while (n > 0) {
+        char c = s[n - 1];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            s[n - 1] = '\0';
+            n--;
+            continue;
+        }
+        break;
+    }
+}
+
+static int netcfg_apply_text(char* buf)
+{
+    if (!buf) return -1;
+
+    net_config cfg;
+    net_config_get(&cfg);
+
+    int applied = 0;
+    char* line = buf;
+    while (line && *line) {
+        char* next = strchr(line, '\n');
+        if (next) { *next = '\0'; next++; }
+
+        char* s2 = netcfg_trim_left_ws(line);
+        netcfg_trim_right_ws(s2);
+        if (!s2[0] || s2[0] == '#') { line = next; continue; }
+
+        char* eq = strchr(s2, '=');
+        if (!eq) { line = next; continue; }
+        *eq = '\0';
+        char* key = s2;
+        char* val = netcfg_trim_left_ws(eq + 1);
+        netcfg_trim_right_ws(key);
+        netcfg_trim_right_ws(val);
+
+        unsigned char ip[4];
+        if (parse_ipv4(val, ip) != 0) { line = next; continue; }
+
+        if (strcmp(key, "ip") == 0 || strcmp(key, "local_ip") == 0) {
+            for (int i = 0; i < 4; i++) cfg.local_ip[i] = ip[i];
+            applied++;
+        } else if (strcmp(key, "gw") == 0 || strcmp(key, "gateway") == 0 || strcmp(key, "gateway_ip") == 0) {
+            for (int i = 0; i < 4; i++) cfg.gateway_ip[i] = ip[i];
+            applied++;
+        } else if (strcmp(key, "mask") == 0 || strcmp(key, "netmask") == 0) {
+            for (int i = 0; i < 4; i++) cfg.netmask[i] = ip[i];
+            applied++;
+        } else if (strcmp(key, "dns") == 0 || strcmp(key, "dns_ip") == 0) {
+            for (int i = 0; i < 4; i++) cfg.dns_ip[i] = ip[i];
+            applied++;
+        }
+
+        line = next;
+    }
+
+    if (applied == 0) return -1;
+    (void)net_config_set(&cfg);
+    return 0;
+}
+
+static int netcfg_load_path(uint8 drive, const char* path)
+{
+    if (!path || !path[0]) return -1;
+    vfs_stat_t st;
+    if (vfs_stat(drive, path, &st) != 0 || st.type != VFS_NODE_FILE) return -1;
+
+    uint32 size = 0;
+    if (vfs_get_file_size(drive, path, &size) != 0) return -1;
+    if (size == 0) return -1;
+    if (size > 1023u) size = 1023u;
+
+    static char buf[1024];
+    int n = vfs_read_file(drive, path, buf, (int)size);
+    if (n <= 0) return -1;
+    buf[n] = '\0';
+
+    return netcfg_apply_text(buf);
+}
+
+static int netcfg_save_path(uint8 drive, const char* path)
+{
+    if (!path || !path[0]) return -1;
+    if (path[0] == '/' && path[1] == 'c' && path[2] == 'o' && path[3] == 'n' && path[4] == 'f' && path[5] == 'i' && path[6] == 'g' && path[7] == '/') {
+        netcfg_ensure_config_dir(drive);
+    }
+
+    net_config cfg;
+    net_config_get(&cfg);
+
+    char out[256];
+    int n = snprintf(out, sizeof(out),
+        "# EYN-OS Network Configuration\n"
+        "# key=value (IPv4 dotted decimal)\n"
+        "ip=%u.%u.%u.%u\n"
+        "gw=%u.%u.%u.%u\n"
+        "mask=%u.%u.%u.%u\n"
+        "dns=%u.%u.%u.%u\n",
+        (unsigned)cfg.local_ip[0], (unsigned)cfg.local_ip[1], (unsigned)cfg.local_ip[2], (unsigned)cfg.local_ip[3],
+        (unsigned)cfg.gateway_ip[0], (unsigned)cfg.gateway_ip[1], (unsigned)cfg.gateway_ip[2], (unsigned)cfg.gateway_ip[3],
+        (unsigned)cfg.netmask[0], (unsigned)cfg.netmask[1], (unsigned)cfg.netmask[2], (unsigned)cfg.netmask[3],
+        (unsigned)cfg.dns_ip[0], (unsigned)cfg.dns_ip[1], (unsigned)cfg.dns_ip[2], (unsigned)cfg.dns_ip[3]
+    );
+    if (n <= 0) return -1;
+    if (n >= (int)sizeof(out)) n = (int)sizeof(out) - 1;
+
+    int w = vfs_write_file(drive, path, out, (uint32)n);
+    return (w < 0) ? -1 : 0;
+}
+
+static void netcfg_try_autoload_quiet(uint8 drive)
+{
+    static int g_netcfg_autoloaded = 0;
+    if (g_netcfg_autoloaded) return;
+    g_netcfg_autoloaded = 1;
+    if (netcfg_load_path(drive, NETCFG_PATH_PRIMARY) == 0) return;
+    (void)netcfg_load_path(drive, NETCFG_PATH_FALLBACK);
 }
 
 static const char* skip_spaces(const char* s)
@@ -1095,11 +1320,13 @@ void e1000_cmd(string arg)
 
     if (token_eq(s, "arp-test")) {
         // Usage: e1000 arp-test [target_ip] [sender_ip] [rxcount] [spins]
-        // Defaults match QEMU user-net: guest=10.0.2.15, gateway=10.0.2.2.
+        // Defaults match netcfg (QEMU user-net): guest=10.0.2.15, gateway=10.0.2.2.
         // Note: rxcount is legacy/ignored now; netstack consumes the reply internally.
 
-        unsigned char target_ip[4] = {10, 0, 2, 2};
-        unsigned char sender_ip[4] = {10, 0, 2, 15};
+        net_config cfg;
+        net_config_get(&cfg);
+        unsigned char target_ip[4] = {cfg.gateway_ip[0], cfg.gateway_ip[1], cfg.gateway_ip[2], cfg.gateway_ip[3]};
+        unsigned char sender_ip[4] = {cfg.local_ip[0], cfg.local_ip[1], cfg.local_ip[2], cfg.local_ip[3]};
         int rxcount = 5;
         int spins = 12000000;
 
@@ -1152,8 +1379,10 @@ void e1000_cmd(string arg)
         // Quickstart for QEMU user-net host receive:
         //   host:  nc -u -l 9999
         //   guest: e1000 udp-send 10.0.2.2 9999 hello
-        unsigned char dst_ip[4] = {10, 0, 2, 2};
-        unsigned char src_ip[4] = {10, 0, 2, 15};
+        net_config cfg;
+        net_config_get(&cfg);
+        unsigned char dst_ip[4] = {cfg.gateway_ip[0], cfg.gateway_ip[1], cfg.gateway_ip[2], cfg.gateway_ip[3]};
+        unsigned char src_ip[4] = {cfg.local_ip[0], cfg.local_ip[1], cfg.local_ip[2], cfg.local_ip[3]};
         int dst_port = 9999;
         int src_port = 12345;
         int arp_spins = 12000000;
@@ -1258,7 +1487,9 @@ void e1000_cmd(string arg)
         // Notes:
         //   count == 0 => listen until Ctrl-C
         //   spins == 0 => listen until Ctrl-C
-        unsigned char local_ip[4] = {10, 0, 2, 15};
+        net_config cfg;
+        net_config_get(&cfg);
+        unsigned char local_ip[4] = {cfg.local_ip[0], cfg.local_ip[1], cfg.local_ip[2], cfg.local_ip[3]};
         int local_port = 9999;
         int count = 0;
         int spins = 0;
@@ -1327,7 +1558,9 @@ void e1000_cmd(string arg)
         // Notes:
         //   count == 0 => echo until Ctrl-C
         //   spins == 0 => echo until Ctrl-C
-        unsigned char local_ip[4] = {10, 0, 2, 15};
+        net_config cfg;
+        net_config_get(&cfg);
+        unsigned char local_ip[4] = {cfg.local_ip[0], cfg.local_ip[1], cfg.local_ip[2], cfg.local_ip[3]};
         int local_port = 9999;
         int count = 0;
         int spins = 0;
@@ -1422,7 +1655,9 @@ void e1000_cmd(string arg)
     if (token_eq(s, "udp-drain")) {
         // Usage: e1000 udp-drain [local_port] [max]
         // Drains already-queued UDP packets for local_port and prints them.
-        unsigned char local_ip[4] = {10, 0, 2, 15};
+        net_config cfg;
+        net_config_get(&cfg);
+        unsigned char local_ip[4] = {cfg.local_ip[0], cfg.local_ip[1], cfg.local_ip[2], cfg.local_ip[3]};
         int local_port = 9999;
         int max = 32;
 
@@ -1522,6 +1757,277 @@ void assertfail_cmd(string ch) {
         }
     }
     printf("%cThis will trigger an assertion failure and may halt the system. To proceed, run: assertfail yes\n", 255, 0, 0);
+}
+
+static void ping_cmd(string ch)
+{
+    // Usage: ping <dst_ip> [count] [local_ip]
+    // Defaults: count=4, local_ip=netcfg local_ip
+    unsigned char dst_ip[4];
+    net_config cfg;
+    net_config_get(&cfg);
+    unsigned char local_ip[4] = {cfg.local_ip[0], cfg.local_ip[1], cfg.local_ip[2], cfg.local_ip[3]};
+    int count = 4;
+
+    const char* s = (const char*)ch;
+    if (!s) {
+        printf("Usage: ping <dst_ip> [count] [local_ip]\n");
+        return;
+    }
+    while (*s && *s != ' ') s++;
+    s = skip_spaces(s);
+
+    if (!s || !*s) {
+        printf("Usage: ping <dst_ip> [count] [local_ip]\n");
+        return;
+    }
+
+    // dst_ip token
+    char tok[32];
+    int n = 0;
+    while (s[n] && s[n] != ' ' && n < (int)sizeof(tok) - 1) {
+        tok[n] = s[n];
+        n++;
+    }
+    tok[n] = 0;
+    if (parse_ipv4(tok, dst_ip) != 0) {
+        printf("%cError: invalid dst_ip (expected a.b.c.d)\n", 255, 0, 0);
+        return;
+    }
+    s = skip_spaces(s + n);
+
+    // optional count
+    if (s && *s) {
+        int v = 0; int any = 0;
+        while (*s >= '0' && *s <= '9') { any = 1; v = (v * 10) + (*s - '0'); s++; }
+        if (any) {
+            if (v <= 0) v = 1;
+            count = v;
+        }
+        s = skip_spaces(s);
+    }
+
+    // optional local_ip
+    if (s && *s) {
+        char tok2[32];
+        int m = 0;
+        while (s[m] && s[m] != ' ' && m < (int)sizeof(tok2) - 1) {
+            tok2[m] = s[m];
+            m++;
+        }
+        tok2[m] = 0;
+        if (parse_ipv4(tok2, local_ip) != 0) {
+            printf("%cError: invalid local_ip (expected a.b.c.d)\n", 255, 0, 0);
+            return;
+        }
+    }
+
+    if (!net_is_inited()) {
+        printf("%cNote%c: run 'e1000 init' first if ping fails.\n", 255, 255, 255, 255, 255, 255);
+    }
+
+    printf("PING ");
+    printf("%d.%d.%d.%d", (int)dst_ip[0], (int)dst_ip[1], (int)dst_ip[2], (int)dst_ip[3]);
+    printf(" from %d.%d.%d.%d (%d request(s))\n",
+           (int)local_ip[0], (int)local_ip[1], (int)local_ip[2], (int)local_ip[3], count);
+
+    int rc = net_icmp_ping(local_ip, dst_ip, count, 0);
+    if (rc < 0) {
+        printf("%cPING failed (%d).\n", 255, 0, 0, rc);
+        return;
+    }
+    printf("PING done: %d/%d replies\n", rc, count);
+}
+
+static void netcfg_cmd(string ch)
+{
+    // Usage: netcfg show | netcfg defaults | netcfg set <key> <a.b.c.d> | netcfg save [path] | netcfg load [path]
+    // Keys: ip, gw, mask, dns
+    // File format: key=value (ip/gw/mask/dns), '#' comments.
+    // Default path: /config/net.cfg
+    const char* s = (const char*)ch;
+    if (!s) {
+        printf("Usage: netcfg show | netcfg defaults | netcfg set ip|gw|mask|dns <a.b.c.d> | netcfg save [path] | netcfg load [path]\n");
+        return;
+    }
+    while (*s && *s != ' ') s++;
+    s = skip_spaces(s);
+
+    // Ensure persisted config is applied before showing/editing.
+    netcfg_try_autoload_quiet(g_current_drive);
+
+    if (!s || !*s || token_eq(s, "show")) {
+        net_config cfg;
+        net_config_get(&cfg);
+        printf("netcfg:\n");
+        printf("  ip=%d.%d.%d.%d\n", (int)cfg.local_ip[0], (int)cfg.local_ip[1], (int)cfg.local_ip[2], (int)cfg.local_ip[3]);
+        printf("  gw=%d.%d.%d.%d\n", (int)cfg.gateway_ip[0], (int)cfg.gateway_ip[1], (int)cfg.gateway_ip[2], (int)cfg.gateway_ip[3]);
+        printf("  mask=%d.%d.%d.%d\n", (int)cfg.netmask[0], (int)cfg.netmask[1], (int)cfg.netmask[2], (int)cfg.netmask[3]);
+        printf("  dns=%d.%d.%d.%d\n", (int)cfg.dns_ip[0], (int)cfg.dns_ip[1], (int)cfg.dns_ip[2], (int)cfg.dns_ip[3]);
+        return;
+    }
+
+    if (token_eq(s, "defaults")) {
+        net_config_set_defaults();
+        printf("netcfg: defaults restored\n");
+        return;
+    }
+
+    if (token_eq(s, "save")) {
+        const char* p = next_token(s);
+        char path[96];
+        if (!p || !*p) {
+            strncpy(path, NETCFG_PATH_PRIMARY, sizeof(path) - 1);
+            path[sizeof(path) - 1] = 0;
+        } else {
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(path) - 1) { path[n] = p[n]; n++; }
+            path[n] = 0;
+        }
+
+        if (netcfg_save_path(g_current_drive, path) != 0) {
+            printf("%cError: netcfg save failed (%s)\n", 255, 0, 0, path);
+            return;
+        }
+        printf("netcfg: saved to %s\n", path);
+        return;
+    }
+
+    if (token_eq(s, "load")) {
+        const char* p = next_token(s);
+        char path[96];
+        int rc = -1;
+        if (!p || !*p) {
+            rc = netcfg_load_path(g_current_drive, NETCFG_PATH_PRIMARY);
+            if (rc != 0) rc = netcfg_load_path(g_current_drive, NETCFG_PATH_FALLBACK);
+            if (rc != 0) {
+                printf("%cError: netcfg load failed (no config file found)\n", 255, 0, 0);
+                return;
+            }
+            printf("netcfg: loaded\n");
+            return;
+        }
+
+        int n = 0;
+        while (p[n] && p[n] != ' ' && n < (int)sizeof(path) - 1) { path[n] = p[n]; n++; }
+        path[n] = 0;
+
+        rc = netcfg_load_path(g_current_drive, path);
+        if (rc != 0) {
+            printf("%cError: netcfg load failed (%s)\n", 255, 0, 0, path);
+            return;
+        }
+        printf("netcfg: loaded from %s\n", path);
+        return;
+    }
+
+    if (token_eq(s, "set")) {
+        const char* p = next_token(s);
+        if (!p || !*p) {
+            printf("Usage: netcfg set ip|gw|mask|dns <a.b.c.d>\n");
+            return;
+        }
+
+        char key[16];
+        int kn = 0;
+        while (p[kn] && p[kn] != ' ' && kn < (int)sizeof(key) - 1) { key[kn] = p[kn]; kn++; }
+        key[kn] = 0;
+        p = skip_spaces(p + kn);
+
+        if (!p || !*p) {
+            printf("%cError: missing value (a.b.c.d)\n", 255, 0, 0);
+            return;
+        }
+
+        char ipstr[32];
+        int n = 0;
+        while (p[n] && p[n] != ' ' && n < (int)sizeof(ipstr) - 1) { ipstr[n] = p[n]; n++; }
+        ipstr[n] = 0;
+
+        unsigned char ip[4];
+        if (parse_ipv4(ipstr, ip) != 0) {
+            printf("%cError: value must be a.b.c.d\n", 255, 0, 0);
+            return;
+        }
+
+        net_config cfg;
+        net_config_get(&cfg);
+        if (strcmp(key, "ip") == 0) {
+            for (int i = 0; i < 4; i++) cfg.local_ip[i] = ip[i];
+        } else if (strcmp(key, "gw") == 0) {
+            for (int i = 0; i < 4; i++) cfg.gateway_ip[i] = ip[i];
+        } else if (strcmp(key, "mask") == 0) {
+            for (int i = 0; i < 4; i++) cfg.netmask[i] = ip[i];
+        } else if (strcmp(key, "dns") == 0) {
+            for (int i = 0; i < 4; i++) cfg.dns_ip[i] = ip[i];
+        } else {
+            printf("%cError: unknown key. Use ip|gw|mask|dns\n", 255, 0, 0);
+            return;
+        }
+
+        (void)net_config_set(&cfg);
+        printf("netcfg: updated\n");
+        return;
+    }
+
+    printf("Usage: netcfg show | netcfg defaults | netcfg set ip|gw|mask|dns <a.b.c.d> | netcfg save [path] | netcfg load [path]\n");
+}
+
+static void netstat_cmd(string ch)
+{
+    (void)ch;
+
+    {
+        net_config cfg;
+        net_config_get(&cfg);
+        printf("netcfg: ip=%d.%d.%d.%d gw=%d.%d.%d.%d mask=%d.%d.%d.%d dns=%d.%d.%d.%d\n",
+               (int)cfg.local_ip[0], (int)cfg.local_ip[1], (int)cfg.local_ip[2], (int)cfg.local_ip[3],
+               (int)cfg.gateway_ip[0], (int)cfg.gateway_ip[1], (int)cfg.gateway_ip[2], (int)cfg.gateway_ip[3],
+               (int)cfg.netmask[0], (int)cfg.netmask[1], (int)cfg.netmask[2], (int)cfg.netmask[3],
+               (int)cfg.dns_ip[0], (int)cfg.dns_ip[1], (int)cfg.dns_ip[2], (int)cfg.dns_ip[3]);
+    }
+
+    printf("netstat: inited=%s\n", net_is_inited() ? "yes" : "no");
+
+    if (net_is_inited()) {
+        uint8 mac[6];
+        if (net_get_mac(mac) == 0) {
+            printf("  mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                   (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2],
+                   (unsigned)mac[3], (unsigned)mac[4], (unsigned)mac[5]);
+        }
+    } else {
+        printf("  (run: e1000 init)\n");
+    }
+
+    // ARP cache dump
+    {
+        net_arp_entry entries[4];
+        uint32 n = net_get_arp_cache(entries, 4);
+        printf("  arp-cache (%d slots):\n", (int)n);
+        for (uint32 i = 0; i < n; i++) {
+            if (!entries[i].valid) continue;
+            printf("    %d.%d.%d.%d -> %02x:%02x:%02x:%02x:%02x:%02x\n",
+                   (int)entries[i].ip[0], (int)entries[i].ip[1], (int)entries[i].ip[2], (int)entries[i].ip[3],
+                   (unsigned)entries[i].mac[0], (unsigned)entries[i].mac[1], (unsigned)entries[i].mac[2],
+                   (unsigned)entries[i].mac[3], (unsigned)entries[i].mac[4], (unsigned)entries[i].mac[5]);
+        }
+    }
+
+    // UDP stats
+    {
+        net_udp_stats st = net_udp_get_stats();
+        uint32 q = net_udp_queue_total();
+        printf("  udp: queued=%d enq=%d drop=%d trunc=%d\n",
+               (int)q, (int)st.udp_rx_enqueued, (int)st.udp_rx_dropped, (int)st.udp_rx_truncated);
+    }
+
+    // ICMP stats
+    {
+        net_icmp_stats st = net_icmp_get_stats();
+        printf("  icmp: echo-req-rx=%d echo-rep-rx=%d echo-rep-tx=%d echo-rep-drop=%d\n",
+               (int)st.echo_req_rx, (int)st.echo_rep_rx, (int)st.echo_rep_tx, (int)st.echo_rep_dropped);
+    }
 }
 
 void serialtest_cmd(string ch) {
@@ -2544,6 +3050,11 @@ void init_cmd(string ch) {
     printf("%c  Initializing ATA drives...\n", 255, 255, 255);
     extern void ata_init_drives(void);
     ata_init_drives();
+
+    // Best-effort load of persisted network config (does not require e1000 init).
+    // Keep quiet on failure (missing file is normal).
+    (void)ch;
+    netcfg_try_autoload_quiet(g_current_drive);
     
     printf("%cSystem initialization complete!\n", 0, 255, 0);
     printf("%cAll services are now available.\n", 0, 255, 0);

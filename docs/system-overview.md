@@ -237,14 +237,15 @@ Loaded on-demand to conserve memory:
 - **ARP**: Address Resolution Protocol for MAC/IP mapping
 - **IPv4**: Basic IPv4 packet handling (no fragmentation yet)
 - **UDP**: Full UDP socket-like interface for userspace
-- **Statistics**: Per-protocol statistics (`udp stats`, `udp drain`)
+- **Statistics**: Per-protocol statistics (`e1000 udp-stats`, `e1000 udp-drain`)
 
 ### Network Commands
 - `e1000 probe|init|regs|test` - NIC diagnostics and initialization
-- `udp listen <port>` - Listen for UDP packets
-- `udp send <ip> <port> <message>` - Send UDP packets
-- `udp stats` - Display UDP statistics
-- `pci scan` - Enumerate PCI devices
+- `e1000 udp-listen|udp-send|udp-echo|udp-stats|udp-drain` - UDP utilities
+- `ping <dst_ip> [count] [local_ip]` - ICMP echo
+- `netstat` - Network status
+- `netcfg show|defaults|set|save|load ...` - Network config (runtime + persisted)
+- `pciscan [net]` - Enumerate PCI devices
 
 ## Robustness Features
 

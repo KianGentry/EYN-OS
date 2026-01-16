@@ -67,8 +67,8 @@ status          # Check which commands are loaded
 |---------|-------------|---------|
 | `drive` | Switch disk drive | `drive 1` |
 | `lsata` | List ATA drives | `lsata` |
-| `pci` | PCI device scan | `pci scan` |
-| `ver` | Show version | `ver` |
+| `pciscan` | PCI device scan | `pciscan net` |
+| `ver` | Show version (with REI logo if available) | `ver` |
 | `help` | Show help | `help` |
 | `history` | Show command history | `history` |
 | `alias` | Create command alias | `alias ll ls -la` |
@@ -109,25 +109,36 @@ status          # Check which commands are loaded
 |---------|-------------|---------|
 | `e1000` | E1000 NIC control | `e1000 init` |
 | `e1000probe` | Probe e1000 NIC | `e1000probe` |
-| `pci` | PCI device scan | `pci scan` |
-| `udp` | UDP operations | `udp listen 10000` |
+| `pciscan` | PCI device scan | `pciscan net` |
+| `ping` | ICMP echo request | `ping 10.0.2.2` |
+| `netstat` | Network status | `netstat` |
+| `netcfg` | Network configuration | `netcfg show` |
 
 ### Network Examples
 ```bash
 # Initialize network
 e1000 init
 
-# Listen for UDP packets on port 10000
-udp listen 10000
+# Show network config (defaults match QEMU user-net)
+netcfg show
+
+# Persist network config to /config/net.cfg
+netcfg save
+
+# Ping the QEMU gateway/host
+ping 10.0.2.2
+
+# Listen for UDP packets on port 9999
+e1000 udp-listen 9999
 
 # Send UDP packet
-udp send 10.0.2.2 5000 Hello from EYN-OS
+e1000 udp-send 10.0.2.2 5000 Hello from EYN-OS
 
 # Check UDP statistics
-udp stats
+e1000 udp-stats
 
 # Clear receive queue
-udp drain
+e1000 udp-drain
 ```
 
 ## UI & Tiling Manager Commands

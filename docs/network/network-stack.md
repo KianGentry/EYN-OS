@@ -231,7 +231,7 @@ Discards all queued packets.
 
 ### Sending UDP Packet
 
-1. User: `udp send 10.0.2.2 5000 Hello`
+1. User: `e1000 udp-send 10.0.2.2 5000 Hello`
 2. Command handler calls `net_udp_send_to()`
 3. ARP lookup for 10.0.2.2 → MAC
    - If not cached, send ARP request
@@ -285,12 +285,18 @@ Cache updated: `10.0.2.2 → 52:54:00:12:34:56`
 
 ## Network Configuration
 
-Currently hardcoded in `netstack.c`:
+Runtime-configurable via the netstack configuration layer and the `netcfg` shell command.
 
-```c
-static uint8 g_local_ip[4] = {10, 0, 2, 15};
-static uint8 g_gateway_ip[4] = {10, 0, 2, 2};
-```
+Defaults match QEMU user-mode networking (slirp):
+- Local IP: 10.0.2.15
+- Gateway/host: 10.0.2.2
+- Netmask: 255.255.255.0
+- DNS: 10.0.2.3
+
+Key APIs (see `include/network/netstack.h`):
+- `net_config_get(...)` / `net_config_set(...)`
+- `net_config_set_defaults()`
+- `net_get_local_ip(...)`
 
 For QEMU user-mode networking:
 - Gateway/host: 10.0.2.2
@@ -310,15 +316,19 @@ Prints:
 - IPv4 packet info (src/dst IP, protocol)
 - UDP delivery (port, length)
 
-Use `udp stats` to monitor:
+Use `e1000 udp-stats` to monitor:
 - Packet counts
 - Dropped packets (queue overflow)
 - Checksum errors
 
+Commands:
+- `e1000 udp-stats`
+- `netstat`
+
 ## Limitations
 
 1. **No TCP**: Only UDP implemented
-2. **No ICMP**: Can't respond to ping
+2. **Limited ICMP**: Only ICMP echo (ping) request/reply
 3. **No Fragmentation**: Max packet ~1500 bytes
 4. **Static IP**: No DHCP
 5. **Small Queue**: 8 packets max
@@ -343,7 +353,6 @@ Memory usage:
 ## Future Enhancements
 
 - TCP implementation (3-way handshake, retransmission, flow control)
-- ICMP echo (ping) support
 - DHCP client
 - DNS resolver
 - Multiple sockets (fd-like interface)

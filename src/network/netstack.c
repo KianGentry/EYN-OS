@@ -7,6 +7,7 @@
 #include <utilities/tile_manager.h>
 #include <utilities/util.h>
 #include <watchdog.h>
+#include <misc/sched.h>
 
 // The shell command blocks the normal input pump, so we must poll Ctrl-C
 // ourselves while listening.
@@ -50,6 +51,14 @@ typedef struct __attribute__((packed)) udp_hdr {
     uint16 checksum_be;
 } udp_hdr;
 
+typedef struct __attribute__((packed)) icmp_echo_hdr {
+    uint8 type;
+    uint8 code;
+    uint16 checksum_be;
+    uint16 id_be;
+    uint16 seq_be;
+} icmp_echo_hdr;
+
 typedef struct arp_cache_entry {
     uint8 ip[4];
     uint8 mac[6];
@@ -61,7 +70,16 @@ typedef struct udp_rx_slot {
     net_udp_rx_packet pkt;
 } udp_rx_slot;
 
+typedef struct icmp_echo_reply_slot {
+    uint8 valid;
+    uint8 src_ip[4];
+    uint16 id;
+    uint16 seq;
+    uint32 payload_len;
+} icmp_echo_reply_slot;
+
 static struct {
+    net_config cfg;
     int inited;
     uint8 mac[6];
     const netdev* dev;
@@ -69,7 +87,47 @@ static struct {
 
     udp_rx_slot udp_rxq[8];
     net_udp_stats udp_stats;
-} g_net;
+
+    icmp_echo_reply_slot icmp_rxq[4];
+    net_icmp_stats icmp_stats;
+} g_net = {
+    .cfg = {
+        .local_ip = {10, 0, 2, 15},
+        .gateway_ip = {10, 0, 2, 2},
+        .netmask = {255, 255, 255, 0},
+        .dns_ip = {10, 0, 2, 3},
+    },
+};
+
+void net_config_get(net_config* out)
+{
+    if (!out) return;
+    *out = g_net.cfg;
+}
+
+int net_config_set(const net_config* in)
+{
+    if (!in) return -1;
+    g_net.cfg = *in;
+    return 0;
+}
+
+void net_config_set_defaults(void)
+{
+    g_net.cfg.local_ip[0] = 10; g_net.cfg.local_ip[1] = 0; g_net.cfg.local_ip[2] = 2; g_net.cfg.local_ip[3] = 15;
+    g_net.cfg.gateway_ip[0] = 10; g_net.cfg.gateway_ip[1] = 0; g_net.cfg.gateway_ip[2] = 2; g_net.cfg.gateway_ip[3] = 2;
+    g_net.cfg.netmask[0] = 255; g_net.cfg.netmask[1] = 255; g_net.cfg.netmask[2] = 255; g_net.cfg.netmask[3] = 0;
+    g_net.cfg.dns_ip[0] = 10; g_net.cfg.dns_ip[1] = 0; g_net.cfg.dns_ip[2] = 2; g_net.cfg.dns_ip[3] = 3;
+}
+
+void net_get_local_ip(uint8 out_ip[4])
+{
+    if (!out_ip) return;
+    out_ip[0] = g_net.cfg.local_ip[0];
+    out_ip[1] = g_net.cfg.local_ip[1];
+    out_ip[2] = g_net.cfg.local_ip[2];
+    out_ip[3] = g_net.cfg.local_ip[3];
+}
 
 static uint16 be16(uint16 x)
 {
@@ -143,6 +201,8 @@ static int arp_send_reply_silent(const uint8 target_mac[6],
                                 const uint8 sender_ip[4], const uint8 sender_mac[6],
                                 const uint8 target_ip[4]);
 
+static int arp_resolve(const uint8 sender_ip[4], const uint8 target_ip[4], uint8 out_mac[6], int arp_spins);
+
 static void udp_rxq_clear(void)
 {
     for (int i = 0; i < (int)(sizeof(g_net.udp_rxq) / sizeof(g_net.udp_rxq[0])); i++) {
@@ -151,6 +211,49 @@ static void udp_rxq_clear(void)
     g_net.udp_stats.udp_rx_enqueued = 0;
     g_net.udp_stats.udp_rx_dropped = 0;
     g_net.udp_stats.udp_rx_truncated = 0;
+}
+
+static void icmp_rxq_clear(void)
+{
+    for (int i = 0; i < (int)(sizeof(g_net.icmp_rxq) / sizeof(g_net.icmp_rxq[0])); i++) {
+        g_net.icmp_rxq[i].valid = 0;
+    }
+    g_net.icmp_stats.echo_req_rx = 0;
+    g_net.icmp_stats.echo_rep_rx = 0;
+    g_net.icmp_stats.echo_rep_tx = 0;
+    g_net.icmp_stats.echo_rep_dropped = 0;
+}
+
+static void icmp_rxq_enqueue_reply(const uint8 src_ip[4], uint16 id, uint16 seq, uint32 payload_len)
+{
+    for (int i = 0; i < (int)(sizeof(g_net.icmp_rxq) / sizeof(g_net.icmp_rxq[0])); i++) {
+        if (!g_net.icmp_rxq[i].valid) {
+            g_net.icmp_rxq[i].valid = 1;
+            for (int j = 0; j < 4; j++) g_net.icmp_rxq[i].src_ip[j] = src_ip[j];
+            g_net.icmp_rxq[i].id = id;
+            g_net.icmp_rxq[i].seq = seq;
+            g_net.icmp_rxq[i].payload_len = payload_len;
+            return;
+        }
+    }
+    g_net.icmp_stats.echo_rep_dropped++;
+}
+
+static int icmp_rxq_dequeue_match(uint16 id, uint16 seq, uint8 out_src_ip[4], uint32* out_payload_len)
+{
+    for (int i = 0; i < (int)(sizeof(g_net.icmp_rxq) / sizeof(g_net.icmp_rxq[0])); i++) {
+        if (g_net.icmp_rxq[i].valid && g_net.icmp_rxq[i].id == id && g_net.icmp_rxq[i].seq == seq) {
+            if (out_src_ip) {
+                for (int j = 0; j < 4; j++) out_src_ip[j] = g_net.icmp_rxq[i].src_ip[j];
+            }
+            if (out_payload_len) {
+                *out_payload_len = g_net.icmp_rxq[i].payload_len;
+            }
+            g_net.icmp_rxq[i].valid = 0;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static int udp_rxq_enqueue(const uint8 src_ip[4], uint16 src_port,
@@ -204,6 +307,7 @@ int net_init(const netdev* dev)
 
     g_net.dev = dev;
     udp_rxq_clear();
+    icmp_rxq_clear();
     g_net.inited = 1;
     return 0;
 }
@@ -216,6 +320,153 @@ int net_is_inited(void)
 net_udp_stats net_udp_get_stats(void)
 {
     return g_net.udp_stats;
+}
+
+net_icmp_stats net_icmp_get_stats(void)
+{
+    return g_net.icmp_stats;
+}
+
+int net_get_mac(uint8 out_mac[6])
+{
+    if (!out_mac) return -1;
+    if (!g_net.inited) return -2;
+    for (int i = 0; i < 6; i++) out_mac[i] = g_net.mac[i];
+    return 0;
+}
+
+uint32 net_get_arp_cache(net_arp_entry* out, uint32 out_cap)
+{
+    if (!out || out_cap == 0u) return 0;
+    uint32 written = 0;
+    for (int i = 0; i < (int)(sizeof(g_net.arp_cache) / sizeof(g_net.arp_cache[0])); i++) {
+        if (written >= out_cap) break;
+        out[written].valid = g_net.arp_cache[i].valid;
+        for (int j = 0; j < 4; j++) out[written].ip[j] = g_net.arp_cache[i].ip[j];
+        for (int j = 0; j < 6; j++) out[written].mac[j] = g_net.arp_cache[i].mac[j];
+        written++;
+    }
+    return written;
+}
+
+uint32 net_udp_queue_total(void)
+{
+    if (!g_net.inited) return 0;
+    uint32 count = 0;
+    for (int i = 0; i < (int)(sizeof(g_net.udp_rxq) / sizeof(g_net.udp_rxq[0])); i++) {
+        if (g_net.udp_rxq[i].valid) count++;
+    }
+    return count;
+}
+
+static int icmp_send_echo_reply_direct(const uint8 dst_mac[6],
+                                      const uint8 local_ip[4], const uint8 dst_ip[4],
+                                      uint16 id, uint16 seq,
+                                      const uint8* payload, uint32 payload_len)
+{
+    uint8 frame[1600];
+    uint32 off = 0;
+
+    eth_hdr* eh = (eth_hdr*)(frame + off);
+    for (int i = 0; i < 6; i++) eh->dst[i] = dst_mac[i];
+    for (int i = 0; i < 6; i++) eh->src[i] = g_net.mac[i];
+    eh->ethertype_be = be16(0x0800u);
+    off += (uint32)sizeof(eth_hdr);
+
+    ipv4_hdr* ip = (ipv4_hdr*)(frame + off);
+    memset(ip, 0, sizeof(*ip));
+    ip->ver_ihl = 0x45;
+    ip->ttl = 64;
+    ip->proto = 1;
+    for (int i = 0; i < 4; i++) ip->src[i] = local_ip[i];
+    for (int i = 0; i < 4; i++) ip->dst[i] = dst_ip[i];
+
+    uint16 ip_total_len = (uint16)(sizeof(ipv4_hdr) + sizeof(icmp_echo_hdr) + payload_len);
+    ip->total_len_be = be16(ip_total_len);
+    static uint16 ip_id = 0x9000;
+    ip->id_be = be16(ip_id++);
+    ip->flags_frag_off_be = be16(0u);
+    ip->hdr_checksum_be = 0;
+    ip->hdr_checksum_be = be16(ipv4_checksum16(ip, (uint32)sizeof(*ip)));
+    off += (uint32)sizeof(ipv4_hdr);
+
+    icmp_echo_hdr* ic = (icmp_echo_hdr*)(frame + off);
+    ic->type = 0;
+    ic->code = 0;
+    ic->checksum_be = 0;
+    ic->id_be = be16(id);
+    ic->seq_be = be16(seq);
+    off += (uint32)sizeof(icmp_echo_hdr);
+
+    if (payload_len != 0u) {
+        memcpy(frame + off, payload, payload_len);
+        off += payload_len;
+    }
+
+    uint16 csum = ipv4_checksum16((const void*)(frame + sizeof(eth_hdr) + sizeof(ipv4_hdr)),
+                                 (uint32)sizeof(icmp_echo_hdr) + payload_len);
+    ic->checksum_be = be16(csum);
+
+    if (off < 60u) {
+        memset(frame + off, 0, 60u - off);
+        off = 60u;
+    }
+    return g_net.dev->send_frame(frame, off);
+}
+
+static int icmp_send_echo_request(const uint8 local_ip[4], const uint8 dst_ip[4], const uint8 dst_mac[6],
+                                 uint16 id, uint16 seq)
+{
+    // Small fixed payload (helps validate checksums/length).
+    uint8 payload[32];
+    for (uint32 i = 0; i < (uint32)sizeof(payload); i++) payload[i] = (uint8)('A' + (i % 26u));
+
+    uint8 frame[1600];
+    uint32 off = 0;
+
+    eth_hdr* eh = (eth_hdr*)(frame + off);
+    for (int i = 0; i < 6; i++) eh->dst[i] = dst_mac[i];
+    for (int i = 0; i < 6; i++) eh->src[i] = g_net.mac[i];
+    eh->ethertype_be = be16(0x0800u);
+    off += (uint32)sizeof(eth_hdr);
+
+    ipv4_hdr* ip = (ipv4_hdr*)(frame + off);
+    memset(ip, 0, sizeof(*ip));
+    ip->ver_ihl = 0x45;
+    ip->ttl = 64;
+    ip->proto = 1;
+    for (int i = 0; i < 4; i++) ip->src[i] = local_ip[i];
+    for (int i = 0; i < 4; i++) ip->dst[i] = dst_ip[i];
+
+    uint16 ip_total_len = (uint16)(sizeof(ipv4_hdr) + sizeof(icmp_echo_hdr) + sizeof(payload));
+    ip->total_len_be = be16(ip_total_len);
+    static uint16 ip_id = 0x1000;
+    ip->id_be = be16(ip_id++);
+    ip->flags_frag_off_be = be16(0u);
+    ip->hdr_checksum_be = 0;
+    ip->hdr_checksum_be = be16(ipv4_checksum16(ip, (uint32)sizeof(*ip)));
+    off += (uint32)sizeof(ipv4_hdr);
+
+    icmp_echo_hdr* ic = (icmp_echo_hdr*)(frame + off);
+    ic->type = 8;
+    ic->code = 0;
+    ic->checksum_be = 0;
+    ic->id_be = be16(id);
+    ic->seq_be = be16(seq);
+    off += (uint32)sizeof(icmp_echo_hdr);
+
+    memcpy(frame + off, payload, (uint32)sizeof(payload));
+    off += (uint32)sizeof(payload);
+
+    uint16 csum = ipv4_checksum16((const void*)(frame + sizeof(eth_hdr) + sizeof(ipv4_hdr)),
+                                 (uint32)sizeof(icmp_echo_hdr) + (uint32)sizeof(payload));
+    ic->checksum_be = be16(csum);
+
+    if (off < 60u) {
+        memset(frame + off, 0, 60u - off);
+        off = 60u;
+    }
+    return g_net.dev->send_frame(frame, off);
 }
 
 uint32 net_udp_queue_count(uint16 local_port)
@@ -298,7 +549,7 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
             }
         }
 
-        // IPv4 + UDP: enqueue.
+        // IPv4: basic handling (UDP enqueue + ICMP echo).
         if (len < (uint32)(sizeof(eth_hdr) + sizeof(ipv4_hdr))) continue;
         eth_hdr* eh = (eth_hdr*)frame;
         if (be16(eh->ethertype_be) != 0x0800u) continue;
@@ -309,9 +560,48 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
         if (ver != 4 || ihl_words < 5) continue;
 
         uint32 ip_hdr_len = (uint32)ihl_words * 4u;
-        if (len < (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(udp_hdr)) continue;
-        if (ip->proto != 17) continue;
         if (!ipv4_eq(ip->dst, local_ip)) continue;
+
+        // Opportunistically learn IP->MAC mapping from IPv4 frames.
+        arp_cache_update(ip->src, eh->src);
+
+        if (ip->proto == 1) {
+            // ICMP echo support for debugging (ping).
+            if (len < (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(icmp_echo_hdr)) continue;
+
+            icmp_echo_hdr* ic = (icmp_echo_hdr*)(frame + sizeof(eth_hdr) + ip_hdr_len);
+            uint16 id = be16(ic->id_be);
+            uint16 seq = be16(ic->seq_be);
+
+            // Use IPv4 total length to compute payload length (bounds-checked against frame len).
+            uint32 ip_total_len = (uint32)be16(ip->total_len_be);
+            if (ip_total_len < ip_hdr_len + (uint32)sizeof(icmp_echo_hdr)) continue;
+            uint32 icmp_total_len = ip_total_len - ip_hdr_len;
+            uint32 icmp_payload_len = icmp_total_len - (uint32)sizeof(icmp_echo_hdr);
+            uint32 icmp_payload_off = (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(icmp_echo_hdr);
+            if (icmp_payload_off > len) continue;
+            if (icmp_payload_off + icmp_payload_len > len) {
+                if (len > icmp_payload_off) icmp_payload_len = len - icmp_payload_off;
+                else icmp_payload_len = 0;
+            }
+
+            if (ic->type == 8 && ic->code == 0) {
+                // Echo request to our IP: reply directly back to sender MAC.
+                g_net.icmp_stats.echo_req_rx++;
+                int rc = icmp_send_echo_reply_direct(eh->src, ip->dst, ip->src, id, seq,
+                                                     frame + icmp_payload_off, icmp_payload_len);
+                if (rc == 0) g_net.icmp_stats.echo_rep_tx++;
+            } else if (ic->type == 0 && ic->code == 0) {
+                // Echo reply: enqueue for ping.
+                g_net.icmp_stats.echo_rep_rx++;
+                icmp_rxq_enqueue_reply(ip->src, id, seq, icmp_payload_len);
+            }
+            continue;
+        }
+
+        // UDP receive enqueue.
+        if (ip->proto != 17) continue;
+        if (len < (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(udp_hdr)) continue;
 
         udp_hdr* udp = (udp_hdr*)(frame + sizeof(eth_hdr) + ip_hdr_len);
         uint16 src_port = be16(udp->src_port_be);
@@ -333,6 +623,88 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
     }
 
     return (int)processed;
+}
+
+int net_icmp_ping(const uint8 local_ip[4], const uint8 dst_ip[4], int count, int timeout_spins)
+{
+    if (!local_ip || !dst_ip) return -1;
+    if (count <= 0) count = 4;
+    if (timeout_spins <= 0) timeout_spins = 8000000;
+
+    if (net_init_e1000_default() != 0) return -2;
+
+    // Stable ID so we can match replies.
+    const uint16 id = 0xE100;
+    int replies = 0;
+
+    g_user_interrupt = 0;
+
+    for (int i = 0; i < count; i++) {
+        watchdog_kick("net-ping");
+        poll_keyboard_for_ctrl_c();
+        if (g_user_interrupt) {
+            g_user_interrupt = 0;
+            break;
+        }
+
+        uint16 seq = (uint16)(i + 1);
+
+        uint8 dst_mac[6];
+        int rc = arp_resolve(local_ip, dst_ip, dst_mac, 800000);
+        if (rc != 0) {
+            printf("%cPING%c ", 255, 255, 255, 255, 255, 255);
+            print_ipv4_bytes(dst_ip);
+            printf(": arp failed (%d)\n", rc);
+            continue;
+        }
+
+        uint32 send_tick = sched_get_tick_count();
+        rc = icmp_send_echo_request(local_ip, dst_ip, dst_mac, id, seq);
+        if (rc != 0) {
+            printf("%cPING%c ", 255, 255, 255, 255, 255, 255);
+            print_ipv4_bytes(dst_ip);
+            printf(": tx failed (%d)\n", rc);
+            continue;
+        }
+
+        int got_reply = 0;
+        for (int spin = 0; spin < timeout_spins; spin++) {
+            if ((spin & 0x3FFF) == 0) {
+                watchdog_kick("net-ping-wait");
+                poll_keyboard_for_ctrl_c();
+                if (g_user_interrupt) {
+                    g_user_interrupt = 0;
+                    return replies;
+                }
+            }
+            (void)net_poll(local_ip, 64);
+
+            uint8 src_ip[4];
+            uint32 payload_len = 0;
+            int found = icmp_rxq_dequeue_match(id, seq, src_ip, &payload_len);
+            if (found == 1) {
+                uint32 now_tick = sched_get_tick_count();
+                uint32 rtt_ticks = now_tick - send_tick;
+                printf("%cPING%c ", 0, 255, 0, 255, 255, 255);
+                print_ipv4_bytes(dst_ip);
+                printf(": seq=%d len=%d time=%d ticks\n", (int)seq, (int)payload_len, (int)rtt_ticks);
+                replies++;
+                got_reply = 1;
+                break;
+            }
+        }
+
+        if (!got_reply) {
+            printf("%cPING%c ", 255, 255, 255, 255, 255, 255);
+            print_ipv4_bytes(dst_ip);
+            printf(": seq=%d timeout\n", (int)seq);
+        }
+
+        // Small delay between pings.
+        sleep(1);
+    }
+
+    return replies;
 }
 
 static int arp_send_request_silent(const uint8 sender_ip[4], const uint8 target_ip[4])
