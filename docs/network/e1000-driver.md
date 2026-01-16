@@ -230,7 +230,6 @@ QEMU's user-mode networking provides:
 
 ## Reference
 
-- [Intel 82540EP/EM Datasheet](https://www.intel.com/content/dam/doc/datasheet/82540ep-gbe-controller-datasheet.pdf)
 - [OSDev Wiki: Intel 8254x](https://wiki.osdev.org/Intel_8254x)
 - QEMU e1000 emulation: `hw/net/e1000.c` in QEMU source
 
