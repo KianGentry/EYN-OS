@@ -861,7 +861,7 @@ static void netstat_cmd(string ch);
 static void netcfg_cmd(string ch);
 REGISTER_SHELL_COMMAND(ping_cmd_info, "ping", ping_cmd, CMD_DIAGNOSTIC, "Send ICMP echo request(s).\nUsage: ping <dst_ip> [count] [local_ip]\nExample: ping 10.0.2.2\nNote: run 'e1000 init' first.", "ping 10.0.2.2");
 REGISTER_SHELL_COMMAND(netstat_cmd_info, "netstat", netstat_cmd, CMD_DIAGNOSTIC, "Network status (netstack + ARP + UDP + ICMP).\nUsage: netstat\nNote: run 'e1000 init' first for full info.", "netstat");
-REGISTER_SHELL_COMMAND(netcfg_cmd_info, "netcfg", netcfg_cmd, CMD_DIAGNOSTIC, "Network configuration (defaults match QEMU user-net).\nUsage: netcfg show | netcfg defaults | netcfg set ip <a.b.c.d> | netcfg set gw <a.b.c.d> | netcfg set mask <a.b.c.d> | netcfg set dns <a.b.c.d> | netcfg save [path] | netcfg load [path]\nDefault path: /config/net.cfg", "netcfg show");
+REGISTER_SHELL_COMMAND(netcfg_cmd_info, "netcfg", netcfg_cmd, CMD_DIAGNOSTIC, "Network configuration (defaults match QEMU user-net).\nUsage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set ip|gw|mask|dns <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]\nDefault path: /config/net.cfg", "netcfg show");
 
 typedef struct pciscan_ctx {
     uint32 count;
@@ -1154,6 +1154,33 @@ static int extract_value_after(const char* s, const char* key, char* out, int ou
     }
     out[n] = '\0';
     return 0;
+}
+
+static int netcfg_ipv4_is_zero_u8(const uint8 ip[4])
+{
+    return ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0;
+}
+
+static uint32 netcfg_ipv4_to_u32(const uint8 ip[4])
+{
+    return ((uint32)ip[0] << 24) | ((uint32)ip[1] << 16) | ((uint32)ip[2] << 8) | (uint32)ip[3];
+}
+
+static int netcfg_netmask_is_contiguous(const uint8 mask[4])
+{
+    uint32 m = netcfg_ipv4_to_u32(mask);
+    if (m == 0u) return 0;
+    // Invert mask; valid masks have contiguous 1s at LSB after invert.
+    uint32 x = ~m;
+    return (x & (x + 1u)) == 0u;
+}
+
+static int netcfg_same_subnet(const uint8 a[4], const uint8 b[4], const uint8 mask[4])
+{
+    uint32 au = netcfg_ipv4_to_u32(a);
+    uint32 bu = netcfg_ipv4_to_u32(b);
+    uint32 mu = netcfg_ipv4_to_u32(mask);
+    return ((au & mu) == (bu & mu));
 }
 
 void e1000_cmd(string arg)
@@ -1474,6 +1501,15 @@ void e1000_cmd(string arg)
             printf(":%d (%d bytes)\n", dst_port, (int)strlen(msg));
         } else {
             printf("%cUDP send failed (%d)", 255, 0, 0, rc);
+            if (rc == -203) {
+                printf(" (ARP timeout: check dst_ip, run 'e1000 init', try 'e1000 arp-test %d.%d.%d.%d %d.%d.%d.%d')",
+                       (int)src_ip[0], (int)src_ip[1], (int)src_ip[2], (int)src_ip[3],
+                       (int)dst_ip[0], (int)dst_ip[1], (int)dst_ip[2], (int)dst_ip[3]);
+            } else if (rc == -202) {
+                printf(" (ARP RX error)");
+            } else if (rc <= -200 && rc >= -299) {
+                printf(" (ARP resolve failed)");
+            }
             printf("\n");
         }
         return;
@@ -1841,13 +1877,13 @@ static void ping_cmd(string ch)
 
 static void netcfg_cmd(string ch)
 {
-    // Usage: netcfg show | netcfg defaults | netcfg set <key> <a.b.c.d> | netcfg save [path] | netcfg load [path]
+    // Usage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set <key> <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]
     // Keys: ip, gw, mask, dns
     // File format: key=value (ip/gw/mask/dns), '#' comments.
     // Default path: /config/net.cfg
     const char* s = (const char*)ch;
     if (!s) {
-        printf("Usage: netcfg show | netcfg defaults | netcfg set ip|gw|mask|dns <a.b.c.d> | netcfg save [path] | netcfg load [path]\n");
+        printf("Usage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set ip|gw|mask|dns <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]\n");
         return;
     }
     while (*s && *s != ' ') s++;
@@ -1867,9 +1903,82 @@ static void netcfg_cmd(string ch)
         return;
     }
 
+    if (token_eq(s, "verify")) {
+        net_config cfg;
+        net_config_get(&cfg);
+
+        int ok = 1;
+        if (netcfg_ipv4_is_zero_u8(cfg.local_ip)) {
+            printf("%cnetcfg verify:%c ip is 0.0.0.0\n", 255, 255, 0, 255, 255, 255);
+            ok = 0;
+        }
+        if (!netcfg_netmask_is_contiguous(cfg.netmask)) {
+            printf("%cnetcfg verify:%c netmask is not contiguous\n", 255, 255, 0, 255, 255, 255);
+            ok = 0;
+        }
+
+        if (!netcfg_ipv4_is_zero_u8(cfg.gateway_ip)) {
+            uint32 ipu = netcfg_ipv4_to_u32(cfg.local_ip);
+            uint32 gwu = netcfg_ipv4_to_u32(cfg.gateway_ip);
+            uint32 mu = netcfg_ipv4_to_u32(cfg.netmask);
+            if ((ipu & mu) != (gwu & mu)) {
+                printf("%cnetcfg verify:%c gw not in same subnet as ip (mask applied)\n", 255, 255, 0, 255, 255, 255);
+                ok = 0;
+            }
+        }
+
+        if (ok) {
+            printf("%cnetcfg verify:%c ok\n", 0, 255, 0, 255, 255, 255);
+            return;
+        }
+        printf("%cnetcfg verify:%c warnings above\n", 255, 255, 0, 255, 255, 255);
+        return;
+    }
+
+    if (token_eq(s, "route")) {
+        const char* p = next_token(s);
+        if (!p || !*p) {
+            printf("Usage: netcfg route <dst_ip>\n");
+            return;
+        }
+
+        char ipstr[32];
+        int n = 0;
+        while (p[n] && p[n] != ' ' && n < (int)sizeof(ipstr) - 1) { ipstr[n] = p[n]; n++; }
+        ipstr[n] = 0;
+
+        unsigned char dst_ip[4];
+        if (parse_ipv4(ipstr, dst_ip) != 0) {
+            printf("%cError: dst_ip must be a.b.c.d\n", 255, 0, 0);
+            return;
+        }
+
+        net_config cfg;
+        net_config_get(&cfg);
+
+        int on_link = netcfg_same_subnet(cfg.local_ip, dst_ip, cfg.netmask);
+        int gw_set = !netcfg_ipv4_is_zero_u8(cfg.gateway_ip);
+
+        printf("route: dst=%d.%d.%d.%d ", (int)dst_ip[0], (int)dst_ip[1], (int)dst_ip[2], (int)dst_ip[3]);
+        if (!on_link && gw_set) {
+            printf("via gw=%d.%d.%d.%d\n", (int)cfg.gateway_ip[0], (int)cfg.gateway_ip[1], (int)cfg.gateway_ip[2], (int)cfg.gateway_ip[3]);
+        } else {
+            printf("direct\n");
+        }
+        return;
+    }
+
     if (token_eq(s, "defaults")) {
+        const char* rest = next_token(s);
         net_config_set_defaults();
         printf("netcfg: defaults restored\n");
+        if (rest && token_eq(rest, "--save")) {
+            if (netcfg_save_path(g_current_drive, NETCFG_PATH_PRIMARY) != 0) {
+                printf("%cError: netcfg save failed (%s)\n", 255, 0, 0, NETCFG_PATH_PRIMARY);
+                return;
+            }
+            printf("netcfg: saved to %s\n", NETCFG_PATH_PRIMARY);
+        }
         return;
     }
 
@@ -1924,7 +2033,7 @@ static void netcfg_cmd(string ch)
     if (token_eq(s, "set")) {
         const char* p = next_token(s);
         if (!p || !*p) {
-            printf("Usage: netcfg set ip|gw|mask|dns <a.b.c.d>\n");
+            printf("Usage: netcfg set ip|gw|mask|dns <a.b.c.d> [--save]\n");
             return;
         }
 
@@ -1943,6 +2052,9 @@ static void netcfg_cmd(string ch)
         int n = 0;
         while (p[n] && p[n] != ' ' && n < (int)sizeof(ipstr) - 1) { ipstr[n] = p[n]; n++; }
         ipstr[n] = 0;
+
+        const char* rest = skip_spaces(p + n);
+        int do_save = (rest && token_eq(rest, "--save"));
 
         unsigned char ip[4];
         if (parse_ipv4(ipstr, ip) != 0) {
@@ -1967,10 +2079,18 @@ static void netcfg_cmd(string ch)
 
         (void)net_config_set(&cfg);
         printf("netcfg: updated\n");
+
+        if (do_save) {
+            if (netcfg_save_path(g_current_drive, NETCFG_PATH_PRIMARY) != 0) {
+                printf("%cError: netcfg save failed (%s)\n", 255, 0, 0, NETCFG_PATH_PRIMARY);
+                return;
+            }
+            printf("netcfg: saved to %s\n", NETCFG_PATH_PRIMARY);
+        }
         return;
     }
 
-    printf("Usage: netcfg show | netcfg defaults | netcfg set ip|gw|mask|dns <a.b.c.d> | netcfg save [path] | netcfg load [path]\n");
+    printf("Usage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set ip|gw|mask|dns <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]\n");
 }
 
 static void netstat_cmd(string ch)
@@ -2018,8 +2138,9 @@ static void netstat_cmd(string ch)
     {
         net_udp_stats st = net_udp_get_stats();
         uint32 q = net_udp_queue_total();
-        printf("  udp: queued=%d enq=%d drop=%d trunc=%d\n",
-               (int)q, (int)st.udp_rx_enqueued, (int)st.udp_rx_dropped, (int)st.udp_rx_truncated);
+         printf("  udp: queued=%d enq=%d drop=%d trunc=%d badcsum=%d txcsum=%d\n",
+             (int)q, (int)st.udp_rx_enqueued, (int)st.udp_rx_dropped, (int)st.udp_rx_truncated,
+             (int)st.udp_rx_bad_checksum, (int)st.udp_tx_checksums);
     }
 
     // ICMP stats

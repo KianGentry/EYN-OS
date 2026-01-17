@@ -73,6 +73,8 @@ typedef struct net_udp_stats {
     uint32 udp_rx_enqueued;
     uint32 udp_rx_dropped;
     uint32 udp_rx_truncated;
+    uint32 udp_rx_bad_checksum;
+    uint32 udp_tx_checksums;
 } net_udp_stats;
 
 // Poll the NIC for RX frames and feed:

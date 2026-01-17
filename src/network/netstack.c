@@ -160,6 +160,67 @@ static uint16 ipv4_checksum16(const void* data, uint32 len)
     return (uint16)(~sum);
 }
 
+static uint16 checksum16_add_bytes(uint32 sum, const uint8* data, uint32 len)
+{
+    // Adds network-order 16-bit words; pads odd trailing byte with zero.
+    uint32 i = 0;
+    while (i + 1u < len) {
+        uint16 w = (uint16)(((uint16)data[i] << 8) | (uint16)data[i + 1u]);
+        sum += (uint32)w;
+        i += 2u;
+    }
+    if (i < len) {
+        uint16 w = (uint16)((uint16)data[i] << 8);
+        sum += (uint32)w;
+    }
+
+    // Fold to 16-bit (may still overflow once, fold again).
+    while (sum >> 16) sum = (sum & 0xFFFFu) + (sum >> 16);
+    return (uint16)sum;
+}
+
+static uint16 udp_checksum16(const uint8 src_ip[4], const uint8 dst_ip[4], const udp_hdr* udp, const uint8* payload, uint32 payload_len)
+{
+    // UDP checksum includes pseudoheader + UDP header + payload.
+    // Returned value is in host order (caller be16()s it).
+    if (!src_ip || !dst_ip || !udp) return 0;
+
+    uint32 sum = 0;
+    // Pseudoheader
+    sum = checksum16_add_bytes(sum, src_ip, 4u);
+    sum = checksum16_add_bytes(sum, dst_ip, 4u);
+    {
+        uint8 ph[4];
+        ph[0] = 0;
+        ph[1] = 17; // protocol
+        ph[2] = (uint8)((uint16)be16(udp->len_be) >> 8);
+        ph[3] = (uint8)((uint16)be16(udp->len_be) & 0xFF);
+        sum = checksum16_add_bytes(sum, ph, 4u);
+    }
+
+    // UDP header with checksum field as 0
+    {
+        uint8 hdr_bytes[8];
+        hdr_bytes[0] = (uint8)((uint16)be16(udp->src_port_be) >> 8);
+        hdr_bytes[1] = (uint8)((uint16)be16(udp->src_port_be) & 0xFF);
+        hdr_bytes[2] = (uint8)((uint16)be16(udp->dst_port_be) >> 8);
+        hdr_bytes[3] = (uint8)((uint16)be16(udp->dst_port_be) & 0xFF);
+        hdr_bytes[4] = (uint8)((uint16)be16(udp->len_be) >> 8);
+        hdr_bytes[5] = (uint8)((uint16)be16(udp->len_be) & 0xFF);
+        hdr_bytes[6] = 0;
+        hdr_bytes[7] = 0;
+        sum = checksum16_add_bytes(sum, hdr_bytes, 8u);
+    }
+
+    if (payload_len && payload) {
+        sum = checksum16_add_bytes(sum, payload, payload_len);
+    }
+
+    uint16 csum = (uint16)(~sum);
+    if (csum == 0) csum = 0xFFFF;
+    return csum;
+}
+
 static int arp_cache_lookup(const uint8 ip[4], uint8 out_mac[6])
 {
     for (int i = 0; i < (int)(sizeof(g_net.arp_cache) / sizeof(g_net.arp_cache[0])); i++) {
@@ -203,6 +264,37 @@ static int arp_send_reply_silent(const uint8 target_mac[6],
 
 static int arp_resolve(const uint8 sender_ip[4], const uint8 target_ip[4], uint8 out_mac[6], int arp_spins);
 
+static uint32 ipv4_to_u32(const uint8 ip[4])
+{
+    return ((uint32)ip[0] << 24) | ((uint32)ip[1] << 16) | ((uint32)ip[2] << 8) | (uint32)ip[3];
+}
+
+static int ipv4_is_zero(const uint8 ip[4])
+{
+    return ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0;
+}
+
+static int ipv4_is_same_subnet(const uint8 a[4], const uint8 b[4], const uint8 mask[4])
+{
+    uint32 au = ipv4_to_u32(a);
+    uint32 bu = ipv4_to_u32(b);
+    uint32 mu = ipv4_to_u32(mask);
+    return ((au & mu) == (bu & mu));
+}
+
+static void ipv4_choose_next_hop(const uint8 src_ip[4], const uint8 dst_ip[4], uint8 out_next_hop_ip[4])
+{
+    // Minimal routing: if dst is not on-link, send to gateway (L2) but keep IP dst unchanged.
+    // If gateway is unset, fall back to direct ARP for dst.
+    if (!src_ip || !dst_ip || !out_next_hop_ip) return;
+
+    if (!ipv4_is_zero(g_net.cfg.gateway_ip) && !ipv4_is_same_subnet(src_ip, dst_ip, g_net.cfg.netmask)) {
+        for (int i = 0; i < 4; i++) out_next_hop_ip[i] = g_net.cfg.gateway_ip[i];
+        return;
+    }
+    for (int i = 0; i < 4; i++) out_next_hop_ip[i] = dst_ip[i];
+}
+
 static void udp_rxq_clear(void)
 {
     for (int i = 0; i < (int)(sizeof(g_net.udp_rxq) / sizeof(g_net.udp_rxq[0])); i++) {
@@ -211,6 +303,8 @@ static void udp_rxq_clear(void)
     g_net.udp_stats.udp_rx_enqueued = 0;
     g_net.udp_stats.udp_rx_dropped = 0;
     g_net.udp_stats.udp_rx_truncated = 0;
+    g_net.udp_stats.udp_rx_bad_checksum = 0;
+    g_net.udp_stats.udp_tx_checksums = 0;
 }
 
 static void icmp_rxq_clear(void)
@@ -619,6 +713,18 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
             else payload_len = 0;
         }
 
+        // Verify UDP checksum if present (0 means "no checksum" for IPv4).
+        if (udp->checksum_be != 0) {
+            uint16 saved = udp->checksum_be;
+            // Compute against the truncated payload we actually have.
+            // This is best-effort; frames truncated by NIC/driver will fail checksum and be dropped.
+            uint16 want = udp_checksum16(ip->src, ip->dst, udp, frame + payload_off, payload_len);
+            if (be16(saved) != want) {
+                g_net.udp_stats.udp_rx_bad_checksum++;
+                continue;
+            }
+        }
+
         (void)udp_rxq_enqueue(ip->src, src_port, ip->dst, dst_port, frame + payload_off, payload_len);
     }
 
@@ -650,7 +756,9 @@ int net_icmp_ping(const uint8 local_ip[4], const uint8 dst_ip[4], int count, int
         uint16 seq = (uint16)(i + 1);
 
         uint8 dst_mac[6];
-        int rc = arp_resolve(local_ip, dst_ip, dst_mac, 800000);
+        uint8 next_hop_ip[4];
+        ipv4_choose_next_hop(local_ip, dst_ip, next_hop_ip);
+        int rc = arp_resolve(local_ip, next_hop_ip, dst_mac, 800000);
         if (rc != 0) {
             printf("%cPING%c ", 255, 255, 255, 255, 255, 255);
             print_ipv4_bytes(dst_ip);
@@ -852,7 +960,9 @@ int net_udp_send(const uint8 src_ip[4], uint16 src_port,
     if (net_init_e1000_default() != 0) return -4;
 
     uint8 dst_mac[6];
-    int rc = arp_resolve(src_ip, dst_ip, dst_mac, arp_spins);
+    uint8 next_hop_ip[4];
+    ipv4_choose_next_hop(src_ip, dst_ip, next_hop_ip);
+    int rc = arp_resolve(src_ip, next_hop_ip, dst_mac, arp_spins);
     if (rc != 0) return rc;
 
     uint8 frame[1600];
@@ -888,8 +998,16 @@ int net_udp_send(const uint8 src_ip[4], uint16 src_port,
     udp->checksum_be = 0;
     off += (uint32)sizeof(udp_hdr);
 
+    const uint8* frame_payload = (const uint8*)(frame + off);
+
     memcpy(frame + off, payload, payload_len);
     off += payload_len;
+
+    {
+        uint16 csum = udp_checksum16(src_ip, dst_ip, udp, frame_payload, payload_len);
+        udp->checksum_be = be16(csum);
+        g_net.udp_stats.udp_tx_checksums++;
+    }
 
     if (off < 60u) {
         memset(frame + off, 0, 60u - off);

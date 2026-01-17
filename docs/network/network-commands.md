@@ -361,6 +361,15 @@ netcfg set gw 10.0.2.2
 netcfg set mask 255.255.255.0
 netcfg set dns 10.0.2.3
 
+# Validate configuration
+netcfg verify
+
+# Show whether traffic to a destination goes direct or via gateway
+netcfg route 8.8.8.8
+
+# Set-and-persist in one step
+netcfg set ip 10.0.2.15 --save
+
 # Persist configuration (default path is /config/net.cfg)
 netcfg save
 # Or manually load a file (also loaded automatically on `init`)

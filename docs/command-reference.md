@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2026-01-16 20:33:15
+This document is auto-generated from the source code. Last updated: 2026-01-17 11:12:57
 
 **Total Commands:** 66
 
@@ -364,7 +364,7 @@ munmap <address>
 
 **Description:**
 Network configuration (defaults match QEMU user-net).
-Usage: netcfg show | netcfg defaults | netcfg set ip <a.b.c.d> | netcfg set gw <a.b.c.d> | netcfg set mask <a.b.c.d> | netcfg set dns <a.b.c.d> | netcfg save [path] | netcfg load [path]
+Usage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set ip|gw|mask|dns <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]
 Default path: /config/net.cfg
 
 **Example:**

@@ -122,8 +122,17 @@ e1000 init
 # Show network config (defaults match QEMU user-net)
 netcfg show
 
+# Show whether a destination routes via gateway
+netcfg route 8.8.8.8
+
 # Persist network config to /config/net.cfg
 netcfg save
+
+# Validate configuration
+netcfg verify
+
+# Set and persist in one step
+netcfg set ip 10.0.2.15 --save
 
 # Ping the QEMU gateway/host
 ping 10.0.2.2
