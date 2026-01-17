@@ -4,6 +4,7 @@
 #include <util.h>
 #include <vga.h>
 #include <kb.h>
+#include <network/netstack.h>
 
 // Very small per-process FD table for now
 #define LINUX_MAX_FD 32
@@ -225,6 +226,78 @@ static int sys_brk(native_process_t* proc, void* addr) {
     return (int)proc->brk_end;
 }
 
+// --- Networking Syscalls ---
+
+static int sys_net_socket(native_process_t* proc) {
+    (void)proc;
+    // For now, we only support UDP sockets; no socket type argument needed
+    // Just return a success indicator; actual socket creation happens in bind
+    return 0; // Placeholder; real socket created on bind
+}
+
+static int sys_net_bind(native_process_t* proc, uint16 port) {
+    (void)proc;
+    // Bind a UDP socket to a port; returns socket_id >= 0 on success
+    return net_udp_bind(port);
+}
+
+static int sys_net_sendto(native_process_t* proc, int socket_id, const char* dst_ip_str, uint16 dst_port, const void* buf, uint32 len) {
+    (void)proc;
+    if (!buf || !dst_ip_str) return -1;
+    
+    // Parse dst_ip_str (format: "a.b.c.d") - manual parsing since we can't use libc sscanf
+    uint8 dst_ip[4];
+    int parts[4] = {0,0,0,0};
+    int part_idx = 0;
+    for (const char* p = dst_ip_str; *p && part_idx < 4; p++) {
+        if (*p >= '0' && *p <= '9') {
+            parts[part_idx] = parts[part_idx] * 10 + (*p - '0');
+            if (parts[part_idx] > 255) return -2;
+        } else if (*p == '.') {
+            part_idx++;
+        } else {
+            return -2; // Invalid character
+        }
+    }
+    if (part_idx != 3) return -2; // Need exactly 4 parts
+    for (int i = 0; i < 4; i++) dst_ip[i] = (uint8)parts[i];
+
+    uint8 src_ip[4];
+    net_get_local_ip(src_ip);
+
+    return net_udp_send_socket(socket_id, src_ip, dst_ip, dst_port, (const uint8*)buf, len, 800000);
+}
+
+static int sys_net_recvfrom(native_process_t* proc, int socket_id, void* buf, uint32 buflen, void* src_ip_out, void* src_port_out) {
+    (void)proc;
+    if (!buf) return -1;
+
+    net_udp_rx_packet pkt;
+    int rc = net_udp_recv_socket(socket_id, &pkt);
+    if (rc <= 0) return rc; // 0 = no packet, <0 = error
+
+    // Copy payload to user buffer
+    uint32 copy_len = pkt.payload_len;
+    if (copy_len > buflen) copy_len = buflen;
+    memcpy(buf, pkt.payload, copy_len);
+
+    // Optionally return source IP and port
+    if (src_ip_out) {
+        uint8* ip_out = (uint8*)src_ip_out;
+        for (int i = 0; i < 4; i++) ip_out[i] = pkt.src_ip[i];
+    }
+    if (src_port_out) {
+        *(uint16*)src_port_out = pkt.src_port;
+    }
+
+    return (int)copy_len; // Return number of bytes received
+}
+
+static int sys_net_close(native_process_t* proc, int socket_id) {
+    (void)proc;
+    return net_udp_close(socket_id);
+}
+
 int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
     uint32 eax = regs[0];
     uint32 ebx = regs[3];
@@ -374,6 +447,103 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
         }
         case __NR_brk: {
             int ret = sys_brk(proc, (void*)ebx);
+            regs[0] = ret;
+            return ret;
+        }
+        // Networking syscalls
+        case __NR_net_socket: {
+            int ret = sys_net_socket(proc);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_net_bind: {
+            // ebx = port
+            uint16 port = (uint16)ebx;
+            int ret = sys_net_bind(proc, port);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_net_sendto: {
+            // ebx = socket_id, ecx = dst_ip_str, edx = dst_port, esi = buf, edi = len
+            uint32 esi = regs[6];
+            uint32 edi = regs[7];
+            
+            const char* dst_ip_str = (const char*)ecx;
+            const void* buf = (const void*)esi;
+            
+            // Translate pointers if needed
+            if (proc->segment_count) {
+                if (ecx >= proc->elf_vaddr_min && ecx < proc->elf_vaddr_max) {
+                    for (int s = 0; s < proc->segment_count; s++) {
+                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
+                        if (ecx >= sv && ecx < sv + sm) { 
+                            dst_ip_str = (const char*)((uint32)proc->segments[s].mem + (ecx - sv)); 
+                            break; 
+                        }
+                    }
+                }
+                if (esi >= proc->elf_vaddr_min && esi < proc->elf_vaddr_max) {
+                    for (int s = 0; s < proc->segment_count; s++) {
+                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
+                        if (esi >= sv && esi + edi <= sv + sm) { 
+                            buf = (const void*)((uint32)proc->segments[s].mem + (esi - sv)); 
+                            break; 
+                        }
+                    }
+                }
+            }
+            
+            int ret = sys_net_sendto(proc, (int)ebx, dst_ip_str, (uint16)edx, buf, edi);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_net_recvfrom: {
+            // ebx = socket_id, ecx = buf, edx = buflen, esi = src_ip_out, edi = src_port_out
+            uint32 esi = regs[6];
+            uint32 edi = regs[7];
+            
+            void* buf = (void*)ecx;
+            void* src_ip_out = (void*)esi;
+            void* src_port_out = (void*)edi;
+            
+            // Translate pointers
+            if (proc->segment_count) {
+                if (ecx >= proc->elf_vaddr_min && ecx + edx <= proc->elf_vaddr_max) {
+                    for (int s = 0; s < proc->segment_count; s++) {
+                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
+                        if (ecx >= sv && ecx + edx <= sv + sm) { 
+                            buf = (void*)((uint32)proc->segments[s].mem + (ecx - sv)); 
+                            break; 
+                        }
+                    }
+                }
+                if (esi && esi >= proc->elf_vaddr_min && esi < proc->elf_vaddr_max) {
+                    for (int s = 0; s < proc->segment_count; s++) {
+                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
+                        if (esi >= sv && esi < sv + sm) { 
+                            src_ip_out = (void*)((uint32)proc->segments[s].mem + (esi - sv)); 
+                            break; 
+                        }
+                    }
+                }
+                if (edi && edi >= proc->elf_vaddr_min && edi < proc->elf_vaddr_max) {
+                    for (int s = 0; s < proc->segment_count; s++) {
+                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
+                        if (edi >= sv && edi < sv + sm) { 
+                            src_port_out = (void*)((uint32)proc->segments[s].mem + (edi - sv)); 
+                            break; 
+                        }
+                    }
+                }
+            }
+            
+            int ret = sys_net_recvfrom(proc, (int)ebx, buf, edx, src_ip_out, src_port_out);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_net_close: {
+            // ebx = socket_id
+            int ret = sys_net_close(proc, (int)ebx);
             regs[0] = ret;
             return ret;
         }

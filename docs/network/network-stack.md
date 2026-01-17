@@ -91,9 +91,12 @@ struct arp_pkt {
    - "X.X.X.X is at MAC aa:bb:cc:dd:ee:ff"
 
 **Cache**:
-- 4-entry cache (simple, no timeout)
+- 4-entry cache with aging
+- Entries expire after 30 seconds without refresh
+- Gateway MAC is refreshed periodically (~8 seconds)
 - Lookup: `arp_cache_lookup(ip[4]) → mac[6]`
-- Update: Automatic on RX
+- Update: Automatic on RX and ARP replies
+- Resolve uses up to 3 retries with backoff
 
 ### IPv4 Layer
 
@@ -117,11 +120,19 @@ struct ipv4_hdr {
 - Basic header parsing
 - Checksum verification
 - Protocol dispatch (UDP only)
+- Drop IPv4 fragments (no reassembly)
+- DF (Don't Fragment) set on TX
 
 **Limitations**:
-- No fragmentation/reassembly
+- No reassembly (fragments are dropped)
 - No options parsing
 - No routing table (single subnet)
+
+**ICMP Error Tracking**:
+- Destination Unreachable (type 3)
+- Time Exceeded (type 11)
+- Fragmentation Needed (type 3 code 4)
+- Exposed via `netstat` counters
 
 **Checksum Algorithm**:
 ```c
@@ -153,6 +164,7 @@ struct udp_hdr {
 - Receive queue (8 slots)
 - Statistics tracking
 - Simple socket-like API
+- Socket bindings (per-port queues)
 
 **Receive Queue**:
 ```c

@@ -59,4 +59,14 @@ int e1000_send_frame(const void* frame, uint32 len);
 // Returns: 1 if a frame was copied, 0 if no frame, <0 on error.
 int e1000_rx_poll_frame(uint8* out_buf, uint32 out_buf_cap, uint32* out_len, int spin_limit);
 
+// Interrupt-assisted RX support.
+// Enables RX interrupts if IRQ line is available.
+int e1000_irq_enable_rx(void);
+
+// Returns non-zero if RX interrupt was seen since last clear.
+int e1000_irq_rx_pending(void);
+
+// Clears RX pending flag (called after polling).
+void e1000_irq_clear_rx_pending(void);
+
 #endif

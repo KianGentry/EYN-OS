@@ -40,6 +40,7 @@ The networking implementation is separated into distinct layers:
   - PCI device detection and initialization
   - MMIO-based register access (no port I/O)
   - TX/RX descriptor ring management
+  - Interrupt-assisted RX polling
   - Link status monitoring
   - MAC address reading from EEPROM
 
@@ -50,10 +51,11 @@ See [e1000-driver.md](e1000-driver.md) for details.
 - **Purpose**: Protocol implementation (Ethernet, ARP, IPv4, UDP, ICMP echo)
 - **Features**:
   - Ethernet frame parsing
-  - ARP cache for IP→MAC resolution
-  - IPv4 packet handling (no fragmentation)
+  - ARP cache for IP→MAC resolution (aging + retries)
+  - IPv4 packet handling (DF set; fragments dropped)
   - UDP socket-like interface
   - ICMP echo (ping) support
+  - ICMP error tracking (unreachable, time exceeded, frag needed)
   - Packet statistics
 
 See [network-stack.md](network-stack.md) for protocol details.

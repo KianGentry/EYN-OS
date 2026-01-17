@@ -1761,7 +1761,83 @@ void e1000_cmd(string arg)
         return;
     }
 
-    printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 init | e1000 regs | e1000 arp-test | e1000 udp-send | e1000 udp-listen | e1000 udp-echo | e1000 udp-stats | e1000 udp-drain ...\n", 255, 0, 0);
+    // Socket commands: udp-bind, udp-recv, udp-close
+    if (token_eq(s, "udp-bind")) {
+        // Usage: e1000 udp-bind <port>
+        const char* p = next_token(s);
+        if (!p || !*p) {
+            printf("Usage: e1000 udp-bind <port>\n");
+            return;
+        }
+        int port_val = 0;
+        while (*p >= '0' && *p <= '9') {
+            port_val = port_val * 10 + (*p - '0');
+            p++;
+        }
+        uint16 port = (uint16)port_val;
+        int sock_id = net_udp_bind(port);
+        if (sock_id < 0) {
+            printf("%cError: bind failed (%d)\n", 255, 0, 0, sock_id);
+        } else {
+            printf("Bound port %u → socket %d\n", port, sock_id);
+        }
+        return;
+    }
+
+    if (token_eq(s, "udp-recv")) {
+        // Usage: e1000 udp-recv <socket_id>
+        const char* p = next_token(s);
+        if (!p || !*p) {
+            printf("Usage: e1000 udp-recv <socket_id>\n");
+            return;
+        }
+        int sock_id = 0;
+        while (*p >= '0' && *p <= '9') {
+            sock_id = sock_id * 10 + (*p - '0');
+            p++;
+        }
+        net_udp_rx_packet pkt;
+        int rc = net_udp_recv_socket(sock_id, &pkt);
+        if (rc < 0) {
+            printf("%cError: recv failed (%d)\n", 255, 0, 0, rc);
+        } else if (rc == 0) {
+            printf("No packet\n");
+        } else {
+            printf("Received from %u.%u.%u.%u:%u (%u bytes): ",
+                   pkt.src_ip[0], pkt.src_ip[1], pkt.src_ip[2], pkt.src_ip[3],
+                   pkt.src_port, pkt.payload_len);
+            for (uint32 i = 0; i < pkt.payload_len && i < 64; i++) {
+                char c = (char)pkt.payload[i];
+                if (c < 32 || c > 126) c = '.';
+                putchar(c);
+            }
+            printf("\n");
+        }
+        return;
+    }
+
+    if (token_eq(s, "udp-close")) {
+        // Usage: e1000 udp-close <socket_id>
+        const char* p = next_token(s);
+        if (!p || !*p) {
+            printf("Usage: e1000 udp-close <socket_id>\n");
+            return;
+        }
+        int sock_id = 0;
+        while (*p >= '0' && *p <= '9') {
+            sock_id = sock_id * 10 + (*p - '0');
+            p++;
+        }
+        int rc = net_udp_close(sock_id);
+        if (rc < 0) {
+            printf("%cError: close failed (%d)\n", 255, 0, 0, rc);
+        } else {
+            printf("Socket %d closed\n", sock_id);
+        }
+        return;
+    }
+
+    printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 init | e1000 regs | e1000 arp-test | e1000 udp-send | e1000 udp-listen | e1000 udp-echo | e1000 udp-stats | e1000 udp-drain | e1000 udp-bind | e1000 udp-recv | e1000 udp-close ...\n", 255, 0, 0);
 }
 
 // Diagnostics/testing command implementations
@@ -2143,11 +2219,32 @@ static void netstat_cmd(string ch)
              (int)st.udp_rx_bad_checksum, (int)st.udp_tx_checksums);
     }
 
+    // IPv4 stats
+    {
+        net_ip_stats ipst = net_ip_get_stats();
+        printf("  ip: frag_rx=%d frag_drop=%d\n",
+               (int)ipst.ipv4_rx_fragments, (int)ipst.ipv4_rx_frag_dropped);
+    }
+
+    // UDP sockets
+    if (net_is_inited()) {
+        net_socket_info sockets[8];
+        uint32 n = net_get_sockets(sockets, 8);
+        if (n > 0) {
+            printf("  udp-sockets (%d bound):\n", (int)n);
+            for (uint32 i = 0; i < n; i++) {
+                printf("    port %u: queued=%u dropped=%u\n",
+                       sockets[i].port, sockets[i].queued, sockets[i].dropped);
+            }
+        }
+    }
+
     // ICMP stats
     {
         net_icmp_stats st = net_icmp_get_stats();
-        printf("  icmp: echo-req-rx=%d echo-rep-rx=%d echo-rep-tx=%d echo-rep-drop=%d\n",
-               (int)st.echo_req_rx, (int)st.echo_rep_rx, (int)st.echo_rep_tx, (int)st.echo_rep_dropped);
+         printf("  icmp: echo-req-rx=%d echo-rep-rx=%d echo-rep-tx=%d echo-rep-drop=%d unreach=%d timeex=%d fragneed=%d\n",
+             (int)st.echo_req_rx, (int)st.echo_rep_rx, (int)st.echo_rep_tx, (int)st.echo_rep_dropped,
+             (int)st.dest_unreach_rx, (int)st.time_exceeded_rx, (int)st.frag_needed_rx);
     }
 }
 

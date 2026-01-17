@@ -295,6 +295,11 @@ See [network/e1000-driver.md](../network/e1000-driver.md) for full details.
 3. **IPv4**: Basic packet handling (20-byte header)
 4. **UDP**: Datagram sockets (8-byte header)
 
+**Timers and Aging**:
+- Netstack uses scheduler ticks for lightweight timers
+- ARP cache entries expire after 30 seconds
+- Gateway MAC is refreshed periodically
+
 **Packet Flow**:
 ```
 Hardware → e1000_receive() → net_poll_rx() → 
@@ -307,11 +312,14 @@ Hardware → e1000_receive() → net_poll_rx() →
 - Use `e1000 udp-stats` for counters
 - Check ARP cache: modify code to print entries
 - Verify checksums: IPv4 header checksum
+- `netstat` shows IPv4 fragment and ICMP error counters
+- RX interrupt assist: `e1000_irq_rx_pending` helps spot bursty traffic
 
 **Common Issues**:
 - **Queue full**: RX overrun, call `e1000 udp-drain`
 - **ARP timeout**: Bad IP or network config
 - **Checksum error**: Corrupted packet or bug
+- **Fragment drop**: Sender is fragmenting (DF set on TX; RX drops fragments)
 
 See [network/network-stack.md](../network/network-stack.md) for protocol details.
 

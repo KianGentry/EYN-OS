@@ -16,6 +16,7 @@ static int g_tm_initialized = 0;
 #include <watchdog.h>
 #include <ui_prefs.h>
 #include <network/netstack.h>
+#include <drivers/e1000.h>
 
 extern uint8_t g_current_drive;
 
@@ -2799,6 +2800,14 @@ void start_tiling_manager() {
             uint8 local_ip[4];
             net_get_local_ip(local_ip);
             (void)net_poll(local_ip, 32);
+        }
+
+        // Interrupt-assisted RX: poll immediately if NIC signaled data.
+        if (net_is_inited() && e1000_irq_rx_pending()) {
+            uint8 local_ip[4];
+            net_get_local_ip(local_ip);
+            (void)net_poll(local_ip, 128);
+            e1000_irq_clear_rx_pending();
         }
 
         // If status overlay visibility toggles, force redraw to restore any covered pixels.

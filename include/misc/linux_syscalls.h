@@ -21,6 +21,13 @@
 #define __NR_set_thread_area 243
 #define __NR_exit_group   252
 
+// EYN-OS custom networking syscalls (600-series for now)
+#define __NR_net_socket   600   // Create UDP socket: returns socket_id or <0
+#define __NR_net_bind     601   // Bind socket to port: (socket_id, port)
+#define __NR_net_sendto   602   // Send UDP: (socket_id, dst_ip_str, dst_port, buf, len)
+#define __NR_net_recvfrom 603   // Receive UDP: (socket_id, buf, buflen, src_ip_out, src_port_out)
+#define __NR_net_close    604   // Close socket: (socket_id)
+
 // Dispatcher entry point. regs is array: [eax, ecx, edx, ebx, esp, ebp, esi, edi]
 // Returns syscall return value to store in eax.
 int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]);

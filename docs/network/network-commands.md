@@ -261,6 +261,76 @@ UDP: Drained 3 packets from queue
 
 ---
 
+### e1000 udp-bind
+Bind a UDP port and create a socket for receiving packets.
+
+```bash
+e1000 udp-bind <port>
+```
+
+**Example**:
+```bash
+e1000 udp-bind 9999
+# Output: Bound port 9999 → socket 0
+```
+
+**What it does**:
+- Reserves the specified port
+- Creates a dedicated receive queue for that port
+- Returns a socket ID for subsequent operations
+
+**Error codes**:
+- Negative: Port already bound or no free socket slots
+- Up to 8 sockets can be bound simultaneously
+
+---
+
+### e1000 udp-recv
+Receive a packet from a bound socket (non-blocking).
+
+```bash
+e1000 udp-recv <socket_id>
+```
+
+**Example**:
+```bash
+e1000 udp-recv 0
+# Output: Received from 10.0.2.2:12345 (13 bytes): Hello, world!
+# Or: No packet
+```
+
+**What it does**:
+- Checks the socket's receive queue
+- Returns immediately (non-blocking)
+- Displays source IP, port, and payload
+
+**Use cases**:
+- Poll for incoming packets
+- Drain socket queue
+- Test UDP reception
+
+---
+
+### e1000 udp-close
+Close a bound socket and free its port.
+
+```bash
+e1000 udp-close <socket_id>
+```
+
+**Example**:
+```bash
+e1000 udp-close 0
+# Output: Socket 0 closed
+```
+
+**What it does**:
+- Unbinds the port
+- Clears the socket's receive queue
+- Frees the socket slot for reuse
+
+---
+
 ## Network Initialization Workflow
 
 Typical startup sequence:

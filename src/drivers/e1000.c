@@ -4,6 +4,7 @@
 #include <vga.h>
 #include <string.h>
 #include <misc/types.h>
+#include <irq.h>
 
 // e1000 register offsets (subset).
 //
@@ -32,8 +33,14 @@
 #define E1000_REG_RDT    0x2818
 #define E1000_REG_RCTL   0x0100
 
-// Interrupt registers (useful for debugging even in polling mode)
+// Interrupt registers (RX assist)
 #define E1000_REG_ICR    0x00C0
+#define E1000_REG_IMS    0x00D0
+#define E1000_REG_IMC    0x00D8
+
+#define E1000_ICR_RXDMT0 (1u << 4)
+#define E1000_ICR_RXO    (1u << 6)
+#define E1000_ICR_RXT0   (1u << 7)
 
 // Use a fixed high kernel VA window for device MMIO.
 //
@@ -85,6 +92,8 @@ typedef struct e1000_state {
     int mmio_mapped;
     uint8 bus, dev, fun;
     uint32 bar0;
+    uint8 irq_line;
+    volatile uint8 rx_irq_pending;
 
     int tx_ready;
     uint32 tx_ring_phys;
@@ -181,6 +190,7 @@ int e1000_init(void)
     if (rc != 0) return rc;
     rc = e1000_tx_init_once();
     if (rc != 0) return rc;
+    (void)e1000_irq_enable_rx();
     return 0;
 }
 
@@ -316,6 +326,7 @@ int e1000_probe(e1000_probe_info* out)
     g_e1000.dev = dev;
     g_e1000.fun = fun;
     g_e1000.bar0 = bar0;
+    g_e1000.irq_line = pci_read_config_byte(bus, dev, fun, 0x3C);
 
     uint32 ctrl = e1000_mmio_read32(E1000_REG_CTRL);
     uint32 status = e1000_mmio_read32(E1000_REG_STATUS);
@@ -473,6 +484,40 @@ static int e1000_tx_send_frame(const void* frame, uint32 len)
 int e1000_send_frame(const void* frame, uint32 len)
 {
     return e1000_tx_send_frame(frame, len);
+}
+
+static void e1000_irq_handler(void)
+{
+    uint32 icr = e1000_mmio_read32(E1000_REG_ICR);
+    if (icr & (E1000_ICR_RXDMT0 | E1000_ICR_RXO | E1000_ICR_RXT0)) {
+        g_e1000.rx_irq_pending = 1;
+    }
+    if (g_e1000.irq_line <= 15) {
+        pic_send_eoi((int)g_e1000.irq_line);
+    }
+}
+
+int e1000_irq_enable_rx(void)
+{
+    if (g_e1000.irq_line == 0xFFu || g_e1000.irq_line > 15) return -1;
+
+    register_interrupt_handler((int)g_e1000.irq_line, e1000_irq_handler);
+    g_e1000.rx_irq_pending = 0;
+
+    // Mask all, then enable RX-related interrupts
+    e1000_mmio_write32(E1000_REG_IMC, 0xFFFFFFFFu);
+    e1000_mmio_write32(E1000_REG_IMS, (E1000_ICR_RXDMT0 | E1000_ICR_RXO | E1000_ICR_RXT0));
+    return 0;
+}
+
+int e1000_irq_rx_pending(void)
+{
+    return g_e1000.rx_irq_pending ? 1 : 0;
+}
+
+void e1000_irq_clear_rx_pending(void)
+{
+    g_e1000.rx_irq_pending = 0;
 }
 
 static int e1000_rx_init_once(void)
