@@ -294,6 +294,8 @@ See [network/e1000-driver.md](../network/e1000-driver.md) for full details.
 2. **ARP**: IP→MAC resolution (4-entry cache)
 3. **IPv4**: Basic packet handling (20-byte header)
 4. **UDP**: Datagram sockets (8-byte header)
+5. **TCP**: Minimal active open + passive listen (single connection)
+5. **TCP**: Minimal client (SYN/SYN-ACK/ACK, data, FIN)
 
 **Timers and Aging**:
 - Netstack uses scheduler ticks for lightweight timers

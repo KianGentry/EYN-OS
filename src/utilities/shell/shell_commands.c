@@ -854,7 +854,7 @@ REGISTER_SHELL_COMMAND(portable, "portable", portable_cmd, CMD_ESSENTIAL, "Displ
 REGISTER_SHELL_COMMAND(init, "init", init_cmd, CMD_ESSENTIAL, "Initialize full system services (ATA drives, etc.).\nUsage: init", "init");
 REGISTER_SHELL_COMMAND(pciscan_cmd_info, "pciscan", pciscan_cmd, CMD_DIAGNOSTIC, "Scan PCI devices and print vendor/device IDs and BAR0.\nUsage: pciscan [net]\nTip: e1000 usually shows as 8086:100E.", "pciscan net");
 REGISTER_SHELL_COMMAND(e1000probe_cmd_info, "e1000probe", e1000probe_cmd, CMD_DIAGNOSTIC, "Probe the Intel e1000 NIC (read-only MMIO sanity check).\nUsage: e1000probe", "e1000probe");
-REGISTER_SHELL_COMMAND(e1000_cmd_info, "e1000", e1000_cmd, CMD_DIAGNOSTIC, "Intel e1000 utilities (probe + bring-up helpers).\nUsage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx]", "e1000 init");
+REGISTER_SHELL_COMMAND(e1000_cmd_info, "e1000", e1000_cmd, CMD_DIAGNOSTIC, "Intel e1000 utilities (probe + bring-up helpers).\nUsage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx] | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-close", "e1000 init");
 
 static void ping_cmd(string ch);
 static void netstat_cmd(string ch);
@@ -1515,6 +1515,153 @@ void e1000_cmd(string arg)
         return;
     }
 
+    if (token_eq(s, "tcp-send")) {
+        // Usage: e1000 tcp-send <dst_ip> <dst_port> <message> [src_port] [spins]
+        // Quickstart (host listens):
+        //   host:  nc -l 9999
+        //   guest: e1000 tcp-send 10.0.2.2 9999 hello
+        net_config cfg;
+        net_config_get(&cfg);
+        unsigned char dst_ip[4] = {cfg.gateway_ip[0], cfg.gateway_ip[1], cfg.gateway_ip[2], cfg.gateway_ip[3]};
+        unsigned char src_ip[4] = {cfg.local_ip[0], cfg.local_ip[1], cfg.local_ip[2], cfg.local_ip[3]};
+        int dst_port = 9999;
+        int src_port = 0;
+        int spins = 12000000;
+
+        const char* p = next_token(s);
+        if (!p || !*p) {
+            printf("Usage: e1000 tcp-send <dst_ip> <dst_port> <message> [src_port] [spins]\n");
+            return;
+        }
+
+        // dst_ip
+        {
+            char ipstr[32];
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(ipstr) - 1) { ipstr[n] = p[n]; n++; }
+            ipstr[n] = '\0';
+            if (parse_ipv4(ipstr, dst_ip) != 0) {
+                printf("%cError: dst_ip must be a.b.c.d\n", 255, 0, 0);
+                return;
+            }
+            p = skip_spaces(p + n);
+        }
+
+        // dst_port
+        if (!p || !*p) {
+            printf("%cError: missing dst_port\n", 255, 0, 0);
+            return;
+        }
+        {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (!any || v <= 0 || v > 65535) {
+                printf("%cError: dst_port must be 1..65535\n", 255, 0, 0);
+                return;
+            }
+            dst_port = v;
+            p = skip_spaces(p);
+        }
+
+        // message (single token)
+        if (!p || !*p) {
+            printf("%cError: missing message token\n", 255, 0, 0);
+            return;
+        }
+        char msg[256];
+        {
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(msg) - 1) { msg[n] = p[n]; n++; }
+            msg[n] = '\0';
+            p = skip_spaces(p + n);
+        }
+
+        // Optional src_port
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (!any || v <= 0 || v > 65535) {
+                printf("%cError: src_port must be 1..65535\n", 255, 0, 0);
+                return;
+            }
+            src_port = v;
+            p = skip_spaces(p);
+        }
+
+        // Optional spins
+        if (p && *p) {
+            int v = 0; int any = 0;
+            while (*p >= '0' && *p <= '9') { any = 1; v = (v * 10) + (*p - '0'); p++; }
+            if (any && v > 0) spins = v;
+        }
+
+        int rc = net_tcp_send(src_ip, (uint16)src_port, dst_ip, (uint16)dst_port,
+                              (const uint8*)msg, (uint32)strlen(msg), spins);
+        if (rc >= 0) {
+            printf("%cTCP sent to ", 0, 255, 0);
+            printf("%d.%d.%d.%d", (int)dst_ip[0], (int)dst_ip[1], (int)dst_ip[2], (int)dst_ip[3]);
+            printf(":%d (%d bytes)\n", dst_port, rc);
+        } else {
+            printf("%cTCP send failed (%d)\n", 255, 0, 0, rc);
+        }
+        return;
+    }
+
+    if (token_eq(s, "tcp-listen")) {
+        // Usage: e1000 tcp-listen <port>
+        const char* p = next_token(s);
+        if (!p || !*p) {
+            printf("Usage: e1000 tcp-listen <port>\n");
+            return;
+        }
+        int port = 0;
+        while (*p >= '0' && *p <= '9') { port = (port * 10) + (*p - '0'); p++; }
+        if (port <= 0 || port > 65535) {
+            printf("%cError: port must be 1..65535\n", 255, 0, 0);
+            return;
+        }
+        int rc = net_tcp_listen((uint16)port);
+        if (rc == 0) {
+            printf("TCP listening on %d\n", port);
+        } else {
+            printf("%cTCP listen failed (%d)\n", 255, 0, 0, rc);
+        }
+        return;
+    }
+
+    if (token_eq(s, "tcp-recv")) {
+        // Usage: e1000 tcp-recv
+        net_tcp_rx_packet pkt;
+        int rc = net_tcp_recv(&pkt);
+        if (rc < 0) {
+            printf("%cTCP recv failed (%d)\n", 255, 0, 0, rc);
+        } else if (rc == 0) {
+            printf("No packet\n");
+        } else {
+            printf("TCP from %u.%u.%u.%u:%u (%u bytes): ",
+                   pkt.src_ip[0], pkt.src_ip[1], pkt.src_ip[2], pkt.src_ip[3],
+                   pkt.src_port, pkt.payload_len);
+            for (uint32 i = 0; i < pkt.payload_len && i < 64; i++) {
+                char c = (char)pkt.payload[i];
+                if (c < 32 || c > 126) c = '.';
+                putchar(c);
+            }
+            printf("\n");
+        }
+        return;
+    }
+
+    if (token_eq(s, "tcp-close")) {
+        // Usage: e1000 tcp-close
+        int rc = net_tcp_close();
+        if (rc == 0) {
+            printf("TCP closed\n");
+        } else {
+            printf("%cTCP close failed (%d)\n", 255, 0, 0, rc);
+        }
+        return;
+    }
+
     if (token_eq(s, "udp-listen")) {
         // Usage: e1000 udp-listen [local_port] [local_ip] [count] [spins]
         // Host->guest quickstart (uses QEMU hostfwd set in Makefile):
@@ -1837,7 +1984,7 @@ void e1000_cmd(string arg)
         return;
     }
 
-    printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 init | e1000 regs | e1000 arp-test | e1000 udp-send | e1000 udp-listen | e1000 udp-echo | e1000 udp-stats | e1000 udp-drain | e1000 udp-bind | e1000 udp-recv | e1000 udp-close ...\n", 255, 0, 0);
+    printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 init | e1000 regs | e1000 arp-test | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-close | e1000 udp-listen | e1000 udp-echo | e1000 udp-stats | e1000 udp-drain | e1000 udp-bind | e1000 udp-recv | e1000 udp-close ...\n", 255, 0, 0);
 }
 
 // Diagnostics/testing command implementations
@@ -2237,6 +2384,16 @@ static void netstat_cmd(string ch)
                        sockets[i].port, sockets[i].queued, sockets[i].dropped);
             }
         }
+    }
+
+    // TCP stats
+    {
+        net_tcp_stats tst = net_tcp_get_stats();
+         uint32 tq = net_tcp_queue_count();
+         printf("  tcp: syn_tx=%d synack_rx=%d ack_tx=%d data_tx=%d data_rx=%d fin_tx=%d fin_rx=%d rst_rx=%d rxq=%d\n",
+             (int)tst.tcp_syn_sent, (int)tst.tcp_synack_rx, (int)tst.tcp_ack_tx,
+             (int)tst.tcp_data_tx, (int)tst.tcp_data_rx, (int)tst.tcp_fin_tx,
+             (int)tst.tcp_fin_rx, (int)tst.tcp_rst_rx, (int)tq);
     }
 
     // ICMP stats

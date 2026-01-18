@@ -52,6 +52,18 @@ typedef struct __attribute__((packed)) udp_hdr {
     uint16 checksum_be;
 } udp_hdr;
 
+typedef struct __attribute__((packed)) tcp_hdr {
+    uint16 src_port_be;
+    uint16 dst_port_be;
+    uint32 seq_be;
+    uint32 ack_be;
+    uint8 data_off; // high 4 bits = data offset
+    uint8 flags;
+    uint16 window_be;
+    uint16 checksum_be;
+    uint16 urg_ptr_be;
+} tcp_hdr;
+
 typedef struct __attribute__((packed)) icmp_echo_hdr {
     uint8 type;
     uint8 code;
@@ -80,6 +92,31 @@ typedef struct icmp_echo_reply_slot {
     uint32 payload_len;
 } icmp_echo_reply_slot;
 
+typedef enum tcp_state {
+    TCP_CLOSED = 0,
+    TCP_SYN_SENT,
+    TCP_SYN_RECEIVED,
+    TCP_ESTABLISHED,
+    TCP_FIN_WAIT
+} tcp_state;
+
+typedef struct tcp_conn {
+    tcp_state state;
+    uint8 local_ip[4];
+    uint16 local_port;
+    uint8 remote_ip[4];
+    uint16 remote_port;
+    uint32 seq;
+    uint32 ack;
+    uint16 listen_port;
+    uint8 listening;
+} tcp_conn;
+
+typedef struct tcp_rx_slot {
+    uint8 valid;
+    net_tcp_rx_packet pkt;
+} tcp_rx_slot;
+
 typedef struct net_timer_slot {
     uint8 active;
     uint32 expiry_tick;
@@ -96,6 +133,13 @@ typedef struct net_timer_slot {
 #define ARP_CACHE_TTL_MS        30000u
 #define ARP_CACHE_REFRESH_MS     8000u
 #define ARP_RETRY_BACKOFF_MS     200u
+
+// TCP flags
+#define TCP_FLAG_FIN 0x01u
+#define TCP_FLAG_SYN 0x02u
+#define TCP_FLAG_RST 0x04u
+#define TCP_FLAG_PSH 0x08u
+#define TCP_FLAG_ACK 0x10u
 
 typedef struct udp_socket {
     uint8 bound;
@@ -121,6 +165,10 @@ static struct {
     icmp_echo_reply_slot icmp_rxq[4];
     net_icmp_stats icmp_stats;
 
+    tcp_conn tcp;
+    net_tcp_stats tcp_stats;
+    tcp_rx_slot tcp_rxq[8];
+
     udp_socket sockets[MAX_SOCKETS];
 
     net_timer_slot timers[8];
@@ -135,10 +183,56 @@ static struct {
     },
 };
 
+static uint16 checksum16_add_bytes(uint32 sum, const uint8* data, uint32 len);
+static int tcp_send_segment(const uint8 src_ip[4], uint16 src_port,
+                            const uint8 dst_ip[4], uint16 dst_port,
+                            uint32 seq, uint32 ack, uint8 flags,
+                            const uint8* payload, uint32 payload_len,
+                            int arp_spins);
+
 void net_config_get(net_config* out)
 {
     if (!out) return;
     *out = g_net.cfg;
+}
+static uint16 tcp_checksum16_ex(const uint8 src_ip[4], const uint8 dst_ip[4], const uint8* tcp_bytes,
+                                uint32 tcp_hdr_len, const uint8* payload, uint32 payload_len)
+{
+    uint32 sum = 0;
+    if (!src_ip || !dst_ip || !tcp_bytes) return 0;
+    if (tcp_hdr_len < (uint32)sizeof(tcp_hdr) || tcp_hdr_len > 60u) return 0;
+
+    uint8 pseudo[12];
+    for (int i = 0; i < 4; i++) pseudo[i] = src_ip[i];
+    for (int i = 0; i < 4; i++) pseudo[4 + i] = dst_ip[i];
+    pseudo[8] = 0;
+    pseudo[9] = 6; // TCP
+    uint16 tcp_len = (uint16)(tcp_hdr_len + payload_len);
+    pseudo[10] = (uint8)(tcp_len >> 8);
+    pseudo[11] = (uint8)(tcp_len & 0xFF);
+
+    sum = checksum16_add_bytes(sum, pseudo, 12u);
+
+    // TCP header (including options) with checksum field zeroed
+    uint8 hdr_bytes[60];
+    memcpy(hdr_bytes, tcp_bytes, tcp_hdr_len);
+    hdr_bytes[16] = 0;
+    hdr_bytes[17] = 0;
+    sum = checksum16_add_bytes(sum, hdr_bytes, tcp_hdr_len);
+
+    if (payload_len && payload) {
+        sum = checksum16_add_bytes(sum, payload, payload_len);
+    }
+
+    uint16 csum = (uint16)(~sum);
+    if (csum == 0) csum = 0xFFFF;
+    return csum;
+}
+
+static uint16 tcp_checksum16(const uint8 src_ip[4], const uint8 dst_ip[4], const tcp_hdr* tcp,
+                             const uint8* payload, uint32 payload_len)
+{
+    return tcp_checksum16_ex(src_ip, dst_ip, (const uint8*)tcp, (uint32)sizeof(tcp_hdr), payload, payload_len);
 }
 
 int net_config_set(const net_config* in)
@@ -168,6 +262,19 @@ void net_get_local_ip(uint8 out_ip[4])
 static uint16 be16(uint16 x)
 {
     return (uint16)((x >> 8) | (x << 8));
+}
+
+static uint32 bswap32(uint32 x)
+{
+    return ((x >> 24) & 0x000000FFu) |
+           ((x >> 8)  & 0x0000FF00u) |
+           ((x << 8)  & 0x00FF0000u) |
+           ((x << 24) & 0xFF000000u);
+}
+
+static uint32 be32(uint32 x)
+{
+    return bswap32(x);
 }
 
 static void net_log(const char* msg)
@@ -460,6 +567,37 @@ static void udp_rxq_clear(void)
     g_net.udp_stats.udp_tx_checksums = 0;
 }
 
+static int tcp_rxq_enqueue(const uint8 src_ip[4], uint16 src_port,
+                           const uint8 dst_ip[4], uint16 dst_port,
+                           const uint8* payload, uint32 payload_len)
+{
+    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
+        if (!g_net.tcp_rxq[i].valid) {
+            tcp_rx_slot* s = &g_net.tcp_rxq[i];
+            s->valid = 1;
+            for (int j = 0; j < 4; j++) s->pkt.src_ip[j] = src_ip[j];
+            for (int j = 0; j < 4; j++) s->pkt.dst_ip[j] = dst_ip[j];
+            s->pkt.src_port = src_port;
+            s->pkt.dst_port = dst_port;
+
+            uint32 copy_len = payload_len;
+            if (copy_len > NET_TCP_MAX_PAYLOAD) {
+                copy_len = NET_TCP_MAX_PAYLOAD;
+                g_net.tcp_stats.tcp_rx_dropped++;
+            }
+            s->pkt.payload_len = copy_len;
+            if (copy_len != 0u) {
+                memcpy(s->pkt.payload, payload, copy_len);
+            }
+            g_net.tcp_stats.tcp_rx_enqueued++;
+            return 0;
+        }
+    }
+
+    g_net.tcp_stats.tcp_rx_dropped++;
+    return -1;
+}
+
 static void icmp_rxq_clear(void)
 {
     for (int i = 0; i < (int)(sizeof(g_net.icmp_rxq) / sizeof(g_net.icmp_rxq[0])); i++) {
@@ -472,6 +610,15 @@ static void icmp_rxq_clear(void)
     g_net.icmp_stats.dest_unreach_rx = 0;
     g_net.icmp_stats.time_exceeded_rx = 0;
     g_net.icmp_stats.frag_needed_rx = 0;
+}
+
+static void tcp_rxq_clear(void)
+{
+    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
+        g_net.tcp_rxq[i].valid = 0;
+    }
+    g_net.tcp_stats.tcp_rx_enqueued = 0;
+    g_net.tcp_stats.tcp_rx_dropped = 0;
 }
 
 static void icmp_rxq_enqueue_reply(const uint8 src_ip[4], uint16 id, uint16 seq, uint32 payload_len)
@@ -593,8 +740,11 @@ int net_init(const netdev* dev)
     g_net.dev = dev;
     udp_rxq_clear();
     icmp_rxq_clear();
+    tcp_rxq_clear();
     g_net.ip_stats.ipv4_rx_fragments = 0;
     g_net.ip_stats.ipv4_rx_frag_dropped = 0;
+    memset(&g_net.tcp, 0, sizeof(g_net.tcp));
+    memset(&g_net.tcp_stats, 0, sizeof(g_net.tcp_stats));
     memset(g_net.timers, 0, sizeof(g_net.timers));
     g_net.last_timer_tick = 0;
     (void)net_timer_start(net_ticks_from_ms(1000), net_ticks_from_ms(1000), arp_age_timer_cb, NULL);
@@ -620,6 +770,72 @@ net_ip_stats net_ip_get_stats(void)
 net_icmp_stats net_icmp_get_stats(void)
 {
     return g_net.icmp_stats;
+}
+
+net_tcp_stats net_tcp_get_stats(void)
+{
+    return g_net.tcp_stats;
+}
+
+int net_tcp_listen(uint16 local_port)
+{
+    if (local_port == 0) return -1;
+    if (net_init_e1000_default() != 0) return -2;
+
+    g_net.tcp.listening = 1;
+    g_net.tcp.listen_port = local_port;
+    g_net.tcp.state = TCP_CLOSED;
+    tcp_rxq_clear();
+    return 0;
+}
+
+int net_tcp_close(void)
+{
+    if (g_net.tcp.state == TCP_ESTABLISHED) {
+        uint8 src_ip[4];
+        net_get_local_ip(src_ip);
+        (void)tcp_send_segment(src_ip, g_net.tcp.local_port,
+                               g_net.tcp.remote_ip, g_net.tcp.remote_port,
+                               g_net.tcp.seq, g_net.tcp.ack,
+                               TCP_FLAG_FIN | TCP_FLAG_ACK,
+                               NULL, 0, 800000);
+        g_net.tcp.seq += 1;
+        g_net.tcp_stats.tcp_fin_tx++;
+    }
+    g_net.tcp.state = TCP_CLOSED;
+    g_net.tcp.listening = 0;
+    return 0;
+}
+
+int net_tcp_recv(net_tcp_rx_packet* out)
+{
+    if (!out) return -1;
+
+    // Make a quick poll pass so callers can receive data even if the system
+    // isn't running a background net_poll loop at this moment.
+    if (g_net.inited) {
+        uint8 local_ip[4];
+        net_get_local_ip(local_ip);
+        (void)net_poll(local_ip, 8);
+    }
+
+    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
+        if (g_net.tcp_rxq[i].valid) {
+            *out = g_net.tcp_rxq[i].pkt;
+            g_net.tcp_rxq[i].valid = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+uint32 net_tcp_queue_count(void)
+{
+    uint32 count = 0;
+    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
+        if (g_net.tcp_rxq[i].valid) count++;
+    }
+    return count;
 }
 
 int net_get_mac(uint8 out_mac[6])
@@ -1015,6 +1231,132 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
             continue;
         }
 
+        // TCP handling (minimal client state machine).
+        if (ip->proto == 6) {
+            if (len < (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(tcp_hdr)) continue;
+
+            tcp_hdr* tcp = (tcp_hdr*)(frame + sizeof(eth_hdr) + ip_hdr_len);
+            uint32 tcp_hdr_len = (uint32)((tcp->data_off >> 4) & 0x0Fu) * 4u;
+            if (tcp_hdr_len < (uint32)sizeof(tcp_hdr)) continue;
+
+            uint16 src_port = be16(tcp->src_port_be);
+            uint16 dst_port = be16(tcp->dst_port_be);
+            if (dst_port == 0 || src_port == 0) continue;
+
+            uint32 payload_off = (uint32)sizeof(eth_hdr) + ip_hdr_len + tcp_hdr_len;
+            uint32 payload_len = 0;
+            uint32 ip_total_len = (uint32)be16(ip->total_len_be);
+            if (ip_total_len >= ip_hdr_len + tcp_hdr_len) {
+                payload_len = ip_total_len - ip_hdr_len - tcp_hdr_len;
+            }
+            if (payload_off > len) continue;
+            if (payload_off + payload_len > len) {
+                if (len > payload_off) payload_len = len - payload_off;
+                else payload_len = 0;
+            }
+
+            // Verify TCP checksum.
+            if (tcp->checksum_be != 0) {
+                uint16 saved = tcp->checksum_be;
+                uint16 want = tcp_checksum16_ex(ip->src, ip->dst, (const uint8*)tcp, tcp_hdr_len,
+                                                frame + payload_off, payload_len);
+                if (be16(saved) != want) {
+                    continue;
+                }
+            }
+
+            // Passive listen: SYN on listen port.
+            if (g_net.tcp.listening && g_net.tcp.state == TCP_CLOSED &&
+                dst_port == g_net.tcp.listen_port && (tcp->flags & TCP_FLAG_SYN)) {
+                g_net.tcp_stats.tcp_listen_syn_rx++;
+                for (int i = 0; i < 4; i++) g_net.tcp.local_ip[i] = ip->dst[i];
+                for (int i = 0; i < 4; i++) g_net.tcp.remote_ip[i] = ip->src[i];
+                g_net.tcp.local_port = dst_port;
+                g_net.tcp.remote_port = src_port;
+                g_net.tcp.seq = net_get_ticks();
+                g_net.tcp.ack = be32(tcp->seq_be) + 1;
+                g_net.tcp.state = TCP_SYN_RECEIVED;
+
+                (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
+                                       g_net.tcp.remote_ip, g_net.tcp.remote_port,
+                                       g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_SYN | TCP_FLAG_ACK,
+                                       NULL, 0, 800000);
+                g_net.tcp_stats.tcp_syn_sent++;
+                continue;
+            }
+
+            // Match against current connection only.
+            if (g_net.tcp.state != TCP_CLOSED &&
+                dst_port == g_net.tcp.local_port &&
+                src_port == g_net.tcp.remote_port &&
+                ipv4_eq(ip->src, g_net.tcp.remote_ip)) {
+
+                uint32 seq = be32(tcp->seq_be);
+                uint32 ack = be32(tcp->ack_be);
+                uint8 flags = tcp->flags;
+
+                if (flags & TCP_FLAG_RST) {
+                    g_net.tcp_stats.tcp_rst_rx++;
+                    g_net.tcp.state = TCP_CLOSED;
+                    continue;
+                }
+
+                if (g_net.tcp.state == TCP_SYN_SENT) {
+                    if ((flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK) &&
+                        ack == g_net.tcp.seq + 1) {
+                        g_net.tcp_stats.tcp_synack_rx++;
+                        g_net.tcp.seq += 1;
+                        g_net.tcp.ack = seq + 1;
+                        (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
+                                               g_net.tcp.remote_ip, g_net.tcp.remote_port,
+                                               g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                                               NULL, 0, 800000);
+                        g_net.tcp_stats.tcp_ack_tx++;
+                        g_net.tcp.state = TCP_ESTABLISHED;
+                        g_net.tcp_stats.tcp_conn_established++;
+                    }
+                    continue;
+                }
+
+                if (g_net.tcp.state == TCP_SYN_RECEIVED) {
+                    if ((flags & TCP_FLAG_ACK) && ack == g_net.tcp.seq + 1) {
+                        g_net.tcp.seq += 1;
+                        g_net.tcp.state = TCP_ESTABLISHED;
+                        g_net.tcp_stats.tcp_conn_established++;
+                    }
+                    continue;
+                }
+
+                if (g_net.tcp.state == TCP_ESTABLISHED || g_net.tcp.state == TCP_FIN_WAIT) {
+                    if (payload_len > 0) {
+                        g_net.tcp_stats.tcp_data_rx++;
+                        (void)tcp_rxq_enqueue(ip->src, src_port, ip->dst, dst_port,
+                                              frame + payload_off, payload_len);
+                        g_net.tcp.ack = seq + payload_len;
+                        (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
+                                               g_net.tcp.remote_ip, g_net.tcp.remote_port,
+                                               g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                                               NULL, 0, 800000);
+                        g_net.tcp_stats.tcp_ack_tx++;
+                    }
+
+                    if (flags & TCP_FLAG_FIN) {
+                        g_net.tcp_stats.tcp_fin_rx++;
+                        g_net.tcp.ack = seq + 1;
+                        (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
+                                               g_net.tcp.remote_ip, g_net.tcp.remote_port,
+                                               g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                                               NULL, 0, 800000);
+                        g_net.tcp_stats.tcp_ack_tx++;
+                        g_net.tcp.state = TCP_CLOSED;
+                    } else if (g_net.tcp.state == TCP_FIN_WAIT && (flags & TCP_FLAG_ACK)) {
+                        g_net.tcp.state = TCP_CLOSED;
+                    }
+                }
+            }
+            continue;
+        }
+
         // UDP receive enqueue.
         if (ip->proto != 17) continue;
         if (len < (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(udp_hdr)) continue;
@@ -1281,6 +1623,131 @@ int net_arp_test_send(const uint8 sender_ip[4], const uint8 target_ip[4], int rx
     }
 
     return rc;
+}
+
+static int tcp_send_segment(const uint8 src_ip[4], uint16 src_port,
+                            const uint8 dst_ip[4], uint16 dst_port,
+                            uint32 seq, uint32 ack, uint8 flags,
+                            const uint8* payload, uint32 payload_len,
+                            int arp_spins)
+{
+    if (!src_ip || !dst_ip) return -1;
+    if (payload_len != 0u && !payload) return -1;
+    if (payload_len > 1400u) return -2;
+    if (src_port == 0 || dst_port == 0) return -3;
+
+    uint8 dst_mac[6];
+    uint8 next_hop_ip[4];
+    ipv4_choose_next_hop(src_ip, dst_ip, next_hop_ip);
+    int rc = arp_resolve(src_ip, next_hop_ip, dst_mac, arp_spins);
+    if (rc != 0) return rc;
+
+    uint8 frame[1600];
+    uint32 off = 0;
+
+    eth_hdr* eh = (eth_hdr*)(frame + off);
+    for (int i = 0; i < 6; i++) eh->dst[i] = dst_mac[i];
+    for (int i = 0; i < 6; i++) eh->src[i] = g_net.mac[i];
+    eh->ethertype_be = be16(0x0800u);
+    off += (uint32)sizeof(eth_hdr);
+
+    ipv4_hdr* ip = (ipv4_hdr*)(frame + off);
+    memset(ip, 0, sizeof(*ip));
+    ip->ver_ihl = 0x45;
+    ip->ttl = 64;
+    ip->proto = 6;
+    for (int i = 0; i < 4; i++) ip->src[i] = src_ip[i];
+    for (int i = 0; i < 4; i++) ip->dst[i] = dst_ip[i];
+
+    uint16 ip_total_len = (uint16)(sizeof(ipv4_hdr) + sizeof(tcp_hdr) + payload_len);
+    ip->total_len_be = be16(ip_total_len);
+    static uint16 ip_id = 0x6000;
+    ip->id_be = be16(ip_id++);
+    ip->flags_frag_off_be = be16(0x4000u);
+    ip->hdr_checksum_be = 0;
+    ip->hdr_checksum_be = be16(ipv4_checksum16(ip, (uint32)sizeof(*ip)));
+    off += (uint32)sizeof(ipv4_hdr);
+
+    tcp_hdr* tcp = (tcp_hdr*)(frame + off);
+    memset(tcp, 0, sizeof(*tcp));
+    tcp->src_port_be = be16(src_port);
+    tcp->dst_port_be = be16(dst_port);
+    tcp->seq_be = be32(seq);
+    tcp->ack_be = be32(ack);
+    tcp->data_off = (uint8)(5u << 4);
+    tcp->flags = flags;
+    tcp->window_be = be16(4096u);
+    tcp->urg_ptr_be = 0;
+    tcp->checksum_be = 0;
+    tcp->checksum_be = be16(tcp_checksum16(src_ip, dst_ip, tcp, payload, payload_len));
+    off += (uint32)sizeof(tcp_hdr);
+
+    if (payload_len) {
+        memcpy(frame + off, payload, payload_len);
+        off += payload_len;
+    }
+
+    return g_net.dev->send_frame(frame, off);
+}
+
+int net_tcp_send(const uint8 local_ip[4], uint16 local_port,
+                 const uint8 dst_ip[4], uint16 dst_port,
+                 const uint8* payload, uint32 payload_len,
+                 int timeout_spins)
+{
+    if (!local_ip || !dst_ip) return -1;
+    if (payload_len != 0u && !payload) return -1;
+    if (dst_port == 0) return -2;
+    if (net_init_e1000_default() != 0) return -3;
+
+    if (local_port == 0) {
+        local_port = (uint16)(40000u + (net_get_ticks() % 20000u));
+    }
+
+    // Initialize connection state.
+    memset(&g_net.tcp, 0, sizeof(g_net.tcp));
+    for (int i = 0; i < 4; i++) g_net.tcp.local_ip[i] = local_ip[i];
+    for (int i = 0; i < 4; i++) g_net.tcp.remote_ip[i] = dst_ip[i];
+    g_net.tcp.local_port = local_port;
+    g_net.tcp.remote_port = dst_port;
+    g_net.tcp.seq = net_get_ticks();
+    g_net.tcp.ack = 0;
+    g_net.tcp.state = TCP_SYN_SENT;
+
+    g_net.tcp_stats.tcp_syn_sent++;
+    int rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
+                              g_net.tcp.seq, 0, TCP_FLAG_SYN, NULL, 0, timeout_spins);
+    if (rc != 0) return rc;
+
+    // Wait for SYN-ACK
+    if (timeout_spins <= 0) timeout_spins = 12000000;
+    for (int spin = 0; spin < timeout_spins; spin++) {
+        if ((spin & 0x1FFF) == 0) watchdog_kick("net-tcp-wait");
+        (void)net_poll(local_ip, 16);
+        if (g_net.tcp.state == TCP_ESTABLISHED) break;
+    }
+    if (g_net.tcp.state != TCP_ESTABLISHED) return -5;
+
+    // Send payload if any.
+    if (payload_len > 0) {
+        rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
+                              g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_PSH | TCP_FLAG_ACK,
+                              payload, payload_len, timeout_spins);
+        if (rc != 0) return rc;
+        g_net.tcp.seq += payload_len;
+        g_net.tcp_stats.tcp_data_tx++;
+    }
+
+    // Send FIN
+    rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
+                          g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_FIN | TCP_FLAG_ACK,
+                          NULL, 0, timeout_spins);
+    if (rc != 0) return rc;
+    g_net.tcp.seq += 1;
+    g_net.tcp.state = TCP_FIN_WAIT;
+    g_net.tcp_stats.tcp_fin_tx++;
+
+    return (int)payload_len;
 }
 
 int net_udp_send(const uint8 src_ip[4], uint16 src_port,

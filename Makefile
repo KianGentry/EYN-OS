@@ -376,7 +376,7 @@ run: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
-	-netdev user,id=net0,hostfwd=udp::10000-:9999 \
+	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
 	-device e1000,netdev=net0 \
 	-m 9M
 
@@ -387,7 +387,7 @@ qemu-debug: build
 	qemu-system-i386 -cdrom EYNOS.iso \
 	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
-	-netdev user,id=net0,hostfwd=udp::10000-:9999 \
+	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
 	-device e1000,netdev=net0 \
 	-serial stdio \
 	-d int,cpu_reset -D tmp/qemu-debug.log \

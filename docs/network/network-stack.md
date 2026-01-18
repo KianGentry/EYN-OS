@@ -166,6 +166,22 @@ struct udp_hdr {
 - Simple socket-like API
 - Socket bindings (per-port queues)
 
+### TCP Layer (Minimal Client)
+
+**Features**:
+- Active open (SYN → SYN-ACK → ACK)
+- Single connection at a time
+- Data send with PSH+ACK
+- FIN close
+- Passive listen (single connection)
+- RX payload queue (non-blocking read)
+
+**Limitations**:
+- No retransmission beyond ARP retry
+- No window scaling or options
+- No passive listen yet
+- No stream reassembly (payloads are queued as received)
+
 **Receive Queue**:
 ```c
 struct udp_rx_slot {

@@ -143,6 +143,15 @@ e1000 udp-listen 9999
 # Send UDP packet
 e1000 udp-send 10.0.2.2 5000 Hello from EYN-OS
 
+# Send TCP packet (connect, send, close)
+e1000 tcp-send 10.0.2.2 9999 Hello
+
+# Listen for TCP connection
+e1000 tcp-listen 9999
+
+# Receive TCP payload (non-blocking)
+e1000 tcp-recv
+
 # Check UDP statistics
 e1000 udp-stats
 

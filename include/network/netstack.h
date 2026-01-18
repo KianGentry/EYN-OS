@@ -97,6 +97,34 @@ typedef struct net_udp_stats {
     uint32 udp_tx_checksums;
 } net_udp_stats;
 
+// TCP stats (minimal client support)
+typedef struct net_tcp_stats {
+    uint32 tcp_syn_sent;
+    uint32 tcp_synack_rx;
+    uint32 tcp_ack_tx;
+    uint32 tcp_data_tx;
+    uint32 tcp_data_rx;
+    uint32 tcp_fin_tx;
+    uint32 tcp_fin_rx;
+    uint32 tcp_rst_rx;
+    uint32 tcp_listen_syn_rx;
+    uint32 tcp_conn_established;
+    uint32 tcp_rx_enqueued;
+    uint32 tcp_rx_dropped;
+} net_tcp_stats;
+
+// TCP receive payload cap
+#define NET_TCP_MAX_PAYLOAD 512u
+
+typedef struct net_tcp_rx_packet {
+    uint8 src_ip[4];
+    uint16 src_port;
+    uint8 dst_ip[4];
+    uint16 dst_port;
+    uint32 payload_len;
+    uint8 payload[NET_TCP_MAX_PAYLOAD];
+} net_tcp_rx_packet;
+
 // IPv4-level stats (diagnostics for fragmentation policy).
 typedef struct net_ip_stats {
     uint32 ipv4_rx_fragments;
@@ -222,6 +250,23 @@ net_ip_stats net_ip_get_stats(void);
 // Returns a snapshot of current ICMP stats.
 net_icmp_stats net_icmp_get_stats(void);
 
+// Returns a snapshot of current TCP stats.
+net_tcp_stats net_tcp_get_stats(void);
+
+// TCP listener/receive API (minimal passive open).
+// Listen on local_port for a single connection.
+int net_tcp_listen(uint16 local_port);
+
+// Close current TCP connection (if any).
+int net_tcp_close(void);
+
+// Non-blocking receive from TCP RX queue.
+// Returns 1 if packet returned, 0 if none, <0 on error.
+int net_tcp_recv(net_tcp_rx_packet* out);
+
+// Returns number of queued TCP packets.
+uint32 net_tcp_queue_count(void);
+
 // Sends ICMP echo request(s) and waits for reply.
 //
 // count:
@@ -231,5 +276,13 @@ net_icmp_stats net_icmp_get_stats(void);
 //
 // Returns number of replies received (>=0), or <0 on error.
 int net_icmp_ping(const uint8 local_ip[4], const uint8 dst_ip[4], int count, int timeout_spins);
+
+// --- TCP (minimal active open) ---
+// Establish a TCP connection, send payload, and close.
+// Returns bytes sent or <0 on error.
+int net_tcp_send(const uint8 local_ip[4], uint16 local_port,
+                 const uint8 dst_ip[4], uint16 dst_port,
+                 const uint8* payload, uint32 payload_len,
+                 int timeout_spins);
 
 #endif

@@ -65,6 +65,7 @@ Commands for network interaction:
 - `e1000 probe|init|regs|test` - NIC management
 - `pciscan [net]` - PCI device enumeration
 - `e1000 udp-send|udp-listen|udp-echo|udp-stats|udp-drain` - UDP utilities
+- `e1000 tcp-send|tcp-listen|tcp-recv|tcp-close` - Minimal TCP tools
 - `ping <dst_ip> [count] [local_ip]` - ICMP echo
 - `netstat` - Network status dump
 - `netcfg show|defaults|set|save|load ...` - Network configuration (runtime + persisted)
@@ -108,7 +109,7 @@ Current implementation has these limitations:
 3. **Limited ICMP**: Only ICMP echo (ping) request/reply
 4. **No Fragmentation**: MTU is effectively ~1500 bytes
 5. **No DHCP**: Static config (runtime configurable via `netcfg`)
-6. **Polling**: Interrupt-based RX not yet implemented
+6. **Polling**: Polling-based with interrupt-assisted RX
 7. **Single Thread**: No concurrent socket operations
 
 ## Testing with QEMU
@@ -120,10 +121,18 @@ QEMU provides user-mode networking by default:
 # - Host: 10.0.2.2
 # - Guest (EYN-OS): 10.0.2.15 (or similar)
 
-# Test host → guest using Makefile's default hostfwd (host UDP 10000 → guest 9999):
+# Test host → guest using Makefile's default hostfwd:
+# - UDP: host 10000 → guest 9999
+# - TCP: host 10000 → guest 9999
 echo "test message" | nc -u 127.0.0.1 10000
 # Then in EYN-OS:
 e1000 udp-listen 9999
+
+# TCP example:
+# In EYN-OS:
+#   e1000 tcp-listen 9999
+# On the host:
+#   nc 127.0.0.1 10000
 ```
 
 ## Implementation Files

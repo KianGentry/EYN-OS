@@ -214,6 +214,71 @@ UDP: Sent 17 bytes to 10.0.2.2:5000
 
 ---
 
+### e1000 tcp-send
+Establish a TCP connection, send a payload, then close.
+
+```bash
+e1000 tcp-send <dst_ip> <dst_port> <message> [src_port] [spins]
+```
+
+**Example**:
+```bash
+# Host:
+nc -l 9999
+
+# Guest:
+e1000 tcp-send 10.0.2.2 9999 hello
+```
+
+**Notes**:
+- Minimal TCP client (SYN → SYN-ACK → ACK → data → FIN)
+- No retransmits beyond ARP retry
+- Payload is a single token (no spaces)
+
+---
+
+### e1000 tcp-listen
+Listen for a single TCP connection and accept it.
+
+```bash
+e1000 tcp-listen <port>
+```
+
+**Example**:
+```bash
+# Guest:
+e1000 tcp-listen 9999
+
+# Host:
+# With Makefile `make run` hostfwd: host TCP 10000 -> guest 9999
+nc 127.0.0.1 10000
+```
+
+---
+
+### e1000 tcp-recv
+Receive a queued TCP payload (non-blocking).
+
+```bash
+e1000 tcp-recv
+```
+
+**Example**:
+```bash
+e1000 tcp-recv
+```
+
+---
+
+### e1000 tcp-close
+Close the current TCP connection (sends FIN if established).
+
+```bash
+e1000 tcp-close
+```
+
+---
+
 ### e1000 udp-stats
 Display UDP statistics.
 
