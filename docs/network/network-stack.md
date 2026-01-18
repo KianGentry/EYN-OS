@@ -166,7 +166,7 @@ struct udp_hdr {
 - Simple socket-like API
 - Socket bindings (per-port queues)
 
-### TCP Layer (Minimal Client)
+### TCP Layer (Minimal)
 
 **Features**:
 - Active open (SYN → SYN-ACK → ACK)
@@ -175,31 +175,39 @@ struct udp_hdr {
 - FIN close
 - Passive listen (single connection)
 - RX payload queue (non-blocking read)
+- Minimal retransmission (SYN/SYN-ACK/DATA/FIN)
 
 **Limitations**:
-- No retransmission beyond ARP retry
 - No window scaling or options
-- No passive listen yet
 - No stream reassembly (payloads are queued as received)
+- No out-of-order reassembly or receive window management
 
 **Receive Queue**:
 ```c
-struct udp_rx_slot {
+struct tcp_rx_slot {
     uint8 valid;                    // Slot occupied
-    net_udp_rx_packet pkt;          // Packet data
+    net_tcp_rx_packet pkt;          // Packet data
 };
 
 // Up to 8 packets buffered
-udp_rx_slot udp_rxq[8];
+tcp_rx_slot tcp_rxq[8];
 ```
 
 **Statistics**:
 ```c
-struct net_udp_stats {
-    uint32 rx_packets;      // Total received
-    uint32 tx_packets;      // Total transmitted
-    uint32 rx_dropped;      // Dropped (queue full)
-    uint32 rx_bad_checksum; // Bad checksum
+struct net_tcp_stats {
+    uint32 tcp_syn_sent;
+    uint32 tcp_synack_rx;
+    uint32 tcp_ack_tx;
+    uint32 tcp_data_tx;
+    uint32 tcp_data_rx;
+    uint32 tcp_fin_tx;
+    uint32 tcp_fin_rx;
+    uint32 tcp_rst_rx;
+    uint32 tcp_listen_syn_rx;
+    uint32 tcp_conn_established;
+    uint32 tcp_rx_enqueued;
+    uint32 tcp_rx_dropped;
 };
 ```
 

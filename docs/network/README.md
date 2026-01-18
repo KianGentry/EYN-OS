@@ -65,7 +65,7 @@ Commands for network interaction:
 - `e1000 probe|init|regs|test` - NIC management
 - `pciscan [net]` - PCI device enumeration
 - `e1000 udp-send|udp-listen|udp-echo|udp-stats|udp-drain` - UDP utilities
-- `e1000 tcp-send|tcp-listen|tcp-recv|tcp-close` - Minimal TCP tools
+- `e1000 tcp-send|tcp-listen|tcp-recv|tcp-sendcur|tcp-close` - Minimal TCP tools
 - `ping <dst_ip> [count] [local_ip]` - ICMP echo
 - `netstat` - Network status dump
 - `netcfg show|defaults|set|save|load ...` - Network configuration (runtime + persisted)
@@ -105,7 +105,7 @@ e1000 udp-stats   # Show packet counters
 Current implementation has these limitations:
 
 1. **Single NIC**: Only first e1000 device is used
-2. **No TCP**: Only UDP is implemented
+2. **Minimal TCP**: Single connection, no stream reassembly, no window management
 3. **Limited ICMP**: Only ICMP echo (ping) request/reply
 4. **No Fragmentation**: MTU is effectively ~1500 bytes
 5. **No DHCP**: Static config (runtime configurable via `netcfg`)
