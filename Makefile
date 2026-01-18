@@ -286,58 +286,16 @@ obj/irq.o:src/cpu/irq.c include/cpu/irq.h
 
 # Actually building the OS (The stuff you should actually run, i.e. make run, make build, etc.)
 
-# Create a fresh staging dir for each build to avoid permission issues from prior runs
-STAGE_DIR := $(shell mktemp -d tmp/grub_ultra_minimal.XXXXXX 2>/dev/null || echo tmp/grub_ultra_minimal)
-
 build: all eynfsimg docs
-	# Create fresh staging dir
-	install -d -m 0755 $(STAGE_DIR)/boot/grub
-	cp tmp/boot/kernel.bin $(STAGE_DIR)/boot/
-	@echo 'set default=0' > $(STAGE_DIR)/boot/grub/grub.cfg
-	@echo 'set timeout=0' >> $(STAGE_DIR)/boot/grub/grub.cfg
-	@echo 'set gfxmode=text' >> $(STAGE_DIR)/boot/grub/grub.cfg
-	@echo 'set gfxpayload=text' >> $(STAGE_DIR)/boot/grub/grub.cfg
-	@echo 'set color_normal=white/black' >> $(STAGE_DIR)/boot/grub/grub.cfg
-	@echo 'set color_highlight=black/white' >> $(STAGE_DIR)/boot/grub/grub.cfg
-	@echo '' >> $(STAGE_DIR)/boot/grub/grub.cfg
-	@echo 'menuentry "EYN-OS" {' >> $(STAGE_DIR)/boot/grub/grub.cfg
-	@echo '    multiboot /boot/kernel.bin' >> $(STAGE_DIR)/boot/grub/grub.cfg
-	@echo '    boot' >> $(STAGE_DIR)/boot/grub/grub.cfg
-	@echo '}' >> $(STAGE_DIR)/boot/grub/grub.cfg
 	@if [ -z "$(GRUB_MKRESCUE)" ]; then \
 		echo "grub-mkrescue not found. Install grub2 (grub2-mkrescue) or grub-pc-bin (grub-mkrescue)."; \
 		exit 1; \
 	fi
-	@# Ensure ISO creation is non-interactive (some xorriso/grub wrappers may prompt on overwrite)
-	rm -f EYNOS.iso
-	$(GRUB_MKRESCUE) --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o EYNOS.iso $(STAGE_DIR)/
-	@echo "Ultra-minimal ISO created: EYNOS.iso"
-	@ls -lh EYNOS.iso
-	@echo "Attempting to strip EFI content (optional)..."
-	@# Skip EFI cleanup if sudo isn't available non-interactively; the ISO from grub2-mkrescue works fine for QEMU.
-	@if sudo -n true 2>/dev/null; then \
-		echo "Cleaning ISO EFI content with sudo..."; \
-		mkdir -p /tmp/iso_edit; \
-		sudo mount -o loop EYNOS.iso /tmp/iso_edit; \
-		mkdir -p /tmp/iso_clean; \
-		cp -r /tmp/iso_edit/* /tmp/iso_clean/; \
-		rm -rf /tmp/iso_clean/efi*; \
-		rm -rf /tmp/iso_clean/boot/grub/i386-efi; \
-		rm -rf /tmp/iso_clean/boot/grub/x86_64-efi; \
-		sudo umount /tmp/iso_edit; \
-		rm -f EYNOS.iso; \
-		xorriso -as mkisofs -o EYNOS.iso -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img -r -V "EYN-OS" -iso-level 3 -joliet-long /tmp/iso_clean; \
-		rm -rf /tmp/iso_clean; \
-		echo "EFI content stripped from ISO."; \
-	else \
-		echo "Skipping EFI cleanup (no sudo available). Using original grub2-mkrescue ISO."; \
-	fi
-	@echo "ISO ready: EYNOS.iso"
-	@ls -lh EYNOS.iso
+	bash devtools/build_iso.sh "$(GRUB_MKRESCUE)"
 
 clean:
 	rm -rf obj/*.o tmp/boot/kernel.bin *.img eynfs_format EYNOS.iso
-	rm -rf tmp/grub_minimal tmp/grub_ultra_minimal
+	@rm -rf tmp/grub_minimal tmp/grub_ultra_minimal tmp/grub_ultra_minimal.* tmp/grub.* tmp/iso_edit.* tmp/iso_clean.* 2>/dev/null || true
 	rm -f userland/*.o userland/*.bin
 
 clear: clean
