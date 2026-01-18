@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2026-01-18 12:10:18
+This document is auto-generated from the source code. Last updated: 2026-01-18 12:24:50
 
 **Total Commands:** 66
 
@@ -197,7 +197,7 @@ clearbg
 
 **Description:**
 Intel e1000 utilities (probe + bring-up helpers).
-Usage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx] | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-close
+Usage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx] | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-sendcur | e1000 tcp-close
 
 **Example:**
 ```bash

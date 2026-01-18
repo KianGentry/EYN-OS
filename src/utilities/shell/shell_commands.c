@@ -854,7 +854,7 @@ REGISTER_SHELL_COMMAND(portable, "portable", portable_cmd, CMD_ESSENTIAL, "Displ
 REGISTER_SHELL_COMMAND(init, "init", init_cmd, CMD_ESSENTIAL, "Initialize full system services (ATA drives, etc.).\nUsage: init", "init");
 REGISTER_SHELL_COMMAND(pciscan_cmd_info, "pciscan", pciscan_cmd, CMD_DIAGNOSTIC, "Scan PCI devices and print vendor/device IDs and BAR0.\nUsage: pciscan [net]\nTip: e1000 usually shows as 8086:100E.", "pciscan net");
 REGISTER_SHELL_COMMAND(e1000probe_cmd_info, "e1000probe", e1000probe_cmd, CMD_DIAGNOSTIC, "Probe the Intel e1000 NIC (read-only MMIO sanity check).\nUsage: e1000probe", "e1000probe");
-REGISTER_SHELL_COMMAND(e1000_cmd_info, "e1000", e1000_cmd, CMD_DIAGNOSTIC, "Intel e1000 utilities (probe + bring-up helpers).\nUsage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx] | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-close", "e1000 init");
+REGISTER_SHELL_COMMAND(e1000_cmd_info, "e1000", e1000_cmd, CMD_DIAGNOSTIC, "Intel e1000 utilities (probe + bring-up helpers).\nUsage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx] | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-sendcur | e1000 tcp-close", "e1000 init");
 
 static void ping_cmd(string ch);
 static void netstat_cmd(string ch);
@@ -1651,6 +1651,30 @@ void e1000_cmd(string arg)
         return;
     }
 
+    if (token_eq(s, "tcp-sendcur")) {
+        // Usage: e1000 tcp-sendcur <message>
+        const char* p = next_token(s);
+        if (!p || !*p) {
+            printf("Usage: e1000 tcp-sendcur <message>\n");
+            return;
+        }
+
+        char msg[256];
+        {
+            int n = 0;
+            while (p[n] && p[n] != ' ' && n < (int)sizeof(msg) - 1) { msg[n] = p[n]; n++; }
+            msg[n] = '\0';
+        }
+
+        int rc = net_tcp_send_current((const uint8*)msg, (uint32)strlen(msg));
+        if (rc >= 0) {
+            printf("TCP sent (%d bytes)\n", rc);
+        } else {
+            printf("%cTCP send failed (%d)\n", 255, 0, 0, rc);
+        }
+        return;
+    }
+
     if (token_eq(s, "tcp-close")) {
         // Usage: e1000 tcp-close
         int rc = net_tcp_close();
@@ -1984,7 +2008,7 @@ void e1000_cmd(string arg)
         return;
     }
 
-    printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 init | e1000 regs | e1000 arp-test | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-close | e1000 udp-listen | e1000 udp-echo | e1000 udp-stats | e1000 udp-drain | e1000 udp-bind | e1000 udp-recv | e1000 udp-close ...\n", 255, 0, 0);
+    printf("%cError: unknown subcommand. Usage: e1000 probe | e1000 init | e1000 regs | e1000 arp-test | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-sendcur | e1000 tcp-close | e1000 udp-listen | e1000 udp-echo | e1000 udp-stats | e1000 udp-drain | e1000 udp-bind | e1000 udp-recv | e1000 udp-close ...\n", 255, 0, 0);
 }
 
 // Diagnostics/testing command implementations

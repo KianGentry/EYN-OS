@@ -1750,6 +1750,26 @@ int net_tcp_send(const uint8 local_ip[4], uint16 local_port,
     return (int)payload_len;
 }
 
+int net_tcp_send_current(const uint8* payload, uint32 payload_len)
+{
+    if (payload_len != 0u && !payload) return -1;
+    if (!g_net.inited || !g_net.dev) return -2;
+    if (g_net.tcp.state != TCP_ESTABLISHED) return -3;
+    if (g_net.tcp.local_port == 0 || g_net.tcp.remote_port == 0) return -4;
+
+    if (payload_len == 0u) return 0;
+
+    int rc = tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
+                              g_net.tcp.remote_ip, g_net.tcp.remote_port,
+                              g_net.tcp.seq, g_net.tcp.ack,
+                              TCP_FLAG_PSH | TCP_FLAG_ACK,
+                              payload, payload_len, 800000);
+    if (rc != 0) return rc;
+    g_net.tcp.seq += payload_len;
+    g_net.tcp_stats.tcp_data_tx++;
+    return (int)payload_len;
+}
+
 int net_udp_send(const uint8 src_ip[4], uint16 src_port,
                  const uint8 dst_ip[4], uint16 dst_port,
                  const uint8* payload, uint32 payload_len,

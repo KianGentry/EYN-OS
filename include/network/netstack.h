@@ -267,6 +267,10 @@ int net_tcp_recv(net_tcp_rx_packet* out);
 // Returns number of queued TCP packets.
 uint32 net_tcp_queue_count(void);
 
+// Send payload on the current established TCP connection.
+// Returns bytes sent or <0 on error.
+int net_tcp_send_current(const uint8* payload, uint32 payload_len);
+
 // Sends ICMP echo request(s) and waits for reply.
 //
 // count:

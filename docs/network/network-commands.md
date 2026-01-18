@@ -270,6 +270,21 @@ e1000 tcp-recv
 
 ---
 
+### e1000 tcp-sendcur
+Send a payload on the current established TCP connection (no new connect).
+
+```bash
+e1000 tcp-sendcur <message>
+```
+
+**Example**:
+```bash
+# After a connection is established:
+e1000 tcp-sendcur hello
+```
+
+---
+
 ### e1000 tcp-close
 Close the current TCP connection (sends FIN if established).
 

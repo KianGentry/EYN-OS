@@ -152,6 +152,9 @@ e1000 tcp-listen 9999
 # Receive TCP payload (non-blocking)
 e1000 tcp-recv
 
+# Send reply on current TCP connection
+e1000 tcp-sendcur Hello
+
 # Check UDP statistics
 e1000 udp-stats
 
