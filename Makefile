@@ -35,7 +35,9 @@ DEBUG_CFLAGS = $(KERNEL_CFLAGS) -g -O0 -DDEBUG -D_DEBUG
 RELEASE_CFLAGS = $(KERNEL_CFLAGS) -O2 -DNDEBUG
 ASFLAGS = -f elf32
 ## Linker flags: target i386 linker script, enable section GC, strip symbols, and emit a map
-LDFLAGS = -m elf_i386 -T src/boot/link.ld --gc-sections -Map tmp/boot/kernel.map -s
+TMPDIR ?= tmp_user
+BOOTDIR = $(TMPDIR)/boot
+LDFLAGS = -m elf_i386 -T src/boot/link.ld --gc-sections -Map $(BOOTDIR)/kernel.map -s
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
@@ -47,13 +49,13 @@ OBJS += obj/partition.o obj/diskmgr.o
 OBJS += obj/pci.o
 OBJS += obj/e1000.o
 OBJS += obj/netstack.o
-OUTPUT = tmp/boot/kernel.bin
+OUTPUT = $(BOOTDIR)/kernel.bin
 
 # Source files to object files
 
 all:$(OBJS)
-	mkdir tmp/ -p
-	mkdir tmp/boot/ -p
+	mkdir $(TMPDIR)/ -p
+	mkdir $(BOOTDIR)/ -p
 	$(LINKER) $(LDFLAGS) -o $(OUTPUT) $(OBJS)
 
 docs: all

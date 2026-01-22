@@ -280,6 +280,15 @@ uint32 get_last_error_eip() {
 // args: (const char* path, const void* buf, int len)
 #define SYSCALL_WRITEFILE 21
 
+// Cooperative scheduling from userland
+#define SYSCALL_SLEEP_US 22
+
+// GUI continuous redraw control
+#define SYSCALL_GUI_SET_CONTINUOUS_REDRAW 23
+
+// GUI RGB565 blit (userland framebuffer)
+#define SYSCALL_GUI_BLIT_RGB565 24
+
 typedef struct {
     uint32 type;
     int32 a;
@@ -358,6 +367,13 @@ typedef struct {
     uint8 ev_head;
     uint8 ev_tail;
     user_gui_event_t ev[64];
+
+    // Optional RGB565 blit buffer (userland-provided)
+    uint16* blit_buf;
+    int blit_w;
+    int blit_h;
+    int blit_dst_w;
+    int blit_dst_h;
 } user_gui_t;
 
 #define USER_GUI_EVENT_CAP 64
@@ -377,6 +393,14 @@ static void user_gui_free_entry(user_gui_t* e) {
 		vga_font_release(e->font_handle);
 		e->font_handle = 0;
 	}
+    if (e->blit_buf) {
+        free(e->blit_buf);
+        e->blit_buf = NULL;
+    }
+    e->blit_w = 0;
+    e->blit_h = 0;
+    e->blit_dst_w = 0;
+    e->blit_dst_h = 0;
     if (e->tile_idx >= 0) {
         tile_unregister_gui_client(e->tile_idx);
         tile_close(e->tile_idx);
@@ -401,6 +425,11 @@ static int user_gui_alloc_handle(void) {
             g_user_guis[i].tile_idx = -1;
             g_user_guis[i].title = NULL;
             g_user_guis[i].status_left = NULL;
+            g_user_guis[i].blit_buf = NULL;
+            g_user_guis[i].blit_w = 0;
+            g_user_guis[i].blit_h = 0;
+            g_user_guis[i].blit_dst_w = 0;
+            g_user_guis[i].blit_dst_h = 0;
             g_user_guis[i].cmd_count = 0;
             g_user_guis[i].ev_head = 0;
             g_user_guis[i].ev_tail = 0;
@@ -446,6 +475,21 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
     user_gui_t* e = user_gui_get(handle);
     if (!e || e->tile_idx != tile_idx) return;
     if (content_w <= 0 || content_h <= 0) return;
+
+    if (e->blit_buf && e->blit_w > 0 && e->blit_h > 0) {
+        int dst_w = (e->blit_dst_w > 0) ? e->blit_dst_w : content_w;
+        int dst_h = (e->blit_dst_h > 0) ? e->blit_dst_h : content_h;
+        if (dst_w > content_w) dst_w = content_w;
+        if (dst_h > content_h) dst_h = content_h;
+        if (dst_w > 0 && dst_h > 0) {
+            if (dst_w == e->blit_w && dst_h == e->blit_h) {
+                vga_blit_rgb565_bb(content_x, content_y, e->blit_buf, e->blit_w, e->blit_h);
+            } else {
+                vga_blit_rgb565_scaled_bb(content_x, content_y, dst_w, dst_h, e->blit_buf, e->blit_w, e->blit_h);
+            }
+            vga_mark_dirty_rect(content_x, content_y, dst_w, dst_h);
+        }
+    }
 
     for (int i = 0; i < e->cmd_count; ++i) {
         const user_gui_cmd_t* c = &e->cmds[i];
@@ -540,6 +584,14 @@ void syscall_reset_user_guis(void) {
             vga_font_release(g_user_guis[0].font_handle);
             g_user_guis[0].font_handle = 0;
         }
+        if (g_user_guis[0].blit_buf) {
+            free(g_user_guis[0].blit_buf);
+            g_user_guis[0].blit_buf = NULL;
+        }
+        g_user_guis[0].blit_w = 0;
+        g_user_guis[0].blit_h = 0;
+        g_user_guis[0].blit_dst_w = 0;
+        g_user_guis[0].blit_dst_h = 0;
         if (g_user_guis[0].title) { free(g_user_guis[0].title); g_user_guis[0].title = NULL; }
         if (g_user_guis[0].status_left) { free(g_user_guis[0].status_left); g_user_guis[0].status_left = NULL; }
         g_user_guis[0].used = 0;
@@ -1153,6 +1205,14 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = (uint32)written;
             break;
         }
+        case SYSCALL_SLEEP_US: {
+            uint32 usec = (uint32)arg1;
+            // Cooperative sleep to allow other tasks (UI/tiler) to run.
+            // Uses a busy-wait fallback if no timer is configured.
+            sched_sleep_us(usec);
+            regs->eax = 0;
+            break;
+        }
         case SYSCALL_GUI_CREATE: {
             // gui_create(title_ptr=arg1, status_left_ptr=arg2)
             if (!tile_is_tiling_active() || !g_user_task_active) { regs->eax = (uint32)-1; break; }
@@ -1282,6 +1342,14 @@ uint32 syscall_dispatch(regs_t* regs) {
 					vga_font_release(e->font_handle);
 					e->font_handle = 0;
 				}
+                if (e->blit_buf) {
+                    free(e->blit_buf);
+                    e->blit_buf = NULL;
+                }
+                e->blit_w = 0;
+                e->blit_h = 0;
+                e->blit_dst_w = 0;
+                e->blit_dst_h = 0;
             }
 
             e->used = 1;
@@ -1407,6 +1475,9 @@ uint32 syscall_dispatch(regs_t* regs) {
             user_gui_t* e = user_gui_get(handle);
             if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
             tile_invalidate_gui(e->tile_idx);
+            // If the main tiler loop is blocked by a running ring3 task, render
+            // a single frame now so GUI updates appear without input events.
+            tile_render_once();
             regs->eax = 0;
             break;
         }
@@ -1457,6 +1528,56 @@ uint32 syscall_dispatch(regs_t* regs) {
                 if (e->font_handle > 0) vga_font_release(e->font_handle);
                 e->font_handle = new_font;
             }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_GUI_SET_CONTINUOUS_REDRAW: {
+            // gui_set_continuous_redraw(handle, enabled)
+            int handle = (int)arg1;
+            int enabled = (int)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+            tile_set_gui_continuous_redraw(e->tile_idx, enabled ? 1 : 0);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_GUI_BLIT_RGB565: {
+            // gui_blit_rgb565(handle, blit_ptr)
+            int handle = (int)arg1;
+            const void* user_cmd = (const void*)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!e || e->tile_idx < 0 || !user_cmd) { regs->eax = (uint32)-1; break; }
+
+            typedef struct {
+                int32 src_w;
+                int32 src_h;
+                const uint16* pixels;
+                int32 dst_w;
+                int32 dst_h;
+            } gui_blit_rgb565_t;
+
+            gui_blit_rgb565_t cmd;
+            if (copyin(&cmd, user_cmd, sizeof(cmd)) != 0) { regs->eax = (uint32)-1; break; }
+            if (!cmd.pixels || cmd.src_w <= 0 || cmd.src_h <= 0) { regs->eax = (uint32)-1; break; }
+
+            const int max_w = 320;
+            const int max_h = 200;
+            if (cmd.src_w > max_w || cmd.src_h > max_h) { regs->eax = (uint32)-1; break; }
+
+            size_t need = (size_t)cmd.src_w * (size_t)cmd.src_h * sizeof(uint16);
+            if (need == 0 || need > (size_t)(max_w * max_h * 2)) { regs->eax = (uint32)-1; break; }
+
+            if (!e->blit_buf || e->blit_w != cmd.src_w || e->blit_h != cmd.src_h) {
+                if (e->blit_buf) { free(e->blit_buf); e->blit_buf = NULL; }
+                e->blit_buf = (uint16*)malloc(need);
+                if (!e->blit_buf) { regs->eax = (uint32)-1; break; }
+                e->blit_w = cmd.src_w;
+                e->blit_h = cmd.src_h;
+            }
+
+            if (copyin((uint8*)e->blit_buf, cmd.pixels, need) != 0) { regs->eax = (uint32)-1; break; }
+            e->blit_dst_w = cmd.dst_w;
+            e->blit_dst_h = cmd.dst_h;
             regs->eax = 0;
             break;
         }

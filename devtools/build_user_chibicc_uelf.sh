@@ -9,7 +9,8 @@ if [[ $# -ge 1 ]]; then
   out="$1"
 fi
 
-mkdir -p tmp
+tmp_root="tmp_user"
+mkdir -p "$tmp_root"
 
 ldscript="devtools/user_elf32.ld"
 crt0="userland/crt0.S"
@@ -56,7 +57,7 @@ if [[ "$CC" == "gcc" ]]; then
   fi
 fi
 
-objdir="tmp/user_chibicc"
+objdir="$tmp_root/user_chibicc"
 mkdir -p "$objdir"
 
 obj_crt="$objdir/crt0.o"

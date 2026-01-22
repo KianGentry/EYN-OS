@@ -33,6 +33,15 @@ enum {
     // Write an entire file (create/overwrite) from ring3.
     // args: (const char* path, const void* buf, int len)
     EYN_SYSCALL_WRITEFILE = 21,
+
+    // Cooperative sleep (microseconds)
+    EYN_SYSCALL_SLEEP_US = 22,
+
+    // GUI continuous redraw control
+    EYN_SYSCALL_GUI_SET_CONTINUOUS_REDRAW = 23,
+
+    // GUI RGB565 blit (userland framebuffer)
+    EYN_SYSCALL_GUI_BLIT_RGB565 = 24,
 };
 
 static inline int eyn_syscall3(int n, int a1, const void* a2, int a3) {

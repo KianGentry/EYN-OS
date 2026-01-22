@@ -18,13 +18,21 @@ if [[ -z "${GRUB_MKRESCUE_BIN}" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP_ROOT="${REPO_ROOT}/tmp"
-KERNEL_BIN="${REPO_ROOT}/tmp/boot/kernel.bin"
+TMP_DIR_NAME="${TMPDIR:-tmp_user}"
+TMP_ROOT="${REPO_ROOT}/${TMP_DIR_NAME}"
+KERNEL_BIN="${TMP_ROOT}/boot/kernel.bin"
 ISO_OUT="${REPO_ROOT}/EYNOS.iso"
 
 if [[ ! -f "${KERNEL_BIN}" ]]; then
-  echo "Error: kernel binary not found at ${KERNEL_BIN}" >&2
-  exit 2
+  alt_kernel="${REPO_ROOT}/tmp/boot/kernel.bin"
+  if [[ -f "${alt_kernel}" ]]; then
+    KERNEL_BIN="${alt_kernel}"
+    TMP_ROOT="${REPO_ROOT}/tmp"
+  else
+    echo "Error: kernel binary not found at ${KERNEL_BIN}" >&2
+    echo "       Tried fallback: ${alt_kernel}" >&2
+    exit 2
+  fi
 fi
 
 mkdir -p "${TMP_ROOT}"

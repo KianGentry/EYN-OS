@@ -33,3 +33,16 @@ __attribute__((noreturn)) void _exit(int code) {
 int getkey(void) {
     return eyn_syscall0(EYN_SYSCALL_GETKEY);
 }
+
+int usleep(unsigned int usec) {
+    // Cooperative sleep to allow GUI and shell updates.
+    (void)eyn_syscall1(EYN_SYSCALL_SLEEP_US, (int)usec);
+    return 0;
+}
+
+unsigned int sleep(unsigned int seconds) {
+    // Best-effort: convert seconds to microseconds.
+    unsigned int usec = seconds * 1000000u;
+    (void)usleep(usec);
+    return 0;
+}

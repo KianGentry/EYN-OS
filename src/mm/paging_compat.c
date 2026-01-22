@@ -6,11 +6,47 @@
 #include <isr.h>
 #include <vga.h>
 #include <mm/user_access.h>
+#include <serial.h>
+#include <system.h>
+
+static void serial_putc_raw(char c) {
+    uint16 port = SERIAL_COM1;
+    int timeout = 100000;
+    while (timeout--) {
+        if (inportb(SERIAL_LINE_STATUS(port)) & SERIAL_THRE) break;
+    }
+    outportb(SERIAL_DATA_PORT(port), (uint8)c);
+}
+
+static void serial_puts_unsafe(const char* s) {
+    if (!s) return;
+    while (*s) {
+        serial_putc_raw(*s++);
+    }
+}
+
+static void serial_put_hex32(uint32 v) {
+    static const char* hex = "0123456789ABCDEF";
+    serial_puts_unsafe("0x");
+    for (int i = 28; i >= 0; i -= 4) {
+        char c = hex[(v >> (unsigned)i) & 0xFu];
+        serial_putc_raw(c);
+    }
+}
 
 /* Legacy page fault handler signature used by ISR 14. */
 void page_fault_handler(regs_t* r) {
     uint32 fault_addr;
     asm volatile("mov %%cr2, %0" : "=r"(fault_addr));
+
+    // Always emit a minimal serial line first in case VGA output is unavailable.
+    serial_puts_unsafe("[PF] addr=");
+    serial_put_hex32(fault_addr);
+    serial_puts_unsafe(" eip=");
+    serial_put_hex32(r ? r->eip : 0);
+    serial_puts_unsafe(" err=");
+    serial_put_hex32(r ? r->err_code : 0);
+    serial_puts_unsafe("\n");
 
     // Extra diagnostics for ring3 faults (helps debug syscall/iret issues).
     if (r && ((r->cs & 3) == 3)) {

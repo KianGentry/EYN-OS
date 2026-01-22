@@ -37,7 +37,8 @@ if [[ ${#sources[@]} -eq 0 ]]; then
   exit 1
 fi
 
-mkdir -p tmp
+tmp_root="tmp_user"
+mkdir -p "$tmp_root"
 
 ldscript="devtools/user_elf32.ld"
 crt0="userland/crt0.S"
@@ -47,15 +48,18 @@ libc_dir="userland/libc"
 
 chibicc_bin="chibicc-main/chibicc"
 
-obj_app_prefix="tmp/user_app_chibicc"
-obj_crt="tmp/user_crt0.o"
-obj_libc_unistd="tmp/user_libc_unistd.o"
-obj_libc_string="tmp/user_libc_string.o"
-obj_libc_stdio="tmp/user_libc_stdio.o"
-obj_libc_fcntl="tmp/user_libc_fcntl.o"
-obj_libc_dirent="tmp/user_libc_dirent.o"
-obj_libc_gui="tmp/user_libc_gui.o"
-lib_archive="tmp/libeync.a"
+obj_app_prefix="$tmp_root/user_app_chibicc"
+obj_crt="$tmp_root/user_crt0.o"
+obj_libc_unistd="$tmp_root/user_libc_unistd.o"
+obj_libc_string="$tmp_root/user_libc_string.o"
+obj_libc_stdio="$tmp_root/user_libc_stdio.o"
+obj_libc_fcntl="$tmp_root/user_libc_fcntl.o"
+obj_libc_dirent="$tmp_root/user_libc_dirent.o"
+obj_libc_gui="$tmp_root/user_libc_gui.o"
+obj_libc_time="$tmp_root/user_libc_time.o"
+obj_libc_stdlib="$tmp_root/user_libc_stdlib.o"
+obj_libc_errno="$tmp_root/user_libc_errno.o"
+lib_archive="$tmp_root/libeync.a"
 
 if [[ ! -x "$chibicc_bin" ]]; then
   echo "Missing $chibicc_bin (build it with: (cd chibicc-main && make))" >&2
@@ -106,6 +110,9 @@ fi
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/fcntl.c" -o "$obj_libc_fcntl"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/dirent.c" -o "$obj_libc_dirent"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/gui.c" -o "$obj_libc_gui"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/time.c" -o "$obj_libc_time"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/stdlib.c" -o "$obj_libc_stdlib"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/errno.c" -o "$obj_libc_errno"
 
 rm -f "$lib_archive"
 ar rcs "$lib_archive" \
@@ -114,7 +121,10 @@ ar rcs "$lib_archive" \
   "$obj_libc_stdio" \
   "$obj_libc_fcntl" \
   "$obj_libc_dirent" \
-  "$obj_libc_gui"
+  "$obj_libc_gui" \
+  "$obj_libc_time" \
+  "$obj_libc_stdlib" \
+  "$obj_libc_errno"
 
 
 # Compile the user program(s) with chibicc i386 backend.
@@ -129,6 +139,6 @@ done
 
 # Link a simple ELF32 ET_EXEC at 0x00400000.
 "$CC" -m32 -nostdlib -nostartfiles -Wl,-m,elf_i386 -Wl,-nostdlib -Wl,-e,_start -Wl,-T,"$ldscript" \
-  -o "$out" "$obj_crt" "${obj_apps[@]}" "$lib_archive"
+  -o "$out" "$obj_crt" "${obj_apps[@]}" "$lib_archive" -lgcc
 
 echo "Built $out"

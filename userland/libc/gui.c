@@ -45,6 +45,14 @@ int gui_set_font(int handle, const char* hex_path) {
     return eyn_syscall3(EYN_SYSCALL_GUI_SET_FONT, handle, hex_path, 0);
 }
 
+int gui_set_continuous_redraw(int handle, int enabled) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_SET_CONTINUOUS_REDRAW, handle, (const void*)enabled, 0);
+}
+
+int gui_blit_rgb565(int handle, const gui_blit_rgb565_t* cmd) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_BLIT_RGB565, handle, cmd, 0);
+}
+
 int gui_poll_event(int handle, gui_event_t* out_event) {
     return eyn_syscall3(EYN_SYSCALL_GUI_POLL_EVENT, handle, out_event, (int)sizeof(*out_event));
 }

@@ -7,7 +7,8 @@ cd "$repo_root"
 src="${1:-testdir/hello_c_uelf.c}"
 out="${2:-testdir/hello_c_uelf.uelf}"
 
-mkdir -p tmp
+tmp_root="tmp_user"
+mkdir -p "$tmp_root"
 
 ldscript="devtools/user_elf32.ld"
 crt0="userland/crt0.S"
@@ -15,15 +16,18 @@ crt0="userland/crt0.S"
 incdir="userland/include"
 libc_dir="userland/libc"
 
-obj_app="tmp/user_app.o"
-obj_crt="tmp/user_crt0.o"
-obj_libc_unistd="tmp/user_libc_unistd.o"
-obj_libc_string="tmp/user_libc_string.o"
-obj_libc_stdio="tmp/user_libc_stdio.o"
-obj_libc_fcntl="tmp/user_libc_fcntl.o"
-obj_libc_dirent="tmp/user_libc_dirent.o"
-obj_libc_gui="tmp/user_libc_gui.o"
-lib_archive="tmp/libeync.a"
+obj_app="$tmp_root/user_app.o"
+obj_crt="$tmp_root/user_crt0.o"
+obj_libc_unistd="$tmp_root/user_libc_unistd.o"
+obj_libc_string="$tmp_root/user_libc_string.o"
+obj_libc_stdio="$tmp_root/user_libc_stdio.o"
+obj_libc_fcntl="$tmp_root/user_libc_fcntl.o"
+obj_libc_dirent="$tmp_root/user_libc_dirent.o"
+obj_libc_gui="$tmp_root/user_libc_gui.o"
+obj_libc_time="$tmp_root/user_libc_time.o"
+obj_libc_stdlib="$tmp_root/user_libc_stdlib.o"
+obj_libc_errno="$tmp_root/user_libc_errno.o"
+lib_archive="$tmp_root/libeync.a"
 
 # Prefer a cross-compiler if available.
 if command -v i686-elf-gcc >/dev/null 2>&1; then
@@ -68,13 +72,16 @@ fi
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/fcntl.c" -o "$obj_libc_fcntl"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/dirent.c" -o "$obj_libc_dirent"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/gui.c" -o "$obj_libc_gui"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/time.c" -o "$obj_libc_time"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/stdlib.c" -o "$obj_libc_stdlib"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/errno.c" -o "$obj_libc_errno"
 
 rm -f "$lib_archive"
-ar rcs "$lib_archive" "$obj_libc_unistd" "$obj_libc_string" "$obj_libc_stdio" "$obj_libc_fcntl" "$obj_libc_dirent" "$obj_libc_gui"
+ar rcs "$lib_archive" "$obj_libc_unistd" "$obj_libc_string" "$obj_libc_stdio" "$obj_libc_fcntl" "$obj_libc_dirent" "$obj_libc_gui" "$obj_libc_time" "$obj_libc_stdlib" "$obj_libc_errno"
 
 "$CC" "${CFLAGS[@]}" -c "$src" -o "$obj_app"
 
 # Link a simple ELF32 ET_EXEC at 0x00400000.
-"$CC" -m32 -nostdlib -nostartfiles -Wl,-m,elf_i386 -Wl,-nostdlib -Wl,-e,_start -Wl,-T,"$ldscript" -o "$out" "$obj_crt" "$obj_app" "$lib_archive"
+"$CC" -m32 -nostdlib -nostartfiles -Wl,-m,elf_i386 -Wl,-nostdlib -Wl,-e,_start -Wl,-T,"$ldscript" -o "$out" "$obj_crt" "$obj_app" "$lib_archive" -lgcc
 
 echo "Built $out"

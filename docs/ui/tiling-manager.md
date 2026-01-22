@@ -83,6 +83,21 @@ void tile_invalidate_gui(int tile_idx);
 void tile_invalidate_decorations(int tile_idx);
 ```
 
+### Userland GUI fast blit
+
+For ring3 GUI applications that need full-frame software rendering, use the RGB565 blit syscall via `gui_blit_rgb565()`.
+This copies a small RGB565 buffer into the kernel and can optionally scale it to the tile content size.
+
+```c
+typedef struct {
+    int src_w, src_h;
+    const uint16_t* pixels; // RGB565LE
+    int dst_w, dst_h;        // optional, <=0 means use src size
+} gui_blit_rgb565_t;
+
+int gui_blit_rgb565(int handle, const gui_blit_rgb565_t* cmd);
+```
+
 Behavior:
 - The manager calls your draw callback with the content rectangle (excludes title/status/border)
 - Call `tile_invalidate_gui()` when your app state changes to request a redraw

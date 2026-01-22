@@ -22,3 +22,7 @@ void _exit(int code) EYN_ATTR_NORETURN;
 
 // Non-blocking single-key read. Returns 0 if none available.
 int getkey(void);
+
+// Sleep helpers (cooperative).
+int usleep(unsigned int usec);
+unsigned int sleep(unsigned int seconds);

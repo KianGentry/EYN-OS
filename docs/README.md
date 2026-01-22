@@ -40,6 +40,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 - **[Game Engine](applications/game-engine.md)** - Built-in game framework
 - **[Write Editor](ui/tui.md#write-editor)** - Text editor documentation
 - **[GUI Applications](ui/tiling-manager.md#gui-clients)** - Creating GUI applications
+- **[Second Reality](applications/second-reality.md)** - Second Reality demo port (visuals only)
 
 ### Hardware & Networking
 - **[Networking Overview](network/README.md)** - UDP/IPv4 stack and e1000 driver

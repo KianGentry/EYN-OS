@@ -344,8 +344,16 @@ pte_t* vmm_walk_page_tables(address_space_t* as, uint32 va, int create) {
     page_table_t* pt;
     
     if (paging_enabled) {
-        /* With recursive mapping, page tables are at known VAs */
-        pt = (page_table_t*)PT_VA(pdi);
+        /* With recursive mapping, page tables are at known VAs.
+         * For low physical PT pages (identity-mapped high-half), prefer
+         * the KERNEL_BASE alias to avoid recursive-map faults while PDEs
+         * are being created on-demand.
+         */
+        if (pt_phys < (16u * 1024u * 1024u)) {
+            pt = (page_table_t*)(KERNEL_BASE + pt_phys);
+        } else {
+            pt = (page_table_t*)PT_VA(pdi);
+        }
     } else {
         /* Before paging: physical = virtual */
         pt = (page_table_t*)pt_phys;
