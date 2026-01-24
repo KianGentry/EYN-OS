@@ -24,6 +24,7 @@
 #include <ata.h>
 #include <ui_prefs.h>
 #include <cpu/fpu.h>
+#include <arch.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
@@ -33,7 +34,7 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     // Validate multiboot information
     if (!mbi) {
         // Can't use printf yet, so just halt
-        asm volatile("hlt");
+        arch_halt_forever();
         return -1;
     }
     
