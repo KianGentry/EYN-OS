@@ -1,0 +1,22 @@
+#include <cpu/aarch64/timer.h>
+
+uint32 aarch64_timer_get_freq_hz(void) {
+    uint32 v;
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(v));
+    return v;
+}
+
+void aarch64_timer_init_tick_hz(uint32 tick_hz) {
+    if (tick_hz == 0) tick_hz = 100;
+
+    uint32 freq = aarch64_timer_get_freq_hz();
+    uint32 interval = freq / tick_hz;
+    if (interval == 0) interval = 1;
+
+    // Program virtual timer compare value and enable it.
+    asm volatile("msr cntv_tval_el0, %0" :: "r"(interval));
+
+    // CNTV_CTL_EL0: bit0 ENABLE=1, bit1 IMASK=0, bit2 ISTATUS (RO)
+    uint32 ctl = 1;
+    asm volatile("msr cntv_ctl_el0, %0" :: "r"(ctl));
+}

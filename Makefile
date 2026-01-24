@@ -56,12 +56,98 @@ OBJS += obj/e1000.o
 OBJS += obj/netstack.o
 OUTPUT = $(BOOTDIR)/kernel.bin
 
+# -----------------------------
+# AArch64 (Raspberry Pi 4) bring-up build
+# -----------------------------
+# This is a minimal, standalone image used for early Pi bring-up (UART hello).
+# It does NOT attempt to build the full i386 kernel on AArch64 yet.
+
+AARCH64_TMPDIR ?= tmp_aarch64_user
+AARCH64_BOOTDIR = $(AARCH64_TMPDIR)/boot
+
+# Cross toolchain (override as needed). Auto-detect common prefixes.
+# Note: these variables are only required when building the `aarch64` target.
+AARCH64_CC ?= $(shell command -v aarch64-none-elf-gcc 2>/dev/null || \
+	command -v aarch64-elf-gcc 2>/dev/null || \
+	command -v aarch64-linux-gnu-gcc 2>/dev/null)
+
+AARCH64_LD ?= $(shell command -v aarch64-none-elf-ld 2>/dev/null || \
+	command -v aarch64-elf-ld 2>/dev/null || \
+	command -v aarch64-linux-gnu-ld 2>/dev/null)
+
+AARCH64_OBJCOPY ?= $(shell command -v aarch64-none-elf-objcopy 2>/dev/null || \
+	command -v aarch64-elf-objcopy 2>/dev/null || \
+	command -v aarch64-linux-gnu-objcopy 2>/dev/null || \
+	command -v llvm-objcopy 2>/dev/null)
+
+# Bring-up platform selector:
+# - rpi4: Raspberry Pi 4 firmware boot assumptions
+# - qemu-virt: QEMU 'virt' machine (recommended for local development)
+AARCH64_PLATFORM ?= rpi4
+
+ifeq ($(AARCH64_PLATFORM),qemu-virt)
+AARCH64_PLATFORM_DEFINE = -DAARCH64_PLATFORM_QEMU_VIRT=1
+AARCH64_LDSCRIPT = src/boot/aarch64-virt.ld
+else ifeq ($(AARCH64_PLATFORM),rpi4)
+AARCH64_PLATFORM_DEFINE = -DAARCH64_PLATFORM_RPI4=1
+AARCH64_LDSCRIPT = src/boot/aarch64-rpi4.ld
+else
+$(error Unknown AARCH64_PLATFORM '$(AARCH64_PLATFORM)'. Use rpi4 or qemu-virt)
+endif
+
+AARCH64_CFLAGS = -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-common \
+		 -Os -fno-strict-overflow -fwrapv \
+		 -fdata-sections -ffunction-sections \
+		 $(AARCH64_PLATFORM_DEFINE) \
+		 -I include/ -I include/cpu -I include/drivers -I include/misc \
+		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \
+		 -Wno-unused-parameter -Wno-unused-variable
+
+AARCH64_LDFLAGS = -T $(AARCH64_LDSCRIPT) --gc-sections -Map $(AARCH64_BOOTDIR)/kernel8.map
+
+AARCH64_ELF = $(AARCH64_BOOTDIR)/kernel8.elf
+AARCH64_IMG = $(AARCH64_BOOTDIR)/kernel8.img
+
+AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o
+
+ifeq ($(AARCH64_PLATFORM),qemu-virt)
+AARCH64_OBJS += obj/aarch64_virt_dtb.o
+endif
+
 # Source files to object files
 
 all:$(OBJS)
 	mkdir $(TMPDIR)/ -p
 	mkdir $(BOOTDIR)/ -p
 	$(LINKER) $(LDFLAGS) -o $(OUTPUT) $(OBJS)
+
+
+.PHONY: aarch64 aarch64-check-tools aarch64-qemu aarch64-qemu-run
+
+aarch64-check-tools:
+	@test -n "$(AARCH64_CC)" || (echo "[AARCH64] No cross-compiler found. Install an AArch64 GCC toolchain (e.g. aarch64-none-elf-gcc or aarch64-linux-gnu-gcc) or set AARCH64_CC=..."; exit 1)
+	@test -n "$(AARCH64_LD)" || (echo "[AARCH64] No linker found. Install AArch64 binutils (e.g. aarch64-none-elf-ld or aarch64-linux-gnu-ld) or set AARCH64_LD=..."; exit 1)
+	@test -n "$(AARCH64_OBJCOPY)" || (echo "[AARCH64] No objcopy found. Install AArch64 binutils/llvm-objcopy or set AARCH64_OBJCOPY=..."; exit 1)
+
+aarch64: aarch64-check-tools $(AARCH64_IMG)
+	@echo "Built $(AARCH64_IMG)"
+
+# Convenience aliases for local testing under QEMU.
+aarch64-qemu:
+	$(MAKE) aarch64 AARCH64_PLATFORM=qemu-virt
+
+aarch64-qemu-run: aarch64-check-tools
+	@command -v qemu-system-aarch64 >/dev/null 2>&1 || (echo "[AARCH64] qemu-system-aarch64 not found"; exit 1)
+	$(MAKE) aarch64 AARCH64_PLATFORM=qemu-virt
+	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -nographic -kernel $(AARCH64_ELF)
+
+$(AARCH64_ELF): $(AARCH64_OBJS)
+	mkdir -p $(AARCH64_TMPDIR)/
+	mkdir -p $(AARCH64_BOOTDIR)/
+	$(AARCH64_LD) $(AARCH64_LDFLAGS) -o $(AARCH64_ELF) $(AARCH64_OBJS)
+
+$(AARCH64_IMG): $(AARCH64_ELF)
+	$(AARCH64_OBJCOPY) -O binary $(AARCH64_ELF) $(AARCH64_IMG)
 
 docs: all
 	python3 devtools/generate_command_docs.py src/
@@ -115,6 +201,55 @@ obj/system.o:src/cpu/system.c
 
 obj/arch.o:src/cpu/$(ARCH)/arch.c
 	$(COMPILER) $(CFLAGS) src/cpu/$(ARCH)/arch.c -o obj/arch.o
+
+obj/aarch64_arch.o:src/cpu/aarch64/arch.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/arch.c -o obj/aarch64_arch.o
+
+obj/aarch64_start.o:src/entry/aarch64/start.S
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/start.S -o obj/aarch64_start.o
+
+obj/aarch64_kernel.o:src/entry/aarch64/kernel.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/kernel.c -o obj/aarch64_kernel.o
+
+obj/aarch64_uart_pl011.o:src/drivers/aarch64/uart_pl011.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/uart_pl011.c -o obj/aarch64_uart_pl011.o
+
+obj/aarch64_vectors.o:src/cpu/aarch64/exceptions.S
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/exceptions.S -o obj/aarch64_vectors.o
+
+obj/aarch64_gicv2.o:src/cpu/aarch64/gicv2.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/gicv2.c -o obj/aarch64_gicv2.o
+
+obj/aarch64_timer.o:src/cpu/aarch64/timer.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/timer.c -o obj/aarch64_timer.o
+
+obj/aarch64_irq.o:src/cpu/aarch64/irq.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/irq.c -o obj/aarch64_irq.o
+
+obj/aarch64_timer_tick.o:src/cpu/aarch64/timer_tick.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/timer_tick.c -o obj/aarch64_timer_tick.o
+
+obj/aarch64_fdt.o:src/misc/fdt.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/misc/fdt.c -o obj/aarch64_fdt.o
+
+# QEMU virt: generate a DTB and embed it into the ELF so the kernel can parse it.
+$(AARCH64_BOOTDIR)/virt.dtb:
+	mkdir -p $(AARCH64_BOOTDIR)/
+	qemu-system-aarch64 -M virt,gic-version=2,dumpdtb=$(AARCH64_BOOTDIR)/virt.dtb -cpu cortex-a57 -nographic >/dev/null 2>&1 || true
+
+obj/aarch64_virt_dtb.o: $(AARCH64_BOOTDIR)/virt.dtb
+	mkdir obj/ -p
+	cd $(AARCH64_BOOTDIR) && $(AARCH64_OBJCOPY) -I binary -O elf64-littleaarch64 -B aarch64 virt.dtb "$(abspath obj/aarch64_virt_dtb.o)"
 
 obj/util.o:src/utilities/util.c
 	$(COMPILER) $(CFLAGS) src/utilities/util.c -o obj/util.o

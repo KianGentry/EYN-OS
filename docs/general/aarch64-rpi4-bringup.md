@@ -1,0 +1,78 @@
+# AArch64 Raspberry Pi 4 Bring-up
+
+This document describes the minimal bring-up image used to validate that EYN-OS can boot on a Raspberry Pi 4 in AArch64 mode and print debug output over UART.
+
+## What this is
+
+- A standalone `kernel8.img` that prints a boot banner and the DTB pointer.
+- It does not include the full i386 kernel, GRUB/Multiboot, paging, VFS, shell, etc.
+
+## Build
+
+The Makefile provides a dedicated bring-up target:
+
+- `make aarch64`
+
+This target requires an AArch64 cross toolchain. The Makefile attempts to auto-detect common GCC prefixes, but you may need to install packages or override the tool names.
+
+Examples of toolchains:
+
+- Bare-metal: `aarch64-none-elf-gcc` + `aarch64-none-elf-ld`
+- Linux cross: `aarch64-linux-gnu-gcc` + `aarch64-linux-gnu-ld`
+
+You can override the detected tools explicitly:
+
+- `make aarch64 AARCH64_CC=aarch64-elf-gcc AARCH64_LD=aarch64-elf-ld AARCH64_OBJCOPY=aarch64-elf-objcopy`
+
+Output:
+
+- `tmp_aarch64_user/boot/kernel8.img`
+
+## Test on a development machine (QEMU)
+
+Raspberry Pi hardware is not identical to QEMU, but the QEMU `virt` machine is the fastest way to iterate on AArch64 bring-up.
+
+Targets:
+
+- `make aarch64-qemu` (build with QEMU platform settings)
+- `make aarch64-qemu-run` (build + run under `qemu-system-aarch64`)
+
+The run target uses:
+
+- `qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -nographic -kernel tmp_aarch64_user/boot/kernel8.elf`
+
+Note: the QEMU build uses a different linker script/load address than the Raspberry Pi firmware build.
+
+For QEMU, the build also embeds a generated `virt.dtb` into the ELF so the FDT parser can be exercised even when QEMU does not provide a DTB pointer in `x0`.
+
+## Boot on Raspberry Pi 4
+
+1) Create or reuse a Raspberry Pi boot partition (FAT32).
+2) Copy `kernel8.img` to the boot partition.
+   - Either rename it to `kernel8.img` or set `kernel8=...` in `config.txt`.
+3) Add/update `config.txt` with:
+
+```ini
+arm_64bit=1
+enable_uart=1
+core_freq=250
+# kernel=kernel8.img   # usually not required; firmware defaults to kernel8.img in 64-bit mode
+```
+
+4) Connect a 3.3V UART adapter to the Pi UART pins and open a serial console at `115200 8N1`.
+
+Expected output includes:
+
+- `EYN-OS AArch64 bring-up`
+- `DTB @ 0x...`
+- `RAM base 0x... size 0x...`
+
+When interrupts are enabled (QEMU bring-up), you should also see periodic timer tick output:
+
+- `tick 0x...`
+
+## Source layout
+
+- Entry: `src/entry/aarch64/start.S` and `src/entry/aarch64/kernel.c`
+- Linker script: `src/boot/aarch64-rpi4.ld`
+- UART: `src/drivers/aarch64/uart_pl011.c`
