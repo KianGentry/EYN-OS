@@ -9,5 +9,6 @@
 
 uint32 aarch64_timer_get_freq_hz(void);
 void aarch64_timer_init_tick_hz(uint32 tick_hz);
+void aarch64_timer_rearm(void);
 
 #endif

@@ -108,7 +108,7 @@ AARCH64_LDFLAGS = -T $(AARCH64_LDSCRIPT) --gc-sections -Map $(AARCH64_BOOTDIR)/k
 AARCH64_ELF = $(AARCH64_BOOTDIR)/kernel8.elf
 AARCH64_IMG = $(AARCH64_BOOTDIR)/kernel8.img
 
-AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o
+AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o
 
 ifeq ($(AARCH64_PLATFORM),qemu-virt)
 AARCH64_OBJS += obj/aarch64_virt_dtb.o
@@ -237,6 +237,10 @@ obj/aarch64_irq.o:src/cpu/aarch64/irq.c
 obj/aarch64_timer_tick.o:src/cpu/aarch64/timer_tick.c
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/timer_tick.c -o obj/aarch64_timer_tick.o
+
+obj/aarch64_exception.o:src/cpu/aarch64/exception.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/exception.c -o obj/aarch64_exception.o
 
 obj/aarch64_fdt.o:src/misc/fdt.c
 	mkdir obj/ -p

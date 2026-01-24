@@ -4,6 +4,8 @@
 #include <cpu/aarch64/gicv2.h>
 #include <cpu/aarch64/timer.h>
 
+void aarch64_irq_init(uint64 gicd_base, uint64 gicc_base, uint32 timer_irq_id);
+
 void uart_pl011_init_115200(void);
 void uart_pl011_write(const char* s);
 
@@ -54,16 +56,47 @@ void kernel_main(uint64 dtb_ptr) {
     uart_pl011_write("Halting.\n");
 
     // --- Interrupts + tick bring-up (QEMU virt,gic-version=2 and Pi4 later) ---
-    // For QEMU virt with GICv2, the default memory map is:
-    //   GICD @ 0x08000000, GICC @ 0x08010000
-    // For Pi4 this will be DT-driven later; for now we keep it minimal.
-    gicv2_t gic;
-    gicv2_init(&gic, 0x08000000ull, 0x08010000ull);
 
-    // Virtual timer interrupt is PPI 27.
-    const uint32 CNTV_IRQ = 27;
-    gicv2_enable_irq(&gic, CNTV_IRQ);
+    uint64 gicd_base = 0;
+    uint64 gicc_base = 0;
+    if (fdt_parse_gicv2(dtb_ptr, &gicd_base, &gicc_base) != 0) {
+#if defined(AARCH64_PLATFORM_QEMU_VIRT)
+        /* QEMU virt fallback defaults (still keep DT-based path as the primary). */
+        gicd_base = 0x08000000ull;
+        gicc_base = 0x08010000ull;
+#else
+        uart_pl011_write("FDT parse failed (gic)\n");
+        for (;;) {
+            asm volatile("wfi" ::: "memory");
+        }
+#endif
+    }
+
+    uart_pl011_write("GICD @ ");
+    uart_write_hex64(gicd_base);
+    uart_pl011_write(" GICC @ ");
+    uart_write_hex64(gicc_base);
+    uart_pl011_write("\n");
+
+    uint32 cntv_irq_id = 0;
+    if (fdt_parse_armv8_timer_virtual_irq(dtb_ptr, &cntv_irq_id) != 0) {
+#if defined(AARCH64_PLATFORM_QEMU_VIRT)
+        /* QEMU virt typically uses PPI 11 => IRQ ID 27 for CNTV. */
+        cntv_irq_id = 27;
+#else
+        uart_pl011_write("FDT parse failed (armv8-timer)\n");
+        for (;;) {
+            asm volatile("wfi" ::: "memory");
+        }
+#endif
+    }
+
+    uart_pl011_write("CNTV IRQ ");
+    uart_write_hex64((uint64)cntv_irq_id);
+    uart_pl011_write("\n");
+
     aarch64_timer_init_tick_hz(100);
+    aarch64_irq_init(gicd_base, gicc_base, cntv_irq_id);
 
     volatile uint32 ticks = 0;
     arch_enable_interrupts();

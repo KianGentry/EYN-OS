@@ -91,6 +91,18 @@ aarch64_irq:
 // For now, other exceptions just hang.
 
 aarch64_sync:
+    sub sp, sp, #0x40
+    stp x0, x1, [sp, #0x00]
+    stp x2, x3, [sp, #0x10]
+    stp x30, xzr, [sp, #0x20]
+
+    bl  aarch64_sync_dispatch
+
+    ldp x30, xzr, [sp, #0x20]
+    ldp x2, x3, [sp, #0x10]
+    ldp x0, x1, [sp, #0x00]
+    add sp, sp, #0x40
+
     b aarch64_panic_hang
 
 aarch64_fiq:

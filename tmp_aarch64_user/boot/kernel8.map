@@ -9,6 +9,7 @@ Removed property 0xc0000000 to merge obj/aarch64_kernel.o (not found) and obj/aa
 Removed property 0xc0000000 to merge obj/aarch64_kernel.o (not found) and obj/aarch64_timer.o (0x7)
 Removed property 0xc0000000 to merge obj/aarch64_kernel.o (not found) and obj/aarch64_irq.o (0x7)
 Removed property 0xc0000000 to merge obj/aarch64_kernel.o (not found) and obj/aarch64_timer_tick.o (0x7)
+Removed property 0xc0000000 to merge obj/aarch64_kernel.o (not found) and obj/aarch64_exception.o (0x7)
 
 Discarded input sections
 
@@ -30,8 +31,6 @@ Discarded input sections
  .text          0x0000000000000000        0x0 obj/aarch64_arch.o
  .data          0x0000000000000000        0x0 obj/aarch64_arch.o
  .bss           0x0000000000000000        0x0 obj/aarch64_arch.o
- .text.arch_disable_interrupts
-                0x0000000000000000        0xc obj/aarch64_arch.o
  .text.arch_irq_save
                 0x0000000000000000       0x10 obj/aarch64_arch.o
  .text.arch_irq_restore
@@ -50,7 +49,7 @@ Discarded input sections
  .bss           0x0000000000000000        0x0 obj/aarch64_fdt.o
  .note.gnu.property
                 0x0000000000000000       0x20 obj/aarch64_fdt.o
- .eh_frame      0x0000000000000000       0x60 obj/aarch64_fdt.o
+ .eh_frame      0x0000000000000000      0x100 obj/aarch64_fdt.o
  .data          0x0000000000000000        0x0 obj/aarch64_vectors.o
  .bss           0x0000000000000000        0x0 obj/aarch64_vectors.o
  .text          0x0000000000000000        0x0 obj/aarch64_gicv2.o
@@ -62,21 +61,29 @@ Discarded input sections
  .text          0x0000000000000000        0x0 obj/aarch64_timer.o
  .data          0x0000000000000000        0x0 obj/aarch64_timer.o
  .bss           0x0000000000000000        0x0 obj/aarch64_timer.o
+ .text.aarch64_timer_get_freq_hz
+                0x0000000000000000        0xc obj/aarch64_timer.o
  .note.gnu.property
                 0x0000000000000000       0x20 obj/aarch64_timer.o
- .eh_frame      0x0000000000000000       0x40 obj/aarch64_timer.o
+ .eh_frame      0x0000000000000000       0x50 obj/aarch64_timer.o
  .text          0x0000000000000000        0x0 obj/aarch64_irq.o
  .data          0x0000000000000000        0x0 obj/aarch64_irq.o
  .bss           0x0000000000000000        0x0 obj/aarch64_irq.o
  .note.gnu.property
                 0x0000000000000000       0x20 obj/aarch64_irq.o
- .eh_frame      0x0000000000000000       0x48 obj/aarch64_irq.o
+ .eh_frame      0x0000000000000000       0x78 obj/aarch64_irq.o
  .text          0x0000000000000000        0x0 obj/aarch64_timer_tick.o
  .data          0x0000000000000000        0x0 obj/aarch64_timer_tick.o
  .bss           0x0000000000000000        0x0 obj/aarch64_timer_tick.o
  .note.gnu.property
                 0x0000000000000000       0x20 obj/aarch64_timer_tick.o
- .eh_frame      0x0000000000000000       0x38 obj/aarch64_timer_tick.o
+ .eh_frame      0x0000000000000000       0x28 obj/aarch64_timer_tick.o
+ .text          0x0000000000000000        0x0 obj/aarch64_exception.o
+ .data          0x0000000000000000        0x0 obj/aarch64_exception.o
+ .bss           0x0000000000000000        0x0 obj/aarch64_exception.o
+ .note.gnu.property
+                0x0000000000000000       0x20 obj/aarch64_exception.o
+ .eh_frame      0x0000000000000000       0x68 obj/aarch64_exception.o
 
 Memory Configuration
 
@@ -88,7 +95,7 @@ Linker script and memory map
                 0x0000000040080000                . = 0x40080000
                 0x0000000040080000                __kernel_start = .
 
-.text           0x0000000040080000     0x115c
+.text           0x0000000040080000     0x1af4
  *(.text._start)
  .text._start   0x0000000040080000       0x50 obj/aarch64_start.o
                 0x0000000040080000                _start
@@ -96,96 +103,133 @@ Linker script and memory map
  .text.uart_write_hex64
                 0x0000000040080050       0x60 obj/aarch64_kernel.o
  .text.kernel_main
-                0x00000000400800b0      0x144 obj/aarch64_kernel.o
+                0x00000000400800b0      0x1c4 obj/aarch64_kernel.o
                 0x00000000400800b0                kernel_main
  .text.uart_pl011_init_115200
-                0x00000000400801f4       0x44 obj/aarch64_uart_pl011.o
-                0x00000000400801f4                uart_pl011_init_115200
+                0x0000000040080274       0x44 obj/aarch64_uart_pl011.o
+                0x0000000040080274                uart_pl011_init_115200
  .text.uart_pl011_putc
-                0x0000000040080238       0x2c obj/aarch64_uart_pl011.o
-                0x0000000040080238                uart_pl011_putc
+                0x00000000400802b8       0x2c obj/aarch64_uart_pl011.o
+                0x00000000400802b8                uart_pl011_putc
  .text.uart_pl011_write
-                0x0000000040080264       0x58 obj/aarch64_uart_pl011.o
-                0x0000000040080264                uart_pl011_write
+                0x00000000400802e4       0x58 obj/aarch64_uart_pl011.o
+                0x00000000400802e4                uart_pl011_write
+ .text.arch_disable_interrupts
+                0x000000004008033c        0xc obj/aarch64_arch.o
+                0x000000004008033c                arch_disable_interrupts
  .text.arch_enable_interrupts
-                0x00000000400802bc        0xc obj/aarch64_arch.o
-                0x00000000400802bc                arch_enable_interrupts
- .text.streq    0x00000000400802c8       0x3c obj/aarch64_fdt.o
+                0x0000000040080348        0xc obj/aarch64_arch.o
+                0x0000000040080348                arch_enable_interrupts
+ .text.streq    0x0000000040080354       0x3c obj/aarch64_fdt.o
+ .text.mem_has_exact_str
+                0x0000000040080390       0x98 obj/aarch64_fdt.o
+ .text.read_cells_as_u64
+                0x0000000040080428       0x38 obj/aarch64_fdt.o
  .text.fdt_parse_memory
-                0x0000000040080304      0x318 obj/aarch64_fdt.o
-                0x0000000040080304                fdt_parse_memory
- .text          0x000000004008061c       0x3c obj/aarch64_vectors.o
- *fill*         0x0000000040080658      0x1a8 
- .text.vectors  0x0000000040080800      0x800 obj/aarch64_vectors.o
-                0x0000000040080800                aarch64_vectors
+                0x0000000040080460      0x2c0 obj/aarch64_fdt.o
+                0x0000000040080460                fdt_parse_memory
+ .text.fdt_parse_gicv2
+                0x0000000040080720      0x31c obj/aarch64_fdt.o
+                0x0000000040080720                fdt_parse_gicv2
+ .text.fdt_parse_armv8_timer_virtual_irq
+                0x0000000040080a3c      0x1e4 obj/aarch64_fdt.o
+                0x0000000040080a3c                fdt_parse_armv8_timer_virtual_irq
+ .text          0x0000000040080c20       0x60 obj/aarch64_vectors.o
+ *fill*         0x0000000040080c80      0x380 
+ .text.vectors  0x0000000040081000      0x800 obj/aarch64_vectors.o
+                0x0000000040081000                aarch64_vectors
  .text.gicv2_init
-                0x0000000040081000       0x24 obj/aarch64_gicv2.o
-                0x0000000040081000                gicv2_init
+                0x0000000040081800       0x24 obj/aarch64_gicv2.o
+                0x0000000040081800                gicv2_init
  .text.gicv2_enable_irq
-                0x0000000040081024       0x28 obj/aarch64_gicv2.o
-                0x0000000040081024                gicv2_enable_irq
+                0x0000000040081824       0x28 obj/aarch64_gicv2.o
+                0x0000000040081824                gicv2_enable_irq
  .text.gicv2_ack_irq
-                0x000000004008104c       0x10 obj/aarch64_gicv2.o
-                0x000000004008104c                gicv2_ack_irq
+                0x000000004008184c       0x10 obj/aarch64_gicv2.o
+                0x000000004008184c                gicv2_ack_irq
  .text.gicv2_eoi_irq
-                0x000000004008105c       0x10 obj/aarch64_gicv2.o
-                0x000000004008105c                gicv2_eoi_irq
- .text.aarch64_timer_get_freq_hz
-                0x000000004008106c        0xc obj/aarch64_timer.o
-                0x000000004008106c                aarch64_timer_get_freq_hz
+                0x000000004008185c       0x10 obj/aarch64_gicv2.o
+                0x000000004008185c                gicv2_eoi_irq
  .text.aarch64_timer_init_tick_hz
-                0x0000000040081078       0x38 obj/aarch64_timer.o
-                0x0000000040081078                aarch64_timer_init_tick_hz
+                0x000000004008186c       0x40 obj/aarch64_timer.o
+                0x000000004008186c                aarch64_timer_init_tick_hz
+ .text.aarch64_timer_rearm
+                0x00000000400818ac       0x38 obj/aarch64_timer.o
+                0x00000000400818ac                aarch64_timer_rearm
+ .text.aarch64_irq_init
+                0x00000000400818e4       0x64 obj/aarch64_irq.o
+                0x00000000400818e4                aarch64_irq_init
  .text.aarch64_irq_dispatch
-                0x00000000400810b0       0x74 obj/aarch64_irq.o
-                0x00000000400810b0                aarch64_irq_dispatch
+                0x0000000040081948       0x80 obj/aarch64_irq.o
+                0x0000000040081948                aarch64_irq_dispatch
  .text.aarch64_timer_on_tick
-                0x0000000040081124       0x38 obj/aarch64_timer_tick.o
-                0x0000000040081124                aarch64_timer_on_tick
+                0x00000000400819c8        0x8 obj/aarch64_timer_tick.o
+                0x00000000400819c8                aarch64_timer_on_tick
+ .text.uart_write_hex64
+                0x00000000400819d0       0x60 obj/aarch64_exception.o
+ .text.aarch64_sync_dispatch
+                0x0000000040081a30       0xc4 obj/aarch64_exception.o
+                0x0000000040081a30                aarch64_sync_dispatch
 
-.iplt           0x000000004008115c        0x0
- .iplt          0x000000004008115c        0x0 obj/aarch64_start.o
+.iplt           0x0000000040081af4        0x0
+ .iplt          0x0000000040081af4        0x0 obj/aarch64_start.o
 
-.rodata         0x0000000040081160       0xa3
+.rodata         0x0000000040081b00      0x17b
  *(.rodata .rodata.*)
  .rodata.uart_write_hex64.str1.1
-                0x0000000040081160       0xa3 obj/aarch64_kernel.o
+                0x0000000040081b00      0x17b obj/aarch64_kernel.o
                                          0x14 (size before relaxing)
  .rodata.kernel_main.str1.1
-                0x0000000040081203        0x0 obj/aarch64_kernel.o
-                                         0x5f (size before relaxing)
+                0x0000000040081c7b        0x0 obj/aarch64_kernel.o
+                                         0x7a (size before relaxing)
  .rodata.fdt_parse_memory.str1.1
-                0x0000000040081203        0x0 obj/aarch64_fdt.o
+                0x0000000040081c7b        0x0 obj/aarch64_fdt.o
                                          0x32 (size before relaxing)
+ .rodata.fdt_parse_gicv2.str1.1
+                0x0000000040081c7b        0x0 obj/aarch64_fdt.o
+                                         0x57 (size before relaxing)
+ .rodata.fdt_parse_armv8_timer_virtual_irq.str1.1
+                0x0000000040081c7b        0x0 obj/aarch64_fdt.o
+                                         0x1b (size before relaxing)
+ .rodata.uart_write_hex64.str1.1
+                0x0000000040081c7b        0x0 obj/aarch64_exception.o
+                                         0x14 (size before relaxing)
+ .rodata.aarch64_sync_dispatch.str1.1
+                0x0000000040081c7b        0x0 obj/aarch64_exception.o
+                                         0x4d (size before relaxing)
 
-.rela.dyn       0x0000000040081208        0x0
- .rela.iplt     0x0000000040081208        0x0 obj/aarch64_start.o
+.rela.dyn       0x0000000040081c80        0x0
+ .rela.iplt     0x0000000040081c80        0x0 obj/aarch64_start.o
  .rela.text._start
-                0x0000000040081208        0x0 obj/aarch64_start.o
+                0x0000000040081c80        0x0 obj/aarch64_start.o
 
-.data           0x0000000040081210   0x100010
+.data           0x0000000040081c80   0x100000
  *(.data .data.*)
- .data.g_gic    0x0000000040081210       0x10 obj/aarch64_irq.o
- .data          0x0000000040081220   0x100000 obj/aarch64_virt_dtb.o
-                0x0000000040081220                _binary_virt_dtb_start
-                0x0000000040181220                _binary_virt_dtb_end
+ .data          0x0000000040081c80   0x100000 obj/aarch64_virt_dtb.o
+                0x0000000040081c80                _binary_virt_dtb_start
+                0x0000000040181c80                _binary_virt_dtb_end
 
-.igot.plt       0x0000000040181220        0x0
- .igot.plt      0x0000000040181220        0x0 obj/aarch64_start.o
+.igot.plt       0x0000000040181c80        0x0
+ .igot.plt      0x0000000040181c80        0x0 obj/aarch64_start.o
 
-.bss            0x0000000040181220        0x4
-                0x0000000040181220                __bss_start = .
+.bss            0x0000000040181c80       0x1c
+                0x0000000040181c80                __bss_start = .
  *(.bss .bss.*)
+ .bss.g_cntv_interval
+                0x0000000040181c80        0x4 obj/aarch64_timer.o
+ .bss.g_timer_irq_id
+                0x0000000040181c84        0x4 obj/aarch64_irq.o
+ .bss.g_gic     0x0000000040181c88       0x10 obj/aarch64_irq.o
  .bss.g_aarch64_ticks
-                0x0000000040181220        0x4 obj/aarch64_irq.o
-                0x0000000040181220                g_aarch64_ticks
+                0x0000000040181c98        0x4 obj/aarch64_irq.o
+                0x0000000040181c98                g_aarch64_ticks
  *(COMMON)
-                0x0000000040181224                __bss_end = .
-                0x0000000040181230                . = ALIGN (0x10)
-                0x0000000040181230                __stack_bottom = .
-                0x0000000040191230                . = (. + 0x10000)
-                0x0000000040191230                __stack_top = .
-                0x0000000040191230                __kernel_end = .
+                0x0000000040181c9c                __bss_end = .
+                0x0000000040181ca0                . = ALIGN (0x10)
+                0x0000000040181ca0                __stack_bottom = .
+                0x0000000040191ca0                . = (. + 0x10000)
+                0x0000000040191ca0                __stack_top = .
+                0x0000000040191ca0                __kernel_end = .
 LOAD obj/aarch64_start.o
 LOAD obj/aarch64_kernel.o
 LOAD obj/aarch64_uart_pl011.o
@@ -196,6 +240,7 @@ LOAD obj/aarch64_gicv2.o
 LOAD obj/aarch64_timer.o
 LOAD obj/aarch64_irq.o
 LOAD obj/aarch64_timer_tick.o
+LOAD obj/aarch64_exception.o
 LOAD obj/aarch64_virt_dtb.o
 OUTPUT(tmp_aarch64_user/boot/kernel8.elf elf64-littleaarch64)
 LOAD linker stubs
@@ -217,6 +262,8 @@ LOAD linker stubs
                                          0x35 (size before relaxing)
  .comment       0x0000000000000034        0x0 obj/aarch64_timer_tick.o
                                          0x35 (size before relaxing)
+ .comment       0x0000000000000034        0x0 obj/aarch64_exception.o
+                                         0x35 (size before relaxing)
 
 .note.GNU-stack
                 0x0000000000000000        0x0
@@ -236,3 +283,5 @@ LOAD linker stubs
                 0x0000000000000000        0x0 obj/aarch64_irq.o
  .note.GNU-stack
                 0x0000000000000000        0x0 obj/aarch64_timer_tick.o
+ .note.GNU-stack
+                0x0000000000000000        0x0 obj/aarch64_exception.o

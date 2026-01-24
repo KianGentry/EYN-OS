@@ -71,6 +71,20 @@ When interrupts are enabled (QEMU bring-up), you should also see periodic timer 
 
 - `tick 0x...`
 
+The bring-up also attempts to discover the GICv2 base addresses from the DTB (instead of hardcoding them). On QEMU you should see:
+
+- `GICD @ 0x... GICC @ 0x...`
+
+The bring-up also extracts the ARMv8 virtual timer IRQ (CNTV) from the DTB and prints it:
+
+- `CNTV IRQ 0x...`
+
+If the kernel hits a synchronous exception during bring-up, it will print basic fault registers over UART:
+
+- `AArch64 SYNC EXCEPTION`
+- `ESR_EL1 0x... FAR_EL1 0x...`
+- `ELR_EL1 0x... SPSR_EL1 0x...`
+
 ## Source layout
 
 - Entry: `src/entry/aarch64/start.S` and `src/entry/aarch64/kernel.c`
