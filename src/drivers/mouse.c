@@ -4,7 +4,7 @@
 #include <isr.h>
 #include <irq.h>
 #include <string.h>
-#include <types.h>
+#include <misc/types.h>
 
 // PS/2 Mouse ports
 #define PS2_DATA_PORT    0x60

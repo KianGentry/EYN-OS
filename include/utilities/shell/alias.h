@@ -1,7 +1,7 @@
 #ifndef SHELL_ALIAS_H
 #define SHELL_ALIAS_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // Persistent command aliases stored in /config/aliases.cfg.
 //

@@ -8,7 +8,7 @@
 #ifndef VMM_H
 #define VMM_H
 
-#include <types.h>
+#include <misc/types.h>
 
 /*
  * i386 PAGING MODEL - BIT DEFINITIONS

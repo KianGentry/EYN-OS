@@ -1,5 +1,5 @@
 #include "vmm.h"
-#include <types.h>
+#include <misc/types.h>
 #include <string.h>
 #include <vga.h>
 #include <panic.h>

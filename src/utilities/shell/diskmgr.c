@@ -5,7 +5,7 @@
  * Commands: diskmgr, partitions, mount, unmount, mkswap
  */
 
-#include <types.h>
+#include <misc/types.h>
 #include <vga.h>
 #include <util.h>
 #include <string.h>

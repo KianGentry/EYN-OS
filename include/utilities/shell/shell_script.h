@@ -1,7 +1,7 @@
 #ifndef SHELL_SCRIPT_H
 #define SHELL_SCRIPT_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <native_exec.h>
 
 // shell script execution result

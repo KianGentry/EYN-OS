@@ -2,6 +2,11 @@ COMPILER = gcc
 LINKER = ld
 ASSEMBLER = nasm
 
+# Target CPU architecture selector.
+# Today the kernel build is i386-focused; ARCH is used to pick the correct
+# implementation of small architecture abstraction units (e.g. src/cpu/*/arch.c).
+ARCH ?= i386
+
 # Prefer grub2-mkrescue if available; fall back to grub-mkrescue
 # Path is resolved at parse time; if neither exists, we'll stop in the build rule with a friendly message
 GRUB_MKRESCUE := $(shell command -v grub2-mkrescue 2>/dev/null || command -v grub-mkrescue 2>/dev/null)
@@ -108,8 +113,8 @@ obj/string.o:src/utilities/shell/string.c
 obj/system.o:src/cpu/system.c
 	$(COMPILER) $(CFLAGS) src/cpu/system.c -o obj/system.o
 
-obj/arch.o:src/cpu/arch.c
-	$(COMPILER) $(CFLAGS) src/cpu/arch.c -o obj/arch.o
+obj/arch.o:src/cpu/$(ARCH)/arch.c
+	$(COMPILER) $(CFLAGS) src/cpu/$(ARCH)/arch.c -o obj/arch.o
 
 obj/util.o:src/utilities/util.c
 	$(COMPILER) $(CFLAGS) src/utilities/util.c -o obj/util.o

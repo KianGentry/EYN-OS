@@ -1,7 +1,7 @@
 #ifndef PANIC_H
 #define PANIC_H
 
-#include <types.h>
+#include <misc/types.h>
 
 void panic(const char* msg, const char* file, int line);
 void panicf(const char* file, int line, const char* fmt, ...);

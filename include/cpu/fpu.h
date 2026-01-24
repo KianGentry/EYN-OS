@@ -1,7 +1,7 @@
 #ifndef CPU_FPU_H
 #define CPU_FPU_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // Minimal x87 FPU support for i386 ring3 programs.
 //

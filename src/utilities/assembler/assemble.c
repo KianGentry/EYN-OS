@@ -4,7 +4,7 @@
 #include <vga.h>
 #include <fs_commands.h>
 #include <eyn_exe_format.h>
-#include <types.h>
+#include <misc/types.h>
 #include <eynfs.h>
 #include <assemble.h>
 #include <utilities/linker.h>

@@ -1,6 +1,6 @@
 #include <cpu/user_elf.h>
 
-#include <types.h>
+#include <misc/types.h>
 #include <string.h>
 #include <util.h>
 #include <vga.h>

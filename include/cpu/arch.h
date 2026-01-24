@@ -14,7 +14,7 @@
  *  - The Raspberry Pi 4 port will provide an AArch64 implementation with the same API.
  */
 
-#include <types.h>
+#include <misc/types.h>
 
 typedef uint32 arch_irq_state_t;
 

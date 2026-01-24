@@ -1,6 +1,6 @@
 // Allow safely re-entering the tiling-manager loop after aborting a user task.
 static int g_tm_initialized = 0;
-#include <types.h>
+#include <misc/types.h>
 #include <vga.h>
 #include <tui.h>
 #include <terminals.h>

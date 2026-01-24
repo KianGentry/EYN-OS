@@ -1,6 +1,6 @@
 #ifndef SHELL_H
 #define SHELL_H
-#include <types.h>
+#include <misc/types.h>
 
 #define MAX_HISTORY_SIZE 50
 #define MAX_COMMAND_LENGTH 200

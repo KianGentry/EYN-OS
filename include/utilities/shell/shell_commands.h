@@ -1,6 +1,6 @@
 #ifndef SHELL_COMMANDS_H
 #define SHELL_COMMANDS_H
-#include <types.h>
+#include <misc/types.h>
 
 void echo(string ch);
 void help();

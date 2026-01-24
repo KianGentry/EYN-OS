@@ -1,7 +1,7 @@
 #ifndef UI_PREFS_H
 #define UI_PREFS_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // Load and apply UI preferences (theme + font) from disk.
 // Returns 0 if applied successfully, <0 if missing/invalid.

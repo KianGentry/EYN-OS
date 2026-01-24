@@ -1,4 +1,4 @@
-#include <types.h>
+#include <misc/types.h>
 #include <idt.h>
 
 // Single definitions of IDT structures (was incorrectly in header)

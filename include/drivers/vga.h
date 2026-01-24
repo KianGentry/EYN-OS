@@ -1,7 +1,7 @@
 #ifndef VGA_H
 #define VGA_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <multiboot.h>
 #include <stdint.h>
 #include <stddef.h>

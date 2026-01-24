@@ -1,7 +1,7 @@
 #ifndef KERNEL_API_H
 #define KERNEL_API_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // Kernel API version
 #define EYNOS_API_VERSION 1

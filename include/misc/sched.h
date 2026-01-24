@@ -1,7 +1,7 @@
 #ifndef SCHED_H
 #define SCHED_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // simple cooperative scheduler stubs
 

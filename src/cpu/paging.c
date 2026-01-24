@@ -2,7 +2,7 @@
 #include <util.h>
 #include <vga.h>
 #include <isr.h>
-#include <types.h>
+#include <misc/types.h>
 #include <string.h>
 
 // Symbols exported by linker script for section bounds

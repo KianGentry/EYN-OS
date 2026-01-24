@@ -1,5 +1,5 @@
 #include <fdisk_commands.h>
-#include <types.h>
+#include <misc/types.h>
 #include <vga.h>
 #include <util.h>
 #include <system.h>

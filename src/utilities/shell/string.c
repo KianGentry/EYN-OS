@@ -1,5 +1,5 @@
 #include <string.h>
-#include <types.h>
+#include <misc/types.h>
 #include <serial.h>
 #include <vga.h>
 

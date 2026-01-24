@@ -1,7 +1,7 @@
 #ifndef NATIVE_EXEC_H
 #define NATIVE_EXEC_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <eyn_exe_format.h>
 
 // Process execution context

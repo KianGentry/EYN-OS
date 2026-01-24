@@ -1,7 +1,7 @@
 #ifndef SUBCOMMANDS_H
 #define SUBCOMMANDS_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // Read sub-command functions
 void read_raw_cmd(string ch);

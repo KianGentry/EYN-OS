@@ -1,7 +1,7 @@
 #ifndef LINUX_SYSCALLS_H
 #define LINUX_SYSCALLS_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <native_exec.h>
 
 // Minimal Linux i386 syscall numbers we will support first

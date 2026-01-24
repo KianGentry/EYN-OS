@@ -1,6 +1,6 @@
 #include <format_command.h>
 #include <shell_command_info.h>
-#include <types.h>
+#include <misc/types.h>
 #include <stdint.h>
 #include <system.h>
 #include <string.h>
