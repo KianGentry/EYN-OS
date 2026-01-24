@@ -1,21 +1,10 @@
-/*
- * vmm.c - Virtual Memory Manager Implementation for EYN-OS
- *
- * Complete i386 paging subsystem with:
- * - 4KB page support (4MB pages optional)
- * - Demand paging and lazy allocation
- * - Copy-on-write for fork()
- * - Clock page replacement algorithm
- * - Swap integration
- * - Working-set tracking for thrashing avoidance
- */
-
 #include "vmm.h"
 #include <types.h>
 #include <string.h>
 #include <vga.h>
 #include <panic.h>
 #include <multiboot.h>
+#include <arch.h>
 
 /* External multiboot info for framebuffer mapping */
 extern multiboot_info_t *g_mbi;
@@ -680,11 +669,11 @@ segfault:
         /* User mode fault: kill the process (when we have processes) */
         printf("Segmentation fault in user process\n");
         /* For now, halt */
-        asm volatile("cli; hlt");
+        arch_halt_forever();
     } else {
         /* Kernel mode fault: panic */
         printf("Kernel panic: page fault in kernel mode\n");
-        asm volatile("cli; hlt");
+        arch_halt_forever();
     }
 }
 

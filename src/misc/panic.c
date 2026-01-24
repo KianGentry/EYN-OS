@@ -3,12 +3,12 @@
 #include <serial.h>
 #include <multiboot.h>
 #include <system.h>
+#include <arch.h>
 #include <stdarg.h>
 #include <string.h>
 
 static void halt_forever(void) {
-    __asm__ volatile ("cli");
-    for (;;) { __asm__ volatile ("hlt"); }
+    arch_halt_forever();
 }
 
 static volatile int g_panic_in_progress = 0;
@@ -57,7 +57,7 @@ static void pick_bg_color_for_category(panic_cat_t c, unsigned hash, int* pr, in
 
 static void render_bsod(const char* title, const char* msg, const char* file, int line) {
     // Suspend all interrupts immediately so no other UI updates race with BSOD
-    __asm__ volatile ("cli");
+    arch_disable_interrupts();
     // Make sure UI overlays and cursor exclusions don't interfere
     vga_clear_swap_exclude();
     stop_shell_redirect();
