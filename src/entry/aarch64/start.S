@@ -44,4 +44,35 @@ _start:
     wfi
     b 3b
 
+// Secondary CPU entry point (PSCI CPU_ON target).
+// x0 is undefined; we read MPIDR_EL1 to select per-CPU stack.
+    .global aarch64_secondary_start
+    .type aarch64_secondary_start, %function
+aarch64_secondary_start:
+    // Install exception vectors for EL1.
+    adrp x0, aarch64_vectors
+    add  x0, x0, :lo12:aarch64_vectors
+    msr  vbar_el1, x0
+    isb
+
+    // cpu_id = MPIDR_EL1[7:0]
+    mrs  x0, mpidr_el1
+    and  x0, x0, #0xFF
+
+    // sp = &aarch64_cpu_stacks[cpu_id][AARCH64_CPU_STACK_SIZE]
+    adrp x1, aarch64_cpu_stacks
+    add  x1, x1, :lo12:aarch64_cpu_stacks
+    mov  x2, #4096
+    mul  x3, x0, x2
+    add  x1, x1, x3
+    add  x1, x1, x2
+    mov  sp, x1
+
+    // Call C secondary entry.
+    bl   aarch64_secondary_entry
+
+4:
+    wfi
+    b 4b
+
     .size _start, . - _start

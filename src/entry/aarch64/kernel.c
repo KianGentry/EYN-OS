@@ -3,6 +3,7 @@
 #include <arch.h>
 #include <cpu/aarch64/gicv2.h>
 #include <cpu/aarch64/timer.h>
+#include <cpu/aarch64/smp.h>
 
 void aarch64_irq_init(uint64 gicd_base, uint64 gicc_base, uint32 timer_irq_id);
 
@@ -97,6 +98,9 @@ void kernel_main(uint64 dtb_ptr) {
 
     aarch64_timer_init_tick_hz(100);
     aarch64_irq_init(gicd_base, gicc_base, cntv_irq_id);
+
+    // Bring up secondary CPUs (QEMU virt uses PSCI).
+    aarch64_smp_boot(dtb_ptr);
 
     volatile uint32 ticks = 0;
     arch_enable_interrupts();

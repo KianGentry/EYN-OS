@@ -44,4 +44,19 @@ int fdt_parse_gicv2(uint64 dtb_ptr, uint64* out_gicd_base, uint64* out_gicc_base
  */
 int fdt_parse_armv8_timer_virtual_irq(uint64 dtb_ptr, uint32* out_irq_id);
 
+/*
+ * Parse CPU nodes under /cpus and extract MPIDR values (from "reg").
+ * This is used for SMP bring-up (PSCI CPU_ON).
+ *
+ * Returns 0 on success (count > 0), -1 on failure.
+ */
+int fdt_parse_cpus_mpidr(uint64 dtb_ptr, uint64* out_mpidrs, uint32 max_cpus, uint32* out_count);
+
+/*
+ * Parse the PSCI node and determine the conduit method.
+ * Sets *out_use_hvc to 1 for "hvc", 0 for "smc".
+ * Returns 0 on success, -1 on failure.
+ */
+int fdt_parse_psci_method(uint64 dtb_ptr, uint32* out_use_hvc);
+
 #endif
