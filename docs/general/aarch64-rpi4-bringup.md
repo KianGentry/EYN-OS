@@ -79,6 +79,8 @@ The bring-up also extracts the ARMv8 virtual timer IRQ (CNTV) from the DTB and p
 
 - `CNTV IRQ 0x...`
 
+If the DTB uses `interrupts-extended` instead of `interrupts` for the timer node, the bring-up will still resolve the IRQ ID (GIC binding with 3 interrupt cells).
+
 If the kernel hits a synchronous exception during bring-up, it will print basic fault registers over UART:
 
 - `AArch64 SYNC EXCEPTION`

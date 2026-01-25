@@ -103,6 +103,29 @@ static uint32 gic_irq_id_from_spec(uint32 int_type, uint32 int_num) {
     return 0;
 }
 
+static int parse_timer_irq_from_interrupts_extended(const uint8* data, uint32 len, uint32* out_irq_id) {
+    /* Minimal interrupts-extended parser for GIC (#interrupt-cells=3).
+     * Each entry: <phandle type number flags> (4 cells).
+     */
+    if (!data || !out_irq_id) return -1;
+    if (len < 16) return -1;
+
+    const uint32* cells = (const uint32*)(const void*)data;
+    uint32 cell_count = len / 4u;
+
+    for (uint32 i = 0; (i + 3u) < cell_count; i += 4u) {
+        uint32 int_type = be32_to_cpu(cells[i + 1u]);
+        uint32 int_num  = be32_to_cpu(cells[i + 2u]);
+        uint32 irq_id = gic_irq_id_from_spec(int_type, int_num);
+        if (irq_id != 0) {
+            *out_irq_id = irq_id;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
 int fdt_parse_memory(uint64 dtb_ptr, uint64* out_base, uint64* out_size) {
     if (!dtb_ptr || !out_base || !out_size) {
         return -1;
@@ -500,6 +523,16 @@ int fdt_parse_armv8_timer_virtual_irq(uint64 dtb_ptr, uint32* out_irq_id) {
 
                 *out_irq_id = irq_id;
                 return 0;
+            }
+
+            if (streq(pname, "interrupts-extended")) {
+                if (!timer_match_stack[depth]) {
+                    continue;
+                }
+
+                if (parse_timer_irq_from_interrupts_extended(value, len, out_irq_id) == 0) {
+                    return 0;
+                }
             }
 
             continue;

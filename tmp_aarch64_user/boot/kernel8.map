@@ -132,10 +132,10 @@ Linker script and memory map
                 0x0000000040080720      0x31c obj/aarch64_fdt.o
                 0x0000000040080720                fdt_parse_gicv2
  .text.fdt_parse_armv8_timer_virtual_irq
-                0x0000000040080a3c      0x1e4 obj/aarch64_fdt.o
+                0x0000000040080a3c      0x25c obj/aarch64_fdt.o
                 0x0000000040080a3c                fdt_parse_armv8_timer_virtual_irq
- .text          0x0000000040080c20       0x60 obj/aarch64_vectors.o
- *fill*         0x0000000040080c80      0x380 
+ .text          0x0000000040080c98       0x60 obj/aarch64_vectors.o
+ *fill*         0x0000000040080cf8      0x308 
  .text.vectors  0x0000000040081000      0x800 obj/aarch64_vectors.o
                 0x0000000040081000                aarch64_vectors
  .text.gicv2_init
@@ -174,62 +174,62 @@ Linker script and memory map
 .iplt           0x0000000040081af4        0x0
  .iplt          0x0000000040081af4        0x0 obj/aarch64_start.o
 
-.rodata         0x0000000040081b00      0x17b
+.rodata         0x0000000040081b00      0x18f
  *(.rodata .rodata.*)
  .rodata.uart_write_hex64.str1.1
-                0x0000000040081b00      0x17b obj/aarch64_kernel.o
+                0x0000000040081b00      0x18f obj/aarch64_kernel.o
                                          0x14 (size before relaxing)
  .rodata.kernel_main.str1.1
-                0x0000000040081c7b        0x0 obj/aarch64_kernel.o
+                0x0000000040081c8f        0x0 obj/aarch64_kernel.o
                                          0x7a (size before relaxing)
  .rodata.fdt_parse_memory.str1.1
-                0x0000000040081c7b        0x0 obj/aarch64_fdt.o
+                0x0000000040081c8f        0x0 obj/aarch64_fdt.o
                                          0x32 (size before relaxing)
  .rodata.fdt_parse_gicv2.str1.1
-                0x0000000040081c7b        0x0 obj/aarch64_fdt.o
+                0x0000000040081c8f        0x0 obj/aarch64_fdt.o
                                          0x57 (size before relaxing)
  .rodata.fdt_parse_armv8_timer_virtual_irq.str1.1
-                0x0000000040081c7b        0x0 obj/aarch64_fdt.o
-                                         0x1b (size before relaxing)
+                0x0000000040081c8f        0x0 obj/aarch64_fdt.o
+                                         0x2f (size before relaxing)
  .rodata.uart_write_hex64.str1.1
-                0x0000000040081c7b        0x0 obj/aarch64_exception.o
+                0x0000000040081c8f        0x0 obj/aarch64_exception.o
                                          0x14 (size before relaxing)
  .rodata.aarch64_sync_dispatch.str1.1
-                0x0000000040081c7b        0x0 obj/aarch64_exception.o
+                0x0000000040081c8f        0x0 obj/aarch64_exception.o
                                          0x4d (size before relaxing)
 
-.rela.dyn       0x0000000040081c80        0x0
- .rela.iplt     0x0000000040081c80        0x0 obj/aarch64_start.o
+.rela.dyn       0x0000000040081c90        0x0
+ .rela.iplt     0x0000000040081c90        0x0 obj/aarch64_start.o
  .rela.text._start
-                0x0000000040081c80        0x0 obj/aarch64_start.o
+                0x0000000040081c90        0x0 obj/aarch64_start.o
 
-.data           0x0000000040081c80   0x100000
+.data           0x0000000040081c90   0x100000
  *(.data .data.*)
- .data          0x0000000040081c80   0x100000 obj/aarch64_virt_dtb.o
-                0x0000000040081c80                _binary_virt_dtb_start
-                0x0000000040181c80                _binary_virt_dtb_end
+ .data          0x0000000040081c90   0x100000 obj/aarch64_virt_dtb.o
+                0x0000000040081c90                _binary_virt_dtb_start
+                0x0000000040181c90                _binary_virt_dtb_end
 
-.igot.plt       0x0000000040181c80        0x0
- .igot.plt      0x0000000040181c80        0x0 obj/aarch64_start.o
+.igot.plt       0x0000000040181c90        0x0
+ .igot.plt      0x0000000040181c90        0x0 obj/aarch64_start.o
 
-.bss            0x0000000040181c80       0x1c
-                0x0000000040181c80                __bss_start = .
+.bss            0x0000000040181c90       0x1c
+                0x0000000040181c90                __bss_start = .
  *(.bss .bss.*)
  .bss.g_cntv_interval
-                0x0000000040181c80        0x4 obj/aarch64_timer.o
+                0x0000000040181c90        0x4 obj/aarch64_timer.o
  .bss.g_timer_irq_id
-                0x0000000040181c84        0x4 obj/aarch64_irq.o
- .bss.g_gic     0x0000000040181c88       0x10 obj/aarch64_irq.o
+                0x0000000040181c94        0x4 obj/aarch64_irq.o
+ .bss.g_gic     0x0000000040181c98       0x10 obj/aarch64_irq.o
  .bss.g_aarch64_ticks
-                0x0000000040181c98        0x4 obj/aarch64_irq.o
-                0x0000000040181c98                g_aarch64_ticks
+                0x0000000040181ca8        0x4 obj/aarch64_irq.o
+                0x0000000040181ca8                g_aarch64_ticks
  *(COMMON)
-                0x0000000040181c9c                __bss_end = .
-                0x0000000040181ca0                . = ALIGN (0x10)
-                0x0000000040181ca0                __stack_bottom = .
-                0x0000000040191ca0                . = (. + 0x10000)
-                0x0000000040191ca0                __stack_top = .
-                0x0000000040191ca0                __kernel_end = .
+                0x0000000040181cac                __bss_end = .
+                0x0000000040181cb0                . = ALIGN (0x10)
+                0x0000000040181cb0                __stack_bottom = .
+                0x0000000040191cb0                . = (. + 0x10000)
+                0x0000000040191cb0                __stack_top = .
+                0x0000000040191cb0                __kernel_end = .
 LOAD obj/aarch64_start.o
 LOAD obj/aarch64_kernel.o
 LOAD obj/aarch64_uart_pl011.o
