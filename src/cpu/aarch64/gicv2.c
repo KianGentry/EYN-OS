@@ -24,9 +24,18 @@ void gicv2_init(gicv2_t* gic, uint64 dist_base, uint64 cpuif_base) {
     gic->dist_base = dist_base;
     gic->cpuif_base = cpuif_base;
 
+    gicv2_dist_init(gic);
+    gicv2_cpu_init(gic);
+}
+
+void gicv2_dist_init(gicv2_t* gic) {
+    if (!gic) return;
     // Enable distributor.
     mmio_write(gic->dist_base + GICD_CTLR, 1);
+}
 
+void gicv2_cpu_init(gicv2_t* gic) {
+    if (!gic) return;
     // Allow all priorities through.
     mmio_write(gic->cpuif_base + GICC_PMR, 0xFF);
 

@@ -2,17 +2,24 @@
 #include <misc/fdt.h>
 #include <cpu/aarch64/psci.h>
 #include <cpu/aarch64/smp.h>
+#include <cpu/aarch64/timer.h>
+#include <arch.h>
 
 void uart_pl011_write(const char* s);
 void uart_pl011_putc(char c);
 
 uint8 aarch64_cpu_stacks[AARCH64_MAX_CPUS][AARCH64_CPU_STACK_SIZE] __attribute__((aligned(16)));
 volatile uint32 aarch64_cpu_online[AARCH64_MAX_CPUS];
+volatile uint32 aarch64_cpu_ticks[AARCH64_MAX_CPUS];
 
 static inline uint64 read_mpidr_el1(void) {
     uint64 v;
     asm volatile("mrs %0, mpidr_el1" : "=r"(v));
     return v;
+}
+
+uint32 aarch64_cpu_id(void) {
+    return (uint32)(read_mpidr_el1() & 0xFFu);
 }
 
 static void uart_write_hex64(uint64 v) {
@@ -94,6 +101,12 @@ void aarch64_secondary_entry(uint64 cpu_id) {
     uart_pl011_write("CPU ");
     uart_write_hex64(cpu_id);
     uart_pl011_write(" online\n");
+
+    /* Enable per-CPU timer IRQs on secondary cores. */
+    extern void aarch64_irq_cpu_init(void);
+    aarch64_irq_cpu_init();
+    aarch64_timer_init_tick_hz(100);
+    arch_enable_interrupts();
 
     for (;;) {
         asm volatile("wfi" ::: "memory");

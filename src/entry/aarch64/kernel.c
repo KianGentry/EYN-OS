@@ -4,8 +4,10 @@
 #include <cpu/aarch64/gicv2.h>
 #include <cpu/aarch64/timer.h>
 #include <cpu/aarch64/smp.h>
+#include <drivers/aarch64/fb_simple.h>
 
 void aarch64_irq_init(uint64 gicd_base, uint64 gicc_base, uint32 timer_irq_id);
+void aarch64_irq_cpu_init(void);
 
 void uart_pl011_init_115200(void);
 void uart_pl011_write(const char* s);
@@ -38,9 +40,62 @@ void kernel_main(uint64 dtb_ptr) {
     }
 #endif
 
+    /* Initialize framebuffer after DTB pointer is finalized. */
+    if (fb_simple_init(dtb_ptr) == 0) {
+        fb_simple_write("EYN-OS AArch64 bring-up\n");
+
+        uint64 fb_base = 0;
+        uint32 fb_w = 0, fb_h = 0, fb_stride = 0, fb_bpp = 0;
+        const char* fb_fmt = 0;
+        if (fb_simple_get_info(&fb_base, &fb_w, &fb_h, &fb_stride, &fb_bpp, &fb_fmt) == 0) {
+            uart_pl011_write("FB base ");
+            uart_write_hex64(fb_base);
+            uart_pl011_write(" w ");
+            uart_write_hex64((uint64)fb_w);
+            uart_pl011_write(" h ");
+            uart_write_hex64((uint64)fb_h);
+            uart_pl011_write(" stride ");
+            uart_write_hex64((uint64)fb_stride);
+            uart_pl011_write(" bpp ");
+            uart_write_hex64((uint64)fb_bpp);
+            uart_pl011_write(" fmt ");
+            uart_pl011_write(fb_fmt ? fb_fmt : "(null)");
+            uart_pl011_write("\n");
+        }
+    } else {
+        uart_pl011_write("FB init failed, code ");
+        uart_write_hex64((uint64)fb_simple_last_error());
+        uart_pl011_write("\n");
+    }
+
     uart_pl011_write("DTB @ ");
     uart_write_hex64(dtb_ptr);
     uart_pl011_write("\n");
+
+    uint64 fwcfg_base = 0;
+    if (fdt_parse_qemu_fw_cfg_mmio(dtb_ptr, &fwcfg_base) == 0) {
+        uart_pl011_write("FW_CFG @ ");
+        uart_write_hex64(fwcfg_base);
+        uart_pl011_write("\n");
+    }
+
+    if (fb_simple_ready()) {
+        fb_simple_write("DTB @ ");
+        /* Hex rendering to framebuffer: reuse UART hex helper output. */
+        char buf[32];
+        for (int i = 0; i < 32; i++) buf[i] = 0;
+        /* Simple manual hex (16 chars) */
+        static const char* hex = "0123456789ABCDEF";
+        buf[0] = '0';
+        buf[1] = 'x';
+        for (int i = 0; i < 16; i++) {
+            int shift = 60 - (i * 4);
+            buf[2 + i] = hex[(dtb_ptr >> (uint64)shift) & 0xFULL];
+        }
+        buf[18] = '\n';
+        buf[19] = '\0';
+        fb_simple_write(buf);
+    }
 
     uint64 ram_base = 0;
     uint64 ram_size = 0;
@@ -50,11 +105,38 @@ void kernel_main(uint64 dtb_ptr) {
         uart_pl011_write(" size ");
         uart_write_hex64(ram_size);
         uart_pl011_write("\n");
+
+        if (fb_simple_ready()) {
+            fb_simple_write("RAM base ");
+            char buf[48];
+            static const char* hex = "0123456789ABCDEF";
+            buf[0] = '0'; buf[1] = 'x';
+            for (int i = 0; i < 16; i++) {
+                int shift = 60 - (i * 4);
+                buf[2 + i] = hex[(ram_base >> (uint64)shift) & 0xFULL];
+            }
+            buf[18] = ' ';
+            buf[19] = 's'; buf[20] = 'i'; buf[21] = 'z'; buf[22] = 'e'; buf[23] = ' ';
+            buf[24] = '0'; buf[25] = 'x';
+            for (int i = 0; i < 16; i++) {
+                int shift = 60 - (i * 4);
+                buf[26 + i] = hex[(ram_size >> (uint64)shift) & 0xFULL];
+            }
+            buf[42] = '\n';
+            buf[43] = '\0';
+            fb_simple_write(buf);
+        }
     } else {
         uart_pl011_write("FDT parse failed (memory)\n");
+        if (fb_simple_ready()) {
+            fb_simple_write("FDT parse failed (memory)\n");
+        }
     }
 
     uart_pl011_write("Halting.\n");
+    if (fb_simple_ready()) {
+        fb_simple_write("Halting.\n");
+    }
 
     // --- Interrupts + tick bring-up (QEMU virt,gic-version=2 and Pi4 later) ---
 
@@ -98,6 +180,7 @@ void kernel_main(uint64 dtb_ptr) {
 
     aarch64_timer_init_tick_hz(100);
     aarch64_irq_init(gicd_base, gicc_base, cntv_irq_id);
+    aarch64_irq_cpu_init();
 
     // Bring up secondary CPUs (QEMU virt uses PSCI).
     aarch64_smp_boot(dtb_ptr);

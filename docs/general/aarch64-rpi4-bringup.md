@@ -35,11 +35,16 @@ Raspberry Pi hardware is not identical to QEMU, but the QEMU `virt` machine is t
 Targets:
 
 - `make aarch64-qemu` (build with QEMU platform settings)
-- `make aarch64-qemu-run` (build + run under `qemu-system-aarch64`)
+- `make aarch64-qemu-run` (build + run under `qemu-system-aarch64` with serial output)
+- `make aarch64-qemu-run-gui` (build + run with a visible window and simple framebuffer)
 
 The run target uses:
 
 - `qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -nographic -kernel tmp_aarch64_user/boot/kernel8.elf`
+
+The GUI run target uses:
+
+- `qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -device ramfb -display gtk -serial stdio -kernel tmp_aarch64_user/boot/kernel8.elf`
 
 Note: the QEMU build uses a different linker script/load address than the Raspberry Pi firmware build.
 
@@ -71,6 +76,8 @@ When interrupts are enabled (QEMU bring-up), you should also see periodic timer 
 
 - `tick 0x...`
 
+When running with the GUI target, the same early text is rendered to a simple framebuffer (in addition to serial output).
+
 The bring-up also attempts to discover the GICv2 base addresses from the DTB (instead of hardcoding them). On QEMU you should see:
 
 - `GICD @ 0x... GICC @ 0x...`
@@ -91,6 +98,8 @@ SMP bring-up on QEMU uses PSCI and should print one line per secondary core, for
 
 - `CPU_ON 0x... rc=0x0`
 - `CPU 0x... online`
+
+Each core also enables its own virtual timer; per-CPU ticks are maintained internally (not yet printed).
 
 If the DTB does not expose all CPUs, the QEMU bring-up falls back to a synthetic MPIDR list to start cores 1..3. The PSCI conduit is selected from the DTB `method` property (HVC or SMC); QEMU typically uses HVC.
 

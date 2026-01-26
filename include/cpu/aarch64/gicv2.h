@@ -19,6 +19,8 @@ typedef struct {
 } gicv2_t;
 
 void gicv2_init(gicv2_t* gic, uint64 dist_base, uint64 cpuif_base);
+void gicv2_dist_init(gicv2_t* gic);
+void gicv2_cpu_init(gicv2_t* gic);
 void gicv2_enable_irq(gicv2_t* gic, uint32 irq_id);
 uint32 gicv2_ack_irq(gicv2_t* gic);
 void gicv2_eoi_irq(gicv2_t* gic, uint32 iar);

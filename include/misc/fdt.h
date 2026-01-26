@@ -59,4 +59,24 @@ int fdt_parse_cpus_mpidr(uint64 dtb_ptr, uint64* out_mpidrs, uint32 max_cpus, ui
  */
 int fdt_parse_psci_method(uint64 dtb_ptr, uint32* out_use_hvc);
 
+/*
+ * Locate QEMU fw_cfg MMIO device ("qemu,fw-cfg-mmio") and return the MMIO base.
+ * Returns 0 on success, -1 on failure.
+ */
+int fdt_parse_qemu_fw_cfg_mmio(uint64 dtb_ptr, uint64* out_base);
+
+/*
+ * Parse a simple-framebuffer node ("simple-framebuffer") and extract
+ * base, size, width, height, stride, and format string.
+ * Returns 0 on success, -1 on failure.
+ */
+int fdt_parse_simple_framebuffer(uint64 dtb_ptr,
+								 uint64* out_base,
+								 uint64* out_size,
+								 uint32* out_width,
+								 uint32* out_height,
+								 uint32* out_stride,
+								 char* out_format,
+								 uint32 out_format_cap);
+
 #endif

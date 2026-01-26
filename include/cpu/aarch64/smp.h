@@ -8,5 +8,9 @@
 
 void aarch64_smp_boot(uint64 dtb_ptr);
 void aarch64_secondary_entry(uint64 cpu_id);
+uint32 aarch64_cpu_id(void);
+
+/* Per-CPU tick counters (incremented in IRQ handler). */
+extern volatile uint32 aarch64_cpu_ticks[AARCH64_MAX_CPUS];
 
 #endif

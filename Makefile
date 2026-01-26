@@ -108,7 +108,7 @@ AARCH64_LDFLAGS = -T $(AARCH64_LDSCRIPT) --gc-sections -Map $(AARCH64_BOOTDIR)/k
 AARCH64_ELF = $(AARCH64_BOOTDIR)/kernel8.elf
 AARCH64_IMG = $(AARCH64_BOOTDIR)/kernel8.img
 
-AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o
+AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o
 
 ifeq ($(AARCH64_PLATFORM),qemu-virt)
 AARCH64_OBJS += obj/aarch64_virt_dtb.o
@@ -122,7 +122,7 @@ all:$(OBJS)
 	$(LINKER) $(LDFLAGS) -o $(OUTPUT) $(OBJS)
 
 
-.PHONY: aarch64 aarch64-check-tools aarch64-qemu aarch64-qemu-run
+.PHONY: aarch64 aarch64-check-tools aarch64-qemu aarch64-qemu-run aarch64-qemu-run-gui
 
 aarch64-check-tools:
 	@test -n "$(AARCH64_CC)" || (echo "[AARCH64] No cross-compiler found. Install an AArch64 GCC toolchain (e.g. aarch64-none-elf-gcc or aarch64-linux-gnu-gcc) or set AARCH64_CC=..."; exit 1)
@@ -140,6 +140,12 @@ aarch64-qemu-run: aarch64-check-tools
 	@command -v qemu-system-aarch64 >/dev/null 2>&1 || (echo "[AARCH64] qemu-system-aarch64 not found"; exit 1)
 	$(MAKE) aarch64 AARCH64_PLATFORM=qemu-virt
 	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -nographic -kernel $(AARCH64_ELF)
+
+# QEMU run with a simple framebuffer device (ramfb) and a visible window.
+aarch64-qemu-run-gui: aarch64-check-tools
+	@command -v qemu-system-aarch64 >/dev/null 2>&1 || (echo "[AARCH64] qemu-system-aarch64 not found"; exit 1)
+	$(MAKE) aarch64 AARCH64_PLATFORM=qemu-virt
+	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -device ramfb -display gtk -serial stdio -kernel $(AARCH64_ELF)
 
 $(AARCH64_ELF): $(AARCH64_OBJS)
 	mkdir -p $(AARCH64_TMPDIR)/
@@ -250,6 +256,10 @@ obj/aarch64_smp.o:src/cpu/aarch64/smp.c
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/smp.c -o obj/aarch64_smp.o
 
+obj/aarch64_fb_simple.o:src/drivers/aarch64/fb_simple.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/fb_simple.c -o obj/aarch64_fb_simple.o
+
 obj/aarch64_fdt.o:src/misc/fdt.c
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/misc/fdt.c -o obj/aarch64_fdt.o
@@ -257,7 +267,7 @@ obj/aarch64_fdt.o:src/misc/fdt.c
 # QEMU virt: generate a DTB and embed it into the ELF so the kernel can parse it.
 $(AARCH64_BOOTDIR)/virt.dtb:
 	mkdir -p $(AARCH64_BOOTDIR)/
-	qemu-system-aarch64 -M virt,gic-version=2,dumpdtb=$(AARCH64_BOOTDIR)/virt.dtb -cpu cortex-a57 -smp 4 -nographic >/dev/null 2>&1 || true
+	qemu-system-aarch64 -M virt,gic-version=2,dumpdtb=$(AARCH64_BOOTDIR)/virt.dtb -cpu cortex-a57 -smp 4 -device ramfb -nographic >/dev/null 2>&1 || true
 
 obj/aarch64_virt_dtb.o: $(AARCH64_BOOTDIR)/virt.dtb
 	mkdir obj/ -p
