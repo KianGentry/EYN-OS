@@ -3,14 +3,11 @@
 
 void uart_pl011_write(const char* s);
 void uart_pl011_putc(char c);
+void uart_pl011_write_hex64(uint64 v);
 
 static void uart_write_hex64(uint64 v) {
-    static const char* hex = "0123456789ABCDEF";
-    uart_pl011_write("0x");
-    for (int i = 60; i >= 0; i -= 4) {
-        char c = hex[(v >> (uint64)i) & 0xFULL];
-        uart_pl011_putc(c);
-    }
+    (void)uart_pl011_putc;
+    uart_pl011_write_hex64(v);
 }
 
 static inline uint64 read_sysreg_esr_el1(void) {

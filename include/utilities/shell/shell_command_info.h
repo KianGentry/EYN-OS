@@ -25,7 +25,7 @@ typedef struct {
 
 // Enhanced macro to register a shell command in the .shellcmds linker section
 #define REGISTER_SHELL_COMMAND(var, cmd_name, handler_func, cmd_type, desc, ex) \
-    __attribute__((section(".shellcmds"), used, aligned(4))) \
+    __attribute__((section(".shellcmds"), used, aligned(8))) \
     const shell_command_info_t shell_cmd_info_##var = { cmd_name, handler_func, cmd_type, desc, ex }
 
 // Externs for start/stop of the section (set by linker script)

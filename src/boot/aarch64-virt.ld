@@ -22,6 +22,13 @@ SECTIONS
   .rodata : ALIGN(16)
   {
     *(.rodata .rodata.*)
+
+    /* Keep registered shell command metadata in read-only memory.
+       The shell iterates this region using these symbols. */
+    . = ALIGN(8);
+    __start_shellcmds = .;
+    KEEP(*(.shellcmds))
+    __stop_shellcmds = .;
   }
 
   .data : ALIGN(16)

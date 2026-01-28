@@ -24,3 +24,17 @@ int psci_cpu_on(uint64 target_mpidr, uint64 entry_point, uint64 context_id) {
     uint64 ret = smc_call(PSCI_CPU_ON, target_mpidr, entry_point, context_id);
     return (int)ret;
 }
+
+void psci_system_off(void) {
+    (void)smc_call(PSCI_SYSTEM_OFF, 0, 0, 0);
+    for (;;) {
+        asm volatile("wfi" ::: "memory");
+    }
+}
+
+void psci_system_reset(void) {
+    (void)smc_call(PSCI_SYSTEM_RESET, 0, 0, 0);
+    for (;;) {
+        asm volatile("wfi" ::: "memory");
+    }
+}

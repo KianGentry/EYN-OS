@@ -980,6 +980,136 @@ int fdt_parse_simple_framebuffer(uint64 dtb_ptr,
     return -1;
 }
 
+int fdt_parse_virtio_mmio(uint64 dtb_ptr, uint64* out_bases, uint32 max_bases, uint32* out_count) {
+    if (!dtb_ptr || !out_bases || !out_count || max_bases == 0) {
+        return -1;
+    }
+
+    *out_count = 0;
+    for (uint32 i = 0; i < max_bases; i++) out_bases[i] = 0;
+
+    const fdt_header_t* hdr = (const fdt_header_t*)(uint64)dtb_ptr;
+    if (be32_to_cpu(hdr->magic) != FDT_MAGIC) {
+        return -1;
+    }
+
+    uint32 off_struct  = be32_to_cpu(hdr->off_dt_struct);
+    uint32 off_strings = be32_to_cpu(hdr->off_dt_strings);
+    uint32 size_struct = be32_to_cpu(hdr->size_dt_struct);
+
+    const uint8* base = (const uint8*)(uint64)dtb_ptr;
+    const uint32* p = (const uint32*)(const void*)(base + off_struct);
+    const uint32* struct_end = (const uint32*)(const void*)(base + off_struct + size_struct);
+    const char* strings = (const char*)(const void*)(base + off_strings);
+
+    uint32 addr_cells_stack[32];
+    uint32 size_cells_stack[32];
+    uint64 reg_base_stack[32];
+    uint8 virtio_match_stack[32];
+
+    for (int i = 0; i < 32; i++) {
+        addr_cells_stack[i] = 2;
+        size_cells_stack[i] = 1;
+        reg_base_stack[i] = 0;
+        virtio_match_stack[i] = 0;
+    }
+
+    int depth = 0;
+
+    while (p < struct_end) {
+        uint32 token = be32_to_cpu(*p++);
+
+        if (token == FDT_BEGIN_NODE) {
+            const char* name = (const char*)(const void*)p;
+            uint32 len = 0;
+            while (name[len] != '\0') len++;
+
+            int parent_depth = depth;
+            depth++;
+            if (depth >= 32) {
+                return -1;
+            }
+
+            addr_cells_stack[depth] = addr_cells_stack[parent_depth];
+            size_cells_stack[depth] = size_cells_stack[parent_depth];
+            reg_base_stack[depth] = 0;
+            virtio_match_stack[depth] = 0;
+
+            p = (const uint32*)((const uint8*)p + align4_u32(len + 1));
+            continue;
+        }
+
+        if (token == FDT_END_NODE) {
+            depth--;
+            continue;
+        }
+
+        if (token == FDT_NOP) {
+            continue;
+        }
+
+        if (token == FDT_END) {
+            break;
+        }
+
+        if (token != FDT_PROP) {
+            continue;
+        }
+
+        uint32 len = be32_to_cpu(*p++);
+        uint32 nameoff = be32_to_cpu(*p++);
+        const char* pname = strings + nameoff;
+
+        const uint8* value = (const uint8*)(const void*)p;
+        p = (const uint32*)(const void*)((const uint8*)p + align4_u32(len));
+
+        /* Root-level address/size cells */
+        if (streq(pname, "#address-cells") && len >= 4) {
+            addr_cells_stack[depth] = be32_to_cpu(*(const uint32*)(const void*)value);
+            continue;
+        }
+        if (streq(pname, "#size-cells") && len >= 4) {
+            size_cells_stack[depth] = be32_to_cpu(*(const uint32*)(const void*)value);
+            continue;
+        }
+
+        if (streq(pname, "compatible")) {
+            if (mem_has_exact_str(value, len, "virtio,mmio")) {
+                virtio_match_stack[depth] = 1;
+
+                /* If reg already seen, record it now. */
+                if (reg_base_stack[depth] != 0 && *out_count < max_bases) {
+                    out_bases[*out_count] = reg_base_stack[depth];
+                    (*out_count)++;
+                }
+            }
+            continue;
+        }
+
+        if (streq(pname, "reg")) {
+            uint32 parent_depth = (depth > 0) ? (uint32)(depth - 1) : 0;
+            uint32 address_cells = addr_cells_stack[parent_depth];
+            uint32 size_cells = size_cells_stack[parent_depth];
+            uint32 tuple_cells = address_cells + size_cells;
+            if (tuple_cells == 0) continue;
+            if (len < tuple_cells * 4u) continue;
+
+            const uint32* cells = (const uint32*)(const void*)value;
+            uint64 base_addr = read_cells_as_u64(cells, address_cells);
+            reg_base_stack[depth] = base_addr;
+
+            if (virtio_match_stack[depth] && base_addr != 0 && *out_count < max_bases) {
+                out_bases[*out_count] = base_addr;
+                (*out_count)++;
+            }
+
+            continue;
+        }
+    }
+
+    return 0;
+}
+
 int fdt_parse_qemu_fw_cfg_mmio(uint64 dtb_ptr, uint64* out_base) {
     if (!dtb_ptr || !out_base) return -1;
     *out_base = 0;

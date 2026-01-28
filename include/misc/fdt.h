@@ -79,4 +79,12 @@ int fdt_parse_simple_framebuffer(uint64 dtb_ptr,
 								 char* out_format,
 								 uint32 out_format_cap);
 
+/*
+ * Locate virtio-mmio transport nodes (compatible "virtio,mmio") and return
+ * their MMIO base addresses from the "reg" property.
+ *
+ * Returns 0 on success (count may be 0), -1 on parse failure.
+ */
+int fdt_parse_virtio_mmio(uint64 dtb_ptr, uint64* out_bases, uint32 max_bases, uint32* out_count);
+
 #endif

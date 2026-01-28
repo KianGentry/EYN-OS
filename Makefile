@@ -104,14 +104,23 @@ AARCH64_CFLAGS = -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-com
 		 -Wno-unused-parameter -Wno-unused-variable
 
 AARCH64_LDFLAGS = -T $(AARCH64_LDSCRIPT) --gc-sections -Map $(AARCH64_BOOTDIR)/kernel8.map
+AARCH64_FULL_LDFLAGS = -T $(AARCH64_LDSCRIPT) --gc-sections -Map $(AARCH64_BOOTDIR)/kernel8_full.map
 
 AARCH64_ELF = $(AARCH64_BOOTDIR)/kernel8.elf
 AARCH64_IMG = $(AARCH64_BOOTDIR)/kernel8.img
 
-AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o
+# AArch64 full-mode outputs (interactive bring-up shell)
+AARCH64_FULL_ELF = $(AARCH64_BOOTDIR)/kernel8_full.elf
+AARCH64_FULL_IMG = $(AARCH64_BOOTDIR)/kernel8_full.img
+
+AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o
+
+# Full-mode links an alternative entry and a minimal interactive shell.
+AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_bringup_shell.o obj/aarch64_shell_dispatch.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o
 
 ifeq ($(AARCH64_PLATFORM),qemu-virt)
 AARCH64_OBJS += obj/aarch64_virt_dtb.o
+AARCH64_FULL_OBJS += obj/aarch64_virt_dtb.o
 endif
 
 # Source files to object files
@@ -123,6 +132,7 @@ all:$(OBJS)
 
 
 .PHONY: aarch64 aarch64-check-tools aarch64-qemu aarch64-qemu-run aarch64-qemu-run-gui
+.PHONY: aarch64-full aarch64-full-qemu-run aarch64-full-qemu-run-gui
 
 aarch64-check-tools:
 	@test -n "$(AARCH64_CC)" || (echo "[AARCH64] No cross-compiler found. Install an AArch64 GCC toolchain (e.g. aarch64-none-elf-gcc or aarch64-linux-gnu-gcc) or set AARCH64_CC=..."; exit 1)
@@ -132,6 +142,9 @@ aarch64-check-tools:
 aarch64: aarch64-check-tools $(AARCH64_IMG)
 	@echo "Built $(AARCH64_IMG)"
 
+aarch64-full: aarch64-check-tools $(AARCH64_FULL_IMG)
+	@echo "Built $(AARCH64_FULL_IMG)"
+
 # Convenience aliases for local testing under QEMU.
 aarch64-qemu:
 	$(MAKE) aarch64 AARCH64_PLATFORM=qemu-virt
@@ -139,21 +152,39 @@ aarch64-qemu:
 aarch64-qemu-run: aarch64-check-tools
 	@command -v qemu-system-aarch64 >/dev/null 2>&1 || (echo "[AARCH64] qemu-system-aarch64 not found"; exit 1)
 	$(MAKE) aarch64 AARCH64_PLATFORM=qemu-virt
-	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -nographic -kernel $(AARCH64_ELF)
+	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -nographic -kernel $(AARCH64_IMG)
 
 # QEMU run with a simple framebuffer device (ramfb) and a visible window.
 aarch64-qemu-run-gui: aarch64-check-tools
 	@command -v qemu-system-aarch64 >/dev/null 2>&1 || (echo "[AARCH64] qemu-system-aarch64 not found"; exit 1)
 	$(MAKE) aarch64 AARCH64_PLATFORM=qemu-virt
-	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -device ramfb -display gtk -serial stdio -kernel $(AARCH64_ELF)
+	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -device ramfb -device virtio-keyboard-device -display gtk -serial stdio -kernel $(AARCH64_IMG)
+
+aarch64-full-qemu-run: aarch64-check-tools
+	@command -v qemu-system-aarch64 >/dev/null 2>&1 || (echo "[AARCH64] qemu-system-aarch64 not found"; exit 1)
+	$(MAKE) aarch64-full AARCH64_PLATFORM=qemu-virt
+	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -nographic -kernel $(AARCH64_FULL_IMG)
+
+aarch64-full-qemu-run-gui: aarch64-check-tools
+	@command -v qemu-system-aarch64 >/dev/null 2>&1 || (echo "[AARCH64] qemu-system-aarch64 not found"; exit 1)
+	$(MAKE) aarch64-full AARCH64_PLATFORM=qemu-virt
+	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -device ramfb -device virtio-keyboard-device -display gtk -serial stdio -kernel $(AARCH64_FULL_IMG)
 
 $(AARCH64_ELF): $(AARCH64_OBJS)
 	mkdir -p $(AARCH64_TMPDIR)/
 	mkdir -p $(AARCH64_BOOTDIR)/
 	$(AARCH64_LD) $(AARCH64_LDFLAGS) -o $(AARCH64_ELF) $(AARCH64_OBJS)
 
+$(AARCH64_FULL_ELF): $(AARCH64_FULL_OBJS)
+	mkdir -p $(AARCH64_TMPDIR)/
+	mkdir -p $(AARCH64_BOOTDIR)/
+	$(AARCH64_LD) $(AARCH64_FULL_LDFLAGS) -o $(AARCH64_FULL_ELF) $(AARCH64_FULL_OBJS)
+
 $(AARCH64_IMG): $(AARCH64_ELF)
 	$(AARCH64_OBJCOPY) -O binary $(AARCH64_ELF) $(AARCH64_IMG)
+
+$(AARCH64_FULL_IMG): $(AARCH64_FULL_ELF)
+	$(AARCH64_OBJCOPY) -O binary $(AARCH64_FULL_ELF) $(AARCH64_FULL_IMG)
 
 docs: all
 	python3 devtools/generate_command_docs.py src/
@@ -219,6 +250,30 @@ obj/aarch64_start.o:src/entry/aarch64/start.S
 obj/aarch64_kernel.o:src/entry/aarch64/kernel.c
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/kernel.c -o obj/aarch64_kernel.o
+
+obj/aarch64_printf.o:src/drivers/aarch64/printf.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/printf.c -o obj/aarch64_printf.o
+
+obj/aarch64_kernel_full.o:src/entry/aarch64/kernel_full.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/kernel_full.c -o obj/aarch64_kernel_full.o
+
+obj/aarch64_bringup_shell.o:src/entry/aarch64/bringup_shell.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/bringup_shell.c -o obj/aarch64_bringup_shell.o
+
+obj/aarch64_shell_dispatch.o:src/entry/aarch64/shell_dispatch.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/shell_dispatch.c -o obj/aarch64_shell_dispatch.o
+
+obj/aarch64_shell_cmds_min.o:src/entry/aarch64/shell_cmds_min.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/shell_cmds_min.c -o obj/aarch64_shell_cmds_min.o
+
+obj/aarch64_virtio_input.o:src/drivers/aarch64/virtio_input.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/virtio_input.c -o obj/aarch64_virtio_input.o
 
 obj/aarch64_uart_pl011.o:src/drivers/aarch64/uart_pl011.c
 	mkdir obj/ -p

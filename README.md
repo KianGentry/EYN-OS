@@ -58,6 +58,18 @@ make run        # build and run in QEMU
 make qemu-gdb   # launch with GDB support (halted at startup, attach to :1234)
 ```
 
+### AArch64 (in progress)
+
+An AArch64 bring-up target exists for QEMU's `virt` machine. This is a port-in-progress intended to reuse existing subsystems over time.
+
+```bash
+make aarch64-qemu-run-gui       # bring-up: UART + ramfb GUI output
+make aarch64-full-qemu-run      # full-mode: UART interactive bring-up shell (nographic)
+make aarch64-full-qemu-run-gui  # full-mode + ramfb GUI output
+```
+
+In full-mode, you should reach an `a64>` prompt. Useful bring-up commands include `help`, `ticks`, `fbinfo`, `meminfo`, `reboot`, and `poweroff`.
+
 Inside EYN-OS, try these commands:
 ```bash
 init            # initialize ATA drives

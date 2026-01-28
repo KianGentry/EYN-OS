@@ -11,20 +11,33 @@ void aarch64_irq_cpu_init(void);
 
 void uart_pl011_init_115200(void);
 void uart_pl011_write(const char* s);
+void uart_pl011_write_hex64(uint64 v);
 
 static void uart_write_hex64(uint64 v) {
+    uart_pl011_write_hex64(v);
+}
+
+static void fb_write_hex64(uint64 v) {
     static const char* hex = "0123456789ABCDEF";
-    uart_pl011_write("0x");
+    fb_simple_write("0x");
     for (int i = 60; i >= 0; i -= 4) {
         char c = hex[(v >> (uint64)i) & 0xFULL];
-        // tiny inline send to avoid needing stdlib
-        extern void uart_pl011_putc(char c);
-        uart_pl011_putc(c);
+        fb_simple_putc(c);
     }
+}
+
+static void aarch64_enable_fp_simd(void) {
+    /* Allow FP/SIMD at EL1 (prevents traps on Q-register spills). */
+    uint64 cpacr;
+    asm volatile("mrs %0, cpacr_el1" : "=r"(cpacr));
+    cpacr |= (3ull << 20); /* FPEN = 0b11 */
+    asm volatile("msr cpacr_el1, %0\n\tisb" :: "r"(cpacr) : "memory");
 }
 
 void kernel_main(uint64 dtb_ptr) {
     uart_pl011_init_115200();
+
+    aarch64_enable_fp_simd();
 
     uart_pl011_write("\nEYN-OS AArch64 bring-up\n");
 
@@ -72,30 +85,25 @@ void kernel_main(uint64 dtb_ptr) {
     uart_write_hex64(dtb_ptr);
     uart_pl011_write("\n");
 
+    if (fb_simple_ready()) {
+        fb_simple_write("DTB @ ");
+        fb_write_hex64(dtb_ptr);
+        fb_simple_putc('\n');
+    }
+
+#if defined(AARCH64_PLATFORM_QEMU_VIRT)
     uint64 fwcfg_base = 0;
     if (fdt_parse_qemu_fw_cfg_mmio(dtb_ptr, &fwcfg_base) == 0) {
         uart_pl011_write("FW_CFG @ ");
         uart_write_hex64(fwcfg_base);
         uart_pl011_write("\n");
-    }
-
-    if (fb_simple_ready()) {
-        fb_simple_write("DTB @ ");
-        /* Hex rendering to framebuffer: reuse UART hex helper output. */
-        char buf[32];
-        for (int i = 0; i < 32; i++) buf[i] = 0;
-        /* Simple manual hex (16 chars) */
-        static const char* hex = "0123456789ABCDEF";
-        buf[0] = '0';
-        buf[1] = 'x';
-        for (int i = 0; i < 16; i++) {
-            int shift = 60 - (i * 4);
-            buf[2 + i] = hex[(dtb_ptr >> (uint64)shift) & 0xFULL];
+        if (fb_simple_ready()) {
+            fb_simple_write("FW_CFG @ ");
+            fb_write_hex64(fwcfg_base);
+            fb_simple_putc('\n');
         }
-        buf[18] = '\n';
-        buf[19] = '\0';
-        fb_simple_write(buf);
     }
+#endif
 
     uint64 ram_base = 0;
     uint64 ram_size = 0;
@@ -108,23 +116,10 @@ void kernel_main(uint64 dtb_ptr) {
 
         if (fb_simple_ready()) {
             fb_simple_write("RAM base ");
-            char buf[48];
-            static const char* hex = "0123456789ABCDEF";
-            buf[0] = '0'; buf[1] = 'x';
-            for (int i = 0; i < 16; i++) {
-                int shift = 60 - (i * 4);
-                buf[2 + i] = hex[(ram_base >> (uint64)shift) & 0xFULL];
-            }
-            buf[18] = ' ';
-            buf[19] = 's'; buf[20] = 'i'; buf[21] = 'z'; buf[22] = 'e'; buf[23] = ' ';
-            buf[24] = '0'; buf[25] = 'x';
-            for (int i = 0; i < 16; i++) {
-                int shift = 60 - (i * 4);
-                buf[26 + i] = hex[(ram_size >> (uint64)shift) & 0xFULL];
-            }
-            buf[42] = '\n';
-            buf[43] = '\0';
-            fb_simple_write(buf);
+            fb_write_hex64(ram_base);
+            fb_simple_write(" size ");
+            fb_write_hex64(ram_size);
+            fb_simple_putc('\n');
         }
     } else {
         uart_pl011_write("FDT parse failed (memory)\n");
@@ -133,9 +128,9 @@ void kernel_main(uint64 dtb_ptr) {
         }
     }
 
-    uart_pl011_write("Halting.\n");
+    uart_pl011_write("Continuing.\n");
     if (fb_simple_ready()) {
-        fb_simple_write("Halting.\n");
+        fb_simple_write("Continuing.\n");
     }
 
     // --- Interrupts + tick bring-up (QEMU virt,gic-version=2 and Pi4 later) ---

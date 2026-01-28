@@ -233,7 +233,7 @@ static int fw_cfg_find_file(uint64 fw_base, const char* name, uint16* out_select
 static int fw_cfg_dma_write(uint64 fw_base, uint16 select_key, const void* src, uint32 len) {
     if (!src || len == 0) return -1;
 
-    fw_cfg_dma_access_t dma;
+    fw_cfg_dma_access_t dma __attribute__((aligned(8)));
     /* control: SELECT (bit3) + WRITE (bit4) + (select_key << 16) */
     uint32 control = 0x08u | 0x10u | ((uint32)select_key << 16);
     dma.control = bswap32(control);
@@ -301,7 +301,7 @@ static int fb_try_init_qemu_ramfb(uint64 dtb_ptr) {
     /* DRM_FORMAT_XRGB8888 = fourcc('X','R','2','4') */
     uint32 fourcc_xrgb8888 = (uint32)'X' | ((uint32)'R' << 8) | ((uint32)'2' << 16) | ((uint32)'4' << 24);
 
-    ramfb_cfg_t cfg;
+    ramfb_cfg_t cfg __attribute__((aligned(8)));
     cfg.addr = bswap64((uint64)(const void*)g_ramfb_pixels);
     cfg.fourcc = bswap32(fourcc_xrgb8888);
     cfg.flags = bswap32(0);
