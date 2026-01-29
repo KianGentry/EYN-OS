@@ -6,6 +6,7 @@
 #include <cpu/aarch64/smp.h>
 #include <drivers/aarch64/fb_simple.h>
 #include <drivers/aarch64/virtio_input.h>
+#include <utilities/aarch64/heap.h>
 
 /* Full-mode bring-up entry: keeps the existing AArch64 interrupt/timer/SMP code
  * but drops into an interactive serial shell instead of the tick-only loop.
@@ -107,6 +108,10 @@ void kernel_main(uint64 dtb_ptr) {
         uart_pl011_write(" size ");
         uart_pl011_write_hex64(ram_size);
         uart_pl011_write("\n");
+
+        /* Enable dynamic allocations for future subsystem porting. */
+        aarch64_heap_init(ram_base, ram_size);
+
         aarch64_bringup_shell_set_meminfo(ram_base, ram_size);
         aarch64_shell_set_meminfo(ram_base, ram_size);
     } else {

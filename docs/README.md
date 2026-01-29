@@ -7,6 +7,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 ### Core System
 - **[System Overview](system-overview.md)** - High-level architecture and design principles
 - **[Memory Management with Paging](mm/virtual-memory.md)** - Virtual memory and paging system
+- **[AArch64 Bring-up Heap](mm/aarch64-bringup-heap.md)** - Temporary heap allocator used during the AArch64 port
 - **[Panic & Assertions](general/panic.md)** - Panic screen, assertions, and developer macros
 - **[Watchdog Timer](general/watchdog.md)** - Detecting stalls and tuning timeouts
 - **[Pipeline System](general/pipeline-system.md)** - Unix-like pipelines and redirection

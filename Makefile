@@ -113,10 +113,10 @@ AARCH64_IMG = $(AARCH64_BOOTDIR)/kernel8.img
 AARCH64_FULL_ELF = $(AARCH64_BOOTDIR)/kernel8_full.elf
 AARCH64_FULL_IMG = $(AARCH64_BOOTDIR)/kernel8_full.img
 
-AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o
+AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o
 
 # Full-mode links an alternative entry and a minimal interactive shell.
-AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_bringup_shell.o obj/aarch64_shell_dispatch.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o
+AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_bringup_shell.o obj/aarch64_shell_dispatch.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o
 
 ifeq ($(AARCH64_PLATFORM),qemu-virt)
 AARCH64_OBJS += obj/aarch64_virt_dtb.o
@@ -254,6 +254,14 @@ obj/aarch64_kernel.o:src/entry/aarch64/kernel.c
 obj/aarch64_printf.o:src/drivers/aarch64/printf.c
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/printf.c -o obj/aarch64_printf.o
+
+obj/aarch64_string.o:src/utilities/aarch64/string.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/aarch64/string.c -o obj/aarch64_string.o
+
+obj/aarch64_heap.o:src/utilities/aarch64/heap.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/aarch64/heap.c -o obj/aarch64_heap.o
 
 obj/aarch64_kernel_full.o:src/entry/aarch64/kernel_full.c
 	mkdir obj/ -p
