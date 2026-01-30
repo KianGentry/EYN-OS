@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2026-01-24 12:18:08
+This document is auto-generated from the source code. Last updated: 2026-01-30 14:58:27
 
-**Total Commands:** 66
+**Total Commands:** 65
 
 ## Table of Contents
 
@@ -1104,26 +1104,6 @@ echo Hello, world!
 
 ---
 
-### history
-
-**Handler:** `history_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `history.c`
-
-**Description:**
-Show or clear command history.
-Usage: history [clear]
-Example: history | history clear
-
-**Example:**
-```bash
-history
-```
-
----
-
 ### log
 
 **Handler:** `log_cmd`
@@ -1290,6 +1270,6 @@ run user_hello.uelf
 | Streaming Commands | 34 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
-| Utility Commands | 10 |
+| Utility Commands | 9 |
 | Development Commands | 2 |
 

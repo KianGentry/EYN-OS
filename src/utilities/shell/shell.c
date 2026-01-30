@@ -18,6 +18,7 @@
 #include <vga.h>
 #include <fat32.h>
 #define COMMAND_HASH_SIZE 256
+#define SHELL_CMD_PTR_MIN 0x1000u
 typedef struct {
     const char* name;                 // command name key
     shell_cmd_handler_t handler;      // command handler value
@@ -345,6 +346,12 @@ static void init_command_hash_table() {
     }
     for (size_t i = 0; i < num_commands; i++) {
         const shell_command_info_t* cmd = &__start_shellcmds[i];
+        if (cmd->name == NULL || cmd->handler == NULL) {
+            continue;
+        }
+        if ((uint32)cmd->name < SHELL_CMD_PTR_MIN || (uint32)cmd->handler < SHELL_CMD_PTR_MIN) {
+            continue;
+        }
         uint32_t hash = command_hash(cmd->name);
         
         // Simple linear probing for collisions
@@ -363,12 +370,20 @@ shell_cmd_handler_t find_command(const char* name) {
     // Initialize hash table on first use
     init_command_hash_table();
     if (!name || !*name) return NULL;
+    if ((uint32)name < SHELL_CMD_PTR_MIN) return NULL;
     
     // If hashing is disabled due to table saturation, use linear search
     if (g_command_hash_disabled) {
+linear_search:
         size_t num_commands = (__stop_shellcmds - __start_shellcmds);
         for (size_t i = 0; i < num_commands; i++) {
             const shell_command_info_t* cmd = &__start_shellcmds[i];
+            if (cmd->name == NULL || cmd->handler == NULL) {
+                continue;
+            }
+            if ((uint32)cmd->name < SHELL_CMD_PTR_MIN || (uint32)cmd->handler < SHELL_CMD_PTR_MIN) {
+                continue;
+            }
             if (strcmp(cmd->name, name) == 0) {
                 return cmd->handler;
             }
@@ -384,6 +399,11 @@ shell_cmd_handler_t find_command(const char* name) {
             // Empty slot: not found
             return NULL;
         }
+        if ((uint32)slot_name < SHELL_CMD_PTR_MIN || (uint32)g_command_hash_table[hash].handler < SHELL_CMD_PTR_MIN) {
+            // Hash table contains invalid pointers; fall back to linear search.
+            g_command_hash_disabled = 1;
+            goto linear_search;
+        }
         if (strcmp(slot_name, name) == 0) {
             return g_command_hash_table[hash].handler;
         }
@@ -395,6 +415,12 @@ shell_cmd_handler_t find_command(const char* name) {
     size_t num_commands = (__stop_shellcmds - __start_shellcmds);
     for (size_t i = 0; i < num_commands; i++) {
         const shell_command_info_t* cmd = &__start_shellcmds[i];
+        if (cmd->name == NULL || cmd->handler == NULL) {
+            continue;
+        }
+        if ((uint32)cmd->name < SHELL_CMD_PTR_MIN || (uint32)cmd->handler < SHELL_CMD_PTR_MIN) {
+            continue;
+        }
         if (strcmp(cmd->name, name) == 0) {
             return cmd->handler;
         }

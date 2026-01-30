@@ -591,8 +591,9 @@ build: all eynfsimg docs
 	bash devtools/build_iso.sh "$(GRUB_MKRESCUE)"
 
 clean:
-	rm -rf obj/*.o tmp/boot/kernel.bin *.img eynfs_format EYNOS.iso
+	rm -rf obj/*.o tmp/boot/kernel.bin tmp_user/boot/kernel.bin tmp_user/boot/kernel.map *.img eynfs_format EYNOS.iso
 	@rm -rf tmp/grub_minimal tmp/grub_ultra_minimal tmp/grub_ultra_minimal.* tmp/grub.* tmp/iso_edit.* tmp/iso_clean.* 2>/dev/null || true
+	@rm -rf tmp_user/grub_minimal tmp_user/grub_ultra_minimal tmp_user/grub_ultra_minimal.* tmp_user/grub.* tmp_user/iso_edit.* tmp_user/iso_clean.* 2>/dev/null || true
 	rm -f userland/*.o userland/*.bin
 
 clear: clean

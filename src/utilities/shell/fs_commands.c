@@ -37,7 +37,6 @@ void fatfix_cmd(string arg);
 extern uint8_t g_current_drive;
 
 // Helper function prototypes (if not already declared)
-void to_fat32_83(const char* input, char* output);
 int parse_redirection(const char* input, char* cmd, char* filename);
 uint32 str_to_uint(const char* s);
 
@@ -545,41 +544,6 @@ void write_cmd(string ch) {
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     // Pass the full path to write_editor for subdirectory support
     write_editor(abspath, disk);
-}
-
-void to_fat32_83(const char* input, char* output)
-{
-    // convert input like "test.txt" to "TEST    TXT" (cancerous)
-    int i = 0, j = 0;
-    // copy name part (up to dot or 8 chars)
-    while (input[i] && input[i] != '.' && j < 8) 
-	{
-        char c = input[i];
-        if (c >= 'a' && c <= 'z') c -= 32; // to upper
-        output[j++] = c;
-        i++;
-    }
-
-    // pad with spaces
-    while (j < 8) output[j++] = ' ';
-    // if dot, skip it
-    if (input[i] == '.') i++;
-    int ext = 0;
-    // copy extension (up to 3 chars)
-    while (input[i] && ext < 3) 
-	{
-        char c = input[i];
-        if (c >= 'a' && c <= 'z') c -= 32;
-        output[j++] = c;
-        i++; ext++;
-    }
-
-    // pad extension with spaces
-    while (ext < 3) 
-	{
-		output[j++] = ' '; ext++; 
-	}
-    output[j] = '\0';
 }
 
 // writefat implementation

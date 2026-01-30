@@ -1,6 +1,7 @@
 #include <misc/types.h>
 #include <misc/fdt.h>
 #include <drivers/aarch64/virtio_input.h>
+#include <hal/keyboard.h>
 
 /* Virtio MMIO register offsets (virtio-mmio v2). */
 #define VIRTIO_MMIO_MAGIC_VALUE       0x000
@@ -50,12 +51,31 @@
 #define EV_KEY 1u
 
 /* Selected key codes (Linux input-event-codes.h) */
+#define KEY_ESC        1u
 #define KEY_BACKSPACE 14u
+#define KEY_TAB       15u
 #define KEY_DELETE    111u
 #define KEY_ENTER     28u
+#define KEY_CAPSLOCK  58u
+#define KEY_LEFTCTRL  29u
+#define KEY_RIGHTCTRL 97u
+#define KEY_LEFTALT   56u
+#define KEY_RIGHTALT  100u
+#define KEY_LEFTMETA  125u
+#define KEY_RIGHTMETA 126u
 #define KEY_LEFTSHIFT 42u
 #define KEY_RIGHTSHIFT 54u
 #define KEY_SPACE     57u
+
+/* Cursor/navigation keys (Linux input-event-codes.h) */
+#define KEY_HOME      102u
+#define KEY_UP        103u
+#define KEY_PAGEUP    104u
+#define KEY_LEFT      105u
+#define KEY_RIGHT     106u
+#define KEY_END       107u
+#define KEY_DOWN      108u
+#define KEY_PAGEDOWN  109u
 
 static inline void mmio_w32(uint64 base, uint64 off, uint32 v) {
     *(volatile uint32*)(uint64)(base + off) = v;
@@ -145,6 +165,10 @@ static uint32 g_ready;
 static uint16 g_last_used_idx;
 static uint16 g_avail_idx;
 static uint32 g_shift;
+static uint32 g_ctrl;
+static uint32 g_alt;
+static uint32 g_super;
+static uint32 g_caps;
 
 static virtq_desc_t* g_desc_p;
 static virtq_avail_t* g_avail_p;
@@ -261,6 +285,58 @@ static char map_keycode(uint16 code, uint32 shift) {
     }
 }
 
+static uint32 virtio_mods_to_hal(void) {
+    uint32 m = 0;
+    if (g_shift) m |= HAL_KBD_MOD_SHIFT;
+    if (g_ctrl) m |= HAL_KBD_MOD_CTRL;
+    if (g_alt) m |= HAL_KBD_MOD_ALT;
+    if (g_super) m |= HAL_KBD_MOD_SUPER;
+    if (g_caps) m |= HAL_KBD_MOD_CAPS;
+    return m;
+}
+
+static uint32 map_keycode_to_hal_key(uint16 code) {
+    /* Special keys first (non-ASCII). */
+    switch (code) {
+        case KEY_UP: return HAL_KEY_UP;
+        case KEY_DOWN: return HAL_KEY_DOWN;
+        case KEY_LEFT: return HAL_KEY_LEFT;
+        case KEY_RIGHT: return HAL_KEY_RIGHT;
+        case KEY_DELETE: return HAL_KEY_DELETE;
+        case KEY_HOME: return HAL_KEY_HOME;
+        case KEY_END: return HAL_KEY_END;
+        case KEY_PAGEUP: return HAL_KEY_PGUP;
+        case KEY_PAGEDOWN: return HAL_KEY_PGDN;
+        default: break;
+    }
+
+    /* Normalize common controls to ASCII. */
+    if (code == KEY_ENTER) return (uint32)'\n';
+    if (code == KEY_TAB) return (uint32)'\t';
+    if (code == KEY_BACKSPACE) return (uint32)'\b';
+    if (code == KEY_ESC) return 27u;
+    if (code == KEY_SPACE) return (uint32)' ';
+
+    /* Letters/punctuation: reuse the existing US layout mapping.
+     * Apply CapsLock only to letters by flipping the effective shift.
+     */
+    uint32 eff_shift = g_shift;
+    if (g_caps) {
+        switch (code) {
+            case 16: case 17: case 18: case 19: case 20: case 21: case 22: case 23: case 24: case 25:
+            case 30: case 31: case 32: case 33: case 34: case 35: case 36: case 37: case 38:
+            case 44: case 45: case 46: case 47: case 48: case 49: case 50:
+                eff_shift = g_shift ? 0u : 1u;
+                break;
+            default:
+                break;
+        }
+    }
+    char c = map_keycode(code, eff_shift);
+    if (c == 0) return 0;
+    return (uint32)(uint8)c;
+}
+
 static int virtio_input_try_consume_event(char* out_c) {
     if (!g_ready) return -1;
 
@@ -305,6 +381,105 @@ static int virtio_input_try_consume_event(char* out_c) {
     return -1;
 }
 
+static int virtio_input_try_consume_key(uint32* out_key, uint32* out_mods) {
+    if (!g_ready) return -1;
+    if (!g_used_p || !g_avail_p) return -1;
+
+    aarch64_dcache_clean_invalidate_poc_range(g_used_p, sizeof(*g_used_p));
+
+    uint16 used_idx = g_used_p->idx;
+    while (g_last_used_idx != used_idx) {
+        uint16 i = (uint16)(g_last_used_idx & 0xF);
+        uint32 desc_id = g_used_p->ring[i].id;
+
+        if (desc_id < 16) {
+            aarch64_dcache_clean_invalidate_poc_range(&g_events[desc_id], sizeof(g_events[desc_id]));
+            virtio_input_event_t ev = g_events[desc_id];
+
+            /* Requeue descriptor */
+            g_avail_p->ring[g_avail_idx & 0xF] = (uint16)desc_id;
+            g_avail_idx++;
+            g_avail_p->idx = g_avail_idx;
+            aarch64_dcache_clean_poc_range(g_avail_p, sizeof(*g_avail_p));
+            mmio_w32(g_input_base, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+
+            if (ev.type == EV_KEY) {
+                /* Track modifiers/toggles on both press and release. */
+                if (ev.code == KEY_LEFTSHIFT || ev.code == KEY_RIGHTSHIFT) {
+                    g_shift = (ev.value != 0) ? 1u : 0u;
+                } else if (ev.code == KEY_LEFTCTRL || ev.code == KEY_RIGHTCTRL) {
+                    g_ctrl = (ev.value != 0) ? 1u : 0u;
+                } else if (ev.code == KEY_LEFTALT || ev.code == KEY_RIGHTALT) {
+                    g_alt = (ev.value != 0) ? 1u : 0u;
+                } else if (ev.code == KEY_LEFTMETA || ev.code == KEY_RIGHTMETA) {
+                    g_super = (ev.value != 0) ? 1u : 0u;
+                } else if (ev.code == KEY_CAPSLOCK && ev.value == 1) {
+                    g_caps = g_caps ? 0u : 1u;
+                } else if (ev.value == 1) {
+                    /* Ctrl combos (match i386 TUI encoding). */
+                    if (g_ctrl) {
+                        if (ev.code == 46) { /* C */
+                            if (out_key) *out_key = 0x2206u;
+                            if (out_mods) *out_mods = virtio_mods_to_hal();
+                            g_last_used_idx++;
+                            return 0;
+                        }
+                        if (ev.code == 47) { /* V */
+                            if (out_key) *out_key = 0x2207u;
+                            if (out_mods) *out_mods = virtio_mods_to_hal();
+                            g_last_used_idx++;
+                            return 0;
+                        }
+                        if (ev.code == 24) { /* O */
+                            if (out_key) *out_key = 0x2001u;
+                            if (out_mods) *out_mods = virtio_mods_to_hal();
+                            g_last_used_idx++;
+                            return 0;
+                        }
+                        if (ev.code == 31) { /* S */
+                            if (out_key) *out_key = 0x2001u;
+                            if (out_mods) *out_mods = virtio_mods_to_hal();
+                            g_last_used_idx++;
+                            return 0;
+                        }
+                        if (ev.code == 45) { /* X */
+                            if (out_key) *out_key = 0x210Bu;
+                            if (out_mods) *out_mods = virtio_mods_to_hal();
+                            g_last_used_idx++;
+                            return 0;
+                        }
+                        if (ev.code == 16) { /* Q */
+                            if (out_key) *out_key = 0x2101u;
+                            if (out_mods) *out_mods = virtio_mods_to_hal();
+                            g_last_used_idx++;
+                            return 0;
+                        }
+                    }
+
+                    uint32 key = map_keycode_to_hal_key(ev.code);
+                    if (key != 0) {
+                        if (g_shift && (key >= HAL_KEY_UP && key <= HAL_KEY_RIGHT)) {
+                            key |= HAL_KEY_FLAG_SHIFTSEL;
+                        }
+                        if (g_super) {
+                            key |= HAL_KEY_FLAG_SUPER;
+                        }
+
+                        if (out_key) *out_key = key;
+                        if (out_mods) *out_mods = virtio_mods_to_hal();
+                        g_last_used_idx++;
+                        return 0;
+                    }
+                }
+            }
+        }
+
+        g_last_used_idx++;
+    }
+
+    return -1;
+}
+
 int virtio_input_ready(void) {
     return (int)g_ready;
 }
@@ -315,6 +490,10 @@ uint64 virtio_input_base(void) {
 
 int virtio_input_getc_nonblock(char* out_c) {
     return virtio_input_try_consume_event(out_c);
+}
+
+int virtio_input_getkey_nonblock(uint32* out_key, uint32* out_mods) {
+    return virtio_input_try_consume_key(out_key, out_mods);
 }
 
 static int virtio_input_init_at_base(uint64 base) {
@@ -361,6 +540,10 @@ static int virtio_input_init_at_base(uint64 base) {
     g_last_used_idx = 0;
     g_avail_idx = 0;
     g_shift = 0;
+    g_ctrl = 0;
+    g_alt = 0;
+    g_super = 0;
+    g_caps = 0;
 
     if (ver >= 2u) {
         g_desc_p = g_desc;
