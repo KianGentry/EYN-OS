@@ -6,6 +6,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 
 ### Core System
 - **[System Overview](system-overview.md)** - High-level architecture and design principles
+- **[Cross-Architecture Parity](general/arch-parity.md)** - i386 ↔ AArch64 parity targets and status matrix
 - **[Memory Management with Paging](mm/virtual-memory.md)** - Virtual memory and paging system
 - **[AArch64 Bring-up Heap](mm/aarch64-bringup-heap.md)** - Temporary heap allocator used during the AArch64 port
 - **[Panic & Assertions](general/panic.md)** - Panic screen, assertions, and developer macros
@@ -59,6 +60,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 - **[Syscalls](api/syscalls.md)** - System call interface and programming guide (ring-3)
 - **[UELF ABI](api/userland-uelf-abi.md)** - Userland executable format and conventions
 - **[REI/REIV API](api/rei-api.md)** - Image and video format specifications
+- **[HAL API](api/hal.md)** - Hardware Abstraction Layer contracts for cross-arch compatibility
 - **[Header Files](api/headers.md)** - Complete header file documentation
 
 ### Troubleshooting

@@ -4,6 +4,35 @@ This document provides a comprehensive overview of all header files in EYN-OS an
 
 ## Core System Headers
 
+## HAL Headers
+
+The HAL (Hardware Abstraction Layer) is the cross-architecture contract surface.
+Shared code should prefer these headers over directly calling architecture- or
+platform-specific functions.
+
+See also: `docs/api/hal.md`.
+
+### `hal/console.h`
+Kernel console text output.
+
+### `hal/keyboard.h`
+Non-blocking keyboard input stream and modifier state.
+
+### `hal/time.h`
+Monotonic tick/timebase and cooperative sleep.
+
+### `hal/block.h`
+Block device sector I/O.
+
+### `hal/irq.h`
+IRQ registration and enable/disable.
+
+### `hal/mm.h`
+Minimal page allocation and map/unmap primitives (kernel).
+
+### `hal/net.h`
+Network device access (wraps `network/netdev.h`).
+
 ### `types.h`
 Defines basic data types and constants used throughout EYN-OS.
 
