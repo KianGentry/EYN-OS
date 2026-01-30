@@ -3,7 +3,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 
-#include <drivers/aarch64/fb_simple.h>
+#include <hal/console.h>
 #include <drivers/vga.h>
 
 extern int shell_redirect_active;
@@ -19,8 +19,6 @@ extern int shell_redirect_active;
  *   color. On AArch64 we ignore color but still consume the arguments to keep
  *   existing call sites working.
  */
-
-void uart_pl011_write(const char* s);
 
 static void console_write(const char* s) {
     if (!s) return;
@@ -40,17 +38,8 @@ static void console_write(const char* s) {
         return;
     }
 
-    /* UART first (single lock inside uart_pl011_write). */
-    uart_pl011_write(s);
-
-    /* Mirror to framebuffer, if available. */
-    if (fb_simple_ready()) {
-        while (*s) {
-            char c = *s++;
-            if (c == '\n') fb_simple_putc('\r');
-            fb_simple_putc(c);
-        }
-    }
+    /* Normal output path goes through the HAL console. */
+    hal_console_write(s);
 }
 
 static void out_pad(char** outp, size_t* left, char c) {

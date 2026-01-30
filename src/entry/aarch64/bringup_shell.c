@@ -1,5 +1,6 @@
 #include <misc/types.h>
-#include <drivers/aarch64/fb_simple.h>
+#include <hal/console.h>
+#include <hal/keyboard.h>
 
 /*
  * AArch64 bring-up shell
@@ -11,32 +12,8 @@
  * interactive surface so we can port subsystems incrementally.
  */
 
-void uart_pl011_putc(char c);
-void uart_pl011_write(const char* s);
-int uart_pl011_getc_nonblock(char* out_c);
-int virtio_input_getc_nonblock(char* out_c);
-
 int aarch64_shell_dispatch_line(string line);
 void aarch64_shell_set_meminfo(uint64 ram_base, uint64 ram_size);
-
-extern volatile uint32 g_aarch64_ticks;
-
-static void console_putc(char c) {
-    if (c == '\n') {
-        uart_pl011_putc('\r');
-    }
-    uart_pl011_putc(c);
-
-    if (fb_simple_ready()) {
-        if (c == '\n') fb_simple_putc('\r');
-        fb_simple_putc(c);
-    }
-}
-
-static void console_write(const char* s) {
-    if (!s) return;
-    while (*s) console_putc(*s++);
-}
 
 static int is_space(char c) {
     return (c == ' ' || c == '\t' || c == '\r' || c == '\n');
@@ -47,15 +24,6 @@ static const char* skip_spaces(const char* s) {
     return s;
 }
 
-static int streq(const char* a, const char* b) {
-    if (!a || !b) return 0;
-    while (*a && *b) {
-        if (*a != *b) return 0;
-        a++; b++;
-    }
-    return (*a == '\0' && *b == '\0');
-}
-
 static void read_line(char* buf, int cap) {
     if (!buf || cap <= 0) return;
 
@@ -63,12 +31,11 @@ static void read_line(char* buf, int cap) {
     buf[0] = '\0';
 
     for (;;) {
-        char c;
+        char c = 0;
         for (;;) {
-            if (uart_pl011_getc_nonblock(&c) == 0) {
-                break;
-            }
-            if (virtio_input_getc_nonblock(&c) == 0) {
+            int v = hal_kbd_getc_nonblock();
+            if (v != 0) {
+                c = (char)(uint8)v;
                 break;
             }
             /* Idle until next interrupt (timer) then poll again. */
@@ -76,7 +43,7 @@ static void read_line(char* buf, int cap) {
         }
 
         if (c == '\r' || c == '\n') {
-            console_putc('\n');
+            hal_console_putc('\n');
             break;
         }
 
@@ -85,8 +52,7 @@ static void read_line(char* buf, int cap) {
             if (n > 0) {
                 n--;
                 buf[n] = '\0';
-                /* Erase char on terminal. */
-                console_write("\b \b");
+                hal_console_putc('\b');
             }
             continue;
         }
@@ -98,7 +64,7 @@ static void read_line(char* buf, int cap) {
         if (n < cap - 1) {
             buf[n++] = c;
             buf[n] = '\0';
-            console_putc(c);
+            hal_console_putc(c);
         }
     }
 }
@@ -108,11 +74,11 @@ void aarch64_bringup_shell_set_meminfo(uint64 ram_base, uint64 ram_size) {
 }
 
 void aarch64_bringup_shell_run(void) {
-    console_write("\nEYN-OS AArch64 shell ready. Type 'help'.\n\n");
+    hal_console_write("\nEYN-OS AArch64 shell ready. Type 'help'.\n\n");
 
     for (;;) {
         char line[200] __attribute__((aligned(16)));
-        console_write("a64> ");
+        hal_console_write("a64> ");
         read_line(line, (int)sizeof(line));
 
         const char* cmd = skip_spaces(line);
@@ -123,7 +89,7 @@ void aarch64_bringup_shell_run(void) {
         int rc = aarch64_shell_dispatch_line(line);
         if (rc == -1) {
             /* Unknown: keep behavior similar to classic shell. */
-            console_write("unknown command: ");
+            hal_console_write("unknown command: ");
             /* Print command name only */
             char name[32] __attribute__((aligned(16)));
             int i = 0;
@@ -132,8 +98,8 @@ void aarch64_bringup_shell_run(void) {
                 i++;
             }
             name[i] = '\0';
-            console_write(name);
-            console_putc('\n');
+            hal_console_write(name);
+            hal_console_putc('\n');
         }
     }
 }

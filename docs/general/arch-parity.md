@@ -49,7 +49,7 @@ Legend:
 | Subsystem | i386 | AArch64 | Notes / parity definition | Primary test |
 |---|---:|---:|---|---|
 | Boot to interactive shell | ✅ | 🟡 | AArch64 currently has bring-up shell + a "full" build path; final target is same shell/TUI entrypoint on both. | smoke transcript |
-| Console semantics | ✅ | 🟡 | Control chars, scrolling, cursor, colors. AArch64 ramfb console must match VGA behavior used by shell/TUI. | `help` + edit line |
+| Console semantics | ✅ | 🟡 | Control chars, scrolling, cursor, colors. AArch64 output now routes through the HAL console, but ramfb still needs parity polish vs VGA. | `help` + edit line |
 | Keyboard semantics | ✅ | 🟡 | Same keybindings, modifiers, arrows/home/end, ctrl shortcuts, repeat. Backends differ but output stream must match. | edit line + ctrl shortcuts |
 | Mouse / pointer | ✅ | ⬜ | Same UI interactions in tiler. | UI smoke |
 | Timer / ticks | ✅ | 🟡 | Same tick rate expectations, sleep accuracy, watchdog behavior. | `ticks` + timer selftest |

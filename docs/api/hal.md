@@ -67,3 +67,8 @@ This HAL starts as a set of headers (contracts). As parity work progresses we:
 1. Add thin wrappers so both i386 and AArch64 provide each HAL symbol.
 2. Switch shared call sites to the HAL incrementally.
 3. Add transcript tests to ensure behavior stays identical.
+
+### Current adoption (in-tree)
+
+- AArch64 bring-up shell uses `hal_console_*` and `hal_kbd_*`.
+- AArch64 `printf()` writes to the HAL console (but still honors `shell_redirect_active` capture semantics).

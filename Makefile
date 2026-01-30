@@ -54,6 +54,9 @@ OBJS += obj/partition.o obj/diskmgr.o
 OBJS += obj/pci.o
 OBJS += obj/e1000.o
 OBJS += obj/netstack.o
+
+# HAL backends (i386)
+OBJS += obj/hal_console.o obj/hal_keyboard.o
 OUTPUT = $(BOOTDIR)/kernel.bin
 
 # -----------------------------
@@ -113,10 +116,10 @@ AARCH64_IMG = $(AARCH64_BOOTDIR)/kernel8.img
 AARCH64_FULL_ELF = $(AARCH64_BOOTDIR)/kernel8_full.elf
 AARCH64_FULL_IMG = $(AARCH64_BOOTDIR)/kernel8_full.img
 
-AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o
+AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_hal_console.o
 
 # Full-mode links an alternative entry and a minimal interactive shell.
-AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_bringup_shell.o obj/aarch64_shell_dispatch.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_virtio_blk.o obj/aarch64_ata_virtio.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_pipeline.o obj/aarch64_shell_find_command.o obj/aarch64_vga_redirect.o obj/aarch64_fs_stubs.o obj/aarch64_alias_stub.o obj/aarch64_math.o obj/aarch64_fat32.o obj/aarch64_eynfs.o obj/aarch64_vfs.o
+AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_bringup_shell.o obj/aarch64_shell_dispatch.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_virtio_blk.o obj/aarch64_ata_virtio.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_pipeline.o obj/aarch64_shell_find_command.o obj/aarch64_vga_redirect.o obj/aarch64_fs_stubs.o obj/aarch64_alias_stub.o obj/aarch64_math.o obj/aarch64_fat32.o obj/aarch64_eynfs.o obj/aarch64_vfs.o obj/aarch64_hal_console.o obj/aarch64_hal_keyboard.o
 
 ifeq ($(AARCH64_PLATFORM),qemu-virt)
 AARCH64_OBJS += obj/aarch64_virt_dtb.o
@@ -210,6 +213,12 @@ obj/isr_stubs.o:src/cpu/isr.asm
 obj/irq_stubs.o:src/cpu/irq.asm
 	mkdir obj/ -p
 	$(ASSEMBLER) $(ASFLAGS) -o obj/irq_stubs.o src/cpu/irq.asm
+
+obj/hal_console.o:src/hal/i386/console.c
+	$(COMPILER) $(CFLAGS) src/hal/i386/console.c -o obj/hal_console.o
+
+obj/hal_keyboard.o:src/hal/i386/keyboard.c
+	$(COMPILER) $(CFLAGS) src/hal/i386/keyboard.c -o obj/hal_keyboard.o
 	
 obj/kc.o:src/entry/kernel.c
 	$(COMPILER) $(CFLAGS) src/entry/kernel.c -o obj/kc.o 
@@ -300,6 +309,14 @@ obj/aarch64_kernel_full.o:src/entry/aarch64/kernel_full.c
 obj/aarch64_bringup_shell.o:src/entry/aarch64/bringup_shell.c
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/bringup_shell.c -o obj/aarch64_bringup_shell.o
+
+obj/aarch64_hal_console.o:src/hal/aarch64/console.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/hal/aarch64/console.c -o obj/aarch64_hal_console.o
+
+obj/aarch64_hal_keyboard.o:src/hal/aarch64/keyboard.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/hal/aarch64/keyboard.c -o obj/aarch64_hal_keyboard.o
 
 obj/aarch64_shell_dispatch.o:src/entry/aarch64/shell_dispatch.c
 	mkdir obj/ -p
