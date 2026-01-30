@@ -2,6 +2,7 @@
 #include <stddef.h>
 
 #include <utilities/shell/fs_commands.h>
+#include <kb.h>
 
 // Minimal filesystem stubs for AArch64 bring-up builds.
 // The legacy shell pipeline implementation supports < and > using the

@@ -50,7 +50,7 @@ Legend:
 |---|---:|---:|---|---|
 | Boot to interactive shell | ✅ | 🟡 | AArch64 currently has bring-up shell + a "full" build path; final target is same shell/TUI entrypoint on both. | smoke transcript |
 | Console semantics | ✅ | 🟡 | Control chars, scrolling, cursor, colors. AArch64 output now routes through the HAL console, but ramfb still needs parity polish vs VGA. | `help` + edit line |
-| Keyboard semantics | ✅ | 🟡 | Same keybindings, modifiers, arrows/home/end, ctrl shortcuts, repeat. Backends differ but output stream must match. | edit line + ctrl shortcuts |
+| Keyboard semantics | ✅ | 🟡 | Same keybindings, modifiers, arrows/home/end, ctrl shortcuts, repeat. Backends differ but output stream must match. Shared code reads via `tui_read_key()`/`hal_kbd_read_key_nonblock()`; legacy `readStr()`/`kb_getchar_nonblocking()` are HAL-backed (no direct port reads outside HAL backends). | edit line + ctrl shortcuts |
 | Mouse / pointer | ✅ | ⬜ | Same UI interactions in tiler. | UI smoke |
 | Timer / ticks | ✅ | 🟡 | Same tick rate expectations, sleep accuracy, watchdog behavior. | `ticks` + timer selftest |
 | Interrupt masking rules | ✅ | 🟡 | Shared code can assume the same IRQ save/restore semantics. | stress / watchdog |

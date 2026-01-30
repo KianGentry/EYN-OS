@@ -8,8 +8,7 @@
 #include <eynfs.h>
 #include <fat32.h>
 #include <vga.h> // for printf
-
-extern char* readStr();
+#include <kb.h>
 
 // Helper function to format a partition as EYNFS
 int eynfs_format_partition(uint8 drive, uint8 part_num) {

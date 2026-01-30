@@ -9,10 +9,10 @@
 #include <watchdog.h>
 #include <misc/sched.h>
 #include <drivers/serial.h>
+#include <kb.h>
 
 // The shell command blocks the normal input pump, so we must poll Ctrl-C
 // ourselves while listening.
-extern void poll_keyboard_for_ctrl_c(void);
 
 typedef struct __attribute__((packed)) eth_hdr {
     uint8 dst[6];

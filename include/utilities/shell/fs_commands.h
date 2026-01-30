@@ -19,7 +19,6 @@ int check_filesystem_integrity(uint8_t disk);
 void copy_cmd(string ch);
 void move_cmd(string ch);
 extern void* fat32_disk_img;
-extern void poll_keyboard_for_ctrl_c();
 extern char shell_current_path[128];
 void cd(string input);
 void makedir(string ch);

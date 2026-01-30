@@ -40,6 +40,23 @@
 #define HAL_KEY_PGUP    0x1008u
 #define HAL_KEY_PGDN    0x1009u
 
+/* Historical TUI control-key encodings (kept for compatibility). */
+#define HAL_KEY_CTRL_C      0x2206u
+#define HAL_KEY_CTRL_V      0x2207u
+#define HAL_KEY_CTRL_Q      0x2101u
+#define HAL_KEY_CTRL_PLUS   0x2102u
+#define HAL_KEY_CTRL_MINUS  0x2103u
+#define HAL_KEY_CTRL_A      0x2104u
+#define HAL_KEY_CTRL_L      0x2105u
+#define HAL_KEY_CTRL_W      0x2106u
+#define HAL_KEY_CTRL_F      0x2107u
+#define HAL_KEY_CTRL_G      0x2108u
+#define HAL_KEY_CTRL_Z      0x2109u
+#define HAL_KEY_CTRL_Y      0x210Au
+#define HAL_KEY_CTRL_X      0x210Bu
+/* Note: both Ctrl+S and Ctrl+O map to this for legacy reasons. */
+#define HAL_KEY_CTRL_SAVE   0x2001u
+
 /* Keycode flags (OR'd into the returned keycode). */
 #define HAL_KEY_FLAG_SHIFTSEL 0x3000u /* used for Shift+Arrow selection extension */
 #define HAL_KEY_FLAG_SUPER    0x4000u /* Super/Meta key held during press */

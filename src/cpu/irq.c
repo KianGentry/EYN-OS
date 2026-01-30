@@ -5,8 +5,7 @@
 #include <vga.h>
 #include <tile_manager.h>
 #include <watchdog.h>
-
-extern void poll_keyboard_for_ctrl_c();
+#include <kb.h>
 
 // PIC ports
 #define PIC1            0x20

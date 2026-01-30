@@ -41,7 +41,6 @@ int parse_redirection(const char* input, char* cmd, char* filename);
 uint32 str_to_uint(const char* s);
 
 extern void* fat32_disk_img;
-extern void poll_keyboard_for_ctrl_c();
 
 #define MAX_ENTRIES 128  // Increased from 9 to 128 to support larger directories
 
