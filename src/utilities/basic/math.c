@@ -1,11 +1,9 @@
 #include <string.h>
-#include <vga.h>
-#include <util.h>
-#include <multiboot.h>
-#include <math.h>
-#include <misc/types.h>
 
-extern multiboot_info_t *g_mbi;
+#include <stdlib.h>
+
+#include <misc/math.h>
+#include <misc/types.h>
 
 int32_t math_add(int32_t num1, int32_t num2) {
 	return (num1 + num2);

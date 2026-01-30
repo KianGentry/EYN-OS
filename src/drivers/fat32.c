@@ -1,11 +1,48 @@
 #include <fat32.h>
-#include <vga.h>
-#include <multiboot.h>
 #include <util.h>
-#include <system.h>
 #include <string.h>
 
-extern multiboot_info_t *g_mbi;
+#include <ata.h>
+
+int printf(const char* fmt, ...);
+
+void to_fat32_83(const char* input, char* output) {
+    // convert input like "test.txt" to "TEST    TXT" (8.3, uppercased)
+    int i = 0;
+    int j = 0;
+
+    // Copy name part (up to dot or 8 chars)
+    while (input[i] && input[i] != '.' && j < 8) {
+        char c = input[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        output[j++] = c;
+        i++;
+    }
+
+    // Pad with spaces
+    while (j < 8) output[j++] = ' ';
+
+    // If dot, skip it
+    if (input[i] == '.') i++;
+
+    int ext = 0;
+    // Copy extension (up to 3 chars)
+    while (input[i] && ext < 3) {
+        char c = input[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        output[j++] = c;
+        i++;
+        ext++;
+    }
+
+    // Pad extension with spaces
+    while (ext < 3) {
+        output[j++] = ' ';
+        ext++;
+    }
+
+    output[j] = '\0';
+}
 
 // Read BPB from disk image
 int fat32_read_bpb(void* disk_img, struct fat32_bpb* bpb) {

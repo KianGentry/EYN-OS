@@ -4,6 +4,25 @@ A quick reference guide for EYN-OS commands, features, and common operations.
 
 ## Getting Started
 
+## AArch64 (QEMU virt) Bring-up
+
+This repo also contains an AArch64 bring-up kernel for QEMU's `virt` machine.
+
+### Build + Run
+```bash
+make eynfsimg
+make aarch64-full-qemu-run-gui
+```
+
+The `aarch64-full-qemu-run(-gui)` targets attach `eynfs.img` as a `virtio-blk` device.
+
+### Bring-up Shell Commands
+```bash
+vfsdetect        # Detect filesystem on drive 0 (EYNFS/FAT32/none)
+ls /             # List directory (drive 0)
+cat /test.txt    # Print a text file (drive 0)
+```
+
 ### Boot Process
 1. **GRUB Menu**: Select EYN-OS from boot menu
 2. **Kernel Load**: System initializes drivers and filesystem with dynamic memory detection

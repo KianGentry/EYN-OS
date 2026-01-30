@@ -582,12 +582,7 @@ int execute_simple_command(command_t* cmd) {
 int execute_background_command(command_t* cmd) {
     if (!cmd) return -1;
     
-    // For now, we'll simulate background execution by running the command
-    // and immediately returning. In a real implementation, this would:
-    // 1. Fork a new process
-    // 2. Execute the command in the child process
-    // 3. Return immediately in the parent process
-    // 4. Track the background process
+    // Fake it 'till you make it. Not really multitasking, just pretending.
     
     // Build command string
     char cmd_str[512] = "";
@@ -904,9 +899,8 @@ void list_background_processes(void) {
 void wait_for_background_process(int pid) {
     background_process_t* proc = get_background_process(pid);
     if (proc) {
-        // In a real implementation, this would wait for the process to complete
+        // Just remove process for now
         printf("Waiting for process %d (%s)...\n", pid, proc->command);
-        // For now, just remove it
         remove_background_process(pid);
     }
 }

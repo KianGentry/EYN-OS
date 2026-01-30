@@ -4,9 +4,14 @@ EYN-OS includes a Unix-like pipeline and redirection system that enables command
 
 ## Current Status
 
+### Platform Notes
+
+- **i386 (classic build)**: Pipeline system integrates with VGA shell redirection and filesystem commands.
+- **AArch64 (bring-up/full on QEMU `virt`)**: Piping via `|` works (in-memory capture via the shell redirect buffer). File redirection (`<`, `>`, `>>`) is present in the parser but requires the VFS/EYNFS layer to be ported; attempts will fail with an error.
+
 ### **Working Features**
-- **Basic Output Redirection**: Write to files with `>` operator
-- **Append Redirection**: Append to files with `>>` operator  
+- **Basic Output Redirection (i386/VFS)**: Write to files with `>` operator
+- **Append Redirection (i386/VFS)**: Append to files with `>>` operator  
 - **Simple Command Piping**: Basic `|` operator for 2-command pipelines
 - **Universal Search Command**: Enhanced `search` command that works in multiple modes
 

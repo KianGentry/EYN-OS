@@ -3239,7 +3239,7 @@ void error_cmd(string ch) {
         subcmd[j] = 0;
         
         if (strEql(subcmd, "clear")) {
-            // Note: In a real implementation, we'd reset the error counters
+            // Clear error counters: not done
             printf("%cError counters cleared\n", 0, 255, 0);
         } else if (strEql(subcmd, "details")) {
             printf("%cDetailed Error Information:\n", 255, 255, 255);

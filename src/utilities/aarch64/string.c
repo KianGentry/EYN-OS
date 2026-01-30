@@ -63,6 +63,17 @@ size_t strlen(const char* s) {
     return (size_t)(p - s);
 }
 
+uint16 strlength(string ch) {
+    if (!ch) {
+        return 0;
+    }
+    size_t n = strlen(ch);
+    if (n > 0xFFFFu) {
+        return 0xFFFFu;
+    }
+    return (uint16)n;
+}
+
 char* strcpy(char* dest, const char* src) {
     if (!dest || !src) return dest;
     char* d = dest;

@@ -2,8 +2,9 @@
 #include <eynfs.h>
 #include <fat32.h>
 #include <string.h>
-#include <system.h>
 #include <util.h>  // for malloc/free
+
+#include <ata.h>
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 

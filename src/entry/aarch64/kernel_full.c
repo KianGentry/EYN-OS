@@ -6,7 +6,10 @@
 #include <cpu/aarch64/smp.h>
 #include <drivers/aarch64/fb_simple.h>
 #include <drivers/aarch64/virtio_input.h>
+#include <drivers/aarch64/virtio_blk.h>
 #include <utilities/aarch64/heap.h>
+
+#include <ata.h>
 
 /* Full-mode bring-up entry: keeps the existing AArch64 interrupt/timer/SMP code
  * but drops into an interactive serial shell instead of the tick-only loop.
@@ -44,10 +47,24 @@ static void aarch64_enable_fp_simd(void) {
     asm volatile("msr cpacr_el1, %0\n\tisb" :: "r"(cpacr) : "memory");
 }
 
+static void aarch64_disable_alignment_check(void) {
+    /*
+     * QEMU (and some firmware defaults) may enable strict alignment checking at EL1.
+     * The existing codebase contains structs with byte fields up front (e.g. ATA
+     * drive_info_t), which makes subsequent fields naturally unaligned. GCC may
+     * still emit wider loads/stores that would fault if SCTLR_EL1.A is set.
+     */
+    uint64 sctlr;
+    asm volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+    sctlr &= ~(1ull << 1); /* A (alignment check enable) */
+    asm volatile("msr sctlr_el1, %0\n\tisb" :: "r"(sctlr) : "memory");
+}
+
 void kernel_main(uint64 dtb_ptr) {
     uart_pl011_init_115200();
 
     aarch64_enable_fp_simd();
+    aarch64_disable_alignment_check();
 
     uart_pl011_write("\nEYN-OS AArch64 full bring-up\n");
 
@@ -78,6 +95,23 @@ void kernel_main(uint64 dtb_ptr) {
         uart_pl011_write("virtio-input not ready\n");
         if (fb_simple_ready()) {
             fb_simple_write("virtio-input not ready\n");
+        }
+    }
+
+    /* Optional: virtio-blk disk (enables VFS/EYNFS/FAT32 on QEMU 'virt'). */
+    int brc = virtio_blk_init(dtb_ptr);
+    if (brc == 0) {
+        uart_pl011_write("virtio-blk ready\n");
+        if (fb_simple_ready()) {
+            fb_simple_write("virtio-blk ready\n");
+        }
+
+        /* Wire the legacy ATA sector API to virtio-blk. */
+        ata_init_drives();
+    } else {
+        uart_pl011_write("virtio-blk not ready\n");
+        if (fb_simple_ready()) {
+            fb_simple_write("virtio-blk not ready\n");
         }
     }
 

@@ -1,13 +1,22 @@
 #include <eynfs.h>
 #include <misc/types.h>
 #include <string.h>
-#include <vga.h>
 #include <util.h>
 #include <math.h> // For quicksort and boyer-moore
 #include <stdint.h>
-#include <drivers/serial.h>
+#include <stddef.h>
 #include <ata.h>
+
+/* Optional debug + watchdog support are present in the i386 full kernel, but
+ * not necessarily wired up in the AArch64 bring-up build.
+ */
+#if !defined(__aarch64__)
+#include <drivers/serial.h>
 #include <watchdog.h>
+#endif
+
+int printf(const char* fmt, ...);
+int snprintf(char* str, size_t size, const char* format, ...);
 
 #define EYNFS_BLOCK_SIZE 512 // For now, fixed block size
 #define EYNFS_SUPERBLOCK_LBA 2048 // Standard superblock location
@@ -89,7 +98,9 @@ int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data) {
             g_eynfs_read_fail_printed = 1;
             char sbuf[160];
             int n = snprintf(sbuf, sizeof(sbuf), "[EYNFS] read fail drive=%d fs_block=%d lba=%d\n", (int)drive, (int)block_num, (int)lba);
+#if !defined(__aarch64__)
             if (n > 0) serial_write(SERIAL_COM1, sbuf, n);
+#endif
         }
         return -1;
     }
@@ -844,7 +855,9 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
     // Skip blocks and bytes up to offset
     uint32_t kick_ctr = 0;
     while (block_num && skip >= (EYNFS_BLOCK_SIZE-4)) {
+        #if !defined(__aarch64__)
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
+        #endif
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
         uint32_t next_block = *(uint32_t*)block;
         block_num = next_block;
@@ -852,7 +865,9 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
     }
     // Now at the block containing the offset
     if (block_num && bytes_left > 0) {
+        #if !defined(__aarch64__)
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
+        #endif
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
         uint32_t next_block = *(uint32_t*)block;
         size_t block_offset = skip;
@@ -865,7 +880,9 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
     }
     // Read remaining blocks
     while (block_num && bytes_left > 0) {
+        #if !defined(__aarch64__)
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
+        #endif
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
         uint32_t next_block = *(uint32_t*)block;
         size_t chunk = (EYNFS_BLOCK_SIZE-4) < bytes_left ? (EYNFS_BLOCK_SIZE-4) : bytes_left;
@@ -1113,6 +1130,7 @@ int eynfs_open(const char* path, int mode) {
     return fd;
 }
 
+#if !defined(__aarch64__)
 // Legacy open function for compatibility
 int open(const char* path, int mode) {
     return eynfs_open(path, mode);
@@ -1226,6 +1244,7 @@ int write(int fd, const void* buf, int size) {
         return n;
     }
 } 
+#endif
 
 // Performance monitoring functions
 void eynfs_get_cache_stats(uint32_t* hits, uint32_t* misses) {

@@ -34,10 +34,18 @@ static void aarch64_enable_fp_simd(void) {
     asm volatile("msr cpacr_el1, %0\n\tisb" :: "r"(cpacr) : "memory");
 }
 
+static void aarch64_disable_alignment_check(void) {
+    uint64 sctlr;
+    asm volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+    sctlr &= ~(1ull << 1); /* A (alignment check enable) */
+    asm volatile("msr sctlr_el1, %0\n\tisb" :: "r"(sctlr) : "memory");
+}
+
 void kernel_main(uint64 dtb_ptr) {
     uart_pl011_init_115200();
 
     aarch64_enable_fp_simd();
+    aarch64_disable_alignment_check();
 
     uart_pl011_write("\nEYN-OS AArch64 bring-up\n");
 

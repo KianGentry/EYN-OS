@@ -99,7 +99,7 @@ AARCH64_CFLAGS = -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-com
 		 -Os -fno-strict-overflow -fwrapv \
 		 -fdata-sections -ffunction-sections \
 		 $(AARCH64_PLATFORM_DEFINE) \
-		 -I include/ -I include/cpu -I include/drivers -I include/misc \
+		 -I include/ -I include/cpu -I include/drivers -I include/misc -I include/utilities -I include/utilities/shell \
 		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \
 		 -Wno-unused-parameter -Wno-unused-variable
 
@@ -116,7 +116,7 @@ AARCH64_FULL_IMG = $(AARCH64_BOOTDIR)/kernel8_full.img
 AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o
 
 # Full-mode links an alternative entry and a minimal interactive shell.
-AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_bringup_shell.o obj/aarch64_shell_dispatch.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o
+AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_bringup_shell.o obj/aarch64_shell_dispatch.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_virtio_blk.o obj/aarch64_ata_virtio.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_pipeline.o obj/aarch64_shell_find_command.o obj/aarch64_vga_redirect.o obj/aarch64_fs_stubs.o obj/aarch64_alias_stub.o obj/aarch64_math.o obj/aarch64_fat32.o obj/aarch64_eynfs.o obj/aarch64_vfs.o
 
 ifeq ($(AARCH64_PLATFORM),qemu-virt)
 AARCH64_OBJS += obj/aarch64_virt_dtb.o
@@ -163,12 +163,18 @@ aarch64-qemu-run-gui: aarch64-check-tools
 aarch64-full-qemu-run: aarch64-check-tools
 	@command -v qemu-system-aarch64 >/dev/null 2>&1 || (echo "[AARCH64] qemu-system-aarch64 not found"; exit 1)
 	$(MAKE) aarch64-full AARCH64_PLATFORM=qemu-virt
-	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -nographic -kernel $(AARCH64_FULL_IMG)
+	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 \
+		-drive file=eynfs.img,format=raw,if=none,id=vd0,readonly=on \
+		-device virtio-blk-device,drive=vd0 \
+		-nographic -kernel $(AARCH64_FULL_IMG)
 
 aarch64-full-qemu-run-gui: aarch64-check-tools
 	@command -v qemu-system-aarch64 >/dev/null 2>&1 || (echo "[AARCH64] qemu-system-aarch64 not found"; exit 1)
 	$(MAKE) aarch64-full AARCH64_PLATFORM=qemu-virt
-	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -device ramfb -device virtio-keyboard-device -display gtk -serial stdio -kernel $(AARCH64_FULL_IMG)
+	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 \
+		-drive file=eynfs.img,format=raw,if=none,id=vd0,readonly=on \
+		-device virtio-blk-device,drive=vd0 \
+		-device ramfb -device virtio-keyboard-device -display gtk -serial stdio -kernel $(AARCH64_FULL_IMG)
 
 $(AARCH64_ELF): $(AARCH64_OBJS)
 	mkdir -p $(AARCH64_TMPDIR)/
@@ -263,6 +269,30 @@ obj/aarch64_heap.o:src/utilities/aarch64/heap.c
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/aarch64/heap.c -o obj/aarch64_heap.o
 
+obj/aarch64_pipeline.o:src/utilities/shell/pipeline.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/shell/pipeline.c -o obj/aarch64_pipeline.o
+
+obj/aarch64_shell_find_command.o:src/entry/aarch64/shell_find_command.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/shell_find_command.c -o obj/aarch64_shell_find_command.o
+
+obj/aarch64_vga_redirect.o:src/drivers/aarch64/vga_redirect.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/vga_redirect.c -o obj/aarch64_vga_redirect.o
+
+obj/aarch64_fs_stubs.o:src/entry/aarch64/fs_stubs.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/fs_stubs.c -o obj/aarch64_fs_stubs.o
+
+obj/aarch64_alias_stub.o:src/entry/aarch64/alias_stub.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/alias_stub.c -o obj/aarch64_alias_stub.o
+
+obj/aarch64_math.o:src/utilities/basic/math.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/basic/math.c -o obj/aarch64_math.o
+
 obj/aarch64_kernel_full.o:src/entry/aarch64/kernel_full.c
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/kernel_full.c -o obj/aarch64_kernel_full.o
@@ -282,6 +312,26 @@ obj/aarch64_shell_cmds_min.o:src/entry/aarch64/shell_cmds_min.c
 obj/aarch64_virtio_input.o:src/drivers/aarch64/virtio_input.c
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/virtio_input.c -o obj/aarch64_virtio_input.o
+
+obj/aarch64_virtio_blk.o:src/drivers/aarch64/virtio_blk.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/virtio_blk.c -o obj/aarch64_virtio_blk.o
+
+obj/aarch64_ata_virtio.o:src/drivers/aarch64/ata_virtio.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/ata_virtio.c -o obj/aarch64_ata_virtio.o
+
+obj/aarch64_fat32.o:src/drivers/fat32.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/fat32.c -o obj/aarch64_fat32.o
+
+obj/aarch64_eynfs.o:src/drivers/eynfs.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/eynfs.c -o obj/aarch64_eynfs.o
+
+obj/aarch64_vfs.o:src/fs/vfs.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/fs/vfs.c -o obj/aarch64_vfs.o
 
 obj/aarch64_uart_pl011.o:src/drivers/aarch64/uart_pl011.c
 	mkdir obj/ -p

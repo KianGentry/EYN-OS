@@ -67,12 +67,12 @@ uint32 eyn_kernel_system(uint32 function, uint32 var1, uint32 var2) {
             
         case EYN_SYSTEM_REBOOT:
             printf("[SYSTEM] Reboot requested\n");
-            // In a real implementation, this would trigger a reboot
+            // Return for now, no reboot process yet.
             return 0;
             
         case EYN_SYSTEM_SHUTDOWN:
             printf("[SYSTEM] Shutdown requested\n");
-            // In a real implementation, this would trigger a shutdown
+            // Return for now, no shutdown process yet.
             return 0;
             
         default:

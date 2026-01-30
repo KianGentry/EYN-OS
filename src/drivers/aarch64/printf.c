@@ -4,6 +4,9 @@
 #include <stdint.h>
 
 #include <drivers/aarch64/fb_simple.h>
+#include <drivers/vga.h>
+
+extern int shell_redirect_active;
 
 /*
  * AArch64 console printf
@@ -21,6 +24,21 @@ void uart_pl011_write(const char* s);
 
 static void console_write(const char* s) {
     if (!s) return;
+
+    /* If the shell has enabled output capture (used by pipelines/redirection),
+     * append output to the redirect buffer instead of writing to the console.
+     */
+    if (shell_redirect_active) {
+        while (*s && shell_redirect_pos < (SHELL_REDIRECT_BUF_SIZE - 1)) {
+            char c = *s++;
+            if (c == '\r') {
+                continue;
+            }
+            shell_redirect_buf[shell_redirect_pos++] = c;
+        }
+        shell_redirect_buf[shell_redirect_pos] = 0;
+        return;
+    }
 
     /* UART first (single lock inside uart_pl011_write). */
     uart_pl011_write(s);

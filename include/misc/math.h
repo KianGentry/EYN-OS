@@ -2,7 +2,6 @@
 #define MATH_H
 
 #include <misc/types.h>
-#include "multiboot.h"
 #include <stdint.h>
 
 // Fixed-point arithmetic with 3 decimal places

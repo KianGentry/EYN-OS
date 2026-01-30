@@ -1,5 +1,6 @@
 #include <misc/types.h>
 #include <utilities/shell/shell_command_info.h>
+#include <utilities/shell/pipeline.h>
 
 static const char* skip_spaces(const char* s) {
     while (s && *s && (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')) s++;
@@ -26,6 +27,25 @@ static int streq_n(const char* a, const char* b, int n) {
 int aarch64_shell_dispatch_line(string line) {
     const char* s = skip_spaces(line);
     if (!s || *s == '\0') return 0;
+
+    static int pipeline_inited = 0;
+    if (!pipeline_inited) {
+        init_pipeline_system();
+        pipeline_inited = 1;
+    }
+
+    /* If the line contains pipeline/redirection operators, use the legacy
+     * pipeline implementation which captures command output via shell redirect.
+     */
+    if (is_pipeline_command(s)) {
+        pipeline_t* p = parse_pipeline(s);
+        if (!p) {
+            return -3;
+        }
+        int rc = execute_pipeline(p);
+        free_pipeline(p);
+        return rc;
+    }
 
     int name_len = 0;
     while (s[name_len] && s[name_len] != ' ' && s[name_len] != '\t' && s[name_len] != '\r' && s[name_len] != '\n') {
