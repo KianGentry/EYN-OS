@@ -735,6 +735,28 @@ void fb_simple_putc(char c) {
         return;
     }
 
+    /*
+     * Control chars used by the shell line editor.
+     * VGA text mode effectively treats these as cursor movement; do the same
+     * for the ramfb console so editing doesn't print garbage glyphs.
+     */
+    if (c == '\b' || c == 0x7F) {
+        if (g_cursor_x >= 8) {
+            g_cursor_x -= 8;
+        } else {
+            g_cursor_x = 0;
+        }
+        fb_draw_glyph(g_cursor_x, g_cursor_y, (uint8)' ', fb_color(255, 255, 255), fb_color(0, 0, 0));
+        return;
+    }
+    if (c == '\t') {
+        /* 4-space tab stops (good enough for bring-up). */
+        for (int i = 0; i < 4; i++) {
+            fb_simple_putc(' ');
+        }
+        return;
+    }
+
     if (g_cursor_x + 8 > g_fb_width) {
         fb_newline();
     }

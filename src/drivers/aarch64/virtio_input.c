@@ -51,6 +51,7 @@
 
 /* Selected key codes (Linux input-event-codes.h) */
 #define KEY_BACKSPACE 14u
+#define KEY_DELETE    111u
 #define KEY_ENTER     28u
 #define KEY_LEFTSHIFT 42u
 #define KEY_RIGHTSHIFT 54u
@@ -242,6 +243,7 @@ static char map_keycode(uint16 code, uint32 shift) {
         case 15: return '\t';
         case KEY_ENTER: return '\n';
         case KEY_BACKSPACE: return '\b';
+        case KEY_DELETE: return 0x7F;
 
         /* Punctuation */
         case 12: return shift ? '_' : '-';
