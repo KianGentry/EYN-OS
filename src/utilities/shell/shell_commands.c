@@ -358,9 +358,11 @@ void sort_cmd(string ch) {
 
 // Command registration for background helpers
 #include <shell_command_info.h>
+#if !defined(__aarch64__)
 REGISTER_SHELL_COMMAND(setbg_cmd_info, "setbg", setbg_cmd, CMD_STREAMING, "Set a REI image as background for the focused tile (shows Tile/Scale/Center chooser).\nUsage: setbg <file.rei>", "setbg eynos.rei");
 REGISTER_SHELL_COMMAND(clearbg_cmd_info, "clearbg", clearbg_cmd, CMD_STREAMING, "Clear background image for the focused tile.", "clearbg");
 REGISTER_SHELL_COMMAND(setfont_cmd_info, "setfont", setfont_cmd, CMD_STREAMING, "Set the system font at runtime (loads .hex from disk into RAM).\nUsage: setfont <file.hex> | setfont builtin", "setfont /fonts/unscii-16.hex");
+#endif
 
 // Ultra-lightweight search with streaming (no large allocations)
 void search_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
@@ -665,6 +667,12 @@ void joke_spam()
 // ver implementation
 void ver() 
 {
+#if defined(__aarch64__)
+    // AArch64-full: avoid i386-only multiboot/framebuffer/REI rendering paths.
+    printf("EYN-OS (AArch64)\n");
+    printf("(Release 15)\n");
+    return;
+#else
     int rei_displayed = 0;
     
     // Check if shell output is being redirected (e.g., running inside a tiled vterm)
@@ -750,6 +758,8 @@ void ver()
     }
     
     printf("%c(Release 15)\n", 200, 200, 200);
+
+#endif
 }
 
 // help implementation
@@ -819,7 +829,18 @@ void help()
 }
 
 void help_cmd(string ch) {
-    // Initialize help state (if not already) and show precomputed GUI when tiling
+    (void)ch;
+
+#if defined(__aarch64__)
+    // AArch64-full: keep help simple and avoid pulling in the tiler/TUI help stack.
+    uint32 count = (uint32)(__stop_shellcmds - __start_shellcmds);
+    printf("Commands (%u):\n", (unsigned)count);
+    for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; cmd++) {
+        if (!cmd->name) continue;
+        printf("  %s\n", cmd->name);
+    }
+#else
+    // i386: initialize help state (if not already) and show precomputed GUI when tiling
     extern void help_tui_init_state(void);
     extern void help_tui_show(void);
     help_tui_init_state();
@@ -829,13 +850,22 @@ void help_cmd(string ch) {
     }
     // Fallback for non-tiling mode
     help_tui();
+#endif
 }
 
 REGISTER_SHELL_COMMAND(help, "help", help_cmd, CMD_ESSENTIAL, "Display this message and show all available commands with descriptions and examples.\nUsage: help", "help");
 REGISTER_SHELL_COMMAND(echo, "echo", echo_cmd, CMD_STREAMING, "Reprints a given text to the screen.\nUsage: echo <text>", "echo Hello, world!");
 REGISTER_SHELL_COMMAND(ver, "ver", ver_cmd, CMD_STREAMING, "Shows the current system version and release information.\nUsage: ver", "ver");
-REGISTER_SHELL_COMMAND(spam, "spam", spam_cmd, CMD_STREAMING, "Spam 'EYN-OS' to the shell 100 times for fun.\nUsage: spam", "spam");
 REGISTER_SHELL_COMMAND(calc, "calc", calc_cmd, CMD_STREAMING, "32-bit fixed-point calculator. Supports +, -, *, /.\nUsage: calc <expression>", "calc 2.5+3.7");
+
+#if defined(__aarch64__)
+// AArch64-full: small portable subset for now.
+REGISTER_SHELL_COMMAND(random, "random", random_cmd, CMD_STREAMING, "Generate random numbers.\nUsage: random [count] | random [min] [max]\nExample: random 5 | random 10 20", "random 5");
+REGISTER_SHELL_COMMAND(sort, "sort", sort_cmd, CMD_STREAMING, "Sort strings alphabetically.\nUsage: sort <string1> <string2> <string3> ...\nExample: sort zebra apple banana", "sort zebra apple banana");
+#endif
+
+#if !defined(__aarch64__)
+REGISTER_SHELL_COMMAND(spam, "spam", spam_cmd, CMD_STREAMING, "Spam 'EYN-OS' to the shell 100 times for fun.\nUsage: spam", "spam");
 REGISTER_SHELL_COMMAND(rect, "rect", draw_cmd_handler, CMD_STREAMING, "Draw a rectangle.\nUsage: rect <x> <y> <width> <height> <r> <g> <b>.\nExample: rect 10 20 100 50 255 0 0 draws a red rectangle.", "rect 10 20 100 50 255 0 0");
 REGISTER_SHELL_COMMAND(drive, "drive", drive_cmd, CMD_STREAMING, "Change between different drives (from lsata).\nUsage: drive <n>", "drive 0");
 REGISTER_SHELL_COMMAND(memory, "memory", memory_cmd, CMD_ESSENTIAL, "Memory management and testing.\nUsage: memory stats | test | stress", "memory stats");
@@ -862,6 +892,8 @@ static void netcfg_cmd(string ch);
 REGISTER_SHELL_COMMAND(ping_cmd_info, "ping", ping_cmd, CMD_DIAGNOSTIC, "Send ICMP echo request(s).\nUsage: ping <dst_ip> [count] [local_ip]\nExample: ping 10.0.2.2\nNote: run 'e1000 init' first.", "ping 10.0.2.2");
 REGISTER_SHELL_COMMAND(netstat_cmd_info, "netstat", netstat_cmd, CMD_DIAGNOSTIC, "Network status (netstack + ARP + UDP + ICMP).\nUsage: netstat\nNote: run 'e1000 init' first for full info.", "netstat");
 REGISTER_SHELL_COMMAND(netcfg_cmd_info, "netcfg", netcfg_cmd, CMD_DIAGNOSTIC, "Network configuration (defaults match QEMU user-net).\nUsage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set ip|gw|mask|dns <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]\nDefault path: /config/net.cfg", "netcfg show");
+
+#endif // !defined(__aarch64__)
 
 typedef struct pciscan_ctx {
     uint32 count;
@@ -2734,6 +2766,7 @@ void userrun_cmd(string ch) {
 }
 
 // Register diagnostics/testing commands
+#if !defined(__aarch64__)
 REGISTER_SHELL_COMMAND(panic_cmd_info, "panic", panic_cmd, CMD_DIAGNOSTIC, "Trigger a kernel panic to test diagnostics.\nUsage: panic yes", "panic yes");
 REGISTER_SHELL_COMMAND(assertfail_cmd_info, "assertfail", assertfail_cmd, CMD_DIAGNOSTIC, "Trigger an assertion failure (ASSERT).\nUsage: assertfail yes", "assertfail yes");
 REGISTER_SHELL_COMMAND(serialtest_cmd_info, "serialtest", serialtest_cmd, CMD_STREAMING, "Write a test line to COM1 to verify serial output.\nUsage: serialtest", "serialtest");
@@ -2741,6 +2774,7 @@ REGISTER_SHELL_COMMAND(pagingguards_cmd_info, "pagingguards", pagingguards_cmd, 
 REGISTER_SHELL_COMMAND(pf_cmd_info, "pf", pf_cmd, CMD_STREAMING, "Intentionally trigger a page fault (read/write/exec a chosen address).\nUsage: pf yes [addr] [r|w|x]", "pf yes 0x0 r");
 REGISTER_SHELL_COMMAND(ring3_cmd_info, "ring3", ring3_cmd, CMD_STREAMING, "Switch to ring 3 and run a tiny user-mode stub (prints via int 0x80).\nUsage: ring3 yes", "ring3 yes");
 REGISTER_SHELL_COMMAND(userrun_cmd_info, "userrun", userrun_cmd, CMD_STREAMING, "Load a raw user-mode code blob from VFS into ring 3 and run it at 0x00400000.\nThe program should use int 0x80 with EYN-OS syscall numbers (write=1, exit=2).\nUsage: userrun <path>", "userrun /testdir/user_hello.bin");
+#endif
 
 
 // draw_cmd_handler implementation
@@ -3325,9 +3359,11 @@ void validate_cmd(string ch) {
 }
 
 // Register hexdump command
+#if !defined(__aarch64__)
 REGISTER_SHELL_COMMAND(hexdump, "hexdump", hexdump_cmd, CMD_STREAMING,
     "Print a hex dump of a file (default 64 bytes).\nUsage: hexdump <file>",
     "hexdump test.eyn");
+#endif
 
 // process command implementation
 void process_cmd(string ch) {
@@ -3505,6 +3541,7 @@ void pipe_cmd(string ch) {
 }
 
 // Register pipeline commands
+#if !defined(__aarch64__)
 REGISTER_SHELL_COMMAND(jobs, "jobs", jobs_cmd, CMD_STREAMING,
     "List background processes.\nUsage: jobs",
     "jobs");
@@ -3521,4 +3558,5 @@ REGISTER_SHELL_COMMAND(pipe, "pipe", pipe_cmd, CMD_STREAMING,
     "Show pipeline system help.\nUsage: pipe",
     "pipe");
 
- 
+#endif
+

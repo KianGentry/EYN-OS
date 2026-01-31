@@ -135,7 +135,7 @@ AARCH64_FULL_IMG = $(AARCH64_BOOTDIR)/kernel8_full.img
 AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_gfx.o obj/aarch64_gfx_backend_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_hal_console.o obj/aarch64_shell_state.o obj/aarch64_util_globals.o
 
 # Full-mode links an alternative entry and uses the shared shell core.
-AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_shell.o obj/aarch64_history.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_virtio_blk.o obj/aarch64_ata_virtio.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_gfx.o obj/aarch64_gfx_backend_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_pipeline.o obj/aarch64_vga_redirect.o obj/aarch64_fs_stubs.o obj/aarch64_alias.o obj/aarch64_math.o obj/aarch64_fat32.o obj/aarch64_eynfs.o obj/aarch64_vfs.o obj/aarch64_hal_console.o obj/aarch64_hal_keyboard.o obj/aarch64_gfx_cmd.o obj/aarch64_shell_state.o obj/aarch64_util_globals.o
+AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_shell_meminfo.o obj/aarch64_shell.o obj/aarch64_history.o obj/aarch64_putchar.o obj/aarch64_shell_commands.o obj/aarch64_fs_commands.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_virtio_blk.o obj/aarch64_ata_virtio.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_gfx.o obj/aarch64_gfx_backend_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_pipeline.o obj/aarch64_vga_redirect.o obj/aarch64_fs_stubs.o obj/aarch64_alias.o obj/aarch64_math.o obj/aarch64_fat32.o obj/aarch64_eynfs.o obj/aarch64_vfs.o obj/aarch64_hal_console.o obj/aarch64_hal_keyboard.o obj/aarch64_gfx_cmd.o obj/aarch64_shell_state.o obj/aarch64_util_globals.o
 
 ifeq ($(AARCH64_PLATFORM),qemu-virt)
 AARCH64_OBJS += obj/aarch64_virt_dtb.o
@@ -335,6 +335,18 @@ obj/aarch64_history.o:src/utilities/shell/history.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/shell/history.c -o obj/aarch64_history.o
 
+obj/aarch64_putchar.o:src/utilities/aarch64/putchar.c $(AARCH64_PLATFORM_STAMP)
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/aarch64/putchar.c -o obj/aarch64_putchar.o
+
+obj/aarch64_shell_commands.o:src/utilities/shell/shell_commands.c $(AARCH64_PLATFORM_STAMP)
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/shell/shell_commands.c -o obj/aarch64_shell_commands.o
+
+obj/aarch64_fs_commands.o:src/utilities/shell/fs_commands.c $(AARCH64_PLATFORM_STAMP)
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/shell/fs_commands.c -o obj/aarch64_fs_commands.o
+
 obj/aarch64_shell_find_command.o:src/entry/aarch64/shell_find_command.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/shell_find_command.c -o obj/aarch64_shell_find_command.o
@@ -358,6 +370,10 @@ obj/aarch64_math.o:src/utilities/basic/math.c $(AARCH64_PLATFORM_STAMP)
 obj/aarch64_kernel_full.o:src/entry/aarch64/kernel_full.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/kernel_full.c -o obj/aarch64_kernel_full.o
+
+obj/aarch64_shell_meminfo.o:src/entry/aarch64/shell_meminfo.c $(AARCH64_PLATFORM_STAMP)
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/shell_meminfo.c -o obj/aarch64_shell_meminfo.o
 
 obj/aarch64_bringup_shell.o:src/entry/aarch64/bringup_shell.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p

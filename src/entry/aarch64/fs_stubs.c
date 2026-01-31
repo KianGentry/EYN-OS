@@ -17,7 +17,7 @@
  * can compile and work regardless of filesystem type.
  */
 
-void resolve_path(const char* input, const char* cwd, char* out, size_t outsz) {
+__attribute__((weak)) void resolve_path(const char* input, const char* cwd, char* out, size_t outsz) {
 	if (!out || outsz == 0) return;
 	if (!cwd) cwd = "/";
 

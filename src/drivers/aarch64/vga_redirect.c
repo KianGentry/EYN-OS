@@ -18,3 +18,15 @@ void stop_shell_redirect(void) {
 	shell_redirect_active = 0;
 	// Keep buffer contents for consumers (pipeline/redirection).
 }
+
+// --- Compatibility stubs ---
+// Some shared shell/UI code queries VGA cell metrics or registers file-type icons
+// for output redirection. AArch64 doesn't use the VGA renderer, so provide safe
+// stubs that keep column-layout math stable.
+
+int vga_text_cell_w(void) { return 8; }
+int vga_text_cell_h(void) { return 16; }
+
+void shell_register_redirect_icon(const char* ext) {
+	(void)ext;
+}

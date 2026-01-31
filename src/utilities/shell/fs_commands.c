@@ -18,6 +18,7 @@
 // Forward declarations for command handlers
 void ls_cmd(string arg);
 void read_cmd(string arg);
+void cat_cmd(string arg);
 void del(string arg);
 void write_cmd(string arg);
 void size(string arg);
@@ -459,6 +460,45 @@ void ls(string input) {
 
 // Main read command implementation with smart detection
 void read_cmd(string ch) {
+#if defined(__aarch64__)
+    // AArch64-full: keep this command simple (raw text dump) until the markdown
+    // renderer and GUI viewers are ported.
+    uint8 disk = g_current_drive;
+    uint8 i = 0;
+    while (ch[i] && ch[i] != ' ') i++;
+    while (ch[i] && ch[i] == ' ') i++;
+    if (!ch[i]) {
+        printf("%cUsage: read <filename>\n", 255, 255, 255);
+        return;
+    }
+
+    char filename[128] = {0};
+    uint8 j = 0;
+    while (ch[i] && ch[i] != ' ' && j < 127) {
+        filename[j++] = ch[i++];
+    }
+    filename[j] = '\0';
+
+    char abspath[128];
+    resolve_path(filename, shell_current_path, abspath, sizeof(abspath));
+
+    uint32 offset = 0;
+    char buf[257];
+    for (;;) {
+        int n = vfs_read_file_at(disk, abspath, buf, 256, offset);
+        if (n < 0) {
+            printf("%cError: read failed (%d)\n", 255, 0, 0, n);
+            return;
+        }
+        if (n == 0) break;
+        buf[n] = '\0';
+        printf("%s", buf);
+        offset += (uint32)n;
+        if (n < 256) break;
+    }
+    printf("\n");
+    return;
+#else
     uint8 i = 0;
     while (ch[i] && ch[i] != ' ') i++;
     while (ch[i] && ch[i] == ' ') i++;
@@ -495,6 +535,46 @@ void read_cmd(string ch) {
         printf("%cDisplaying as raw text...\n", 120, 120, 255);
         read_raw_cmd(ch);
     }
+#endif
+}
+
+// cat: raw file dump via VFS
+void cat_cmd(string arg) {
+    uint8 disk = g_current_drive;
+
+    uint8 i = 0;
+    while (arg[i] && arg[i] != ' ') i++;
+    while (arg[i] && arg[i] == ' ') i++;
+    if (!arg[i]) {
+        printf("%cUsage: cat <filename>\n", 255, 255, 255);
+        return;
+    }
+
+    char filename[128] = {0};
+    uint8 j = 0;
+    while (arg[i] && arg[i] != ' ' && j < 127) {
+        filename[j++] = arg[i++];
+    }
+    filename[j] = '\0';
+
+    char abspath[128];
+    resolve_path(filename, shell_current_path, abspath, sizeof(abspath));
+
+    uint32 offset = 0;
+    char buf[257];
+    for (;;) {
+        int n = vfs_read_file_at(disk, abspath, buf, 256, offset);
+        if (n < 0) {
+            printf("%cError: read failed (%d)\n", 255, 0, 0, n);
+            return;
+        }
+        if (n == 0) break;
+        buf[n] = '\0';
+        printf("%s", buf);
+        offset += (uint32)n;
+        if (n < 256) break;
+    }
+    printf("\n");
 }
 
 // del implementation
@@ -527,6 +607,11 @@ void del(string ch) {
 
 // write implementation
 void write_cmd(string ch) {
+#if defined(__aarch64__)
+    (void)ch;
+    printf("%c'write' is not available on AArch64 yet.\n", 255, 165, 0);
+    return;
+#else
     uint8 disk = g_current_drive;
     uint8 i = 0;
     while (ch[i] && ch[i] != ' ') i++;
@@ -543,6 +628,7 @@ void write_cmd(string ch) {
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     // Pass the full path to write_editor for subdirectory support
     write_editor(abspath, disk);
+#endif
 }
 
 // writefat implementation
@@ -909,6 +995,7 @@ void writeram(string ch)
     }
 }
 
+#if !defined(__aarch64__)
 int write_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
     int written = vfs_write_file(disk, filename, buf, (uint32)len);
     if (written != len) {
@@ -947,6 +1034,7 @@ int append_output_to_file(const char* buf, int len, const char* filename, uint8_
     printf("Successfully appended %d bytes to %s\n", len, filename);
     return 0;
 }
+#endif
 
 // Filesystem integrity check
 int check_filesystem_integrity(uint8_t disk) {
@@ -1129,8 +1217,11 @@ void move_cmd(string ch) {
 
 REGISTER_SHELL_COMMAND(ls, "ls", ls_cmd, CMD_STREAMING, "List files in the root directory of the selected drive.\nUsage: ls", "ls");
 REGISTER_SHELL_COMMAND(read, "read", read_cmd, CMD_STREAMING, "Display text files (.txt) or render markdown (.md). For images, use 'view' or 'vieww'.\nUsage: read <filename>", "read myfile.txt");
+REGISTER_SHELL_COMMAND(cat, "cat", cat_cmd, CMD_STREAMING, "Print a text file.\nUsage: cat <filename>", "cat test.txt");
 REGISTER_SHELL_COMMAND(del, "del", del, CMD_STREAMING, "Delete a file from the filesystem.\nUsage: del <filename>", "del myfile.txt");
+#if !defined(__aarch64__)
 REGISTER_SHELL_COMMAND(write, "write", write_cmd, CMD_STREAMING, "Open nano-like text editor for a file.\nUsage: write <filename>", "write myfile.txt");
+#endif
 REGISTER_SHELL_COMMAND(size, "size", size, CMD_STREAMING, "Show the size of a file in bytes.\nUsage: size <filename>", "size myfile.txt");
 REGISTER_SHELL_COMMAND(cd, "cd", cd, CMD_STREAMING, "Change the current directory.\nUsage: cd <directory>", "cd myfolder");
 REGISTER_SHELL_COMMAND(makedir, "makedir", makedir, CMD_STREAMING, "Create a new directory.\nUsage: makedir <directory>", "makedir myfolder");

@@ -27,6 +27,19 @@ int snprintf(char* str, size_t size, const char* format, ...);
 static inline uint32_t eynfs_block_to_lba(uint32_t fs_block) {
     return EYNFS_SUPERBLOCK_LBA + fs_block;
 }
+// The on-disk EYNFS format stores 32-bit values at byte offsets that are not
+// guaranteed to be naturally aligned (e.g., directory tables begin at buf+4).
+// On AArch64, unaligned typed loads/stores can trigger alignment faults.
+// Use memcpy-based helpers to keep accesses alignment-safe across architectures.
+static inline uint32_t eynfs_load_u32(const void* p) {
+    uint32_t v;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+static inline void eynfs_store_u32(void* p, uint32_t v) {
+    memcpy(p, &v, sizeof(v));
+}
 
 // Performance optimization: Block cache
 #define EYNFS_CACHE_SIZE 16
@@ -354,7 +367,7 @@ int eynfs_read_dir_table(uint8 drive, uint32 lba, eynfs_dir_entry_t *entries, si
     uint8 buf[EYNFS_BLOCK_SIZE];
     while (current_block && total_entries < max_entries) {
         if (ata_read_sector(drive, eynfs_block_to_lba(current_block), buf) != 0) return -1;
-        uint32_t next_block = *(uint32_t*)buf;
+        uint32_t next_block = eynfs_load_u32(buf);
         size_t entry_count = (EYNFS_BLOCK_SIZE - 4) / sizeof(eynfs_dir_entry_t);
         size_t entries_to_copy = entry_count;
         if (max_entries - total_entries < entry_count) entries_to_copy = max_entries - total_entries;
@@ -374,7 +387,7 @@ int eynfs_read_dir_table(uint8 drive, uint32 lba, eynfs_dir_entry_t *entries, si
 static int eynfs_write_dir_block(uint8 drive, uint32_t block_num, const eynfs_dir_entry_t *entries, 
                                 size_t num_entries, uint32_t next_block) {
     uint8 buf[EYNFS_BLOCK_SIZE] = {0};
-    *(uint32_t*)buf = next_block;
+    eynfs_store_u32(buf, next_block);
     size_t entries_to_write = (EYNFS_BLOCK_SIZE - 4) / sizeof(eynfs_dir_entry_t);
     if (num_entries < entries_to_write) entries_to_write = num_entries;
     memcpy(buf + 4, entries, entries_to_write * sizeof(eynfs_dir_entry_t));
@@ -393,7 +406,7 @@ int eynfs_count_dir_entries(uint8 drive, uint32_t lba) {
     
     while (current_block && block_count < max_blocks) {
         if (ata_read_sector(drive, eynfs_block_to_lba(current_block), buf) != 0) return -1;
-        uint32_t next_block = *(uint32_t*)buf;
+        uint32_t next_block = eynfs_load_u32(buf);
         size_t entry_count = (EYNFS_BLOCK_SIZE - 4) / sizeof(eynfs_dir_entry_t);
         total_entries += entry_count;
         current_block = next_block;
@@ -417,7 +430,7 @@ static int eynfs_free_dir_chain(uint8 drive, uint32_t first_block) {
     while (block_num != 0) {
         uint8 buf[EYNFS_BLOCK_SIZE];
         if (ata_read_sector(drive, eynfs_block_to_lba(block_num), buf) != 0) break;
-        uint32_t next_block = *(uint32_t*)buf;
+        uint32_t next_block = eynfs_load_u32(buf);
         eynfs_free_block(drive, &sb, block_num);
         block_num = next_block;
     }
@@ -441,7 +454,7 @@ int eynfs_write_dir_table(uint8 drive, uint32 lba, const eynfs_dir_entry_t *entr
         original_blocks[block_count++] = current_block;
         uint8 buf[EYNFS_BLOCK_SIZE];
         if (ata_read_sector(drive, eynfs_block_to_lba(current_block), buf) != 0) break;
-        current_block = *(uint32_t*)buf;
+        current_block = eynfs_load_u32(buf);
     }
     
     uint32_t prev_block = 0;
@@ -602,7 +615,7 @@ int eynfs_find_in_dir(uint8 drive, const eynfs_superblock_t *sb, uint32_t dir_bl
         uint8 buf[EYNFS_BLOCK_SIZE];
         if (eynfs_cache_get_block(drive, current_block, buf) != 0) return -1;
 
-        uint32_t next_block = *(uint32_t*)buf;
+        uint32_t next_block = eynfs_load_u32(buf);
 
         // The directory entry table begins at buf+4, which is only 4-byte aligned.
         // On AArch64, copying/loading structs from this address can trigger
@@ -687,18 +700,22 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
         uint8 buf[EYNFS_BLOCK_SIZE];
         if (eynfs_cache_get_block(drive, cur, buf) != 0) return -1;
 
-        uint32_t next = *(uint32_t*)buf;
-        eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)(buf + 4);
+        uint32_t next = eynfs_load_u32(buf);
 
         int free_idx = -1;
         for (size_t i = 0; i < entries_per_block; ++i) {
+            const uint8* entp = buf + 4 + (i * sizeof(eynfs_dir_entry_t));
+            eynfs_dir_entry_t ent;
+            memcpy(&ent, entp, sizeof(ent));
+
             // Empty slot
-            if (entries[i].name[0] == '\0') {
+            if (ent.name[0] == '\0') {
                 if (free_idx < 0) free_idx = (int)i;
                 continue;
             }
+
             // Existing entry
-            if (strncmp(entries[i].name, name, EYNFS_NAME_MAX) == 0) {
+            if (strncmp(ent.name, name, EYNFS_NAME_MAX) == 0) {
                 return -1; // already exists
             }
         }
@@ -707,12 +724,16 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
             int new_block = eynfs_alloc_block(drive, sb);
             if (new_block < 0) return -1;
 
-            memset(&entries[free_idx], 0, sizeof(eynfs_dir_entry_t));
-            strncpy(entries[free_idx].name, name, EYNFS_NAME_MAX - 1);
-            entries[free_idx].name[EYNFS_NAME_MAX - 1] = '\0';
-            entries[free_idx].type = type;
-            entries[free_idx].first_block = (uint32_t)new_block;
-            entries[free_idx].size = 0;
+            eynfs_dir_entry_t new_ent;
+            memset(&new_ent, 0, sizeof(new_ent));
+            strncpy(new_ent.name, name, EYNFS_NAME_MAX - 1);
+            new_ent.name[EYNFS_NAME_MAX - 1] = '\0';
+            new_ent.type = type;
+            new_ent.first_block = (uint32_t)new_block;
+            new_ent.size = 0;
+
+            uint8* outp = buf + 4 + ((uint32_t)free_idx * (uint32_t)sizeof(eynfs_dir_entry_t));
+            memcpy(outp, &new_ent, sizeof(new_ent));
 
             if (type == EYNFS_TYPE_DIR) {
                 uint8 zero_block[EYNFS_BLOCK_SIZE] = {0};
@@ -758,7 +779,7 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
             eynfs_free_block(drive, sb, (uint32_t)new_dir_block);
             return -1;
         }
-        *(uint32_t*)last_buf = (uint32_t)new_dir_block;
+        eynfs_store_u32(last_buf, (uint32_t)new_dir_block);
         if (eynfs_cache_write_block(drive, last, last_buf) != 0) {
             eynfs_free_block(drive, sb, (uint32_t)new_entry_block);
             eynfs_free_block(drive, sb, (uint32_t)new_dir_block);
@@ -770,14 +791,16 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
     {
         uint8 new_buf[EYNFS_BLOCK_SIZE];
         memset(new_buf, 0, sizeof(new_buf));
-        *(uint32_t*)new_buf = 0; // next = 0
-        eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)(new_buf + 4);
-        memset(&entries[0], 0, sizeof(eynfs_dir_entry_t));
-        strncpy(entries[0].name, name, EYNFS_NAME_MAX - 1);
-        entries[0].name[EYNFS_NAME_MAX - 1] = '\0';
-        entries[0].type = type;
-        entries[0].first_block = (uint32_t)new_entry_block;
-        entries[0].size = 0;
+        eynfs_store_u32(new_buf, 0); // next = 0
+
+        eynfs_dir_entry_t ent0;
+        memset(&ent0, 0, sizeof(ent0));
+        strncpy(ent0.name, name, EYNFS_NAME_MAX - 1);
+        ent0.name[EYNFS_NAME_MAX - 1] = '\0';
+        ent0.type = type;
+        ent0.first_block = (uint32_t)new_entry_block;
+        ent0.size = 0;
+        memcpy(new_buf + 4, &ent0, sizeof(ent0));
 
         if (type == EYNFS_TYPE_DIR) {
             uint8 zero_block[EYNFS_BLOCK_SIZE] = {0};
@@ -827,7 +850,7 @@ int eynfs_delete_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
             while (block_num != 0) {
                 uint8 tmp[EYNFS_BLOCK_SIZE];
                 if (ata_read_sector(drive, eynfs_block_to_lba(block_num), tmp) != 0) break;
-                uint32_t next_block = *(uint32_t*)tmp;
+                uint32_t next_block = eynfs_load_u32(tmp);
                 eynfs_free_block(drive, sb, block_num);
                 block_num = next_block;
             }
@@ -865,7 +888,7 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         #endif
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
-        uint32_t next_block = *(uint32_t*)block;
+        uint32_t next_block = eynfs_load_u32(block);
         block_num = next_block;
         skip -= (EYNFS_BLOCK_SIZE-4);
     }
@@ -875,7 +898,7 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         #endif
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
-        uint32_t next_block = *(uint32_t*)block;
+        uint32_t next_block = eynfs_load_u32(block);
         size_t block_offset = skip;
         size_t chunk = (EYNFS_BLOCK_SIZE-4) - block_offset;
         if (chunk > bytes_left) chunk = bytes_left;
@@ -890,7 +913,7 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         #endif
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
-        uint32_t next_block = *(uint32_t*)block;
+        uint32_t next_block = eynfs_load_u32(block);
         size_t chunk = (EYNFS_BLOCK_SIZE-4) < bytes_left ? (EYNFS_BLOCK_SIZE-4) : bytes_left;
         memcpy((uint8*)buf + total_read, block+4, chunk);
         total_read += chunk;
@@ -912,7 +935,7 @@ int eynfs_write_file(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *ent
         while (block_num != 0) {
             uint8 tmp[EYNFS_BLOCK_SIZE];
             if (ata_read_sector(drive, eynfs_block_to_lba(block_num), tmp) != 0) break;
-            uint32_t next_block = *(uint32_t*)tmp;
+            uint32_t next_block = eynfs_load_u32(tmp);
             // Ensure any cached data for this block can't be served after it's freed/reused.
             eynfs_cache_invalidate_block(block_num);
             eynfs_free_block(drive, sb, block_num);
@@ -939,13 +962,13 @@ int eynfs_write_file(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *ent
             // Update previous block's next_block pointer
             uint8 tmp[EYNFS_BLOCK_SIZE];
             if (ata_read_sector(drive, eynfs_block_to_lba(prev_block), tmp) != 0) return -1;
-            *(uint32_t*)tmp = new_block;
+            eynfs_store_u32(tmp, (uint32_t)new_block);
             if (eynfs_cache_write_block(drive, prev_block, tmp) != 0) return -1;
         }
         
         uint8 block[EYNFS_BLOCK_SIZE] = {0};
         size_t chunk = bytes_left < (EYNFS_BLOCK_SIZE-4) ? bytes_left : (EYNFS_BLOCK_SIZE-4);
-        *(uint32_t*)block = 0; // next_block = 0 for now
+        eynfs_store_u32(block, 0); // next_block = 0 for now
         
         // Bounds check for memory copy
         if (chunk <= (EYNFS_BLOCK_SIZE-4) && (data+total_written) && (block+4)) {
@@ -1362,7 +1385,7 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
     // Initialize the first block: next=0 and data cleared.
     if (s->curr_block != 0) {
         uint8 block[EYNFS_BLOCK_SIZE] = {0};
-        *(uint32_t*)block = 0;
+        eynfs_store_u32(block, 0);
         eynfs_cache_invalidate_block(s->curr_block);
         if (eynfs_cache_write_block(s->drive, s->curr_block, block) != 0) return -1;
     }
@@ -1382,13 +1405,13 @@ int eynfs_stream_write(eynfs_stream_t* s, const void* buf, size_t size) {
             eynfs_cache_invalidate_block((uint32_t)new_block);
             // Initialize the new block's link to 0 and clear data area
             uint8 block[EYNFS_BLOCK_SIZE] = {0};
-            *(uint32_t*)block = 0;
+            eynfs_store_u32(block, 0);
             if (eynfs_cache_write_block(s->drive, (uint32_t)new_block, block) != 0) return -1;
             // Link from previous current block if it exists
             if (s->curr_block != 0) {
                 uint8 prev[EYNFS_BLOCK_SIZE];
                 if (eynfs_cache_get_block(s->drive, s->curr_block, prev) != 0) return -1;
-                *(uint32_t*)prev = (uint32_t)new_block; // store block number, not LBA
+                eynfs_store_u32(prev, (uint32_t)new_block); // store block number, not LBA
                 eynfs_cache_invalidate_block(s->curr_block);
                 if (eynfs_cache_write_block(s->drive, s->curr_block, prev) != 0) return -1;
             }
@@ -1430,14 +1453,14 @@ int eynfs_stream_end(eynfs_stream_t* s) {
         if (cur == 0 || i >= max_blocks) return -1;
         uint8 buf[EYNFS_BLOCK_SIZE];
         if (eynfs_cache_get_block(s->drive, cur, buf) != 0) return -1;
-        cur = *(uint32_t*)buf;
+        cur = eynfs_load_u32(buf);
     }
     if (cur == 0) return -1;
 
     uint8 dirblk[EYNFS_BLOCK_SIZE];
     if (eynfs_cache_get_block(s->drive, cur, dirblk) != 0) return -1;
-    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)(dirblk + 4);
-    entries[slot] = s->entry;
+    uint8* entp = dirblk + 4 + (slot * (uint32_t)sizeof(eynfs_dir_entry_t));
+    memcpy(entp, &s->entry, sizeof(s->entry));
 
     eynfs_cache_invalidate_block(cur);
     if (eynfs_cache_write_block(s->drive, cur, dirblk) != 0) return -1;
