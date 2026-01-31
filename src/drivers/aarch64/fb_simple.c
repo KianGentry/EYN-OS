@@ -25,6 +25,12 @@ static char g_fb_format[32] __attribute__((aligned(8)));
 static uint32 g_cursor_x = 0;
 static uint32 g_cursor_y = 0;
 
+/* Default colors (match existing hard-coded behavior). */
+static uint32 g_fg_color = 0;
+static uint32 g_bg_color = 0;
+
+static inline uint32 fb_color(uint8 r, uint8 g, uint8 b);
+
 static void fb_clear_screen(void);
 
 /* fb_simple_init diagnostics */
@@ -65,7 +71,6 @@ static void aarch64_dcache_clean_poc_range(const void* addr, uint64 len) {
     uint64 mask = (uint64)line - 1u;
     start &= ~mask;
     end = (end + mask) & ~mask;
-
     for (uint64 p = start; p < end; p += (uint64)line) {
         asm volatile("dc cvac, %0" :: "r"(p) : "memory");
     }
@@ -335,6 +340,9 @@ static int fb_try_init_qemu_ramfb(uint64 dtb_ptr) {
     g_fb_format[6] = 'b';
     g_fb_format[7] = '8';
     g_fb_format[8] = '\0';
+
+    g_fg_color = fb_color(255, 255, 255);
+    g_bg_color = fb_color(0, 0, 0);
 
     fb_clear_screen();
     g_fb_last_error = FB_ERR_OK;
@@ -701,6 +709,9 @@ int fb_simple_init(uint64 dtb_ptr) {
         }
     }
 
+    g_fg_color = fb_color(255, 255, 255);
+    g_bg_color = fb_color(0, 0, 0);
+
     fb_clear_screen();
     g_fb_last_error = FB_ERR_OK;
     return 0;
@@ -713,6 +724,46 @@ int fb_simple_ready(void) {
 void fb_simple_clear(void) {
     if (!g_fb_base) return;
     fb_clear_screen();
+}
+
+void fb_simple_set_rgb(uint8 r, uint8 g, uint8 b) {
+    if (!g_fb_base) return;
+    g_fg_color = fb_color(r, g, b);
+}
+
+void fb_simple_set_bg_rgb(uint8 r, uint8 g, uint8 b) {
+    if (!g_fb_base) return;
+    g_bg_color = fb_color(r, g, b);
+}
+
+void fb_simple_clear_rgb(uint8 r, uint8 g, uint8 b) {
+    if (!g_fb_base) return;
+    fb_fill_rect(0, 0, g_fb_width, g_fb_height, fb_color(r, g, b));
+    fb_flush_rect(0, 0, g_fb_width, g_fb_height);
+    g_cursor_x = 0;
+    g_cursor_y = 0;
+}
+
+void fb_simple_draw_pixel(uint32 x, uint32 y, uint8 r, uint8 g, uint8 b) {
+    if (!g_fb_base) return;
+    if (x >= g_fb_width || y >= g_fb_height) return;
+    fb_put_pixel(x, y, fb_color(r, g, b));
+    fb_flush_rect(x, y, 1, 1);
+}
+
+void fb_simple_fill_rect(uint32 x, uint32 y, uint32 w, uint32 h, uint8 r, uint8 g, uint8 b) {
+    if (!g_fb_base) return;
+    if (w == 0 || h == 0) return;
+    if (x >= g_fb_width || y >= g_fb_height) return;
+    if (x + w > g_fb_width) w = g_fb_width - x;
+    if (y + h > g_fb_height) h = g_fb_height - y;
+    fb_fill_rect(x, y, w, h, fb_color(r, g, b));
+    fb_flush_rect(x, y, w, h);
+}
+
+void fb_simple_flush(void) {
+    if (!g_fb_base) return;
+    fb_flush_rect(0, 0, g_fb_width, g_fb_height);
 }
 
 static void fb_newline(void) {
@@ -746,7 +797,7 @@ void fb_simple_putc(char c) {
         } else {
             g_cursor_x = 0;
         }
-        fb_draw_glyph(g_cursor_x, g_cursor_y, (uint8)' ', fb_color(255, 255, 255), fb_color(0, 0, 0));
+        fb_draw_glyph(g_cursor_x, g_cursor_y, (uint8)' ', g_fg_color, g_bg_color);
         return;
     }
     if (c == '\t') {
@@ -761,7 +812,7 @@ void fb_simple_putc(char c) {
         fb_newline();
     }
 
-    fb_draw_glyph(g_cursor_x, g_cursor_y, (uint8)c, fb_color(255, 255, 255), fb_color(0, 0, 0));
+    fb_draw_glyph(g_cursor_x, g_cursor_y, (uint8)c, g_fg_color, g_bg_color);
     g_cursor_x += 8;
 }
 

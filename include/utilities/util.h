@@ -55,4 +55,19 @@ uint32 get_heap_used(void);
 uint32 get_total_ram(void);
 void putchar(char c);
 
+// -
+// Unified stdin (fd=0) line input helper
+// When tiling is active and a ring3/native task is associated with a vterm,
+// input is delivered via the vterm stdin buffer. Otherwise fall back to the
+// legacy line reader (which is HAL-backed).
+// -
+
+// Blocks until a complete line is available or Ctrl+C aborts.
+// On success, returns 1 and sets *out_s / *out_len (not including NUL).
+// On interrupt/error, returns 0 and leaves outputs unchanged.
+int kstdin_get_line(const char** out_s, int* out_len);
+
+// Consume the previously returned line (no-op for non-tiling fallback).
+void kstdin_consume_line(void);
+
 #endif

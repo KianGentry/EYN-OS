@@ -12,6 +12,14 @@ void fb_simple_putc(char c);
 void fb_simple_write(const char* s);
 void fb_simple_clear(void);
 
+/* Optional enhancements used by the arch-neutral gfx facade. */
+void fb_simple_set_rgb(uint8 r, uint8 g, uint8 b);
+void fb_simple_set_bg_rgb(uint8 r, uint8 g, uint8 b);
+void fb_simple_clear_rgb(uint8 r, uint8 g, uint8 b);
+void fb_simple_draw_pixel(uint32 x, uint32 y, uint8 r, uint8 g, uint8 b);
+void fb_simple_fill_rect(uint32 x, uint32 y, uint32 w, uint32 h, uint8 r, uint8 g, uint8 b);
+void fb_simple_flush(void);
+
 /*
  * Query the detected framebuffer parameters.
  * Returns 0 on success, -1 if the framebuffer is not initialized.

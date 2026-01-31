@@ -12,6 +12,8 @@ A feature developed for i386 should be usable on AArch64 with **no code changes 
 
 Everything else (shell/TUI, VFS behavior, userland ABI, syscalls, networking stack, UI/tiler APIs) should remain shared.
 
+For console/graphics, shared code should target the arch-neutral `gfx` facade in `include/graphics/` and avoid including architecture-specific display drivers directly.
+
 ## Non-goals
 
 - Identical performance characteristics
@@ -49,7 +51,7 @@ Legend:
 | Subsystem | i386 | AArch64 | Notes / parity definition | Primary test |
 |---|---:|---:|---|---|
 | Boot to interactive shell | ✅ | 🟡 | AArch64 currently has bring-up shell + a "full" build path; final target is same shell/TUI entrypoint on both. | smoke transcript |
-| Console semantics | ✅ | 🟡 | Control chars, scrolling, cursor, colors. AArch64 output now routes through the HAL console, but ramfb still needs parity polish vs VGA. | `help` + edit line |
+| Console semantics | ✅ | 🟡 | Control chars, scrolling, cursor, colors. Graphical output routes through the arch-neutral `gfx` facade (`gfx_putc`, `gfx_set_rgb`) with per-arch backends (i386: VGA, AArch64: `fb_simple`). UART behavior is backend-specific and not expected to support colors. | `help` + edit line |
 | Keyboard semantics | ✅ | 🟡 | Same keybindings, modifiers, arrows/home/end, ctrl shortcuts, repeat. Backends differ but output stream must match. Shared code reads via `tui_read_key()`/`hal_kbd_read_key_nonblock()`; legacy `readStr()`/`kb_getchar_nonblocking()` are HAL-backed (no direct port reads outside HAL backends). | edit line + ctrl shortcuts |
 | Mouse / pointer | ✅ | ⬜ | Same UI interactions in tiler. | UI smoke |
 | Timer / ticks | ✅ | 🟡 | Same tick rate expectations, sleep accuracy, watchdog behavior. | `ticks` + timer selftest |
@@ -58,7 +60,7 @@ Legend:
 | VFS read semantics | ✅ | ✅ | `vfs_stat`, `vfs_listdir`, `vfs_read_file` behavior must match. | `ls`, `cat` |
 | VFS write semantics | ✅ | 🟡 | Confirm write paths behave the same on both (truncate, mkdir/rmdir, unlink). | write/mkdir tests |
 | Userland loading (.uelf) | ✅ | ⬜ | Same loader behavior, argv/env, fd routing, exit codes. | run hello/demo |
-| Syscall ABI | ✅ | ⬜ | Same syscall numbers/struct layouts/error returns. Only entry/return is arch-specific. | userland tests |
+| Syscall ABI | ✅ | ⬜ | Same syscall numbers/struct layouts/error returns. Only entry/return is arch-specific. `fd=0` stdin reads should behave identically (tiling routes through vterm stdin buffer; non-tiling uses the same line reader). | userland tests |
 | Scheduler behavior | ✅ | ⬜ | Same yield/sleep semantics from userland and shell. | sleep/yield tests |
 | Networking stack | ✅ | ⬜ | Shared stack; only netdev backend differs. | net commands |
 | GUI / tiler APIs | ✅ | ⬜ | Same tile_manager API; same UI output. | GUI demo |

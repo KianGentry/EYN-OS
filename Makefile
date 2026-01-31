@@ -46,7 +46,7 @@ LDFLAGS = -m elf_i386 -T src/boot/link.ld --gc-sections -Map $(BOOTDIR)/kernel.m
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/linker.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/alias.o obj/alias_cmd.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/linux_syscalls.o
+OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/gfx.o obj/gfx_backend_vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/linker.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/alias.o obj/alias_cmd.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/linux_syscalls.o
 
 OBJS += obj/tiling_manager.o obj/tiling_cmd.o obj/theme_cmd.o obj/ui_prefs.o
 OBJS += obj/terminals.o
@@ -116,10 +116,10 @@ AARCH64_IMG = $(AARCH64_BOOTDIR)/kernel8.img
 AARCH64_FULL_ELF = $(AARCH64_BOOTDIR)/kernel8_full.elf
 AARCH64_FULL_IMG = $(AARCH64_BOOTDIR)/kernel8_full.img
 
-AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_hal_console.o
+AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_gfx.o obj/aarch64_gfx_backend_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_hal_console.o
 
 # Full-mode links an alternative entry and a minimal interactive shell.
-AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_bringup_shell.o obj/aarch64_shell_dispatch.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_virtio_blk.o obj/aarch64_ata_virtio.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_pipeline.o obj/aarch64_shell_find_command.o obj/aarch64_vga_redirect.o obj/aarch64_fs_stubs.o obj/aarch64_alias_stub.o obj/aarch64_math.o obj/aarch64_fat32.o obj/aarch64_eynfs.o obj/aarch64_vfs.o obj/aarch64_hal_console.o obj/aarch64_hal_keyboard.o
+AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_bringup_shell.o obj/aarch64_shell_dispatch.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_virtio_blk.o obj/aarch64_ata_virtio.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_gfx.o obj/aarch64_gfx_backend_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_pipeline.o obj/aarch64_shell_find_command.o obj/aarch64_vga_redirect.o obj/aarch64_fs_stubs.o obj/aarch64_alias_stub.o obj/aarch64_math.o obj/aarch64_fat32.o obj/aarch64_eynfs.o obj/aarch64_vfs.o obj/aarch64_hal_console.o obj/aarch64_hal_keyboard.o
 
 ifeq ($(AARCH64_PLATFORM),qemu-virt)
 AARCH64_OBJS += obj/aarch64_virt_dtb.o
@@ -219,7 +219,19 @@ obj/hal_console.o:src/hal/i386/console.c
 
 obj/hal_keyboard.o:src/hal/i386/keyboard.c
 	$(COMPILER) $(CFLAGS) src/hal/i386/keyboard.c -o obj/hal_keyboard.o
-	
+
+obj/gfx.o:src/graphics/gfx.c
+	$(COMPILER) $(CFLAGS) src/graphics/gfx.c -o obj/gfx.o
+
+obj/gfx_backend_vga.o:src/graphics/gfx_backend_vga.c
+	$(COMPILER) $(CFLAGS) src/graphics/gfx_backend_vga.c -o obj/gfx_backend_vga.o
+
+obj/aarch64_gfx.o:src/graphics/gfx.c
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/graphics/gfx.c -o obj/aarch64_gfx.o
+
+obj/aarch64_gfx_backend_fb_simple.o:src/graphics/gfx_backend_fb_simple.c
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/graphics/gfx_backend_fb_simple.c -o obj/aarch64_gfx_backend_fb_simple.o
+
 obj/kc.o:src/entry/kernel.c
 	$(COMPILER) $(CFLAGS) src/entry/kernel.c -o obj/kc.o 
 	

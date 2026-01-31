@@ -2164,3 +2164,11 @@ void vga_window_set_title(int index, const char* title) {
     if (index < 0 || index > 3) return;
     vga_draw_window_frame(g_win_rects[index].x, g_win_rects[index].y, g_win_rects[index].w, g_win_rects[index].h, title);
 }
+
+uint32 vga_screen_width(void) {
+	return (g_mbi && g_mbi->framebuffer_width) ? (uint32)g_mbi->framebuffer_width : 0u;
+}
+
+uint32 vga_screen_height(void) {
+	return (g_mbi && g_mbi->framebuffer_height) ? (uint32)g_mbi->framebuffer_height : 0u;
+}

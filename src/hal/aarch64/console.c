@@ -1,5 +1,6 @@
 #include <hal/console.h>
 #include <drivers/aarch64/fb_simple.h>
+#include <graphics/gfx.h>
 
 void uart_pl011_putc(char c);
 
@@ -27,16 +28,16 @@ void hal_console_putc(char c) {
         aarch64_uart_putc(' ');
         aarch64_uart_putc('\b');
 
-        if (fb_simple_ready()) {
-            fb_simple_putc('\b');
+        if (gfx_ready()) {
+            gfx_putc('\b');
         }
         return;
     }
 
     aarch64_uart_putc(c);
 
-    if (fb_simple_ready()) {
-        fb_simple_putc(c);
+    if (gfx_ready()) {
+        gfx_putc(c);
     }
 }
 
@@ -55,7 +56,6 @@ void hal_console_write_len(const char* s, uint32 len) {
 }
 
 void hal_console_set_rgb(uint8 r, uint8 g, uint8 b) {
-    (void)r;
-    (void)g;
-    (void)b;
+    /* Only affects the graphical console; UART output remains uncolored. */
+    gfx_set_rgb(r, g, b);
 }

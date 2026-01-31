@@ -138,6 +138,10 @@ void vga_blit_rgb565_scaled_bb(int dst_x, int dst_y, int dst_w, int dst_h,
 void vga_blit_rgb565_bb(int dst_x, int dst_y, const uint16_t* src, int src_w, int src_h);
 // Fill a rectangle directly into the physical framebuffer (overlay), clipped to screen
 void vga_fillRect_fb(int x, int y, int w, int h, int r, int g, int b);
+
+// Screen geometry (0 if VGA/framebuffer not initialized yet)
+uint32 vga_screen_width(void);
+uint32 vga_screen_height(void);
 // Multiply-darken a rectangle in the backbuffer (or framebuffer if no backbuffer):
 // out.rgb = (in.rgb * factor + 127) / 255. factor=128 ~= 50% black overlay.
 void vga_darkenRect_bb(int x, int y, int w, int h, int factor);

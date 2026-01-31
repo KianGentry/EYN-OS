@@ -8,6 +8,9 @@
 #include <shell.h>
 #include <mm/vmm.h>
 #include <isr.h>
+#include <terminals.h>
+#include <watchdog.h>
+#include <kb.h>
 
 volatile int g_user_interrupt = 0;
 volatile int g_user_task_active = 0;
@@ -26,6 +29,48 @@ volatile uint8 g_user_task_color_bytes[3] = {0, 0, 0};
 volatile uint32 g_user_code_base = 0;
 volatile uint32 g_user_code_pages = 0;
 volatile uint32 g_user_stack_page = 0;
+
+int kstdin_get_line(const char** out_s, int* out_len) {
+    if (!out_s || !out_len) return 0;
+
+    if (tile_is_tiling_active() && g_user_task_term >= 0) {
+        int term = g_user_task_term;
+
+        // Allow IRQ0/UI to keep pumping keyboard input into the vterm buffer.
+        __asm__ __volatile__("sti");
+        while (!vterm_stdin_ready(term)) {
+            if (g_user_interrupt) {
+                return 0;
+            }
+            watchdog_kick("stdin");
+            __asm__ __volatile__("hlt");
+        }
+
+        // Snapshot buffer under CLI to avoid races with the input pump.
+        __asm__ __volatile__("cli");
+        const char* s = vterm_stdin_data(term);
+        int slen = vterm_stdin_len(term);
+        __asm__ __volatile__("sti");
+
+        if (!s || slen < 0) return 0;
+        *out_s = s;
+        *out_len = slen;
+        return 1;
+    }
+
+    // Non-tiling fallback: legacy line reader (HAL-backed).
+    const char* s = readStr();
+    if (!s) return 0;
+    *out_s = s;
+    *out_len = (int)strlen(s);
+    return 1;
+}
+
+void kstdin_consume_line(void) {
+    if (tile_is_tiling_active() && g_user_task_term >= 0) {
+        vterm_stdin_consume(g_user_task_term);
+    }
+}
 
 void user_task_cleanup_mappings(void) {
     // Best-effort cleanup; safe to call repeatedly.

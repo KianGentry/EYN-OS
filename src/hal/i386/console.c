@@ -1,9 +1,5 @@
 #include <hal/console.h>
-#include <vga.h>
-
-static uint8 g_console_r = 255;
-static uint8 g_console_g = 255;
-static uint8 g_console_b = 255;
+#include <graphics/gfx.h>
 
 void hal_console_putc(char c) {
     /* Keep behavior consistent with the VGA/printf convention: ignore CR. */
@@ -16,7 +12,7 @@ void hal_console_putc(char c) {
         c = '\b';
     }
 
-    drawText((int)(uint8)c, (int)g_console_r, (int)g_console_g, (int)g_console_b);
+    gfx_putc(c);
 }
 
 void hal_console_write(const char* s) {
@@ -34,7 +30,5 @@ void hal_console_write_len(const char* s, uint32 len) {
 }
 
 void hal_console_set_rgb(uint8 r, uint8 g, uint8 b) {
-    g_console_r = r;
-    g_console_g = g;
-    g_console_b = b;
+    gfx_set_rgb(r, g, b);
 }

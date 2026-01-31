@@ -54,12 +54,14 @@ static int sys_write(native_process_t* proc, uint32 fd, const void* buf, uint32 
 
 static int sys_read(native_process_t* proc, uint32 fd, void* buf, uint32 count) {
     if (fd == 0) {
-        // stdin via readStr(); non-blocking minimal
-        string s = readStr();
-        if (!s) return 0;
-        uint32 n = (uint32)strlen(s);
+        const char* s = NULL;
+        int slen = 0;
+        if (!kstdin_get_line(&s, &slen) || !s) return 0;
+
+        uint32 n = (uint32)slen;
         if (n > count) n = count;
         memcpy(buf, s, n);
+        kstdin_consume_line();
         return (int)n;
     }
     linux_fd* tbl = get_fd_table(proc);

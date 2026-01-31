@@ -885,49 +885,16 @@ uint32 syscall_dispatch(regs_t* regs) {
                            255, 255, 0, (unsigned)arg2, maxlen, (unsigned)regs->useresp);
                 }
 
-                // When tiling is active, use the vterm stdin buffer instead of
-                // polling the keyboard directly. The TUI routes input to this buffer.
                 const char* s = NULL;
                 int slen = 0;
-                
-                if (tile_is_tiling_active() && g_user_task_term >= 0) {
-                    int term = g_user_task_term;  // Cache to avoid race conditions
-                    
-                    // Wait for a complete line in the stdin buffer.
-                    // This is a busy-wait but the PIT IRQ will feed the buffer
-                    // and can also set g_user_interrupt for Ctrl+C.
-                    // Enable interrupts so the PIT can fire and process keyboard input.
-                    __asm__ __volatile__("sti");
-                    while (!vterm_stdin_ready(term)) {
-                        if (g_user_interrupt) {
-                            // User pressed Ctrl+C - return error
-                            regs->eax = (uint32)-1;
-                            goto stdin_done;
-                        }
-                        // A ring3 task may legitimately block waiting for input;
-                        // keep the watchdog from firing while we're alive and
-                        // PIT IRQ0 is pumping UI/input.
-                        watchdog_kick("sys-read");
-                        // Yield to allow IRQ processing (PIT feeds the buffer)
-                        __asm__ __volatile__("hlt");
-                    }
-                    
-                    // Disable interrupts while reading buffer to prevent races
-                    __asm__ __volatile__("cli");
-                    s = vterm_stdin_data(term);
-                    slen = vterm_stdin_len(term);
-                    
-                    if (SYSCALL_DEBUG) {
-                        printf("[stdin] len=%d data='%s'\n", slen, s ? s : "(null)");
-                    }
-                    
-                    // Re-enable interrupts
-                    __asm__ __volatile__("sti");
-                } else {
-                    // Non-tiling mode: use direct keyboard polling
-                    s = readStr();
-                    if (!s) { regs->eax = (uint32)-1; break; }
-                    slen = (int)strlen(s);
+
+                if (!kstdin_get_line(&s, &slen)) {
+                    regs->eax = (uint32)-1;
+                    goto stdin_done;
+                }
+
+                if (SYSCALL_DEBUG) {
+                    printf("[stdin] len=%d data='%s'\n", slen, s ? s : "(null)");
                 }
                 
                 if (maxlen <= 0) { regs->eax = 0; goto stdin_cleanup; }
@@ -958,10 +925,8 @@ uint32 syscall_dispatch(regs_t* regs) {
                 regs->eax = (uint32)n;
                 
             stdin_cleanup:
-                // Clear the stdin buffer after consuming
-                if (tile_is_tiling_active() && g_user_task_term >= 0) {
-                    vterm_stdin_consume(g_user_task_term);
-                }
+                // Clear the stdin buffer after consuming (no-op for non-tiling fallback)
+                kstdin_consume_line();
             stdin_done:
                 break;
             }

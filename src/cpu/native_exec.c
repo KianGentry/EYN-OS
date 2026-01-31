@@ -718,9 +718,9 @@ exec_result_t native_run_process(native_process_t* process) {
                     } else if (regs[0] == 3) { // READ
                         // fd in EBX (regs[3]), buf in ECX (regs[1]), len in EDX (regs[2])
                         if (regs[3] == 0 && regs[1] && regs[2] > 0) {
-                            string s = readStr();
-                            if (s) {
-                                int slen = (int)strlen(s);
+                            const char* s = NULL;
+                            int slen = 0;
+                            if (kstdin_get_line(&s, &slen) && s) {
                                 int maxcpy = (int)regs[2];
                                 int n = slen;
                                 if (n > maxcpy - 1) n = maxcpy - 1;
@@ -732,11 +732,11 @@ exec_result_t native_run_process(native_process_t* process) {
                                 int wrote = 0;
                                 uint32_t translated = buffer_addr;
                                 if (process->segment_count && buffer_addr >= process->elf_vaddr_min && buffer_addr < process->elf_vaddr_max) {
-                                    for (int s = 0; s < process->segment_count; s++) {
-                                        uint32_t sv = process->segments[s].vaddr;
-                                        uint32_t sm = process->segments[s].memsz;
+                                    for (int seg = 0; seg < process->segment_count; seg++) {
+                                        uint32_t sv = process->segments[seg].vaddr;
+                                        uint32_t sm = process->segments[seg].memsz;
                                         if (buffer_addr >= sv && buffer_addr + n + 1 <= sv + sm) {
-                                            translated = (uint32_t)process->segments[s].mem + (buffer_addr - sv);
+                                            translated = (uint32_t)process->segments[seg].mem + (buffer_addr - sv);
                                             break;
                                         }
                                     }
@@ -786,6 +786,8 @@ exec_result_t native_run_process(native_process_t* process) {
                          process->data_start, process->data_start + process->data_size,
                          process->stack_start, process->stack_start + process->stack_size);
                                     regs[0] = -1;
+                                } else {
+                                    kstdin_consume_line();
                                 }
                             } else {
                                 regs[0] = -1;
