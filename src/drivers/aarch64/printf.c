@@ -107,8 +107,15 @@ int vsnprintf(char* str, size_t size, const char* format, va_list ap) {
         return 0;
     }
 
-    /* Ignore leading color triplet: printf("%c...", r,g,b, ...) */
-    if (p[0] == '%' && p[1] == 'c') {
+    /*
+     * Compatibility: some kernel code uses a leading "%c" as a color prefix,
+     * e.g. printf("%cError...", r, g, b, ...).
+     *
+     * However, normal printf also uses "%c" to print a character. To avoid
+     * breaking legitimate uses like printf("%c", ch) we only treat "%c" as
+     * the color prefix when it is followed by additional format text.
+     */
+    if (p[0] == '%' && p[1] == 'c' && p[2] != '\0') {
         (void)va_arg(ap, int);
         (void)va_arg(ap, int);
         (void)va_arg(ap, int);

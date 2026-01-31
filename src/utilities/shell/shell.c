@@ -547,7 +547,7 @@ void handler_assemble(string arg) {
     
     if (!input_file[0] || !output_file[0]) {
         printf("%cUsage: assemble <input.asm> <output.eyn>\n", 255, 255, 255);
-        printf("%cExample: assemble test.asm test.eyn\n");
+        printf("%cExample: assemble test.asm test.eyn\n", 255, 255, 255);
         return;
     }
     

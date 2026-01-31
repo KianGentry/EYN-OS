@@ -582,7 +582,7 @@ int eynfs_find_in_dir(uint8 drive, const eynfs_superblock_t *sb, uint32_t dir_bl
         for (int i = 0; i < cache_entry->count; ++i) {
             if (cache_entry->entries[i].name[0] == '\0') continue;
             if (strncmp(cache_entry->entries[i].name, name, EYNFS_NAME_MAX) == 0) {
-                if (out_entry) *out_entry = cache_entry->entries[i];
+                if (out_entry) memcpy(out_entry, &cache_entry->entries[i], sizeof(*out_entry));
                 if (out_index) *out_index = (uint32_t)i;
                 return 0;
             }
@@ -603,12 +603,18 @@ int eynfs_find_in_dir(uint8 drive, const eynfs_superblock_t *sb, uint32_t dir_bl
         if (eynfs_cache_get_block(drive, current_block, buf) != 0) return -1;
 
         uint32_t next_block = *(uint32_t*)buf;
-        const eynfs_dir_entry_t* entries = (const eynfs_dir_entry_t*)(buf + 4);
 
+        // The directory entry table begins at buf+4, which is only 4-byte aligned.
+        // On AArch64, copying/loading structs from this address can trigger
+        // alignment faults if the compiler emits 8-byte accesses. Copy into a
+        // properly-aligned local struct before inspecting.
         for (uint32_t i = 0; i < entries_per_block; ++i) {
-            if (entries[i].name[0] == '\0') continue;
-            if (strncmp(entries[i].name, name, EYNFS_NAME_MAX) == 0) {
-                if (out_entry) *out_entry = entries[i];
+            const uint8* entp = buf + 4 + (i * (uint32_t)sizeof(eynfs_dir_entry_t));
+            eynfs_dir_entry_t ent;
+            memcpy(&ent, entp, sizeof(ent));
+            if (ent.name[0] == '\0') continue;
+            if (strncmp(ent.name, name, EYNFS_NAME_MAX) == 0) {
+                if (out_entry) memcpy(out_entry, &ent, sizeof(*out_entry));
                 if (out_index) *out_index = base_index + i;
                 return 0;
             }
@@ -658,7 +664,7 @@ int eynfs_traverse_path(uint8 drive, const eynfs_superblock_t *sb, const char *p
             return -1; // Not a directory in the path
         }
     }
-    if (out_entry) *out_entry = entry;
+    if (out_entry) memcpy(out_entry, &entry, sizeof(*out_entry));
     if (parent_block) *parent_block = last_parent;
     if (entry_index) *entry_index = last_index;
     return 0;

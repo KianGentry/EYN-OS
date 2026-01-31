@@ -1,14 +1,14 @@
 #include <misc/types.h>
 #include <misc/math.h>
+#include <misc/printf.h>
 
 #include <cpu/aarch64/psci.h>
 #include <drivers/aarch64/fb_simple.h>
 #include <utilities/shell/shell_command_info.h>
+#include <utilities/shell/fs_commands.h>
 #include <fs/vfs.h>
 
 #include <string.h>
-
-int printf(const char* fmt, ...);
 
 extern volatile uint32 g_aarch64_ticks;
 extern int shell_redirect_active;
@@ -260,7 +260,9 @@ static void cmd_ls(string arg) {
     const char* path = skip_cmd_name(arg);
     if (!path || !*path) path = "/";
 
-    int rc = vfs_listdir(0, path, ls_cb, 0);
+    char abspath[128];
+    resolve_path(path, shell_current_path, abspath, sizeof(abspath));
+    int rc = vfs_listdir(0, abspath, ls_cb, 0);
     if (rc != 0) {
         printf("%cError: listdir failed (%d)\n", 255, 0, 0, rc);
     }
@@ -274,10 +276,13 @@ static void cmd_cat(string arg) {
         return;
     }
 
+    char abspath[128];
+    resolve_path(path, shell_current_path, abspath, sizeof(abspath));
+
     uint32 offset = 0;
     char buf[257];
     for (;;) {
-        int n = vfs_read_file_at(0, path, buf, 256, offset);
+        int n = vfs_read_file_at(0, abspath, buf, 256, offset);
         if (n < 0) {
             printf("%cError: read failed (%d)\n", 255, 0, 0, n);
             return;
