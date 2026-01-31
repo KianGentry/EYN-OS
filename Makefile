@@ -7,6 +7,11 @@ ASSEMBLER = nasm
 # implementation of small architecture abstraction units (e.g. src/cpu/*/arch.c).
 ARCH ?= i386
 
+# Ensure `make` defaults to the main i386 build.
+# (The AArch64 platform stamp rule appears earlier in this file, and GNU make
+# otherwise uses the first rule as the default goal.)
+.DEFAULT_GOAL := all
+
 # Prefer grub2-mkrescue if available; fall back to grub-mkrescue
 # Path is resolved at parse time; if neither exists, we'll stop in the build rule with a friendly message
 GRUB_MKRESCUE := $(shell command -v grub2-mkrescue 2>/dev/null || command -v grub-mkrescue 2>/dev/null)
@@ -46,7 +51,7 @@ LDFLAGS = -m elf_i386 -T src/boot/link.ld --gc-sections -Map $(BOOTDIR)/kernel.m
 EMULATOR = qemu-system-i386
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/gfx.o obj/gfx_backend_vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/linker.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/alias.o obj/alias_cmd.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/linux_syscalls.o
+OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/shell_state.o obj/shell.o obj/math.o obj/vga.o obj/gfx.o obj/gfx_backend_vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/linker.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/alias.o obj/alias_cmd.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/linux_syscalls.o obj/gfx_cmd.o
 
 OBJS += obj/tiling_manager.o obj/tiling_cmd.o obj/theme_cmd.o obj/ui_prefs.o
 OBJS += obj/terminals.o
@@ -88,6 +93,12 @@ AARCH64_OBJCOPY ?= $(shell command -v aarch64-none-elf-objcopy 2>/dev/null || \
 # - qemu-virt: QEMU 'virt' machine (recommended for local development)
 AARCH64_PLATFORM ?= rpi4
 
+# NOTE: AARCH64_PLATFORM affects compiler defines and linker script selection.
+# The AArch64 objects live in the shared `obj/` directory, so switching
+# AARCH64_PLATFORM would otherwise reuse stale objects built for the other
+# platform. The stamp forces recompilation when the platform changes.
+AARCH64_PLATFORM_STAMP = $(AARCH64_TMPDIR)/.aarch64_platform_$(AARCH64_PLATFORM)
+
 ifeq ($(AARCH64_PLATFORM),qemu-virt)
 AARCH64_PLATFORM_DEFINE = -DAARCH64_PLATFORM_QEMU_VIRT=1
 AARCH64_LDSCRIPT = src/boot/aarch64-virt.ld
@@ -106,6 +117,11 @@ AARCH64_CFLAGS = -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-com
 		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \
 		 -Wno-unused-parameter -Wno-unused-variable
 
+$(AARCH64_PLATFORM_STAMP):
+	mkdir -p $(AARCH64_TMPDIR)/
+	@rm -f $(AARCH64_TMPDIR)/.aarch64_platform_*
+	@echo "$(AARCH64_PLATFORM)" > $(AARCH64_PLATFORM_STAMP)
+
 AARCH64_LDFLAGS = -T $(AARCH64_LDSCRIPT) --gc-sections -Map $(AARCH64_BOOTDIR)/kernel8.map
 AARCH64_FULL_LDFLAGS = -T $(AARCH64_LDSCRIPT) --gc-sections -Map $(AARCH64_BOOTDIR)/kernel8_full.map
 
@@ -116,10 +132,10 @@ AARCH64_IMG = $(AARCH64_BOOTDIR)/kernel8.img
 AARCH64_FULL_ELF = $(AARCH64_BOOTDIR)/kernel8_full.elf
 AARCH64_FULL_IMG = $(AARCH64_BOOTDIR)/kernel8_full.img
 
-AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_gfx.o obj/aarch64_gfx_backend_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_hal_console.o
+AARCH64_OBJS = obj/aarch64_start.o obj/aarch64_kernel.o obj/aarch64_uart_pl011.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_gfx.o obj/aarch64_gfx_backend_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_hal_console.o obj/aarch64_shell_state.o obj/aarch64_util_globals.o
 
-# Full-mode links an alternative entry and a minimal interactive shell.
-AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_bringup_shell.o obj/aarch64_shell_dispatch.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_virtio_blk.o obj/aarch64_ata_virtio.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_gfx.o obj/aarch64_gfx_backend_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_pipeline.o obj/aarch64_shell_find_command.o obj/aarch64_vga_redirect.o obj/aarch64_fs_stubs.o obj/aarch64_alias_stub.o obj/aarch64_math.o obj/aarch64_fat32.o obj/aarch64_eynfs.o obj/aarch64_vfs.o obj/aarch64_hal_console.o obj/aarch64_hal_keyboard.o
+# Full-mode links an alternative entry and uses the shared shell core.
+AARCH64_FULL_OBJS = obj/aarch64_start.o obj/aarch64_kernel_full.o obj/aarch64_shell.o obj/aarch64_history.o obj/aarch64_shell_cmds_min.o obj/aarch64_uart_pl011.o obj/aarch64_virtio_input.o obj/aarch64_virtio_blk.o obj/aarch64_ata_virtio.o obj/aarch64_arch.o obj/aarch64_fdt.o obj/aarch64_vectors.o obj/aarch64_gicv2.o obj/aarch64_timer.o obj/aarch64_irq.o obj/aarch64_timer_tick.o obj/aarch64_exception.o obj/aarch64_psci.o obj/aarch64_smp.o obj/aarch64_fb_simple.o obj/aarch64_gfx.o obj/aarch64_gfx_backend_fb_simple.o obj/aarch64_printf.o obj/aarch64_string.o obj/aarch64_heap.o obj/aarch64_pipeline.o obj/aarch64_vga_redirect.o obj/aarch64_fs_stubs.o obj/aarch64_alias.o obj/aarch64_math.o obj/aarch64_fat32.o obj/aarch64_eynfs.o obj/aarch64_vfs.o obj/aarch64_hal_console.o obj/aarch64_hal_keyboard.o obj/aarch64_gfx_cmd.o obj/aarch64_shell_state.o obj/aarch64_util_globals.o
 
 ifeq ($(AARCH64_PLATFORM),qemu-virt)
 AARCH64_OBJS += obj/aarch64_virt_dtb.o
@@ -161,7 +177,7 @@ aarch64-qemu-run: aarch64-check-tools
 aarch64-qemu-run-gui: aarch64-check-tools
 	@command -v qemu-system-aarch64 >/dev/null 2>&1 || (echo "[AARCH64] qemu-system-aarch64 not found"; exit 1)
 	$(MAKE) aarch64 AARCH64_PLATFORM=qemu-virt
-	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -device ramfb -device virtio-keyboard-device -display gtk -serial stdio -kernel $(AARCH64_IMG)
+	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 -device ramfb -device virtio-keyboard-device -display gtk -serial stdio -monitor none -kernel $(AARCH64_IMG)
 
 aarch64-full-qemu-run: aarch64-check-tools
 	@command -v qemu-system-aarch64 >/dev/null 2>&1 || (echo "[AARCH64] qemu-system-aarch64 not found"; exit 1)
@@ -177,7 +193,7 @@ aarch64-full-qemu-run-gui: aarch64-check-tools
 	qemu-system-aarch64 -M virt,gic-version=2 -cpu cortex-a57 -smp 4 \
 		-drive file=eynfs.img,format=raw,if=none,id=vd0,readonly=on \
 		-device virtio-blk-device,drive=vd0 \
-		-device ramfb -device virtio-keyboard-device -display gtk -serial stdio -kernel $(AARCH64_FULL_IMG)
+		-device ramfb -device virtio-keyboard-device -display gtk -serial stdio -monitor none -kernel $(AARCH64_FULL_IMG)
 
 $(AARCH64_ELF): $(AARCH64_OBJS)
 	mkdir -p $(AARCH64_TMPDIR)/
@@ -226,11 +242,17 @@ obj/gfx.o:src/graphics/gfx.c
 obj/gfx_backend_vga.o:src/graphics/gfx_backend_vga.c
 	$(COMPILER) $(CFLAGS) src/graphics/gfx_backend_vga.c -o obj/gfx_backend_vga.o
 
-obj/aarch64_gfx.o:src/graphics/gfx.c
+obj/aarch64_gfx.o:src/graphics/gfx.c $(AARCH64_PLATFORM_STAMP)
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/graphics/gfx.c -o obj/aarch64_gfx.o
 
-obj/aarch64_gfx_backend_fb_simple.o:src/graphics/gfx_backend_fb_simple.c
+obj/aarch64_gfx_backend_fb_simple.o:src/graphics/gfx_backend_fb_simple.c $(AARCH64_PLATFORM_STAMP)
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/graphics/gfx_backend_fb_simple.c -o obj/aarch64_gfx_backend_fb_simple.o
+
+obj/gfx_cmd.o:src/utilities/shell/gfx_cmd.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/gfx_cmd.c -o obj/gfx_cmd.o
+
+obj/aarch64_gfx_cmd.o:src/utilities/shell/gfx_cmd.c $(AARCH64_PLATFORM_STAMP)
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/shell/gfx_cmd.c -o obj/aarch64_gfx_cmd.o
 
 obj/kc.o:src/entry/kernel.c
 	$(COMPILER) $(CFLAGS) src/entry/kernel.c -o obj/kc.o 
@@ -260,149 +282,168 @@ obj/user_elf.o:src/cpu/user_elf.c
 obj/string.o:src/utilities/shell/string.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/string.c -o obj/string.o
 
+obj/shell_state.o:src/utilities/shell/shell_state.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/shell_state.c -o obj/shell_state.o
+
+obj/aarch64_shell_state.o:src/utilities/shell/shell_state.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/shell/shell_state.c -o obj/aarch64_shell_state.o
+
 obj/system.o:src/cpu/system.c
 	$(COMPILER) $(CFLAGS) src/cpu/system.c -o obj/system.o
 
 obj/arch.o:src/cpu/$(ARCH)/arch.c
 	$(COMPILER) $(CFLAGS) src/cpu/$(ARCH)/arch.c -o obj/arch.o
 
-obj/aarch64_arch.o:src/cpu/aarch64/arch.c
+obj/aarch64_arch.o:src/cpu/aarch64/arch.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/arch.c -o obj/aarch64_arch.o
 
-obj/aarch64_start.o:src/entry/aarch64/start.S
+obj/aarch64_start.o:src/entry/aarch64/start.S $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/start.S -o obj/aarch64_start.o
 
-obj/aarch64_kernel.o:src/entry/aarch64/kernel.c
+obj/aarch64_kernel.o:src/entry/aarch64/kernel.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/kernel.c -o obj/aarch64_kernel.o
 
-obj/aarch64_printf.o:src/drivers/aarch64/printf.c
+obj/aarch64_printf.o:src/drivers/aarch64/printf.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/printf.c -o obj/aarch64_printf.o
 
-obj/aarch64_string.o:src/utilities/aarch64/string.c
+obj/aarch64_string.o:src/utilities/aarch64/string.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/aarch64/string.c -o obj/aarch64_string.o
 
-obj/aarch64_heap.o:src/utilities/aarch64/heap.c
+obj/aarch64_heap.o:src/utilities/aarch64/heap.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/aarch64/heap.c -o obj/aarch64_heap.o
 
-obj/aarch64_pipeline.o:src/utilities/shell/pipeline.c
+obj/aarch64_util_globals.o:src/utilities/aarch64/util_globals.c $(AARCH64_PLATFORM_STAMP)
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/aarch64/util_globals.c -o obj/aarch64_util_globals.o
+
+obj/aarch64_pipeline.o:src/utilities/shell/pipeline.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/shell/pipeline.c -o obj/aarch64_pipeline.o
 
-obj/aarch64_shell_find_command.o:src/entry/aarch64/shell_find_command.c
+obj/aarch64_shell.o:src/utilities/shell/shell.c $(AARCH64_PLATFORM_STAMP)
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/shell/shell.c -o obj/aarch64_shell.o
+
+obj/aarch64_history.o:src/utilities/shell/history.c $(AARCH64_PLATFORM_STAMP)
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/shell/history.c -o obj/aarch64_history.o
+
+obj/aarch64_shell_find_command.o:src/entry/aarch64/shell_find_command.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/shell_find_command.c -o obj/aarch64_shell_find_command.o
 
-obj/aarch64_vga_redirect.o:src/drivers/aarch64/vga_redirect.c
+obj/aarch64_vga_redirect.o:src/drivers/aarch64/vga_redirect.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/vga_redirect.c -o obj/aarch64_vga_redirect.o
 
-obj/aarch64_fs_stubs.o:src/entry/aarch64/fs_stubs.c
+obj/aarch64_fs_stubs.o:src/entry/aarch64/fs_stubs.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/fs_stubs.c -o obj/aarch64_fs_stubs.o
 
-obj/aarch64_alias_stub.o:src/entry/aarch64/alias_stub.c
+obj/aarch64_alias_stub.o:src/entry/aarch64/alias_stub.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/alias_stub.c -o obj/aarch64_alias_stub.o
 
-obj/aarch64_math.o:src/utilities/basic/math.c
+obj/aarch64_math.o:src/utilities/basic/math.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/basic/math.c -o obj/aarch64_math.o
 
-obj/aarch64_kernel_full.o:src/entry/aarch64/kernel_full.c
+obj/aarch64_kernel_full.o:src/entry/aarch64/kernel_full.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/kernel_full.c -o obj/aarch64_kernel_full.o
 
-obj/aarch64_bringup_shell.o:src/entry/aarch64/bringup_shell.c
+obj/aarch64_bringup_shell.o:src/entry/aarch64/bringup_shell.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/bringup_shell.c -o obj/aarch64_bringup_shell.o
 
-obj/aarch64_hal_console.o:src/hal/aarch64/console.c
+obj/aarch64_hal_console.o:src/hal/aarch64/console.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/hal/aarch64/console.c -o obj/aarch64_hal_console.o
 
-obj/aarch64_hal_keyboard.o:src/hal/aarch64/keyboard.c
+obj/aarch64_hal_keyboard.o:src/hal/aarch64/keyboard.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/hal/aarch64/keyboard.c -o obj/aarch64_hal_keyboard.o
 
-obj/aarch64_shell_dispatch.o:src/entry/aarch64/shell_dispatch.c
+obj/aarch64_shell_dispatch.o:src/entry/aarch64/shell_dispatch.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/shell_dispatch.c -o obj/aarch64_shell_dispatch.o
 
-obj/aarch64_shell_cmds_min.o:src/entry/aarch64/shell_cmds_min.c
+obj/aarch64_shell_cmds_min.o:src/entry/aarch64/shell_cmds_min.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/entry/aarch64/shell_cmds_min.c -o obj/aarch64_shell_cmds_min.o
 
-obj/aarch64_virtio_input.o:src/drivers/aarch64/virtio_input.c
+obj/aarch64_virtio_input.o:src/drivers/aarch64/virtio_input.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/virtio_input.c -o obj/aarch64_virtio_input.o
 
-obj/aarch64_virtio_blk.o:src/drivers/aarch64/virtio_blk.c
+obj/aarch64_virtio_blk.o:src/drivers/aarch64/virtio_blk.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/virtio_blk.c -o obj/aarch64_virtio_blk.o
 
-obj/aarch64_ata_virtio.o:src/drivers/aarch64/ata_virtio.c
+obj/aarch64_ata_virtio.o:src/drivers/aarch64/ata_virtio.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/ata_virtio.c -o obj/aarch64_ata_virtio.o
 
-obj/aarch64_fat32.o:src/drivers/fat32.c
+obj/aarch64_fat32.o:src/drivers/fat32.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/fat32.c -o obj/aarch64_fat32.o
 
-obj/aarch64_eynfs.o:src/drivers/eynfs.c
+obj/aarch64_eynfs.o:src/drivers/eynfs.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/eynfs.c -o obj/aarch64_eynfs.o
 
-obj/aarch64_vfs.o:src/fs/vfs.c
+obj/aarch64_vfs.o:src/fs/vfs.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/fs/vfs.c -o obj/aarch64_vfs.o
 
-obj/aarch64_uart_pl011.o:src/drivers/aarch64/uart_pl011.c
+obj/aarch64_uart_pl011.o:src/drivers/aarch64/uart_pl011.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/uart_pl011.c -o obj/aarch64_uart_pl011.o
 
-obj/aarch64_vectors.o:src/cpu/aarch64/exceptions.S
+obj/aarch64_vectors.o:src/cpu/aarch64/exceptions.S $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/exceptions.S -o obj/aarch64_vectors.o
 
-obj/aarch64_gicv2.o:src/cpu/aarch64/gicv2.c
+obj/aarch64_gicv2.o:src/cpu/aarch64/gicv2.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/gicv2.c -o obj/aarch64_gicv2.o
 
-obj/aarch64_timer.o:src/cpu/aarch64/timer.c
+obj/aarch64_timer.o:src/cpu/aarch64/timer.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/timer.c -o obj/aarch64_timer.o
 
-obj/aarch64_irq.o:src/cpu/aarch64/irq.c
+obj/aarch64_irq.o:src/cpu/aarch64/irq.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/irq.c -o obj/aarch64_irq.o
 
-obj/aarch64_timer_tick.o:src/cpu/aarch64/timer_tick.c
+obj/aarch64_timer_tick.o:src/cpu/aarch64/timer_tick.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/timer_tick.c -o obj/aarch64_timer_tick.o
 
-obj/aarch64_exception.o:src/cpu/aarch64/exception.c
+obj/aarch64_exception.o:src/cpu/aarch64/exception.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/exception.c -o obj/aarch64_exception.o
 
-obj/aarch64_psci.o:src/cpu/aarch64/psci.c
+obj/aarch64_psci.o:src/cpu/aarch64/psci.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/psci.c -o obj/aarch64_psci.o
 
-obj/aarch64_smp.o:src/cpu/aarch64/smp.c
+obj/aarch64_smp.o:src/cpu/aarch64/smp.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/cpu/aarch64/smp.c -o obj/aarch64_smp.o
 
-obj/aarch64_fb_simple.o:src/drivers/aarch64/fb_simple.c
+obj/aarch64_fb_simple.o:src/drivers/aarch64/fb_simple.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/drivers/aarch64/fb_simple.c -o obj/aarch64_fb_simple.o
 
-obj/aarch64_fdt.o:src/misc/fdt.c
+obj/aarch64_fdt.o:src/misc/fdt.c $(AARCH64_PLATFORM_STAMP)
 	mkdir obj/ -p
 	$(AARCH64_CC) $(AARCH64_CFLAGS) src/misc/fdt.c -o obj/aarch64_fdt.o
 
@@ -493,6 +534,10 @@ obj/shell_script.o:src/utilities/shell/shell_script.c
 
 obj/alias.o:src/utilities/shell/alias.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/alias.c -o obj/alias.o
+
+obj/aarch64_alias.o:src/utilities/shell/alias.c
+	mkdir obj/ -p
+	$(AARCH64_CC) $(AARCH64_CFLAGS) src/utilities/shell/alias.c -o obj/aarch64_alias.o
 
 obj/alias_cmd.o:src/utilities/shell/alias_cmd.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/alias_cmd.c -o obj/alias_cmd.o

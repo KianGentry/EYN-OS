@@ -44,6 +44,17 @@ SECTIONS
     __bss_end = .;
   }
 
+  /*
+   * Large ramfb backing store.
+   * Keep it out of the main BSS clear range so early boot doesn't spend
+   * a long time zeroing a multi-megabyte buffer in TCG.
+   * The framebuffer driver explicitly clears what it uses.
+   */
+  .ramfb (NOLOAD) : ALIGN(16)
+  {
+    *(.ramfb)
+  }
+
   /* Simple static stack for early bring-up */
   . = ALIGN(16);
   __stack_bottom = .;

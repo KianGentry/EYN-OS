@@ -1,8 +1,7 @@
 #include <shell.h>
-#include <vga.h>
 #include <util.h>
 #include <string.h>
-#include <tui.h>
+#include <misc/printf.h>
 #include <hal/keyboard.h>
 
 command_history_t g_command_history = {0};
@@ -72,10 +71,16 @@ string readStr_with_history(command_history_t* history) {
     buffstr[0] = '\0';
 
     while (1) {
-        int key = tui_read_key();
-        if (key == 0) continue;
+        uint32 key = hal_kbd_read_key_nonblock();
+        if (key == 0) {
+#if defined(__aarch64__)
+            /* Avoid busy looping in the bring-up environment. */
+            asm volatile("wfi" ::: "memory");
+#endif
+            continue;
+        }
 
-        uint32 raw = (uint32)key;
+        uint32 raw = key;
         uint32 base = raw;
 
         if (base & HAL_KEY_FLAG_SUPER) base &= ~HAL_KEY_FLAG_SUPER;

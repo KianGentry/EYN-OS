@@ -273,11 +273,20 @@ static int fw_cfg_dma_write(uint64 fw_base, uint16 select_key, const void* src, 
 /* A modest default resolution to keep RAM usage small. */
 #define RAMFB_W 800u
 #define RAMFB_H 600u
-static uint8 g_ramfb_pixels[RAMFB_W * RAMFB_H * 4u];
+static uint8 g_ramfb_pixels[RAMFB_W * RAMFB_H * 4u] __attribute__((section(".ramfb")));
 
 static int fb_try_init_qemu_ramfb(uint64 dtb_ptr) {
     uint64 fw_base = 0;
     if (fdt_parse_qemu_fw_cfg_mmio(dtb_ptr, &fw_base) != 0 || fw_base == 0) {
+        /*
+         * QEMU virt default for fw_cfg-mmio. Some environments don't provide a DTB pointer
+         * (x0==0) and we may be using an embedded DTB; keep a fixed-address fallback so
+         * ramfb can still be brought up.
+         */
+        fw_base = 0x09020000ull;
+    }
+
+    if (fw_base == 0) {
         g_fb_last_error = FB_ERR_NO_FWCFG_NODE;
         return -1;
     }

@@ -19,6 +19,7 @@ Streaming Commands:
   e1000probe      - Probe the Intel e1000 NIC (read-only MMIO sanity check).
   error           - Display system error statistics and status.
   fatfix          - Scan and repair FAT32 entries incorrectly marked as directories.
+  gfxdemo         - Draw a simple gfx test pattern.
   lsram           - List files in the RAM disk (FAT32) with directory tree.
   memory_stats    - Show predictive memory statistics
   mmap            - Memory map a file for zero-copy access

@@ -3,6 +3,7 @@
 #include <misc/types.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <utilities/shell/shell_state.h>
 
 void ls(string input);
 void cat(string ch);
@@ -19,7 +20,6 @@ int check_filesystem_integrity(uint8_t disk);
 void copy_cmd(string ch);
 void move_cmd(string ch);
 extern void* fat32_disk_img;
-extern char shell_current_path[128];
 void cd(string input);
 void makedir(string ch);
 void deldir(string ch);

@@ -9,6 +9,9 @@
 #include <drivers/aarch64/virtio_blk.h>
 #include <utilities/aarch64/heap.h>
 
+#include <graphics/gfx.h>
+#include <shell.h>
+
 #include <ata.h>
 
 /* Full-mode bring-up entry: keeps the existing AArch64 interrupt/timer/SMP code
@@ -22,9 +25,7 @@ void uart_pl011_init_115200(void);
 void uart_pl011_write(const char* s);
 void uart_pl011_write_hex64(uint64 v);
 
-void aarch64_bringup_shell_set_meminfo(uint64 ram_base, uint64 ram_size);
 void aarch64_shell_set_meminfo(uint64 ram_base, uint64 ram_size);
-void aarch64_bringup_shell_run(void);
 
 static void fb_write_hex64(uint64 v) {
     static const char* hex = "0123456789ABCDEF";
@@ -75,8 +76,32 @@ void kernel_main(uint64 dtb_ptr) {
     }
 #endif
 
+    uart_pl011_write("DTB @ ");
+    uart_pl011_write_hex64(dtb_ptr);
+    uart_pl011_write("\n");
+
+#if defined(AARCH64_PLATFORM_QEMU_VIRT)
+    uint64 fwcfg_base_early = 0;
+    if (fdt_parse_qemu_fw_cfg_mmio(dtb_ptr, &fwcfg_base_early) == 0) {
+        uart_pl011_write("FW_CFG @ ");
+        uart_pl011_write_hex64(fwcfg_base_early);
+        uart_pl011_write("\n");
+    } else {
+        uart_pl011_write("FW_CFG not found in DTB\n");
+    }
+#endif
+
     if (fb_simple_init(dtb_ptr) == 0) {
+        uart_pl011_write("FB init ok\n");
         fb_simple_write("EYN-OS AArch64 full bring-up\n");
+        fb_simple_flush();
+
+        /* Enable the arch-neutral gfx facade for the interactive shell. */
+        gfx_init_default();
+    } else {
+        uart_pl011_write("FB init failed, code ");
+        uart_pl011_write_hex64((uint64)fb_simple_last_error());
+        uart_pl011_write("\n");
     }
 
     /* Optional: virtio-input keyboard (for QEMU GUI window typing). */
@@ -115,14 +140,11 @@ void kernel_main(uint64 dtb_ptr) {
         }
     }
 
-    uart_pl011_write("DTB @ ");
-    uart_pl011_write_hex64(dtb_ptr);
-    uart_pl011_write("\n");
-
     if (fb_simple_ready()) {
         fb_simple_write("DTB @ ");
         fb_write_hex64(dtb_ptr);
         fb_simple_putc('\n');
+        fb_simple_flush();
     }
 
 #if defined(AARCH64_PLATFORM_QEMU_VIRT)
@@ -146,7 +168,6 @@ void kernel_main(uint64 dtb_ptr) {
         /* Enable dynamic allocations for future subsystem porting. */
         aarch64_heap_init(ram_base, ram_size);
 
-        aarch64_bringup_shell_set_meminfo(ram_base, ram_size);
         aarch64_shell_set_meminfo(ram_base, ram_size);
     } else {
         uart_pl011_write("FDT parse failed (memory)\n");
@@ -183,7 +204,8 @@ void kernel_main(uint64 dtb_ptr) {
     aarch64_smp_boot(dtb_ptr);
     arch_enable_interrupts();
 
-    aarch64_bringup_shell_run();
+    /* Drop into the shared shell core. */
+    launch_shell(0);
 
     /* If shell ever returns, halt. */
     for (;;) asm volatile("wfi" ::: "memory");

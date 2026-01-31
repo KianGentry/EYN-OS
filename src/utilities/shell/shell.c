@@ -1,24 +1,35 @@
 #include <misc/types.h>
+#include <misc/printf.h>
 #include <string.h>
-#include <system.h>
 #include <shell.h>
 #include <util.h>
-#include <kb.h>
 #include <math.h>
-#include <multiboot.h>
 #include <utilities/shell/shell_command_info.h>
 #include <utilities/shell/alias.h>
 #include <utilities/shell/pipeline.h>
 #include <utilities/shell/fs_commands.h>
 #include <utilities/shell/run_command.h>
 #include <utilities/shell/shell_commands.h>
+#include <utilities/shell/shell_state.h>
 #include <utilities/assemble.h>
 #include <fs/vfs.h>
 #include <cpu/user_elf.h>
-#include <vga.h>
-#include <fat32.h>
+#include <graphics/gfx.h>
+#include <ata.h>
+
+#if !defined(__aarch64__)
+#include <system.h>
+#include <multiboot.h>
+#endif
 #define COMMAND_HASH_SIZE 256
-#define SHELL_CMD_PTR_MIN 0x1000u
+
+#if defined(__aarch64__)
+typedef uint64 shell_uptr_t;
+#define SHELL_CMD_PTR_MIN ((shell_uptr_t)0x1000ull)
+#else
+typedef uint32 shell_uptr_t;
+#define SHELL_CMD_PTR_MIN ((shell_uptr_t)0x1000u)
+#endif
 typedef struct {
     const char* name;                 // command name key
     shell_cmd_handler_t handler;      // command handler value
@@ -31,8 +42,6 @@ void __stack_chk_fail_local() {
     return;
 }
 
-uint8_t g_current_drive = 0;
-
 // get current physical drive from logical drive
 uint8_t get_current_physical_drive(void) {
     return g_current_drive;  // g_current_drive is now physical drive
@@ -43,8 +52,6 @@ uint8_t get_current_logical_drive(void) {
     return ata_physical_to_logical(g_current_drive);
 }
 
-// Add a global variable for the current directory path (for now, always root)
-char shell_current_path[128] = "/";
 
 // Command execution safety
 static volatile int command_execution_errors = 0;
@@ -182,6 +189,11 @@ static int find_uelf_recursive(uint8 drive, const char* dir, const char* target_
 }
 
 static int try_run_unknown_as_uelf(const char* input) {
+#ifdef __aarch64__
+    // User ELF execution is currently an i386 feature; keep AArch64 shell portable.
+    (void)input;
+    return 0;
+#endif
     if (!input) return 0;
 
     // Tokenize: cmd + args
@@ -284,7 +296,7 @@ void read_image_cmd(string arg);
 
 // Wrapper functions to match existing function names
 void ls_cmd(string arg) { ls(arg); }
-void clear_cmd(string arg) { clearScreen(); }
+void clear_cmd(string arg) { (void)arg; gfx_clear(); }
 void echo_cmd(string arg) { echo(arg); }
 void ver_cmd(string arg) { ver(); }
 void calc_cmd(string arg) { calc(arg); }
@@ -346,10 +358,10 @@ static void init_command_hash_table() {
     }
     for (size_t i = 0; i < num_commands; i++) {
         const shell_command_info_t* cmd = &__start_shellcmds[i];
-        if (cmd->name == NULL || cmd->handler == NULL) {
+            if (cmd->name == NULL || cmd->handler == NULL) {
             continue;
         }
-        if ((uint32)cmd->name < SHELL_CMD_PTR_MIN || (uint32)cmd->handler < SHELL_CMD_PTR_MIN) {
+            if ((shell_uptr_t)cmd->name < SHELL_CMD_PTR_MIN || (shell_uptr_t)cmd->handler < SHELL_CMD_PTR_MIN) {
             continue;
         }
         uint32_t hash = command_hash(cmd->name);
@@ -370,7 +382,7 @@ shell_cmd_handler_t find_command(const char* name) {
     // Initialize hash table on first use
     init_command_hash_table();
     if (!name || !*name) return NULL;
-    if ((uint32)name < SHELL_CMD_PTR_MIN) return NULL;
+    if ((shell_uptr_t)name < SHELL_CMD_PTR_MIN) return NULL;
     
     // If hashing is disabled due to table saturation, use linear search
     if (g_command_hash_disabled) {
@@ -381,7 +393,7 @@ linear_search:
             if (cmd->name == NULL || cmd->handler == NULL) {
                 continue;
             }
-            if ((uint32)cmd->name < SHELL_CMD_PTR_MIN || (uint32)cmd->handler < SHELL_CMD_PTR_MIN) {
+            if ((shell_uptr_t)cmd->name < SHELL_CMD_PTR_MIN || (shell_uptr_t)cmd->handler < SHELL_CMD_PTR_MIN) {
                 continue;
             }
             if (strcmp(cmd->name, name) == 0) {
@@ -399,7 +411,7 @@ linear_search:
             // Empty slot: not found
             return NULL;
         }
-        if ((uint32)slot_name < SHELL_CMD_PTR_MIN || (uint32)g_command_hash_table[hash].handler < SHELL_CMD_PTR_MIN) {
+        if ((shell_uptr_t)slot_name < SHELL_CMD_PTR_MIN || (shell_uptr_t)g_command_hash_table[hash].handler < SHELL_CMD_PTR_MIN) {
             // Hash table contains invalid pointers; fall back to linear search.
             g_command_hash_disabled = 1;
             goto linear_search;
@@ -418,7 +430,7 @@ linear_search:
         if (cmd->name == NULL || cmd->handler == NULL) {
             continue;
         }
-        if ((uint32)cmd->name < SHELL_CMD_PTR_MIN || (uint32)cmd->handler < SHELL_CMD_PTR_MIN) {
+        if ((shell_uptr_t)cmd->name < SHELL_CMD_PTR_MIN || (shell_uptr_t)cmd->handler < SHELL_CMD_PTR_MIN) {
             continue;
         }
         if (strcmp(cmd->name, name) == 0) {
@@ -495,7 +507,11 @@ void handler_cmd(string arg) {
 void handler_exit(string arg) {
     printf("%cGoodbye!\n", 255, 140, 0); // Orange
     // For now, just exit the shell
+#if defined(__aarch64__)
+    for (;;) asm volatile("wfi" ::: "memory");
+#else
     asm("hlt");
+#endif
 }
 
 void handler_assemble(string arg) {
@@ -650,10 +666,14 @@ void launch_shell(int n) {
     
     while (1) {
         // Note shell loop progress for the watchdog
+    #if !defined(__aarch64__)
         watchdog_kick("shell-loop");
+    #endif
+#if !defined(__aarch64__)
         if (shell_log_active) {
             printf("%c[LOG] ", 0, 255, 0);
         }
+#endif
         // Print prompt: <drive>:<path>! 
         // convert physical drive to logical drive for display
         uint8 logical_drive = ata_physical_to_logical(g_current_drive);
@@ -662,6 +682,7 @@ void launch_shell(int n) {
         printf("%c! ", 255, 255, 0); // yellow for !
         string ch = readStr_with_history(&g_command_history);
         
+#if !defined(__aarch64__)
         // Initialize dynamic log buffer if logging is active
         if (shell_log_active && shell_log_buf == NULL) {
             init_dynamic_log_buffer();
@@ -680,24 +701,24 @@ void launch_shell(int n) {
                 if (shell_log_pos == 0 || shell_log_buf[shell_log_pos - 1] == '\n') {
                     shell_log_current_line_start = shell_log_pos;
                 }
-                
+
                 shell_log_buf[shell_log_pos++] = logline[k];
-                
+
                 // If we just added a newline, record the line start
                 if (logline[k] == '\n') {
                     shell_log_line_starts[shell_log_line_count] = shell_log_current_line_start;
                     shell_log_line_count++;
-                    
+
                     // Keep only last 1000 lines
                     if (shell_log_line_count > 1000) {
                         // Move buffer content to start, keeping only last 1000 lines
                         int first_line_start = shell_log_line_starts[1];
                         int bytes_to_keep = shell_log_pos - first_line_start;
-                        
+
                         if (bytes_to_keep > 0 && first_line_start < shell_log_pos) {
                             memmove(shell_log_buf, shell_log_buf + first_line_start, bytes_to_keep);
                             shell_log_pos = bytes_to_keep;
-                            
+
                             // Adjust line start positions
                             for (int j = 0; j < 1000; j++) {
                                 shell_log_line_starts[j] = shell_log_line_starts[j + 1] - first_line_start;
@@ -710,6 +731,7 @@ void launch_shell(int n) {
             shell_log_buf[shell_log_pos] = '\0';
             shell_log_flush();
         }
+#endif
         printf("\n");
 
         // Check if this is a pipeline command
@@ -721,13 +743,18 @@ void launch_shell(int n) {
                 if (ch && strlen(ch) > 0) {
                     add_to_history(&g_command_history, ch);
                 }
+#if !defined(__aarch64__)
                 watchdog_kick("exec-pipeline");
+#endif
                 execute_pipeline(pipeline);
                 free_pipeline(pipeline);
             } else {
                 printf("Failed to parse pipeline command\n");
             }
         } else {
+            // Legacy single-command redirection parsing is i386-only today.
+            // On AArch64, use the pipeline parser (which already handles '>' / '|').
+#if !defined(__aarch64__)
             // Check if this is a sub-command that might contain operators like '>'
             int is_subcommand = 0;
             if (strncmp(ch, "search_size", 11) == 0 || 
@@ -756,17 +783,21 @@ void launch_shell(int n) {
                 else
                     printf("%cFailed to write file '%s' (error code: %d).\n", 255, 0, 0, filename, res);
                 stop_shell_redirect();
-            } else {
+            } else
+#endif
+            {
                 // Add command to history (only if not empty)
                 if (ch && strlen(ch) > 0) {
                     add_to_history(&g_command_history, ch);
                 }
+#if !defined(__aarch64__)
                 watchdog_kick("exec-line");
+#endif
                 handle_shell_command(ch);
             }
         }
 
-        if (cmdEql(ch, "exit"))
+        if (ch && strcmp(ch, "exit") == 0)
             break;
     }
 }

@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2026-01-30 14:58:27
+This document is auto-generated from the source code. Last updated: 2026-01-31 09:33:41
 
-**Total Commands:** 65
+**Total Commands:** 66
 
 ## Table of Contents
 
@@ -259,6 +259,24 @@ Usage: fatfix [path]
 **Example:**
 ```bash
 fatfix /
+```
+
+---
+
+### gfxdemo
+
+**Handler:** `cmd_gfxdemo`
+
+**Type:** CMD_DIAGNOSTIC
+
+**File:** `gfx_cmd.c`
+
+**Description:**
+Draw a simple gfx test pattern.
+
+**Example:**
+```bash
+gfxdemo
 ```
 
 ---
@@ -1267,7 +1285,7 @@ run user_hello.uelf
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 34 |
+| Streaming Commands | 35 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 9 |
