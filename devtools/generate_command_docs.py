@@ -15,7 +15,7 @@ class CommandInfo:
 
 def parse_register_macro(line: str) -> Tuple[str, str, str, str, str, str]:
     # Pattern to match the macro
-    pattern = r'REGISTER_SHELL_COMMAND\s*\(\s*(\w+)\s*,\s*"([^"]+)"\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)'
+    pattern = r'(?:REGISTER_SHELL_COMMAND|EYNOS_REGISTER_SHELL_COMMAND)\s*\(\s*(\w+)\s*,\s*"([^"]+)"\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)'
     match = re.search(pattern, line)
     
     if match:
@@ -63,8 +63,31 @@ def scan_source_directory(src_dir: str) -> List[CommandInfo]:
                 file_path = os.path.join(root, file)
                 commands = find_commands_in_file(file_path)
                 all_commands.extend(commands)
+
+    # Deduplicate by command name.
+    # The portable registry TU intentionally re-registers a subset of commands
+    # for AArch64-full; the canonical documentation should come from the
+    # command's implementation module, not the portable registry.
+    prefer_avoid_files = {"command_registry_portable.c"}
+    by_name: Dict[str, CommandInfo] = {}
+    for cmd in all_commands:
+        existing = by_name.get(cmd.name)
+        if not existing:
+            by_name[cmd.name] = cmd
+            continue
+
+        existing_is_avoid = existing.file in prefer_avoid_files
+        cmd_is_avoid = cmd.file in prefer_avoid_files
+
+        # Prefer non-portable-registry definition when there is a conflict.
+        if existing_is_avoid and not cmd_is_avoid:
+            by_name[cmd.name] = cmd
+            continue
+
+        # Otherwise keep the existing one.
+        # (If both are non-avoid or both are avoid, the first seen wins.)
     
-    return all_commands
+    return list(by_name.values())
 
 def categorize_commands(commands: List[CommandInfo]) -> Dict[str, List[CommandInfo]]:
     # Categorize commands by type

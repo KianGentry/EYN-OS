@@ -20,6 +20,7 @@
 #if !defined(__aarch64__)
 #include <system.h>
 #include <multiboot.h>
+#include <vga.h>
 #endif
 #define COMMAND_HASH_SIZE 256
 

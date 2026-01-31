@@ -93,6 +93,30 @@ void kernel_main(uint64 dtb_ptr) {
 
     if (fb_simple_init(dtb_ptr) == 0) {
         uart_pl011_write("FB init ok\n");
+
+        uint64 fb_base = 0;
+        uint32 fb_w = 0, fb_h = 0, fb_stride = 0, fb_bpp = 0;
+        const char* fb_fmt = 0;
+        if (fb_simple_get_info(&fb_base, &fb_w, &fb_h, &fb_stride, &fb_bpp, &fb_fmt) == 0) {
+            uart_pl011_write("FB base ");
+            uart_pl011_write_hex64(fb_base);
+            uart_pl011_write(" w ");
+            uart_pl011_write_hex64((uint64)fb_w);
+            uart_pl011_write(" h ");
+            uart_pl011_write_hex64((uint64)fb_h);
+            uart_pl011_write(" stride ");
+            uart_pl011_write_hex64((uint64)fb_stride);
+            uart_pl011_write(" bpp ");
+            uart_pl011_write_hex64((uint64)fb_bpp);
+            uart_pl011_write(" fmt ");
+            uart_pl011_write(fb_fmt ? fb_fmt : "(null)");
+            uart_pl011_write("\n");
+        } else {
+            uart_pl011_write("FB info query failed\n");
+        }
+
+        /* Make the GUI window visibly change immediately (helps debug ramfb refresh). */
+        fb_simple_clear_rgb(255, 0, 255);
         fb_simple_write("EYN-OS AArch64 full bring-up\n");
         fb_simple_flush();
 

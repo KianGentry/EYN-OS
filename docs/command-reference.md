@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2026-01-31 09:33:41
+This document is auto-generated from the source code. Last updated: 2026-01-31 14:46:23
 
-**Total Commands:** 66
+**Total Commands:** 67
 
 ## Table of Contents
 
@@ -146,6 +146,25 @@ Usage: assertfail yes
 **Example:**
 ```bash
 assertfail yes
+```
+
+---
+
+### cat
+
+**Handler:** `cat_cmd`
+
+**Type:** CMD_STREAMING
+
+**File:** `fs_commands.c`
+
+**Description:**
+Print a text file.
+Usage: cat <filename>
+
+**Example:**
+```bash
+cat test.txt
 ```
 
 ---
@@ -1285,7 +1304,7 @@ run user_hello.uelf
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 35 |
+| Streaming Commands | 36 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 9 |

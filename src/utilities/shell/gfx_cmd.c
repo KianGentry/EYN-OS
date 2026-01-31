@@ -4,7 +4,13 @@
 #include <hal/console.h>
 #include <utilities/shell/shell_command_info.h>
 
-static void cmd_gfxdemo(string arg) {
+#if defined(EYNOS_DISABLE_SHELL_COMMAND_REGISTRY)
+#define EYNOS_REGISTER_SHELL_COMMAND(...)
+#else
+#define EYNOS_REGISTER_SHELL_COMMAND(...) REGISTER_SHELL_COMMAND(__VA_ARGS__)
+#endif
+
+void cmd_gfxdemo(string arg) {
     (void)arg;
 
     gfx_init_default();
@@ -39,4 +45,4 @@ static void cmd_gfxdemo(string arg) {
     gfx_flush();
 }
 
-REGISTER_SHELL_COMMAND(gfxdemo, "gfxdemo", cmd_gfxdemo, CMD_DIAGNOSTIC, "Draw a simple gfx test pattern.", "gfxdemo");
+EYNOS_REGISTER_SHELL_COMMAND(gfxdemo, "gfxdemo", cmd_gfxdemo, CMD_DIAGNOSTIC, "Draw a simple gfx test pattern.", "gfxdemo");

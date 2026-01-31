@@ -254,6 +254,137 @@ int atoi(const char* s) {
     return v * sign;
 }
 
+char* int_to_string(int n)
+{
+    static char buffer[32];
+    int i = 0;
+    int is_negative = 0;
+
+    if (n == 0) {
+        buffer[0] = '0';
+        buffer[1] = '\0';
+        return buffer;
+    }
+
+    if (n < 0) {
+        is_negative = 1;
+        n = -n;
+    }
+
+    while (n > 0 && i < (int)(sizeof(buffer) - 1)) {
+        buffer[i++] = (char)('0' + (n % 10));
+        n /= 10;
+    }
+
+    if (is_negative && i < (int)(sizeof(buffer) - 1)) {
+        buffer[i++] = '-';
+    }
+
+    // Reverse in-place
+    for (int j = 0; j < i / 2; ++j) {
+        char tmp = buffer[j];
+        buffer[j] = buffer[i - 1 - j];
+        buffer[i - 1 - j] = tmp;
+    }
+
+    buffer[i] = '\0';
+    return buffer;
+}
+
+int str_to_int(const char* str)
+{
+    if (!str) return 0;
+    return atoi(str);
+}
+
+uint32 str_to_uint(const char* s)
+{
+    if (!s) return 0;
+
+    uint32 n = 0;
+    while (*s >= '0' && *s <= '9') {
+        n = n * 10 + (uint32)(*s - '0');
+        ++s;
+    }
+    return n;
+}
+
+uint8 strEql(string ch1, string ch2)
+{
+    if (!ch1 || !ch2) return 0;
+    return (uint8)(strcmp(ch1, ch2) == 0);
+}
+
+uint8 cmdEql(string ch1, string ch2)
+{
+    if (!ch1 || !ch2) return 0;
+    return (uint8)(strcmp(ch1, ch2) == 0);
+}
+
+// Parses redirection: e.g. "echo hi > file.txt" -> cmd="echo hi", filename="file.txt"
+int parse_redirection(const char* input, char* cmd, char* filename)
+{
+    if (!input || !cmd || !filename) return 0;
+
+    int i = 0, j = 0, k = 0;
+    int found = 0;
+
+    while (input[i] && j < 255) {
+        if (input[i] == '>') {
+            found = 1;
+            break;
+        }
+        cmd[j++] = input[i++];
+    }
+    cmd[j] = '\0';
+    if (!found) return 0;
+
+    i++; // skip '>'
+    while (input[i] == ' ') i++;
+    while (input[i] && input[i] != ' ' && k < 63) filename[k++] = input[i++];
+    filename[k] = '\0';
+    return 1;
+}
+
+// Input validation and buffer overflow protection
+static int input_validation_errors = 0;
+
+static int validate_string_ascii(const char* str, int max_length)
+{
+    if (!str) return 0;
+
+    for (int i = 0; i < max_length; ++i) {
+        if (str[i] == '\0') break;
+        if ((unsigned char)str[i] < 32 || (unsigned char)str[i] > 126) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+int validate_file_path(const char* path)
+{
+    if (!path) return 0;
+
+    // Disallow traversal and odd separators
+    if (strstr(path, "..") || strstr(path, "//") || strstr(path, "\\")) {
+        return 0;
+    }
+
+    // Disallow absolute paths (AArch64-full uses VFS and its own CWD)
+    if (path[0] == '/') {
+        return 0;
+    }
+
+    return validate_string_ascii(path, 256);
+}
+
+int get_input_validation_errors(void)
+{
+    return input_validation_errors;
+}
+
 /*
  * The remaining EYN-OS-specific helpers in include/utilities/string.h are not
  * needed by the current AArch64 bring-up targets. When we start porting the full

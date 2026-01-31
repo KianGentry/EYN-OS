@@ -13,6 +13,7 @@ Essential Commands:
 Streaming Commands:
 ------------------
   assertfail      - Trigger an assertion failure (ASSERT).
+  cat             - Print a text file.
   catram          - Display contents of a file from RAM disk (FAT32).
   clearbg         - Clear background image for the focused tile.
   e1000           - Intel e1000 utilities (probe + bring-up helpers).
