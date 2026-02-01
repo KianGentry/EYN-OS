@@ -4,7 +4,8 @@
 #include <stdint.h>
 
 #include <hal/console.h>
-#include <drivers/vga.h>
+
+#include <utilities/shell/shell_redirect.h>
 
 extern int shell_redirect_active;
 

@@ -6,10 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-// Shell redirection buffer size (lowered for small-memory systems)
-// Reducing this value reduces static RAM used by the redirect buffers
-// and is safe because code already bounds copy operations.
-#define SHELL_REDIRECT_BUF_SIZE 1024
+#include <utilities/shell/shell_redirect.h>
 
 // Misc
 void render_markdown(const char* content);
@@ -77,16 +74,11 @@ void vga_clear_window(int index);
 void vga_window_set_title(int index, const char* title);
 
 // Shell redirection functions
-void start_shell_redirect(void);
-void stop_shell_redirect(void);
 // Optional: while shell redirection is active, also stream output to a vterm.
 // This is used to keep the GUI responsive while a ring3 task is running and
 // commands are executed from the IRQ-driven input pump.
 void vga_set_shell_redirect_stream_vterm(int vterm_idx);
 void vga_clear_shell_redirect_stream_vterm(void);
-extern char shell_redirect_buf[SHELL_REDIRECT_BUF_SIZE];
-// Current write position in shell_redirect_buf while redirect is active.
-extern int shell_redirect_pos;
 // Color used for the last redirected output (set by printf while redirect active)
 extern int shell_redirect_color_r;
 extern int shell_redirect_color_g;

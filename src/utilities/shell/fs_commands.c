@@ -1003,46 +1003,7 @@ void writeram(string ch)
     }
 }
 
-#if !defined(__aarch64__)
-int write_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
-    int written = vfs_write_file(disk, filename, buf, (uint32)len);
-    if (written != len) {
-        printf("Failed to write file data: expected %d, got %d\n", len, written);
-        return -1;
-    }
-    printf("Successfully wrote %d bytes to %s\n", len, filename);
-    return 0;
-}
 
-// Append output to file using EYNFS append mode
-int append_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
-    // Read existing contents if any
-    vfs_stat_t st;
-    int existing_len = 0;
-    char* existing = NULL;
-    if (vfs_stat(disk, filename, &st) == 0 && st.type == VFS_NODE_FILE && st.size > 0) {
-        existing = (char*)malloc(st.size);
-        if (!existing) return -1;
-        int n = vfs_read_file(disk, filename, existing, (int)st.size);
-        if (n < 0) { free(existing); return -1; }
-        existing_len = n;
-    }
-    // Concatenate existing + new
-    char* combined = (char*)malloc(existing_len + len);
-    if (!combined) { if (existing) free(existing); return -1; }
-    if (existing_len) memcpy(combined, existing, existing_len);
-    memcpy(combined + existing_len, buf, len);
-    int written = vfs_write_file(disk, filename, combined, (uint32)(existing_len + len));
-    free(combined);
-    if (existing) free(existing);
-    if (written != existing_len + len) {
-        printf("Failed to append to %s\n", filename);
-        return -1;
-    }
-    printf("Successfully appended %d bytes to %s\n", len, filename);
-    return 0;
-}
-#endif
 
 // Filesystem integrity check
 int check_filesystem_integrity(uint8_t disk) {

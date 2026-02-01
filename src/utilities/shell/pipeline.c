@@ -4,10 +4,11 @@
 #include <shell_command_info.h>
 #include <fs_commands.h>
 #include <util.h>
-#include <vga.h>
 #include <string.h>
-#include <eynfs.h>
+#include <fs/vfs.h>
+#include <utilities/shell/shell_redirect.h>
 #include <misc/types.h>
+#include <misc/printf.h>
 #include <utilities/shell/alias.h>
 
 // Global variables
@@ -460,30 +461,29 @@ void close_fd(int fd) {
 // Read file content for input redirection
 char* read_file_for_input_redirection(const char* filename) {
     if (!filename) return NULL;
-    
-    // Try to read the file using the filesystem
-    int fd = open(filename, EYNFS_READ);
-    if (fd == -1) {
+
+    char abspath[128];
+    resolve_path(filename, shell_current_path, abspath, sizeof(abspath));
+
+    vfs_stat_t st;
+    if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) {
         printf("Error: Cannot open file '%s' for input redirection.\n", filename);
         return NULL;
     }
-    
-    // Read file content
+
+    // Read file content (bounded). This is a shell feature; keep memory small.
     char* buffer = malloc(8192); // 8KB buffer
     if (!buffer) {
-        close(fd);
         return NULL;
     }
-    
-    int bytes_read = read(fd, buffer, 8191);
-    close(fd);
-    
+
+    int bytes_read = vfs_read_file(g_current_drive, abspath, buffer, 8191);
     if (bytes_read < 0) {
         free(buffer);
         printf("Error: Cannot read file '%s' for input redirection.\n", filename);
         return NULL;
     }
-    
+
     buffer[bytes_read] = '\0';
     return buffer;
 }
