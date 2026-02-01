@@ -16,8 +16,12 @@ int shell_log_current_line_start = 0;
 int shell_log_active = 0;
 
 static int g_shell_log_in_flush = 0;
+static int g_shell_log_write_failed = 0;
 
-void shell_log_enable(void) { shell_log_active = 1; }
+void shell_log_enable(void) {
+    g_shell_log_write_failed = 0;
+    shell_log_active = 1;
+}
 void shell_log_disable(void) { shell_log_active = 0; }
 
 void init_dynamic_log_buffer(void) {
@@ -55,6 +59,10 @@ static void shell_log_warn(const char* msg) {
 }
 
 void shell_log_flush(void) {
+    if (g_shell_log_write_failed) {
+        // Persistent failure (e.g. read-only disk). Avoid spamming warnings.
+        return;
+    }
     if (g_shell_log_in_flush) return;
     g_shell_log_in_flush = 1;
 
@@ -114,7 +122,10 @@ void shell_log_flush(void) {
     }
 
     if (vfs_write_file(0, path, tmp, pos) < 0) {
-        shell_log_warn("Failed to write log file");
+        shell_log_warn("Failed to write /log (disk may be read-only)");
+        // Disable logging to prevent repeated warnings on every newline.
+        g_shell_log_write_failed = 1;
+        shell_log_active = 0;
     }
 
     free(tmp);
