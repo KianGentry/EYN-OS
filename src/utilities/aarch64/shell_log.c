@@ -1,30 +1,38 @@
-#include <misc/types.h>
+#include <utilities/shell/shell_log.h>
 
 /*
- * Minimal shell logging hooks for AArch64-full.
+ * AArch64 bring-up logging stub.
  *
- * The i386 build wires shell logging into the VGA printf implementation.
- * On AArch64-full we currently keep these as lightweight stubs so that
- * portable shell commands (e.g. `log on|off`) can be enabled without
- * pulling in the i386 VGA driver.
+ * The minimal AArch64 target intentionally avoids pulling in the VFS stack.
+ * However, the shared AArch64 printf implementation may reference the
+ * shell logging API. This file satisfies those symbols without adding heavy
+ * dependencies.
  *
- * When we later port the full logging pipeline, we can implement buffering
- * and persistence here (or move the shared implementation out of vga.c).
+ * The AArch64-full target links the real implementation from
+ * src/utilities/shell/shell_log.c.
  */
 
+char* shell_log_buf = 0;
+int shell_log_buf_size = 0;
+int shell_log_pos = 0;
+int shell_log_line_count = 0;
+int shell_log_line_starts[1001];
+int shell_log_current_line_start = 0;
 int shell_log_active = 0;
 
-void shell_log_enable(void)
-{
-    shell_log_active = 1;
+void shell_log_enable(void) { shell_log_active = 1; }
+void shell_log_disable(void) { shell_log_active = 0; }
+
+void init_dynamic_log_buffer(void) {
+    // no-op for bring-up
 }
 
-void shell_log_disable(void)
-{
-    shell_log_active = 0;
+void shell_log_append(const char* data, int len) {
+    (void)data;
+    (void)len;
+    // no-op for bring-up
 }
 
-void shell_log_flush(void)
-{
-    // no-op on AArch64 for now
+void shell_log_flush(void) {
+    // no-op for bring-up
 }

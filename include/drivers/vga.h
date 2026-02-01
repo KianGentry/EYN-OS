@@ -7,16 +7,13 @@
 #include <stddef.h>
 
 #include <utilities/shell/shell_redirect.h>
+#include <utilities/shell/shell_log.h>
 
 // Misc
 void render_markdown(const char* content);
 void vga_set_color(int nr, int ng, int nb);
 
 // Function prototypes
-void init_dynamic_log_buffer(void);
-void shell_log_enable(void);
-void shell_log_disable(void);
-void shell_log_flush(void);
 
 // Drawing functions
 void drawRect(int x, int y, int w, int h, int r, int g, int b);
@@ -97,15 +94,7 @@ extern int shell_redirect_icon_count;
 // Register an icon for the next bytes to be emitted into shell_redirect_buf.
 void shell_register_redirect_icon(const char* ext);
 
-// Shell logging variables
-extern int shell_log_active;
-extern char* shell_log_buf;
-extern int shell_log_buf_size;
-extern int shell_log_pos;
-extern int shell_log_line_count;
-extern int shell_log_line_starts[1001];
-extern int shell_log_current_line_start;
-#define LOG_BUF_SIZE 65536
+// Shell logging variables (declared in shell_log.h)
 
 // Double buffer integration
 void vga_swap_buffers(void);

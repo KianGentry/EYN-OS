@@ -6,6 +6,7 @@
 #include <hal/console.h>
 
 #include <utilities/shell/shell_redirect.h>
+#include <utilities/shell/shell_log.h>
 
 extern int shell_redirect_active;
 
@@ -229,7 +230,12 @@ void printf(const char* format, ...) {
      * formatter for now while keeping stack usage small.
      */
     char buf[512];
-    (void)vsnprintf(buf, sizeof(buf), format, ap);
+    int n = vsnprintf(buf, sizeof(buf), format, ap);
+
+    // Match i386 behavior: don't log during shell redirect/capture.
+    if (!shell_redirect_active && shell_log_active && n > 0) {
+        shell_log_append(buf, n);
+    }
     console_write(buf);
 
     va_end(ap);

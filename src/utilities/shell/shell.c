@@ -17,6 +17,8 @@
 #include <graphics/gfx.h>
 #include <ata.h>
 
+#include <utilities/shell/shell_log.h>
+
 #if !defined(__aarch64__)
 #include <system.h>
 #include <multiboot.h>
@@ -670,11 +672,9 @@ void launch_shell(int n) {
     #if !defined(__aarch64__)
         watchdog_kick("shell-loop");
     #endif
-#if !defined(__aarch64__)
         if (shell_log_active) {
             printf("%c[LOG] ", 0, 255, 0);
         }
-#endif
         // Print prompt: <drive>:<path>! 
         // convert physical drive to logical drive for display
         uint8 logical_drive = ata_physical_to_logical(g_current_drive);
@@ -683,11 +683,6 @@ void launch_shell(int n) {
         printf("%c! ", 255, 255, 0); // yellow for !
         string ch = readStr_with_history(&g_command_history);
         
-#if !defined(__aarch64__)
-        // Initialize dynamic log buffer if logging is active
-        if (shell_log_active && shell_log_buf == NULL) {
-            init_dynamic_log_buffer();
-        }
         if (shell_log_active) {
             char logline[256];
             int pos = 0;
@@ -696,43 +691,8 @@ void launch_shell(int n) {
                 logline[pos++] = ch[i];
             }
             logline[pos++] = '\n';
-            logline[pos] = '\0';
-            for (int k = 0; logline[k] && shell_log_pos < LOG_BUF_SIZE - 1; k++) {
-                // Check if we need to start a new line
-                if (shell_log_pos == 0 || shell_log_buf[shell_log_pos - 1] == '\n') {
-                    shell_log_current_line_start = shell_log_pos;
-                }
-
-                shell_log_buf[shell_log_pos++] = logline[k];
-
-                // If we just added a newline, record the line start
-                if (logline[k] == '\n') {
-                    shell_log_line_starts[shell_log_line_count] = shell_log_current_line_start;
-                    shell_log_line_count++;
-
-                    // Keep only last 1000 lines
-                    if (shell_log_line_count > 1000) {
-                        // Move buffer content to start, keeping only last 1000 lines
-                        int first_line_start = shell_log_line_starts[1];
-                        int bytes_to_keep = shell_log_pos - first_line_start;
-
-                        if (bytes_to_keep > 0 && first_line_start < shell_log_pos) {
-                            memmove(shell_log_buf, shell_log_buf + first_line_start, bytes_to_keep);
-                            shell_log_pos = bytes_to_keep;
-
-                            // Adjust line start positions
-                            for (int j = 0; j < 1000; j++) {
-                                shell_log_line_starts[j] = shell_log_line_starts[j + 1] - first_line_start;
-                            }
-                            shell_log_line_count = 1000;
-                        }
-                    }
-                }
-            }
-            shell_log_buf[shell_log_pos] = '\0';
-            shell_log_flush();
+            shell_log_append(logline, pos);
         }
-#endif
         printf("\n");
 
         // Check if this is a pipeline command
