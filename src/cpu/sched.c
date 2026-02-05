@@ -1,8 +1,8 @@
 #include <sched.h>
 #include <system.h>
-#include <irq.h>
 #include <watchdog.h>
 #include <arch.h>
+#include <hal/time.h>
 
 static volatile uint32 g_ticks = 0;
 static uint32 g_tick_hz = 100;
@@ -10,14 +10,15 @@ static uint32 g_timeslice_ticks = 5; // ~50ms at 100Hz
 static uint32 g_current_slice = 0;
 static volatile uint32 g_idle_hlt_count = 0; // counts ticks elapsed while idling (not raw HLTs)
 
-static void sched_irq0_handler(void) {
+static void sched_tick_irq_handler(void* user) {
+    (void)user;
     sched_tick();
 }
 
 void sched_init(void) {
     g_ticks = 0;
-    // register tick handler on IRQ0
-    register_interrupt_handler(0, sched_irq0_handler);
+    // Register tick handler via HAL so the timer IRQ identity stays backend-defined.
+    (void)hal_time_register_tick_handler(sched_tick_irq_handler, 0);
 }
 
 void sched_yield(void) {

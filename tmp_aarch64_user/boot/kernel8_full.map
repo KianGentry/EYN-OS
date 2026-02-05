@@ -338,17 +338,29 @@ Discarded input sections
  .bss           0x0000000000000000        0x0 obj/aarch64_gicv2.o
  .text.gicv2_init
                 0x0000000000000000       0x28 obj/aarch64_gicv2.o
- .eh_frame      0x0000000000000000       0x98 obj/aarch64_gicv2.o
+ .text.gicv2_disable_irq
+                0x0000000000000000       0x24 obj/aarch64_gicv2.o
+ .eh_frame      0x0000000000000000       0xb0 obj/aarch64_gicv2.o
  .text          0x0000000000000000        0x0 obj/aarch64_timer.o
  .data          0x0000000000000000        0x0 obj/aarch64_timer.o
  .bss           0x0000000000000000        0x0 obj/aarch64_timer.o
  .text.aarch64_timer_get_freq_hz
                 0x0000000000000000        0x8 obj/aarch64_timer.o
- .eh_frame      0x0000000000000000       0x50 obj/aarch64_timer.o
+ .text.aarch64_timer_get_tick_hz
+                0x0000000000000000       0x18 obj/aarch64_timer.o
+ .eh_frame      0x0000000000000000       0x68 obj/aarch64_timer.o
  .text          0x0000000000000000        0x0 obj/aarch64_irq.o
  .data          0x0000000000000000        0x0 obj/aarch64_irq.o
  .bss           0x0000000000000000        0x0 obj/aarch64_irq.o
- .eh_frame      0x0000000000000000       0x90 obj/aarch64_irq.o
+ .text.aarch64_irq_register_handler
+                0x0000000000000000       0x34 obj/aarch64_irq.o
+ .text.aarch64_irq_enable_id
+                0x0000000000000000       0x10 obj/aarch64_irq.o
+ .text.aarch64_irq_disable_id
+                0x0000000000000000       0x10 obj/aarch64_irq.o
+ .text.aarch64_irq_set_tick_handler
+                0x0000000000000000       0x14 obj/aarch64_irq.o
+ .eh_frame      0x0000000000000000       0xe0 obj/aarch64_irq.o
  .text          0x0000000000000000        0x0 obj/aarch64_timer_tick.o
  .data          0x0000000000000000        0x0 obj/aarch64_timer_tick.o
  .bss           0x0000000000000000        0x0 obj/aarch64_timer_tick.o
@@ -609,6 +621,34 @@ Discarded input sections
                 0x0000000000000000        0x4 obj/aarch64_util_globals.o
  .bss.g_user_task_active
                 0x0000000000000000        0x4 obj/aarch64_util_globals.o
+ .text          0x0000000000000000        0x0 obj/aarch64_hal_time.o
+ .data          0x0000000000000000        0x0 obj/aarch64_hal_time.o
+ .bss           0x0000000000000000        0x0 obj/aarch64_hal_time.o
+ .text.hal_time_ticks
+                0x0000000000000000       0x10 obj/aarch64_hal_time.o
+ .text.hal_time_tick_hz
+                0x0000000000000000        0x4 obj/aarch64_hal_time.o
+ .text.hal_sleep_us
+                0x0000000000000000       0x74 obj/aarch64_hal_time.o
+ .text.hal_time_register_tick_handler
+                0x0000000000000000       0x18 obj/aarch64_hal_time.o
+ .comment       0x0000000000000000       0x23 obj/aarch64_hal_time.o
+ .note.GNU-stack
+                0x0000000000000000        0x0 obj/aarch64_hal_time.o
+ .eh_frame      0x0000000000000000       0x88 obj/aarch64_hal_time.o
+ .text          0x0000000000000000        0x0 obj/aarch64_hal_irq.o
+ .data          0x0000000000000000        0x0 obj/aarch64_hal_irq.o
+ .bss           0x0000000000000000        0x0 obj/aarch64_hal_irq.o
+ .text.hal_irq_register
+                0x0000000000000000        0x4 obj/aarch64_hal_irq.o
+ .text.hal_irq_enable
+                0x0000000000000000        0x4 obj/aarch64_hal_irq.o
+ .text.hal_irq_disable
+                0x0000000000000000        0x4 obj/aarch64_hal_irq.o
+ .comment       0x0000000000000000       0x23 obj/aarch64_hal_irq.o
+ .note.GNU-stack
+                0x0000000000000000        0x0 obj/aarch64_hal_irq.o
+ .eh_frame      0x0000000000000000       0x50 obj/aarch64_hal_irq.o
  .note.gnu.property
                 0x0000000000000000        0x0 obj/aarch64_virt_dtb.o
 
@@ -622,7 +662,7 @@ Linker script and memory map
                 0x0000000040080000                . = 0x40080000
                 0x0000000040080000                __kernel_start = .
 
-.text           0x0000000040080000     0xf414
+.text           0x0000000040080000     0xf49c
  *(.text._start)
  .text._start   0x0000000040080000       0x90 obj/aarch64_start.o
                 0x0000000040080000                _start
@@ -858,755 +898,755 @@ Linker script and memory map
                 0x0000000040087060        0xc obj/aarch64_gicv2.o
                 0x0000000040087060                gicv2_eoi_irq
  .text.aarch64_timer_init_tick_hz
-                0x000000004008706c       0x3c obj/aarch64_timer.o
+                0x000000004008706c       0x44 obj/aarch64_timer.o
                 0x000000004008706c                aarch64_timer_init_tick_hz
  .text.aarch64_timer_rearm
-                0x00000000400870a8       0x34 obj/aarch64_timer.o
-                0x00000000400870a8                aarch64_timer_rearm
+                0x00000000400870b0       0x34 obj/aarch64_timer.o
+                0x00000000400870b0                aarch64_timer_rearm
  .text.aarch64_irq_cpu_init
-                0x00000000400870dc       0x38 obj/aarch64_irq.o
-                0x00000000400870dc                aarch64_irq_cpu_init
+                0x00000000400870e4       0x38 obj/aarch64_irq.o
+                0x00000000400870e4                aarch64_irq_cpu_init
  .text.aarch64_irq_init
-                0x0000000040087114       0x2c obj/aarch64_irq.o
-                0x0000000040087114                aarch64_irq_init
+                0x000000004008711c       0x64 obj/aarch64_irq.o
+                0x000000004008711c                aarch64_irq_init
  .text.aarch64_irq_dispatch
-                0x0000000040087140       0x98 obj/aarch64_irq.o
-                0x0000000040087140                aarch64_irq_dispatch
+                0x0000000040087180       0xe0 obj/aarch64_irq.o
+                0x0000000040087180                aarch64_irq_dispatch
  .text.aarch64_timer_on_tick
-                0x00000000400871d8        0x4 obj/aarch64_timer_tick.o
-                0x00000000400871d8                aarch64_timer_on_tick
+                0x0000000040087260        0x4 obj/aarch64_timer_tick.o
+                0x0000000040087260                aarch64_timer_on_tick
  .text.aarch64_sync_dispatch
-                0x00000000400871dc       0xc0 obj/aarch64_exception.o
-                0x00000000400871dc                aarch64_sync_dispatch
+                0x0000000040087264       0xc0 obj/aarch64_exception.o
+                0x0000000040087264                aarch64_sync_dispatch
  .text.smc_call
-                0x000000004008729c       0x1c obj/aarch64_psci.o
+                0x0000000040087324       0x1c obj/aarch64_psci.o
  .text.psci_set_conduit
-                0x00000000400872b8       0x14 obj/aarch64_psci.o
-                0x00000000400872b8                psci_set_conduit
+                0x0000000040087340       0x14 obj/aarch64_psci.o
+                0x0000000040087340                psci_set_conduit
  .text.psci_cpu_on
-                0x00000000400872cc       0x28 obj/aarch64_psci.o
-                0x00000000400872cc                psci_cpu_on
+                0x0000000040087354       0x28 obj/aarch64_psci.o
+                0x0000000040087354                psci_cpu_on
  .text.append_str
-                0x00000000400872f4       0x20 obj/aarch64_smp.o
+                0x000000004008737c       0x20 obj/aarch64_smp.o
  .text.append_hex64
-                0x0000000040087314       0x50 obj/aarch64_smp.o
+                0x000000004008739c       0x50 obj/aarch64_smp.o
  .text.aarch64_cpu_id
-                0x0000000040087364        0xc obj/aarch64_smp.o
-                0x0000000040087364                aarch64_cpu_id
+                0x00000000400873ec        0xc obj/aarch64_smp.o
+                0x00000000400873ec                aarch64_cpu_id
  .text.aarch64_smp_boot
-                0x0000000040087370      0x18c obj/aarch64_smp.o
-                0x0000000040087370                aarch64_smp_boot
+                0x00000000400873f8      0x18c obj/aarch64_smp.o
+                0x00000000400873f8                aarch64_smp_boot
  .text.aarch64_secondary_entry
-                0x00000000400874fc       0x74 obj/aarch64_smp.o
-                0x00000000400874fc                aarch64_secondary_entry
- .text.bswap32  0x0000000040087570        0x8 obj/aarch64_fb_simple.o
+                0x0000000040087584       0x74 obj/aarch64_smp.o
+                0x0000000040087584                aarch64_secondary_entry
+ .text.bswap32  0x00000000400875f8        0x8 obj/aarch64_fb_simple.o
  .text.fw_cfg_read_u32_be
-                0x0000000040087578       0x2c obj/aarch64_fb_simple.o
+                0x0000000040087600       0x2c obj/aarch64_fb_simple.o
  .text.fb_color
-                0x00000000400875a4       0x34 obj/aarch64_fb_simple.o
+                0x000000004008762c       0x34 obj/aarch64_fb_simple.o
  .text.fb_put_pixel
-                0x00000000400875d8       0x50 obj/aarch64_fb_simple.o
+                0x0000000040087660       0x50 obj/aarch64_fb_simple.o
  .text.fb_fill_rect
-                0x0000000040087628       0x74 obj/aarch64_fb_simple.o
+                0x00000000400876b0       0x74 obj/aarch64_fb_simple.o
  .text.aarch64_dcache_clean_poc_range.part.0
-                0x000000004008769c       0x44 obj/aarch64_fb_simple.o
+                0x0000000040087724       0x44 obj/aarch64_fb_simple.o
  .text.fb_flush_rect
-                0x00000000400876e0       0xc0 obj/aarch64_fb_simple.o
+                0x0000000040087768       0xc0 obj/aarch64_fb_simple.o
  .text.fb_draw_glyph
-                0x00000000400877a0       0x84 obj/aarch64_fb_simple.o
+                0x0000000040087828       0x84 obj/aarch64_fb_simple.o
  .text.fb_clear_screen
-                0x0000000040087824       0x68 obj/aarch64_fb_simple.o
+                0x00000000400878ac       0x68 obj/aarch64_fb_simple.o
  .text.fb_newline
-                0x000000004008788c       0x34 obj/aarch64_fb_simple.o
+                0x0000000040087914       0x34 obj/aarch64_fb_simple.o
  .text.fb_simple_init
-                0x00000000400878c0      0x440 obj/aarch64_fb_simple.o
-                0x00000000400878c0                fb_simple_init
+                0x0000000040087948      0x440 obj/aarch64_fb_simple.o
+                0x0000000040087948                fb_simple_init
  .text.fb_simple_ready
-                0x0000000040087d00       0x14 obj/aarch64_fb_simple.o
-                0x0000000040087d00                fb_simple_ready
+                0x0000000040087d88       0x14 obj/aarch64_fb_simple.o
+                0x0000000040087d88                fb_simple_ready
  .text.fb_simple_clear
-                0x0000000040087d14       0x14 obj/aarch64_fb_simple.o
-                0x0000000040087d14                fb_simple_clear
+                0x0000000040087d9c       0x14 obj/aarch64_fb_simple.o
+                0x0000000040087d9c                fb_simple_clear
  .text.fb_simple_set_rgb
-                0x0000000040087d28       0x2c obj/aarch64_fb_simple.o
-                0x0000000040087d28                fb_simple_set_rgb
+                0x0000000040087db0       0x2c obj/aarch64_fb_simple.o
+                0x0000000040087db0                fb_simple_set_rgb
  .text.fb_simple_set_bg_rgb
-                0x0000000040087d54       0x2c obj/aarch64_fb_simple.o
-                0x0000000040087d54                fb_simple_set_bg_rgb
+                0x0000000040087ddc       0x2c obj/aarch64_fb_simple.o
+                0x0000000040087ddc                fb_simple_set_bg_rgb
  .text.fb_simple_clear_rgb
-                0x0000000040087d80       0x70 obj/aarch64_fb_simple.o
-                0x0000000040087d80                fb_simple_clear_rgb
+                0x0000000040087e08       0x70 obj/aarch64_fb_simple.o
+                0x0000000040087e08                fb_simple_clear_rgb
  .text.fb_simple_draw_pixel
-                0x0000000040087df0       0x78 obj/aarch64_fb_simple.o
-                0x0000000040087df0                fb_simple_draw_pixel
+                0x0000000040087e78       0x78 obj/aarch64_fb_simple.o
+                0x0000000040087e78                fb_simple_draw_pixel
  .text.fb_simple_fill_rect
-                0x0000000040087e68       0xb4 obj/aarch64_fb_simple.o
-                0x0000000040087e68                fb_simple_fill_rect
+                0x0000000040087ef0       0xb4 obj/aarch64_fb_simple.o
+                0x0000000040087ef0                fb_simple_fill_rect
  .text.fb_simple_flush
-                0x0000000040087f1c       0x2c obj/aarch64_fb_simple.o
-                0x0000000040087f1c                fb_simple_flush
+                0x0000000040087fa4       0x2c obj/aarch64_fb_simple.o
+                0x0000000040087fa4                fb_simple_flush
  .text.fb_simple_putc
-                0x0000000040087f48       0xfc obj/aarch64_fb_simple.o
-                0x0000000040087f48                fb_simple_putc
+                0x0000000040087fd0       0xfc obj/aarch64_fb_simple.o
+                0x0000000040087fd0                fb_simple_putc
  .text.fb_simple_write
-                0x0000000040088044       0x38 obj/aarch64_fb_simple.o
-                0x0000000040088044                fb_simple_write
+                0x00000000400880cc       0x38 obj/aarch64_fb_simple.o
+                0x00000000400880cc                fb_simple_write
  .text.fb_simple_get_info
-                0x000000004008807c       0x78 obj/aarch64_fb_simple.o
-                0x000000004008807c                fb_simple_get_info
+                0x0000000040088104       0x78 obj/aarch64_fb_simple.o
+                0x0000000040088104                fb_simple_get_info
  .text.fb_simple_last_error
-                0x00000000400880f4        0xc obj/aarch64_fb_simple.o
-                0x00000000400880f4                fb_simple_last_error
+                0x000000004008817c        0xc obj/aarch64_fb_simple.o
+                0x000000004008817c                fb_simple_last_error
  .text.gfx_init_default
-                0x0000000040088100       0x1c obj/aarch64_gfx.o
-                0x0000000040088100                gfx_init_default
- .text.gfx_b    0x000000004008811c       0x2c obj/aarch64_gfx.o
+                0x0000000040088188       0x1c obj/aarch64_gfx.o
+                0x0000000040088188                gfx_init_default
+ .text.gfx_b    0x00000000400881a4       0x2c obj/aarch64_gfx.o
  .text.gfx_ready
-                0x0000000040088148       0x30 obj/aarch64_gfx.o
-                0x0000000040088148                gfx_ready
+                0x00000000400881d0       0x30 obj/aarch64_gfx.o
+                0x00000000400881d0                gfx_ready
  .text.gfx_putc
-                0x0000000040088178       0x34 obj/aarch64_gfx.o
-                0x0000000040088178                gfx_putc
+                0x0000000040088200       0x34 obj/aarch64_gfx.o
+                0x0000000040088200                gfx_putc
  .text.gfx_write
-                0x00000000400881ac       0x6c obj/aarch64_gfx.o
-                0x00000000400881ac                gfx_write
+                0x0000000040088234       0x6c obj/aarch64_gfx.o
+                0x0000000040088234                gfx_write
  .text.gfx_set_rgb
-                0x0000000040088218       0x44 obj/aarch64_gfx.o
-                0x0000000040088218                gfx_set_rgb
+                0x00000000400882a0       0x44 obj/aarch64_gfx.o
+                0x00000000400882a0                gfx_set_rgb
  .text.gfx_set_bg_rgb
-                0x000000004008825c       0x44 obj/aarch64_gfx.o
-                0x000000004008825c                gfx_set_bg_rgb
+                0x00000000400882e4       0x44 obj/aarch64_gfx.o
+                0x00000000400882e4                gfx_set_bg_rgb
  .text.gfx_clear
-                0x00000000400882a0       0x2c obj/aarch64_gfx.o
-                0x00000000400882a0                gfx_clear
+                0x0000000040088328       0x2c obj/aarch64_gfx.o
+                0x0000000040088328                gfx_clear
  .text.gfx_clear_rgb
-                0x00000000400882cc       0x44 obj/aarch64_gfx.o
-                0x00000000400882cc                gfx_clear_rgb
+                0x0000000040088354       0x44 obj/aarch64_gfx.o
+                0x0000000040088354                gfx_clear_rgb
  .text.gfx_fill_rect
-                0x0000000040088310       0x44 obj/aarch64_gfx.o
-                0x0000000040088310                gfx_fill_rect
+                0x0000000040088398       0x44 obj/aarch64_gfx.o
+                0x0000000040088398                gfx_fill_rect
  .text.gfx_flush
-                0x0000000040088354       0x2c obj/aarch64_gfx.o
-                0x0000000040088354                gfx_flush
+                0x00000000400883dc       0x2c obj/aarch64_gfx.o
+                0x00000000400883dc                gfx_flush
  .text.gfx_screen_width
-                0x0000000040088380       0x30 obj/aarch64_gfx.o
-                0x0000000040088380                gfx_screen_width
+                0x0000000040088408       0x30 obj/aarch64_gfx.o
+                0x0000000040088408                gfx_screen_width
  .text.gfx_screen_height
-                0x00000000400883b0       0x30 obj/aarch64_gfx.o
-                0x00000000400883b0                gfx_screen_height
+                0x0000000040088438       0x30 obj/aarch64_gfx.o
+                0x0000000040088438                gfx_screen_height
  .text.fb_screen_h_impl
-                0x00000000400883e0       0x3c obj/aarch64_gfx_backend_fb_simple.o
+                0x0000000040088468       0x3c obj/aarch64_gfx_backend_fb_simple.o
  .text.fb_screen_w_impl
-                0x000000004008841c       0x3c obj/aarch64_gfx_backend_fb_simple.o
+                0x00000000400884a4       0x3c obj/aarch64_gfx_backend_fb_simple.o
  .text.fb_flush_impl
-                0x0000000040088458        0x4 obj/aarch64_gfx_backend_fb_simple.o
+                0x00000000400884e0        0x4 obj/aarch64_gfx_backend_fb_simple.o
  .text.fb_draw_pixel_impl
-                0x000000004008845c       0x10 obj/aarch64_gfx_backend_fb_simple.o
+                0x00000000400884e4       0x10 obj/aarch64_gfx_backend_fb_simple.o
  .text.fb_clear_rgb_impl
-                0x000000004008846c        0x4 obj/aarch64_gfx_backend_fb_simple.o
+                0x00000000400884f4        0x4 obj/aarch64_gfx_backend_fb_simple.o
  .text.fb_clear_impl
-                0x0000000040088470        0x4 obj/aarch64_gfx_backend_fb_simple.o
+                0x00000000400884f8        0x4 obj/aarch64_gfx_backend_fb_simple.o
  .text.fb_set_bg_rgb_impl
-                0x0000000040088474        0x4 obj/aarch64_gfx_backend_fb_simple.o
+                0x00000000400884fc        0x4 obj/aarch64_gfx_backend_fb_simple.o
  .text.fb_set_rgb_impl
-                0x0000000040088478        0x4 obj/aarch64_gfx_backend_fb_simple.o
+                0x0000000040088500        0x4 obj/aarch64_gfx_backend_fb_simple.o
  .text.fb_write_impl
-                0x000000004008847c        0x4 obj/aarch64_gfx_backend_fb_simple.o
+                0x0000000040088504        0x4 obj/aarch64_gfx_backend_fb_simple.o
  .text.fb_putc_impl
-                0x0000000040088480        0x4 obj/aarch64_gfx_backend_fb_simple.o
+                0x0000000040088508        0x4 obj/aarch64_gfx_backend_fb_simple.o
  .text.fb_ready_impl
-                0x0000000040088484        0x4 obj/aarch64_gfx_backend_fb_simple.o
+                0x000000004008850c        0x4 obj/aarch64_gfx_backend_fb_simple.o
  .text.fb_fill_rect_impl
-                0x0000000040088488       0x1c obj/aarch64_gfx_backend_fb_simple.o
- .text.out_pad  0x00000000400884a4       0x34 obj/aarch64_printf.o
+                0x0000000040088510       0x1c obj/aarch64_gfx_backend_fb_simple.o
+ .text.out_pad  0x000000004008852c       0x34 obj/aarch64_printf.o
  .text.out_u64_dec
-                0x00000000400884d8       0x60 obj/aarch64_printf.o
+                0x0000000040088560       0x60 obj/aarch64_printf.o
  .text.out_u64_hex
-                0x0000000040088538       0x90 obj/aarch64_printf.o
+                0x00000000400885c0       0x90 obj/aarch64_printf.o
  .text.vsnprintf
-                0x00000000400885c8      0x41c obj/aarch64_printf.o
-                0x00000000400885c8                vsnprintf
+                0x0000000040088650      0x41c obj/aarch64_printf.o
+                0x0000000040088650                vsnprintf
  .text.snprintf
-                0x00000000400889e4       0x64 obj/aarch64_printf.o
-                0x00000000400889e4                snprintf
- .text.printf   0x0000000040088a48      0x15c obj/aarch64_printf.o
-                0x0000000040088a48                printf
- .text.memcpy   0x0000000040088ba4       0x2c obj/aarch64_string.o
-                0x0000000040088ba4                memcpy
- .text.memset   0x0000000040088bd0       0x24 obj/aarch64_string.o
-                0x0000000040088bd0                memset
- .text.memmove  0x0000000040088bf4       0x54 obj/aarch64_string.o
-                0x0000000040088bf4                memmove
- .text.strlen   0x0000000040088c48       0x20 obj/aarch64_string.o
-                0x0000000040088c48                strlen
+                0x0000000040088a6c       0x64 obj/aarch64_printf.o
+                0x0000000040088a6c                snprintf
+ .text.printf   0x0000000040088ad0      0x15c obj/aarch64_printf.o
+                0x0000000040088ad0                printf
+ .text.memcpy   0x0000000040088c2c       0x2c obj/aarch64_string.o
+                0x0000000040088c2c                memcpy
+ .text.memset   0x0000000040088c58       0x24 obj/aarch64_string.o
+                0x0000000040088c58                memset
+ .text.memmove  0x0000000040088c7c       0x54 obj/aarch64_string.o
+                0x0000000040088c7c                memmove
+ .text.strlen   0x0000000040088cd0       0x20 obj/aarch64_string.o
+                0x0000000040088cd0                strlen
  .text.strlength
-                0x0000000040088c68       0x30 obj/aarch64_string.o
-                0x0000000040088c68                strlength
- .text.strcpy   0x0000000040088c98       0x24 obj/aarch64_string.o
-                0x0000000040088c98                strcpy
- .text.strncpy  0x0000000040088cbc       0x44 obj/aarch64_string.o
-                0x0000000040088cbc                strncpy
- .text.strcat   0x0000000040088d00       0x38 obj/aarch64_string.o
-                0x0000000040088d00                strcat
- .text.strncat  0x0000000040088d38       0x48 obj/aarch64_string.o
-                0x0000000040088d38                strncat
- .text.strcmp   0x0000000040088d80       0x38 obj/aarch64_string.o
-                0x0000000040088d80                strcmp
- .text.strncmp  0x0000000040088db8       0x44 obj/aarch64_string.o
-                0x0000000040088db8                strncmp
- .text.strchr   0x0000000040088dfc       0x2c obj/aarch64_string.o
-                0x0000000040088dfc                strchr
- .text.strrchr  0x0000000040088e28       0x30 obj/aarch64_string.o
-                0x0000000040088e28                strrchr
- .text.strstr   0x0000000040088e58       0x74 obj/aarch64_string.o
-                0x0000000040088e58                strstr
+                0x0000000040088cf0       0x30 obj/aarch64_string.o
+                0x0000000040088cf0                strlength
+ .text.strcpy   0x0000000040088d20       0x24 obj/aarch64_string.o
+                0x0000000040088d20                strcpy
+ .text.strncpy  0x0000000040088d44       0x44 obj/aarch64_string.o
+                0x0000000040088d44                strncpy
+ .text.strcat   0x0000000040088d88       0x38 obj/aarch64_string.o
+                0x0000000040088d88                strcat
+ .text.strncat  0x0000000040088dc0       0x48 obj/aarch64_string.o
+                0x0000000040088dc0                strncat
+ .text.strcmp   0x0000000040088e08       0x38 obj/aarch64_string.o
+                0x0000000040088e08                strcmp
+ .text.strncmp  0x0000000040088e40       0x44 obj/aarch64_string.o
+                0x0000000040088e40                strncmp
+ .text.strchr   0x0000000040088e84       0x2c obj/aarch64_string.o
+                0x0000000040088e84                strchr
+ .text.strrchr  0x0000000040088eb0       0x30 obj/aarch64_string.o
+                0x0000000040088eb0                strrchr
+ .text.strstr   0x0000000040088ee0       0x74 obj/aarch64_string.o
+                0x0000000040088ee0                strstr
  .text.strtok_r
-                0x0000000040088ecc       0xa8 obj/aarch64_string.o
-                0x0000000040088ecc                strtok_r
- .text.atoi     0x0000000040088f74       0x8c obj/aarch64_string.o
-                0x0000000040088f74                atoi
- .text.cmdEql   0x0000000040089000       0x30 obj/aarch64_string.o
-                0x0000000040089000                cmdEql
- .text.strEql   0x0000000040089030        0x4 obj/aarch64_string.o
-                0x0000000040089030                strEql
+                0x0000000040088f54       0xa8 obj/aarch64_string.o
+                0x0000000040088f54                strtok_r
+ .text.atoi     0x0000000040088ffc       0x8c obj/aarch64_string.o
+                0x0000000040088ffc                atoi
+ .text.cmdEql   0x0000000040089088       0x30 obj/aarch64_string.o
+                0x0000000040089088                cmdEql
+ .text.strEql   0x00000000400890b8        0x4 obj/aarch64_string.o
+                0x00000000400890b8                strEql
  .text.safe_strcpy
-                0x0000000040089034       0x40 obj/aarch64_string.o
-                0x0000000040089034                safe_strcpy
+                0x00000000400890bc       0x40 obj/aarch64_string.o
+                0x00000000400890bc                safe_strcpy
  .text.shell_log_warn
-                0x0000000040089074       0x44 obj/aarch64_shell_log.o
+                0x00000000400890fc       0x44 obj/aarch64_shell_log.o
  .text.shell_log_enable
-                0x00000000400890b8       0x18 obj/aarch64_shell_log.o
-                0x00000000400890b8                shell_log_enable
+                0x0000000040089140       0x18 obj/aarch64_shell_log.o
+                0x0000000040089140                shell_log_enable
  .text.shell_log_disable
-                0x00000000400890d0        0xc obj/aarch64_shell_log.o
-                0x00000000400890d0                shell_log_disable
+                0x0000000040089158        0xc obj/aarch64_shell_log.o
+                0x0000000040089158                shell_log_disable
  .text.init_dynamic_log_buffer
-                0x00000000400890dc       0x64 obj/aarch64_shell_log.o
-                0x00000000400890dc                init_dynamic_log_buffer
+                0x0000000040089164       0x64 obj/aarch64_shell_log.o
+                0x0000000040089164                init_dynamic_log_buffer
  .text.shell_log_flush
-                0x0000000040089140      0x1cc obj/aarch64_shell_log.o
-                0x0000000040089140                shell_log_flush
+                0x00000000400891c8      0x1cc obj/aarch64_shell_log.o
+                0x00000000400891c8                shell_log_flush
  .text.shell_log_append
-                0x000000004008930c      0x1c0 obj/aarch64_shell_log.o
-                0x000000004008930c                shell_log_append
+                0x0000000040089394      0x1c0 obj/aarch64_shell_log.o
+                0x0000000040089394                shell_log_append
  .text.heap_init_default
-                0x00000000400894cc       0x48 obj/aarch64_heap.o
+                0x0000000040089554       0x48 obj/aarch64_heap.o
  .text.aarch64_heap_init
-                0x0000000040089514       0x7c obj/aarch64_heap.o
-                0x0000000040089514                aarch64_heap_init
- .text.malloc   0x0000000040089590      0x134 obj/aarch64_heap.o
-                0x0000000040089590                malloc
- .text.free     0x00000000400896c4       0x80 obj/aarch64_heap.o
-                0x00000000400896c4                free
+                0x000000004008959c       0x7c obj/aarch64_heap.o
+                0x000000004008959c                aarch64_heap_init
+ .text.malloc   0x0000000040089618      0x134 obj/aarch64_heap.o
+                0x0000000040089618                malloc
+ .text.free     0x000000004008974c       0x80 obj/aarch64_heap.o
+                0x000000004008974c                free
  .text.init_pipeline_system
-                0x0000000040089744       0x5c obj/aarch64_pipeline.o
-                0x0000000040089744                init_pipeline_system
+                0x00000000400897cc       0x5c obj/aarch64_pipeline.o
+                0x00000000400897cc                init_pipeline_system
  .text.is_pipeline_command
-                0x00000000400897a0       0x44 obj/aarch64_pipeline.o
-                0x00000000400897a0                is_pipeline_command
+                0x0000000040089828       0x44 obj/aarch64_pipeline.o
+                0x0000000040089828                is_pipeline_command
  .text.count_pipeline_commands
-                0x00000000400897e4       0x34 obj/aarch64_pipeline.o
-                0x00000000400897e4                count_pipeline_commands
+                0x000000004008986c       0x34 obj/aarch64_pipeline.o
+                0x000000004008986c                count_pipeline_commands
  .text.is_whitespace
-                0x0000000040089818       0x20 obj/aarch64_pipeline.o
-                0x0000000040089818                is_whitespace
+                0x00000000400898a0       0x20 obj/aarch64_pipeline.o
+                0x00000000400898a0                is_whitespace
  .text.trim_whitespace
-                0x0000000040089838       0x64 obj/aarch64_pipeline.o
-                0x0000000040089838                trim_whitespace
+                0x00000000400898c0       0x64 obj/aarch64_pipeline.o
+                0x00000000400898c0                trim_whitespace
  .text.simple_strtok
-                0x000000004008989c       0xd4 obj/aarch64_pipeline.o
-                0x000000004008989c                simple_strtok
+                0x0000000040089924       0xd4 obj/aarch64_pipeline.o
+                0x0000000040089924                simple_strtok
  .text.split_command
-                0x0000000040089970      0x12c obj/aarch64_pipeline.o
-                0x0000000040089970                split_command
+                0x00000000400899f8      0x12c obj/aarch64_pipeline.o
+                0x00000000400899f8                split_command
  .text.free_args
-                0x0000000040089a9c       0x54 obj/aarch64_pipeline.o
-                0x0000000040089a9c                free_args
+                0x0000000040089b24       0x54 obj/aarch64_pipeline.o
+                0x0000000040089b24                free_args
  .text.parse_redirections
-                0x0000000040089af0      0x320 obj/aarch64_pipeline.o
-                0x0000000040089af0                parse_redirections
+                0x0000000040089b78      0x320 obj/aarch64_pipeline.o
+                0x0000000040089b78                parse_redirections
  .text.parse_command
-                0x0000000040089e10      0x1f4 obj/aarch64_pipeline.o
-                0x0000000040089e10                parse_command
+                0x0000000040089e98      0x1f4 obj/aarch64_pipeline.o
+                0x0000000040089e98                parse_command
  .text.parse_pipeline
-                0x000000004008a004       0xe0 obj/aarch64_pipeline.o
-                0x000000004008a004                parse_pipeline
+                0x000000004008a08c       0xe0 obj/aarch64_pipeline.o
+                0x000000004008a08c                parse_pipeline
  .text.free_command
-                0x000000004008a0e4       0x70 obj/aarch64_pipeline.o
-                0x000000004008a0e4                free_command
+                0x000000004008a16c       0x70 obj/aarch64_pipeline.o
+                0x000000004008a16c                free_command
  .text.free_pipeline
-                0x000000004008a154       0x40 obj/aarch64_pipeline.o
-                0x000000004008a154                free_pipeline
+                0x000000004008a1dc       0x40 obj/aarch64_pipeline.o
+                0x000000004008a1dc                free_pipeline
  .text.read_file_for_input_redirection
-                0x000000004008a194       0xc8 obj/aarch64_pipeline.o
-                0x000000004008a194                read_file_for_input_redirection
+                0x000000004008a21c       0xc8 obj/aarch64_pipeline.o
+                0x000000004008a21c                read_file_for_input_redirection
  .text.execute_simple_command.part.0
-                0x000000004008a25c      0x290 obj/aarch64_pipeline.o
+                0x000000004008a2e4      0x290 obj/aarch64_pipeline.o
  .text.execute_simple_command
-                0x000000004008a4ec       0x18 obj/aarch64_pipeline.o
-                0x000000004008a4ec                execute_simple_command
+                0x000000004008a574       0x18 obj/aarch64_pipeline.o
+                0x000000004008a574                execute_simple_command
  .text.execute_complex_pipeline
-                0x000000004008a504      0x214 obj/aarch64_pipeline.o
-                0x000000004008a504                execute_complex_pipeline
+                0x000000004008a58c      0x214 obj/aarch64_pipeline.o
+                0x000000004008a58c                execute_complex_pipeline
  .text.add_background_process
-                0x000000004008a718       0x90 obj/aarch64_pipeline.o
-                0x000000004008a718                add_background_process
+                0x000000004008a7a0       0x90 obj/aarch64_pipeline.o
+                0x000000004008a7a0                add_background_process
  .text.execute_background_command
-                0x000000004008a7a8      0x108 obj/aarch64_pipeline.o
-                0x000000004008a7a8                execute_background_command
+                0x000000004008a830      0x108 obj/aarch64_pipeline.o
+                0x000000004008a830                execute_background_command
  .text.execute_command
-                0x000000004008a8b0       0x1c obj/aarch64_pipeline.o
-                0x000000004008a8b0                execute_command
+                0x000000004008a938       0x1c obj/aarch64_pipeline.o
+                0x000000004008a938                execute_command
  .text.execute_pipeline
-                0x000000004008a8cc      0x32c obj/aarch64_pipeline.o
-                0x000000004008a8cc                execute_pipeline
+                0x000000004008a954      0x32c obj/aarch64_pipeline.o
+                0x000000004008a954                execute_pipeline
  .text.start_shell_redirect
-                0x000000004008abf8       0x20 obj/aarch64_vga_redirect.o
-                0x000000004008abf8                start_shell_redirect
+                0x000000004008ac80       0x20 obj/aarch64_vga_redirect.o
+                0x000000004008ac80                start_shell_redirect
  .text.stop_shell_redirect
-                0x000000004008ac18        0xc obj/aarch64_vga_redirect.o
-                0x000000004008ac18                stop_shell_redirect
+                0x000000004008aca0        0xc obj/aarch64_vga_redirect.o
+                0x000000004008aca0                stop_shell_redirect
  .text.vga_text_cell_w
-                0x000000004008ac24        0x8 obj/aarch64_vga_redirect.o
-                0x000000004008ac24                vga_text_cell_w
+                0x000000004008acac        0x8 obj/aarch64_vga_redirect.o
+                0x000000004008acac                vga_text_cell_w
  .text.vga_text_cell_h
-                0x000000004008ac2c        0x8 obj/aarch64_vga_redirect.o
-                0x000000004008ac2c                vga_text_cell_h
+                0x000000004008acb4        0x8 obj/aarch64_vga_redirect.o
+                0x000000004008acb4                vga_text_cell_h
  .text.shell_register_redirect_icon
-                0x000000004008ac34        0x4 obj/aarch64_vga_redirect.o
-                0x000000004008ac34                shell_register_redirect_icon
+                0x000000004008acbc        0x4 obj/aarch64_vga_redirect.o
+                0x000000004008acbc                shell_register_redirect_icon
  .text.alias_name_valid
-                0x000000004008ac38       0x64 obj/aarch64_alias.o
+                0x000000004008acc0       0x64 obj/aarch64_alias.o
  .text.trim_left
-                0x000000004008ac9c       0x28 obj/aarch64_alias.o
+                0x000000004008ad24       0x28 obj/aarch64_alias.o
  .text.contains_meta_chars
-                0x000000004008acc4       0x40 obj/aarch64_alias.o
+                0x000000004008ad4c       0x40 obj/aarch64_alias.o
  .text.alias_find_mut
-                0x000000004008ad04       0x70 obj/aarch64_alias.o
+                0x000000004008ad8c       0x70 obj/aarch64_alias.o
  .text.trim_right
-                0x000000004008ad74       0x60 obj/aarch64_alias.o
+                0x000000004008adfc       0x60 obj/aarch64_alias.o
  .text.alias_load_if_needed
-                0x000000004008add4      0x1f0 obj/aarch64_alias.o
+                0x000000004008ae5c      0x1f0 obj/aarch64_alias.o
  .text.shell_alias_expand_line
-                0x000000004008afc4      0x318 obj/aarch64_alias.o
-                0x000000004008afc4                shell_alias_expand_line
+                0x000000004008b04c      0x318 obj/aarch64_alias.o
+                0x000000004008b04c                shell_alias_expand_line
  .text.math_get_current_equation
-                0x000000004008b2dc      0x2f0 obj/aarch64_math.o
-                0x000000004008b2dc                math_get_current_equation
+                0x000000004008b364      0x2f0 obj/aarch64_math.o
+                0x000000004008b364                math_get_current_equation
  .text.rand_next
-                0x000000004008b5cc       0x24 obj/aarch64_math.o
-                0x000000004008b5cc                rand_next
+                0x000000004008b654       0x24 obj/aarch64_math.o
+                0x000000004008b654                rand_next
  .text.rand_range
-                0x000000004008b5f0       0x3c obj/aarch64_math.o
-                0x000000004008b5f0                rand_range
+                0x000000004008b678       0x3c obj/aarch64_math.o
+                0x000000004008b678                rand_range
  .text.partition_strings
-                0x000000004008b62c       0xa4 obj/aarch64_math.o
-                0x000000004008b62c                partition_strings
+                0x000000004008b6b4       0xa4 obj/aarch64_math.o
+                0x000000004008b6b4                partition_strings
  .text.quicksort_strings
-                0x000000004008b6d0       0x5c obj/aarch64_math.o
-                0x000000004008b6d0                quicksort_strings
+                0x000000004008b758       0x5c obj/aarch64_math.o
+                0x000000004008b758                quicksort_strings
  .text.build_bad_char_table
-                0x000000004008b72c       0x3c obj/aarch64_math.o
-                0x000000004008b72c                build_bad_char_table
+                0x000000004008b7b4       0x3c obj/aarch64_math.o
+                0x000000004008b7b4                build_bad_char_table
  .text.build_good_suffix_table
-                0x000000004008b768       0xdc obj/aarch64_math.o
-                0x000000004008b768                build_good_suffix_table
+                0x000000004008b7f0       0xdc obj/aarch64_math.o
+                0x000000004008b7f0                build_good_suffix_table
  .text.boyer_moore_search
-                0x000000004008b844      0x108 obj/aarch64_math.o
-                0x000000004008b844                boyer_moore_search
+                0x000000004008b8cc      0x108 obj/aarch64_math.o
+                0x000000004008b8cc                boyer_moore_search
  .text.to_fat32_83
-                0x000000004008b94c       0xd8 obj/aarch64_fat32.o
-                0x000000004008b94c                to_fat32_83
+                0x000000004008b9d4       0xd8 obj/aarch64_fat32.o
+                0x000000004008b9d4                to_fat32_83
  .text.fat32_read_bpb_sector
-                0x000000004008ba24       0x54 obj/aarch64_fat32.o
-                0x000000004008ba24                fat32_read_bpb_sector
+                0x000000004008baac       0x54 obj/aarch64_fat32.o
+                0x000000004008baac                fat32_read_bpb_sector
  .text.fat32_next_cluster_sector
-                0x000000004008ba78       0x74 obj/aarch64_fat32.o
-                0x000000004008ba78                fat32_next_cluster_sector
+                0x000000004008bb00       0x74 obj/aarch64_fat32.o
+                0x000000004008bb00                fat32_next_cluster_sector
  .text.fat32_get_partition_lba_start
-                0x000000004008baec       0xbc obj/aarch64_fat32.o
-                0x000000004008baec                fat32_get_partition_lba_start
+                0x000000004008bb74       0xbc obj/aarch64_fat32.o
+                0x000000004008bb74                fat32_get_partition_lba_start
  .text.fat32_find_entry_sector
-                0x000000004008bba8      0x1a8 obj/aarch64_fat32.o
-                0x000000004008bba8                fat32_find_entry_sector
+                0x000000004008bc30      0x1a8 obj/aarch64_fat32.o
+                0x000000004008bc30                fat32_find_entry_sector
  .text.eynfs_cache_invalidate_block
-                0x000000004008bd50       0x38 obj/aarch64_eynfs.o
+                0x000000004008bdd8       0x38 obj/aarch64_eynfs.o
  .text.eynfs_load_u32
-                0x000000004008bd88       0x24 obj/aarch64_eynfs.o
+                0x000000004008be10       0x24 obj/aarch64_eynfs.o
  .text.eynfs_store_u32
-                0x000000004008bdac       0x20 obj/aarch64_eynfs.o
+                0x000000004008be34       0x20 obj/aarch64_eynfs.o
  .text.eynfs_write_dir_block
-                0x000000004008bdcc       0x80 obj/aarch64_eynfs.o
+                0x000000004008be54       0x80 obj/aarch64_eynfs.o
  .text.eynfs_cache_flush
-                0x000000004008be4c       0x64 obj/aarch64_eynfs.o
+                0x000000004008bed4       0x64 obj/aarch64_eynfs.o
  .text.eynfs_dir_cache_invalidate
-                0x000000004008beb0       0x60 obj/aarch64_eynfs.o
+                0x000000004008bf38       0x60 obj/aarch64_eynfs.o
  .text.eynfs_cache_write_block
-                0x000000004008bf10       0x8c obj/aarch64_eynfs.o
+                0x000000004008bf98       0x8c obj/aarch64_eynfs.o
  .text.eynfs_alloc_block_optimized
-                0x000000004008bf9c      0x178 obj/aarch64_eynfs.o
+                0x000000004008c024      0x178 obj/aarch64_eynfs.o
  .text.eynfs_bitmap_set_used
-                0x000000004008c114       0xd4 obj/aarch64_eynfs.o
+                0x000000004008c19c       0xd4 obj/aarch64_eynfs.o
  .text.eynfs_cache_get_block
-                0x000000004008c1e8      0x19c obj/aarch64_eynfs.o
-                0x000000004008c1e8                eynfs_cache_get_block
+                0x000000004008c270      0x19c obj/aarch64_eynfs.o
+                0x000000004008c270                eynfs_cache_get_block
  .text.eynfs_read_superblock
-                0x000000004008c384       0xb8 obj/aarch64_eynfs.o
-                0x000000004008c384                eynfs_read_superblock
+                0x000000004008c40c       0xb8 obj/aarch64_eynfs.o
+                0x000000004008c40c                eynfs_read_superblock
  .text.eynfs_read_dir_table
-                0x000000004008c43c       0xe0 obj/aarch64_eynfs.o
-                0x000000004008c43c                eynfs_read_dir_table
+                0x000000004008c4c4       0xe0 obj/aarch64_eynfs.o
+                0x000000004008c4c4                eynfs_read_dir_table
  .text.eynfs_count_dir_entries
-                0x000000004008c51c       0x9c obj/aarch64_eynfs.o
-                0x000000004008c51c                eynfs_count_dir_entries
+                0x000000004008c5a4       0x9c obj/aarch64_eynfs.o
+                0x000000004008c5a4                eynfs_count_dir_entries
  .text.eynfs_alloc_block
-                0x000000004008c5b8       0x60 obj/aarch64_eynfs.o
-                0x000000004008c5b8                eynfs_alloc_block
+                0x000000004008c640       0x60 obj/aarch64_eynfs.o
+                0x000000004008c640                eynfs_alloc_block
  .text.eynfs_write_dir_table
-                0x000000004008c618      0x210 obj/aarch64_eynfs.o
-                0x000000004008c618                eynfs_write_dir_table
+                0x000000004008c6a0      0x210 obj/aarch64_eynfs.o
+                0x000000004008c6a0                eynfs_write_dir_table
  .text.eynfs_free_block
-                0x000000004008c828       0x48 obj/aarch64_eynfs.o
-                0x000000004008c828                eynfs_free_block
+                0x000000004008c8b0       0x48 obj/aarch64_eynfs.o
+                0x000000004008c8b0                eynfs_free_block
  .text.eynfs_find_in_dir
-                0x000000004008c870      0x1c0 obj/aarch64_eynfs.o
-                0x000000004008c870                eynfs_find_in_dir
+                0x000000004008c8f8      0x1c0 obj/aarch64_eynfs.o
+                0x000000004008c8f8                eynfs_find_in_dir
  .text.eynfs_traverse_path
-                0x000000004008ca30      0x168 obj/aarch64_eynfs.o
-                0x000000004008ca30                eynfs_traverse_path
+                0x000000004008cab8      0x168 obj/aarch64_eynfs.o
+                0x000000004008cab8                eynfs_traverse_path
  .text.eynfs_create_entry
-                0x000000004008cb98      0x2fc obj/aarch64_eynfs.o
-                0x000000004008cb98                eynfs_create_entry
+                0x000000004008cc20      0x2fc obj/aarch64_eynfs.o
+                0x000000004008cc20                eynfs_create_entry
  .text.eynfs_read_file
-                0x000000004008ce94      0x178 obj/aarch64_eynfs.o
-                0x000000004008ce94                eynfs_read_file
+                0x000000004008cf1c      0x178 obj/aarch64_eynfs.o
+                0x000000004008cf1c                eynfs_read_file
  .text.eynfs_write_file
-                0x000000004008d00c      0x2dc obj/aarch64_eynfs.o
-                0x000000004008d00c                eynfs_write_file
+                0x000000004008d094      0x2dc obj/aarch64_eynfs.o
+                0x000000004008d094                eynfs_write_file
  .text.eynfs_cache_clear
-                0x000000004008d2e8       0x80 obj/aarch64_eynfs.o
-                0x000000004008d2e8                eynfs_cache_clear
+                0x000000004008d370       0x80 obj/aarch64_eynfs.o
+                0x000000004008d370                eynfs_cache_clear
  .text.eynfs_delete_entry
-                0x000000004008d368      0x15c obj/aarch64_eynfs.o
-                0x000000004008d368                eynfs_delete_entry
+                0x000000004008d3f0      0x15c obj/aarch64_eynfs.o
+                0x000000004008d3f0                eynfs_delete_entry
  .text.fat32_path_to_entry
-                0x000000004008d4c4      0x154 obj/aarch64_vfs.o
+                0x000000004008d54c      0x154 obj/aarch64_vfs.o
  .text.fat32_read_fat_entry
-                0x000000004008d618       0x80 obj/aarch64_vfs.o
+                0x000000004008d6a0       0x80 obj/aarch64_vfs.o
  .text.fat32_write_fat_entry_all
-                0x000000004008d698       0xf0 obj/aarch64_vfs.o
+                0x000000004008d720       0xf0 obj/aarch64_vfs.o
  .text.vfs_split_path.constprop.0
-                0x000000004008d788       0xec obj/aarch64_vfs.o
+                0x000000004008d810       0xec obj/aarch64_vfs.o
  .text.fat32_free_chain_sector_all.isra.0
-                0x000000004008d874       0x94 obj/aarch64_vfs.o
+                0x000000004008d8fc       0x94 obj/aarch64_vfs.o
  .text.fat32_allocate_chain_sector_all.constprop.0
-                0x000000004008d908      0x14c obj/aarch64_vfs.o
+                0x000000004008d990      0x14c obj/aarch64_vfs.o
  .text.vfs_get_file_size
-                0x000000004008da54      0x100 obj/aarch64_vfs.o
-                0x000000004008da54                vfs_get_file_size
+                0x000000004008dadc      0x100 obj/aarch64_vfs.o
+                0x000000004008dadc                vfs_get_file_size
  .text.vfs_read_file
-                0x000000004008db54      0x21c obj/aarch64_vfs.o
-                0x000000004008db54                vfs_read_file
+                0x000000004008dbdc      0x21c obj/aarch64_vfs.o
+                0x000000004008dbdc                vfs_read_file
  .text.vfs_read_file_at
-                0x000000004008dd70      0x2c0 obj/aarch64_vfs.o
-                0x000000004008dd70                vfs_read_file_at
+                0x000000004008ddf8      0x2c0 obj/aarch64_vfs.o
+                0x000000004008ddf8                vfs_read_file_at
  .text.vfs_stat
-                0x000000004008e030      0x12c obj/aarch64_vfs.o
-                0x000000004008e030                vfs_stat
+                0x000000004008e0b8      0x12c obj/aarch64_vfs.o
+                0x000000004008e0b8                vfs_stat
  .text.vfs_listdir
-                0x000000004008e15c      0x400 obj/aarch64_vfs.o
-                0x000000004008e15c                vfs_listdir
+                0x000000004008e1e4      0x400 obj/aarch64_vfs.o
+                0x000000004008e1e4                vfs_listdir
  .text.vfs_write_file
-                0x000000004008e55c      0x62c obj/aarch64_vfs.o
-                0x000000004008e55c                vfs_write_file
+                0x000000004008e5e4      0x62c obj/aarch64_vfs.o
+                0x000000004008e5e4                vfs_write_file
  .text.vfs_unlink
-                0x000000004008eb88      0x3ac obj/aarch64_vfs.o
-                0x000000004008eb88                vfs_unlink
+                0x000000004008ec10      0x3ac obj/aarch64_vfs.o
+                0x000000004008ec10                vfs_unlink
  .text.hal_console_putc
-                0x000000004008ef34       0x84 obj/aarch64_hal_console.o
-                0x000000004008ef34                hal_console_putc
+                0x000000004008efbc       0x84 obj/aarch64_hal_console.o
+                0x000000004008efbc                hal_console_putc
  .text.hal_console_write
-                0x000000004008efb8       0x38 obj/aarch64_hal_console.o
-                0x000000004008efb8                hal_console_write
+                0x000000004008f040       0x38 obj/aarch64_hal_console.o
+                0x000000004008f040                hal_console_write
  .text.hal_kbd_read_key_nonblock
-                0x000000004008eff0      0x2e8 obj/aarch64_hal_keyboard.o
-                0x000000004008eff0                hal_kbd_read_key_nonblock
+                0x000000004008f078      0x2e8 obj/aarch64_hal_keyboard.o
+                0x000000004008f078                hal_kbd_read_key_nonblock
  .text.cmd_gfxdemo
-                0x000000004008f2d8      0x13c obj/aarch64_gfx_cmd.o
-                0x000000004008f2d8                cmd_gfxdemo
+                0x000000004008f360      0x13c obj/aarch64_gfx_cmd.o
+                0x000000004008f360                cmd_gfxdemo
 
-.iplt           0x000000004008f414        0x0
- .iplt          0x000000004008f414        0x0 obj/aarch64_start.o
+.iplt           0x000000004008f49c        0x0
+ .iplt          0x000000004008f49c        0x0 obj/aarch64_start.o
 
-.rodata         0x000000004008f420     0x2110
+.rodata         0x000000004008f4a0     0x2110
  *(.rodata .rodata.*)
  .rodata.fb_write_hex64.str1.1
-                0x000000004008f420     0x14ce obj/aarch64_kernel_full.o
+                0x000000004008f4a0     0x14ce obj/aarch64_kernel_full.o
                                          0x14 (size before relaxing)
  .rodata.kernel_main.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_kernel_full.o
+                0x000000004009096e        0x0 obj/aarch64_kernel_full.o
                                         0x14a (size before relaxing)
  .rodata.handler_exit.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell.o
+                0x000000004009096e        0x0 obj/aarch64_shell.o
                                           0xc (size before relaxing)
  .rodata.handle_shell_command.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell.o
+                0x000000004009096e        0x0 obj/aarch64_shell.o
                                          0x60 (size before relaxing)
  .rodata.launch_shell.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell.o
+                0x000000004009096e        0x0 obj/aarch64_shell.o
                                          0x3f (size before relaxing)
  .rodata.line_move_left.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_history.o
+                0x000000004009096e        0x0 obj/aarch64_history.o
                                           0x2 (size before relaxing)
  .rodata.line_set.constprop.0.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_history.o
+                0x000000004009096e        0x0 obj/aarch64_history.o
                                           0x5 (size before relaxing)
  .rodata.show_history.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_history.o
+                0x000000004009096e        0x0 obj/aarch64_history.o
                                          0x2b (size before relaxing)
  .rodata.readStr_with_history.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_history.o
+                0x000000004009096e        0x0 obj/aarch64_history.o
                                           0xb (size before relaxing)
  .rodata.putchar.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_putchar.o
+                0x000000004009096e        0x0 obj/aarch64_putchar.o
                                           0x3 (size before relaxing)
  .rodata.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_cmd_registry_portable.o
+                0x000000004009096e        0x0 obj/aarch64_cmd_registry_portable.o
                                         0x2d0 (size before relaxing)
  .rodata.random_cmd.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell_commands.o
+                0x000000004009096e        0x0 obj/aarch64_shell_commands.o
                                         0x119 (size before relaxing)
  .rodata.history_cmd.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell_commands.o
+                0x000000004009096e        0x0 obj/aarch64_shell_commands.o
                                          0x90 (size before relaxing)
  .rodata.sort_cmd.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell_commands.o
+                0x000000004009096e        0x0 obj/aarch64_shell_commands.o
                                          0x9a (size before relaxing)
  .rodata.search_recursive.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell_commands.o
+                0x000000004009096e        0x0 obj/aarch64_shell_commands.o
                                          0x34 (size before relaxing)
  .rodata.search_cmd.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell_commands.o
+                0x000000004009096e        0x0 obj/aarch64_shell_commands.o
                                         0x361 (size before relaxing)
  .rodata.echo.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell_commands.o
+                0x000000004009096e        0x0 obj/aarch64_shell_commands.o
                                           0x4 (size before relaxing)
  .rodata.ver.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell_commands.o
+                0x000000004009096e        0x0 obj/aarch64_shell_commands.o
                                          0x20 (size before relaxing)
  .rodata.help_cmd.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell_commands.o
+                0x000000004009096e        0x0 obj/aarch64_shell_commands.o
                                          0x16 (size before relaxing)
  .rodata.calc.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell_commands.o
+                0x000000004009096e        0x0 obj/aarch64_shell_commands.o
                                          0x54 (size before relaxing)
  .rodata.log_cmd.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell_commands.o
+                0x000000004009096e        0x0 obj/aarch64_shell_commands.o
                                          0x43 (size before relaxing)
  .rodata.hexdump_cmd.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_shell_commands.o
+                0x000000004009096e        0x0 obj/aarch64_shell_commands.o
                                          0xc8 (size before relaxing)
  .rodata.resolve_path.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_fs_commands.o
+                0x000000004009096e        0x0 obj/aarch64_fs_commands.o
                                           0x7 (size before relaxing)
  .rodata.cd.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_fs_commands.o
+                0x000000004009096e        0x0 obj/aarch64_fs_commands.o
                                          0x34 (size before relaxing)
  .rodata.ls.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_fs_commands.o
+                0x000000004009096e        0x0 obj/aarch64_fs_commands.o
                                          0xc3 (size before relaxing)
  .rodata.read_cmd.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_fs_commands.o
+                0x000000004009096e        0x0 obj/aarch64_fs_commands.o
                                          0x3a (size before relaxing)
  .rodata.cat_cmd.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_fs_commands.o
+                0x000000004009096e        0x0 obj/aarch64_fs_commands.o
                                          0x19 (size before relaxing)
  .rodata.del.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_fs_commands.o
+                0x000000004009096e        0x0 obj/aarch64_fs_commands.o
                                          0xa4 (size before relaxing)
  .rodata.write_output_to_file.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_fs_io_helpers.o
+                0x000000004009096e        0x0 obj/aarch64_fs_io_helpers.o
                                           0x1 (size before relaxing)
  .rodata.uart_pl011_write_hex64.str1.1
-                0x00000000400908ee        0x0 obj/aarch64_uart_pl011.o
+                0x000000004009096e        0x0 obj/aarch64_uart_pl011.o
                                          0x11 (size before relaxing)
- *fill*         0x00000000400908ee        0x2 
+ *fill*         0x000000004009096e        0x2 
  .rodata.map_keycode
-                0x00000000400908f0       0xdc obj/aarch64_virtio_input.o
+                0x0000000040090970       0xdc obj/aarch64_virtio_input.o
  .rodata.virtio_input_getkey_nonblock
-                0x00000000400909cc        0xa obj/aarch64_virtio_input.o
+                0x0000000040090a4c        0xa obj/aarch64_virtio_input.o
  .rodata.virtio_input_init.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_virtio_input.o
+                0x0000000040090a56        0x0 obj/aarch64_virtio_input.o
                                          0xb4 (size before relaxing)
  .rodata.ata_init_drives.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_ata_virtio.o
+                0x0000000040090a56        0x0 obj/aarch64_ata_virtio.o
                                           0xb (size before relaxing)
  .rodata.fdt_parse_memory.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_fdt.o
+                0x0000000040090a56        0x0 obj/aarch64_fdt.o
                                          0x32 (size before relaxing)
  .rodata.fdt_parse_gicv2.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_fdt.o
+                0x0000000040090a56        0x0 obj/aarch64_fdt.o
                                          0x57 (size before relaxing)
  .rodata.fdt_parse_armv8_timer_virtual_irq.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_fdt.o
+                0x0000000040090a56        0x0 obj/aarch64_fdt.o
                                          0x2f (size before relaxing)
  .rodata.fdt_parse_cpus_mpidr.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_fdt.o
+                0x0000000040090a56        0x0 obj/aarch64_fdt.o
                                          0x13 (size before relaxing)
  .rodata.fdt_parse_psci_method.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_fdt.o
+                0x0000000040090a56        0x0 obj/aarch64_fdt.o
                                          0x21 (size before relaxing)
  .rodata.fdt_parse_simple_framebuffer.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_fdt.o
+                0x0000000040090a56        0x0 obj/aarch64_fdt.o
                                          0x2e (size before relaxing)
  .rodata.fdt_parse_virtio_mmio.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_fdt.o
+                0x0000000040090a56        0x0 obj/aarch64_fdt.o
                                           0xc (size before relaxing)
  .rodata.fdt_parse_qemu_fw_cfg_mmio.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_fdt.o
+                0x0000000040090a56        0x0 obj/aarch64_fdt.o
                                          0x11 (size before relaxing)
  .rodata.aarch64_sync_dispatch.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_exception.o
+                0x0000000040090a56        0x0 obj/aarch64_exception.o
                                          0x4d (size before relaxing)
  .rodata.append_hex64.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_smp.o
+                0x0000000040090a56        0x0 obj/aarch64_smp.o
                                          0x11 (size before relaxing)
  .rodata.aarch64_smp_boot.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_smp.o
+                0x0000000040090a56        0x0 obj/aarch64_smp.o
                                          0xa4 (size before relaxing)
  .rodata.aarch64_secondary_entry.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_smp.o
+                0x0000000040090a56        0x0 obj/aarch64_smp.o
                                           0xe (size before relaxing)
  .rodata.fb_simple_init.str1.1
-                0x00000000400909d6        0x0 obj/aarch64_fb_simple.o
+                0x0000000040090a56        0x0 obj/aarch64_fb_simple.o
                                           0xa (size before relaxing)
  .rodata.g_font8x8
-                0x00000000400909d6      0x809 obj/aarch64_fb_simple.o
+                0x0000000040090a56      0x809 obj/aarch64_fb_simple.o
  .rodata.str1.1
-                0x00000000400911df        0x0 obj/aarch64_gfx_backend_fb_simple.o
+                0x000000004009125f        0x0 obj/aarch64_gfx_backend_fb_simple.o
                                           0xa (size before relaxing)
- *fill*         0x00000000400911df        0x1 
+ *fill*         0x000000004009125f        0x1 
  .rodata.g_gfx_backend_fb_simple
-                0x00000000400911e0       0x68 obj/aarch64_gfx_backend_fb_simple.o
-                0x00000000400911e0                g_gfx_backend_fb_simple
+                0x0000000040091260       0x68 obj/aarch64_gfx_backend_fb_simple.o
+                0x0000000040091260                g_gfx_backend_fb_simple
  .rodata.out_u64_hex.str1.1
-                0x0000000040091248        0x0 obj/aarch64_printf.o
+                0x00000000400912c8        0x0 obj/aarch64_printf.o
                                          0x22 (size before relaxing)
  .rodata.vsnprintf.str1.1
-                0x0000000040091248        0x0 obj/aarch64_printf.o
+                0x00000000400912c8        0x0 obj/aarch64_printf.o
                                           0x7 (size before relaxing)
  .rodata.shell_log_warn.str1.1
-                0x0000000040091248        0x0 obj/aarch64_shell_log.o
+                0x00000000400912c8        0x0 obj/aarch64_shell_log.o
                                           0xf (size before relaxing)
  .rodata.shell_log_flush.str1.1
-                0x0000000040091248        0x0 obj/aarch64_shell_log.o
+                0x00000000400912c8        0x0 obj/aarch64_shell_log.o
                                          0x69 (size before relaxing)
  .rodata.split_command.str1.1
-                0x0000000040091248        0x0 obj/aarch64_pipeline.o
+                0x00000000400912c8        0x0 obj/aarch64_pipeline.o
                                           0x5 (size before relaxing)
  .rodata.parse_redirections.str1.1
-                0x0000000040091248        0x0 obj/aarch64_pipeline.o
+                0x00000000400912c8        0x0 obj/aarch64_pipeline.o
                                           0xc (size before relaxing)
  .rodata.parse_command.str1.1
-                0x0000000040091248        0x0 obj/aarch64_pipeline.o
+                0x00000000400912c8        0x0 obj/aarch64_pipeline.o
                                           0x2 (size before relaxing)
  .rodata.parse_pipeline.str1.1
-                0x0000000040091248        0x0 obj/aarch64_pipeline.o
+                0x00000000400912c8        0x0 obj/aarch64_pipeline.o
                                           0x2 (size before relaxing)
  .rodata.read_file_for_input_redirection.str1.1
-                0x0000000040091248        0x0 obj/aarch64_pipeline.o
+                0x00000000400912c8        0x0 obj/aarch64_pipeline.o
                                          0x6a (size before relaxing)
  .rodata.execute_simple_command.part.0.str1.1
-                0x0000000040091248        0x0 obj/aarch64_pipeline.o
+                0x00000000400912c8        0x0 obj/aarch64_pipeline.o
                                          0x73 (size before relaxing)
  .rodata.execute_complex_pipeline.str1.1
-                0x0000000040091248        0x0 obj/aarch64_pipeline.o
+                0x00000000400912c8        0x0 obj/aarch64_pipeline.o
                                          0x11 (size before relaxing)
  .rodata.execute_background_command.str1.1
-                0x0000000040091248        0x0 obj/aarch64_pipeline.o
+                0x00000000400912c8        0x0 obj/aarch64_pipeline.o
                                          0x4b (size before relaxing)
  .rodata.alias_load_if_needed.str1.1
-                0x0000000040091248        0x0 obj/aarch64_alias.o
+                0x00000000400912c8        0x0 obj/aarch64_alias.o
                                          0x14 (size before relaxing)
  .rodata.eynfs_cache_get_block.str1.1
-                0x0000000040091248        0x0 obj/aarch64_eynfs.o
+                0x00000000400912c8        0x0 obj/aarch64_eynfs.o
                                          0x2f (size before relaxing)
  .rodata.eynfs_count_dir_entries.str1.1
-                0x0000000040091248        0x0 obj/aarch64_eynfs.o
+                0x00000000400912c8        0x0 obj/aarch64_eynfs.o
                                          0x43 (size before relaxing)
  .rodata.eynfs_traverse_path.str1.1
-                0x0000000040091248        0x0 obj/aarch64_eynfs.o
+                0x00000000400912c8        0x0 obj/aarch64_eynfs.o
                                           0x2 (size before relaxing)
  .rodata.eynfs_write_file.str1.1
-                0x0000000040091248        0x0 obj/aarch64_eynfs.o
+                0x00000000400912c8        0x0 obj/aarch64_eynfs.o
                                         0x12f (size before relaxing)
  .rodata.vfs_split_path.constprop.0.str1.1
-                0x0000000040091248        0x0 obj/aarch64_vfs.o
+                0x00000000400912c8        0x0 obj/aarch64_vfs.o
                                           0x2 (size before relaxing)
  .rodata.vfs_listdir.str1.1
-                0x0000000040091248        0x0 obj/aarch64_vfs.o
+                0x00000000400912c8        0x0 obj/aarch64_vfs.o
                                           0x2 (size before relaxing)
  .rodata.hal_kbd_read_key_nonblock
-                0x0000000040091248       0x18 obj/aarch64_hal_keyboard.o
+                0x00000000400912c8       0x18 obj/aarch64_hal_keyboard.o
  .rodata.cmd_gfxdemo.str1.1
-                0x0000000040091260        0x0 obj/aarch64_gfx_cmd.o
+                0x00000000400912e0        0x0 obj/aarch64_gfx_cmd.o
                                          0x92 (size before relaxing)
-                0x0000000040091260                . = ALIGN (0x8)
-                0x0000000040091260                __start_shellcmds = .
+                0x00000000400912e0                . = ALIGN (0x8)
+                0x00000000400912e0                __start_shellcmds = .
  *(.shellcmds)
- .shellcmds     0x0000000040091260      0x2d0 obj/aarch64_cmd_registry_portable.o
-                0x0000000040091260                shell_cmd_info_gfxdemo
-                0x0000000040091288                shell_cmd_info_del
-                0x00000000400912b0                shell_cmd_info_cat
-                0x00000000400912d8                shell_cmd_info_read
-                0x0000000040091300                shell_cmd_info_cd
-                0x0000000040091328                shell_cmd_info_ls
-                0x0000000040091350                shell_cmd_info_log
-                0x0000000040091378                shell_cmd_info_hexdump
-                0x00000000400913a0                shell_cmd_info_search
-                0x00000000400913c8                shell_cmd_info_history
-                0x00000000400913f0                shell_cmd_info_exit
-                0x0000000040091418                shell_cmd_info_clear
-                0x0000000040091440                shell_cmd_info_sort
-                0x0000000040091468                shell_cmd_info_random
-                0x0000000040091490                shell_cmd_info_calc
-                0x00000000400914b8                shell_cmd_info_ver
-                0x00000000400914e0                shell_cmd_info_echo
-                0x0000000040091508                shell_cmd_info_help
-                0x0000000040091530                __stop_shellcmds = .
+ .shellcmds     0x00000000400912e0      0x2d0 obj/aarch64_cmd_registry_portable.o
+                0x00000000400912e0                shell_cmd_info_gfxdemo
+                0x0000000040091308                shell_cmd_info_del
+                0x0000000040091330                shell_cmd_info_cat
+                0x0000000040091358                shell_cmd_info_read
+                0x0000000040091380                shell_cmd_info_cd
+                0x00000000400913a8                shell_cmd_info_ls
+                0x00000000400913d0                shell_cmd_info_log
+                0x00000000400913f8                shell_cmd_info_hexdump
+                0x0000000040091420                shell_cmd_info_search
+                0x0000000040091448                shell_cmd_info_history
+                0x0000000040091470                shell_cmd_info_exit
+                0x0000000040091498                shell_cmd_info_clear
+                0x00000000400914c0                shell_cmd_info_sort
+                0x00000000400914e8                shell_cmd_info_random
+                0x0000000040091510                shell_cmd_info_calc
+                0x0000000040091538                shell_cmd_info_ver
+                0x0000000040091560                shell_cmd_info_echo
+                0x0000000040091588                shell_cmd_info_help
+                0x00000000400915b0                __stop_shellcmds = .
 
-.rela.dyn       0x0000000040091530        0x0
- .rela.iplt     0x0000000040091530        0x0 obj/aarch64_start.o
+.rela.dyn       0x00000000400915b0        0x0
+ .rela.iplt     0x00000000400915b0        0x0 obj/aarch64_start.o
  .rela.text._start
-                0x0000000040091530        0x0 obj/aarch64_start.o
+                0x00000000400915b0        0x0 obj/aarch64_start.o
  .rela.text.find_command
-                0x0000000040091530        0x0 obj/aarch64_start.o
+                0x00000000400915b0        0x0 obj/aarch64_start.o
  .rela.text.help_cmd
-                0x0000000040091530        0x0 obj/aarch64_start.o
+                0x00000000400915b0        0x0 obj/aarch64_start.o
  .rela.text.heap_init_default
-                0x0000000040091530        0x0 obj/aarch64_start.o
+                0x00000000400915b0        0x0 obj/aarch64_start.o
  .rela.text.aarch64_heap_init
-                0x0000000040091530        0x0 obj/aarch64_start.o
+                0x00000000400915b0        0x0 obj/aarch64_start.o
 
-.data           0x0000000040091530   0x10008c
+.data           0x00000000400915b0   0x10008c
  *(.data .data.*)
  .data.g_fb_bpp
-                0x0000000040091530        0x4 obj/aarch64_fb_simple.o
+                0x00000000400915b0        0x4 obj/aarch64_fb_simple.o
  .data.g_fb_fmt
-                0x0000000040091534        0x4 obj/aarch64_fb_simple.o
+                0x00000000400915b4        0x4 obj/aarch64_fb_simple.o
  .data.rand_state
-                0x0000000040091538        0x4 obj/aarch64_math.o
+                0x00000000400915b8        0x4 obj/aarch64_math.o
  .data.shell_current_path
-                0x000000004009153c       0x80 obj/aarch64_shell_state.o
-                0x000000004009153c                shell_current_path
- .data          0x00000000400915bc   0x100000 obj/aarch64_virt_dtb.o
-                0x00000000400915bc                _binary_virt_dtb_start
-                0x00000000401915bc                _binary_virt_dtb_end
+                0x00000000400915bc       0x80 obj/aarch64_shell_state.o
+                0x00000000400915bc                shell_current_path
+ .data          0x000000004009163c   0x100000 obj/aarch64_virt_dtb.o
+                0x000000004009163c                _binary_virt_dtb_start
+                0x000000004019163c                _binary_virt_dtb_end
 
-.igot.plt       0x00000000401915c0        0x0
- .igot.plt      0x00000000401915c0        0x0 obj/aarch64_start.o
+.igot.plt       0x0000000040191640        0x0
+ .igot.plt      0x0000000040191640        0x0 obj/aarch64_start.o
 
-.bss            0x0000000040192000    0x1ce78
+.bss            0x0000000040192000    0x20e98
                 0x0000000040192000                __bss_start = .
  *(.bss .bss.*)
  .bss.g_ram_size
@@ -1689,154 +1729,166 @@ Linker script and memory map
                 0x00000000401a30b0        0x4 obj/aarch64_ata_virtio.o
  .bss.g_inited  0x00000000401a30b4        0x4 obj/aarch64_ata_virtio.o
  .bss.g_drive0  0x00000000401a30b8       0x34 obj/aarch64_ata_virtio.o
- .bss.g_cntv_interval
+ .bss.g_tick_hz
                 0x00000000401a30ec        0x4 obj/aarch64_timer.o
- .bss.g_timer_irq_id
-                0x00000000401a30f0        0x4 obj/aarch64_irq.o
+ .bss.g_cntv_interval
+                0x00000000401a30f0        0x4 obj/aarch64_timer.o
  *fill*         0x00000000401a30f4        0x4 
- .bss.g_gic     0x00000000401a30f8       0x10 obj/aarch64_irq.o
+ .bss.g_tick_user
+                0x00000000401a30f8        0x8 obj/aarch64_irq.o
+ .bss.g_tick_handler
+                0x00000000401a3100        0x8 obj/aarch64_irq.o
+ .bss.g_irq_users
+                0x00000000401a3108     0x2000 obj/aarch64_irq.o
+ .bss.g_irq_handlers
+                0x00000000401a5108     0x2000 obj/aarch64_irq.o
+ .bss.g_timer_irq_id
+                0x00000000401a7108        0x4 obj/aarch64_irq.o
+ *fill*         0x00000000401a710c        0x4 
+ .bss.g_gic     0x00000000401a7110       0x10 obj/aarch64_irq.o
  .bss.g_aarch64_ticks
-                0x00000000401a3108        0x4 obj/aarch64_irq.o
-                0x00000000401a3108                g_aarch64_ticks
+                0x00000000401a7120        0x4 obj/aarch64_irq.o
+                0x00000000401a7120                g_aarch64_ticks
  .bss.g_psci_use_hvc
-                0x00000000401a310c        0x4 obj/aarch64_psci.o
+                0x00000000401a7124        0x4 obj/aarch64_psci.o
  .bss.aarch64_cpu_ticks
-                0x00000000401a3110       0x10 obj/aarch64_smp.o
-                0x00000000401a3110                aarch64_cpu_ticks
+                0x00000000401a7128       0x10 obj/aarch64_smp.o
+                0x00000000401a7128                aarch64_cpu_ticks
  .bss.aarch64_cpu_online
-                0x00000000401a3120       0x10 obj/aarch64_smp.o
-                0x00000000401a3120                aarch64_cpu_online
+                0x00000000401a7138       0x10 obj/aarch64_smp.o
+                0x00000000401a7138                aarch64_cpu_online
+ *fill*         0x00000000401a7148        0x8 
  .bss.aarch64_cpu_stacks
-                0x00000000401a3130     0x4000 obj/aarch64_smp.o
-                0x00000000401a3130                aarch64_cpu_stacks
+                0x00000000401a7150     0x4000 obj/aarch64_smp.o
+                0x00000000401a7150                aarch64_cpu_stacks
  .bss.g_fb_last_error
-                0x00000000401a7130        0x4 obj/aarch64_fb_simple.o
+                0x00000000401ab150        0x4 obj/aarch64_fb_simple.o
  .bss.g_bg_color
-                0x00000000401a7134        0x4 obj/aarch64_fb_simple.o
+                0x00000000401ab154        0x4 obj/aarch64_fb_simple.o
  .bss.g_fg_color
-                0x00000000401a7138        0x4 obj/aarch64_fb_simple.o
+                0x00000000401ab158        0x4 obj/aarch64_fb_simple.o
  .bss.g_cursor_y
-                0x00000000401a713c        0x4 obj/aarch64_fb_simple.o
+                0x00000000401ab15c        0x4 obj/aarch64_fb_simple.o
  .bss.g_cursor_x
-                0x00000000401a7140        0x4 obj/aarch64_fb_simple.o
- *fill*         0x00000000401a7144        0x4 
+                0x00000000401ab160        0x4 obj/aarch64_fb_simple.o
+ *fill*         0x00000000401ab164        0x4 
  .bss.g_fb_format
-                0x00000000401a7148       0x20 obj/aarch64_fb_simple.o
+                0x00000000401ab168       0x20 obj/aarch64_fb_simple.o
  .bss.g_fb_stride
-                0x00000000401a7168        0x4 obj/aarch64_fb_simple.o
+                0x00000000401ab188        0x4 obj/aarch64_fb_simple.o
  .bss.g_fb_height
-                0x00000000401a716c        0x4 obj/aarch64_fb_simple.o
+                0x00000000401ab18c        0x4 obj/aarch64_fb_simple.o
  .bss.g_fb_width
-                0x00000000401a7170        0x4 obj/aarch64_fb_simple.o
- *fill*         0x00000000401a7174        0x4 
+                0x00000000401ab190        0x4 obj/aarch64_fb_simple.o
+ *fill*         0x00000000401ab194        0x4 
  .bss.g_fb_base
-                0x00000000401a7178        0x8 obj/aarch64_fb_simple.o
+                0x00000000401ab198        0x8 obj/aarch64_fb_simple.o
  .bss.g_backend
-                0x00000000401a7180        0x8 obj/aarch64_gfx.o
+                0x00000000401ab1a0        0x8 obj/aarch64_gfx.o
  .bss.g_shell_log_write_failed
-                0x00000000401a7188        0x4 obj/aarch64_shell_log.o
+                0x00000000401ab1a8        0x4 obj/aarch64_shell_log.o
  .bss.g_shell_log_in_flush
-                0x00000000401a718c        0x4 obj/aarch64_shell_log.o
+                0x00000000401ab1ac        0x4 obj/aarch64_shell_log.o
  .bss.shell_log_active
-                0x00000000401a7190        0x4 obj/aarch64_shell_log.o
-                0x00000000401a7190                shell_log_active
+                0x00000000401ab1b0        0x4 obj/aarch64_shell_log.o
+                0x00000000401ab1b0                shell_log_active
  .bss.shell_log_current_line_start
-                0x00000000401a7194        0x4 obj/aarch64_shell_log.o
-                0x00000000401a7194                shell_log_current_line_start
+                0x00000000401ab1b4        0x4 obj/aarch64_shell_log.o
+                0x00000000401ab1b4                shell_log_current_line_start
  .bss.shell_log_line_starts
-                0x00000000401a7198      0xfa4 obj/aarch64_shell_log.o
-                0x00000000401a7198                shell_log_line_starts
+                0x00000000401ab1b8      0xfa4 obj/aarch64_shell_log.o
+                0x00000000401ab1b8                shell_log_line_starts
  .bss.shell_log_line_count
-                0x00000000401a813c        0x4 obj/aarch64_shell_log.o
-                0x00000000401a813c                shell_log_line_count
+                0x00000000401ac15c        0x4 obj/aarch64_shell_log.o
+                0x00000000401ac15c                shell_log_line_count
  .bss.shell_log_pos
-                0x00000000401a8140        0x4 obj/aarch64_shell_log.o
-                0x00000000401a8140                shell_log_pos
+                0x00000000401ac160        0x4 obj/aarch64_shell_log.o
+                0x00000000401ac160                shell_log_pos
  .bss.shell_log_buf_size
-                0x00000000401a8144        0x4 obj/aarch64_shell_log.o
-                0x00000000401a8144                shell_log_buf_size
+                0x00000000401ac164        0x4 obj/aarch64_shell_log.o
+                0x00000000401ac164                shell_log_buf_size
  .bss.shell_log_buf
-                0x00000000401a8148        0x8 obj/aarch64_shell_log.o
-                0x00000000401a8148                shell_log_buf
+                0x00000000401ac168        0x8 obj/aarch64_shell_log.o
+                0x00000000401ac168                shell_log_buf
  .bss.g_heap_ready
-                0x00000000401a8150        0x4 obj/aarch64_heap.o
- *fill*         0x00000000401a8154        0x4 
+                0x00000000401ac170        0x4 obj/aarch64_heap.o
+ *fill*         0x00000000401ac174        0x4 
  .bss.g_heap_first
-                0x00000000401a8158        0x8 obj/aarch64_heap.o
+                0x00000000401ac178        0x8 obj/aarch64_heap.o
  .bss.current_pos.0
-                0x00000000401a8160        0x8 obj/aarch64_pipeline.o
+                0x00000000401ac180        0x8 obj/aarch64_pipeline.o
  .bss.last_str.1
-                0x00000000401a8168        0x8 obj/aarch64_pipeline.o
+                0x00000000401ac188        0x8 obj/aarch64_pipeline.o
  .bss.g_pipeline_input_data
-                0x00000000401a8170        0x8 obj/aarch64_pipeline.o
-                0x00000000401a8170                g_pipeline_input_data
+                0x00000000401ac190        0x8 obj/aarch64_pipeline.o
+                0x00000000401ac190                g_pipeline_input_data
  .bss.g_background_processes
-                0x00000000401a8178      0x180 obj/aarch64_pipeline.o
-                0x00000000401a8178                g_background_processes
+                0x00000000401ac198      0x180 obj/aarch64_pipeline.o
+                0x00000000401ac198                g_background_processes
  .bss.g_file_descriptors
-                0x00000000401a82f8     0x1800 obj/aarch64_pipeline.o
-                0x00000000401a82f8                g_file_descriptors
+                0x00000000401ac318     0x1800 obj/aarch64_pipeline.o
+                0x00000000401ac318                g_file_descriptors
  .bss.shell_redirect_buf
-                0x00000000401a9af8      0x400 obj/aarch64_vga_redirect.o
-                0x00000000401a9af8                shell_redirect_buf
+                0x00000000401adb18      0x400 obj/aarch64_vga_redirect.o
+                0x00000000401adb18                shell_redirect_buf
  .bss.shell_redirect_pos
-                0x00000000401a9ef8        0x4 obj/aarch64_vga_redirect.o
-                0x00000000401a9ef8                shell_redirect_pos
+                0x00000000401adf18        0x4 obj/aarch64_vga_redirect.o
+                0x00000000401adf18                shell_redirect_pos
  .bss.shell_redirect_active
-                0x00000000401a9efc        0x4 obj/aarch64_vga_redirect.o
-                0x00000000401a9efc                shell_redirect_active
- .bss.buf.1     0x00000000401a9f00     0x1000 obj/aarch64_alias.o
+                0x00000000401adf1c        0x4 obj/aarch64_vga_redirect.o
+                0x00000000401adf1c                shell_redirect_active
+ .bss.buf.1     0x00000000401adf20     0x1000 obj/aarch64_alias.o
  .bss.g_alias_loaded
-                0x00000000401aaf00        0x4 obj/aarch64_alias.o
+                0x00000000401aef20        0x4 obj/aarch64_alias.o
  .bss.g_alias_count
-                0x00000000401aaf04        0x4 obj/aarch64_alias.o
+                0x00000000401aef24        0x4 obj/aarch64_alias.o
  .bss.g_aliases
-                0x00000000401aaf08     0x1d00 obj/aarch64_alias.o
+                0x00000000401aef28     0x1d00 obj/aarch64_alias.o
  .bss.caches_initialized.0
-                0x00000000401acc08        0x4 obj/aarch64_eynfs.o
+                0x00000000401b0c28        0x4 obj/aarch64_eynfs.o
  .bss.g_eynfs_read_fail_printed.1
-                0x00000000401acc0c        0x4 obj/aarch64_eynfs.o
+                0x00000000401b0c2c        0x4 obj/aarch64_eynfs.o
  .bss.dir_cache
-                0x00000000401acc10       0xc0 obj/aarch64_eynfs.o
+                0x00000000401b0c30       0xc0 obj/aarch64_eynfs.o
  .bss.free_block_cache_valid
-                0x00000000401accd0        0x1 obj/aarch64_eynfs.o
- *fill*         0x00000000401accd1        0x3 
+                0x00000000401b0cf0        0x1 obj/aarch64_eynfs.o
+ *fill*         0x00000000401b0cf1        0x3 
  .bss.free_block_cache_count
-                0x00000000401accd4        0x4 obj/aarch64_eynfs.o
+                0x00000000401b0cf4        0x4 obj/aarch64_eynfs.o
  .bss.free_block_cache
-                0x00000000401accd8      0x100 obj/aarch64_eynfs.o
+                0x00000000401b0cf8      0x100 obj/aarch64_eynfs.o
  .bss.cache_misses
-                0x00000000401acdd8        0x4 obj/aarch64_eynfs.o
+                0x00000000401b0df8        0x4 obj/aarch64_eynfs.o
  .bss.cache_hits
-                0x00000000401acddc        0x4 obj/aarch64_eynfs.o
+                0x00000000401b0dfc        0x4 obj/aarch64_eynfs.o
  .bss.block_cache
-                0x00000000401acde0     0x2080 obj/aarch64_eynfs.o
+                0x00000000401b0e00     0x2080 obj/aarch64_eynfs.o
  .bss.g_uart_csi_len
-                0x00000000401aee60        0x1 obj/aarch64_hal_keyboard.o
+                0x00000000401b2e80        0x1 obj/aarch64_hal_keyboard.o
  .bss.g_uart_csi_buf
-                0x00000000401aee61        0x8 obj/aarch64_hal_keyboard.o
+                0x00000000401b2e81        0x8 obj/aarch64_hal_keyboard.o
  .bss.g_uart_esc_state
-                0x00000000401aee69        0x1 obj/aarch64_hal_keyboard.o
- *fill*         0x00000000401aee6a        0x2 
- .bss.g_mods    0x00000000401aee6c        0x4 obj/aarch64_hal_keyboard.o
+                0x00000000401b2e89        0x1 obj/aarch64_hal_keyboard.o
+ *fill*         0x00000000401b2e8a        0x2 
+ .bss.g_mods    0x00000000401b2e8c        0x4 obj/aarch64_hal_keyboard.o
  .bss.g_current_drive
-                0x00000000401aee70        0x1 obj/aarch64_shell_state.o
-                0x00000000401aee70                g_current_drive
- *fill*         0x00000000401aee71        0x3 
+                0x00000000401b2e90        0x1 obj/aarch64_shell_state.o
+                0x00000000401b2e90                g_current_drive
+ *fill*         0x00000000401b2e91        0x3 
  .bss.g_user_interrupt
-                0x00000000401aee74        0x4 obj/aarch64_util_globals.o
-                0x00000000401aee74                g_user_interrupt
+                0x00000000401b2e94        0x4 obj/aarch64_util_globals.o
+                0x00000000401b2e94                g_user_interrupt
  *(COMMON)
-                0x00000000401aee78                __bss_end = .
+                0x00000000401b2e98                __bss_end = .
 
-.ramfb          0x00000000401aee80   0x1d4c00
+.ramfb          0x00000000401b2ea0   0x1d4c00
  *(.ramfb)
- .ramfb         0x00000000401aee80   0x1d4c00 obj/aarch64_fb_simple.o
-                0x0000000040383a80                . = ALIGN (0x10)
-                0x0000000040383a80                __stack_bottom = .
-                0x0000000040393a80                . = (. + 0x10000)
-                0x0000000040393a80                __stack_top = .
-                0x0000000040393a80                __kernel_end = .
+ .ramfb         0x00000000401b2ea0   0x1d4c00 obj/aarch64_fb_simple.o
+                0x0000000040387aa0                . = ALIGN (0x10)
+                0x0000000040387aa0                __stack_bottom = .
+                0x0000000040397aa0                . = (. + 0x10000)
+                0x0000000040397aa0                __stack_top = .
+                0x0000000040397aa0                __kernel_end = .
 LOAD obj/aarch64_start.o
 LOAD obj/aarch64_kernel_full.o
 LOAD obj/aarch64_shell_meminfo.o
@@ -1881,6 +1933,8 @@ LOAD obj/aarch64_hal_keyboard.o
 LOAD obj/aarch64_gfx_cmd.o
 LOAD obj/aarch64_shell_state.o
 LOAD obj/aarch64_util_globals.o
+LOAD obj/aarch64_hal_time.o
+LOAD obj/aarch64_hal_irq.o
 LOAD obj/aarch64_virt_dtb.o
 OUTPUT(tmp_aarch64_user/boot/kernel8_full.elf elf64-littleaarch64)
 LOAD linker stubs

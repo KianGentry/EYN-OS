@@ -23,4 +23,18 @@ uint32 hal_time_tick_hz(void);
 /* Best-effort cooperative sleep. */
 void hal_sleep_us(uint32 usec);
 
+/*
+ * Tick callback registration.
+ *
+ * Purpose:
+ *  Allow shared subsystems (scheduler, UI) to attach a tick handler without
+ *  knowing platform IRQ numbering (PIC/PIT vs GIC generic timer).
+ *
+ * Contract:
+ *  - At most one tick handler is supported for now.
+ *  - The handler runs in IRQ context: it must be fast and must not block.
+ */
+typedef void (*hal_time_tick_handler_t)(void* user);
+int hal_time_register_tick_handler(hal_time_tick_handler_t handler, void* user);
+
 #endif

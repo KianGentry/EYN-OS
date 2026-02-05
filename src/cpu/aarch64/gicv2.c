@@ -3,6 +3,7 @@
 // GICv2 Distributor registers
 #define GICD_CTLR          0x000
 #define GICD_ISENABLER(n)  (0x100 + ((n) * 4))
+#define GICD_ICENABLER(n)  (0x180 + ((n) * 4))
 
 // GICv2 CPU interface registers
 #define GICC_CTLR          0x0000
@@ -49,6 +50,14 @@ void gicv2_enable_irq(gicv2_t* gic, uint32 irq_id) {
     uint32 reg = irq_id / 32;
     uint32 bit = irq_id % 32;
     mmio_write(gic->dist_base + GICD_ISENABLER(reg), (1u << bit));
+}
+
+void gicv2_disable_irq(gicv2_t* gic, uint32 irq_id) {
+    if (!gic) return;
+
+    uint32 reg = irq_id / 32;
+    uint32 bit = irq_id % 32;
+    mmio_write(gic->dist_base + GICD_ICENABLER(reg), (1u << bit));
 }
 
 uint32 gicv2_ack_irq(gicv2_t* gic) {
