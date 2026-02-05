@@ -11,6 +11,7 @@
 #include <terminals.h>
 #include <watchdog.h>
 #include <kb.h>
+#include <arch.h>
 
 volatile int g_user_interrupt = 0;
 volatile int g_user_task_active = 0;
@@ -37,20 +38,20 @@ int kstdin_get_line(const char** out_s, int* out_len) {
         int term = g_user_task_term;
 
         // Allow IRQ0/UI to keep pumping keyboard input into the vterm buffer.
-        __asm__ __volatile__("sti");
+        arch_enable_interrupts();
         while (!vterm_stdin_ready(term)) {
             if (g_user_interrupt) {
                 return 0;
             }
             watchdog_kick("stdin");
-            __asm__ __volatile__("hlt");
+            arch_halt();
         }
 
         // Snapshot buffer under CLI to avoid races with the input pump.
-        __asm__ __volatile__("cli");
+        arch_irq_state_t irq_state = arch_irq_save();
         const char* s = vterm_stdin_data(term);
         int slen = vterm_stdin_len(term);
-        __asm__ __volatile__("sti");
+        arch_irq_restore(irq_state);
 
         if (!s || slen < 0) return 0;
         *out_s = s;
@@ -128,7 +129,7 @@ void ui_return_from_user_task(void) {
 
     // Shouldn't return; if it does, stop safely.
     for (;;) {
-        __asm__ __volatile__("hlt");
+        arch_halt();
     }
 }
 

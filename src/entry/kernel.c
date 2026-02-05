@@ -142,7 +142,7 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     // Enable interrupts globally now that IDT/PIC/PIT are initialized and
     // the IRQ0 handler is registered. Without this, sched_get_tick_count()
     // never advances (breaking REIV playback timing and other tick-based code).
-    __asm__ __volatile__("sti");
+    arch_enable_interrupts();
     // Initialize watchdog with a sensitive default (~250ms)
     printf("Starting watchdog...");
     uint32 hz = sched_get_tick_hz();

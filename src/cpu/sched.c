@@ -2,6 +2,7 @@
 #include <system.h>
 #include <irq.h>
 #include <watchdog.h>
+#include <arch.h>
 
 static volatile uint32 g_ticks = 0;
 static uint32 g_tick_hz = 100;
@@ -38,7 +39,7 @@ void sched_sleep_us(uint32 microseconds) {
     uint32 target_ticks = start_ticks + needed_ticks;
     while ((uint32)g_ticks < target_ticks) {
         // halt until next interrupt to save cpu; track for idle time estimation
-        __asm__ __volatile__("hlt");
+        arch_halt();
     }
     // Accumulate idle time in ticks that elapsed during this sleep
     uint32 end_ticks = g_ticks;

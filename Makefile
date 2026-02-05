@@ -64,12 +64,6 @@ OBJS += obj/netstack.o
 OBJS += obj/hal_console.o obj/hal_keyboard.o
 OUTPUT = $(BOOTDIR)/kernel.bin
 
-# -----------------------------
-# AArch64 (Raspberry Pi 4) bring-up build
-# -----------------------------
-# This is a minimal, standalone image used for early Pi bring-up (UART hello).
-# It does NOT attempt to build the full i386 kernel on AArch64 yet.
-
 AARCH64_TMPDIR ?= tmp_aarch64_user
 AARCH64_BOOTDIR = $(AARCH64_TMPDIR)/boot
 
@@ -77,15 +71,18 @@ AARCH64_BOOTDIR = $(AARCH64_TMPDIR)/boot
 # Note: these variables are only required when building the `aarch64` target.
 AARCH64_CC ?= $(shell command -v aarch64-none-elf-gcc 2>/dev/null || \
 	command -v aarch64-elf-gcc 2>/dev/null || \
-	command -v aarch64-linux-gnu-gcc 2>/dev/null)
+	command -v aarch64-linux-gnu-gcc 2>/dev/null || \
+	command -v aarch64-suse-linux-gcc 2>/dev/null)
 
 AARCH64_LD ?= $(shell command -v aarch64-none-elf-ld 2>/dev/null || \
 	command -v aarch64-elf-ld 2>/dev/null || \
-	command -v aarch64-linux-gnu-ld 2>/dev/null)
+	command -v aarch64-linux-gnu-ld 2>/dev/null || \
+	command -v aarch64-suse-linux-ld 2>/dev/null)
 
 AARCH64_OBJCOPY ?= $(shell command -v aarch64-none-elf-objcopy 2>/dev/null || \
 	command -v aarch64-elf-objcopy 2>/dev/null || \
 	command -v aarch64-linux-gnu-objcopy 2>/dev/null || \
+	command -v aarch64-suse-linux-objcopy 2>/dev/null || \
 	command -v llvm-objcopy 2>/dev/null)
 
 # Bring-up platform selector:
