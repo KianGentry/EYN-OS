@@ -13,6 +13,7 @@ static int g_tm_initialized = 0;
 #include <misc/types.h>
 // allow sleeping the CPU when tiling manager is idle
 #include <sched.h>
+#include <hal/time.h>
 #include <watchdog.h>
 #include <ui_prefs.h>
 #include <network/netstack.h>
@@ -76,9 +77,9 @@ static inline int status_overlay_visible(void) {
 // Fixed-rate marquee: ~3 characters per second regardless of frame rate.
 // Uses a bounce-with-pause pattern so the text reverses at ends.
 static inline uint32 status_scroll_steps(void) {
-    uint32 hz = sched_get_tick_hz();
+    uint32 hz = hal_time_tick_hz();
     if (!hz) hz = 50;
-    uint32 ticks = sched_get_tick_count();
+    uint32 ticks = (uint32)hal_time_ticks();
     // 3 chars/sec => steps = floor(ticks * 3 / hz)
     uint32 q = ticks / hz;
     uint32 r = ticks % hz;
@@ -2707,13 +2708,13 @@ void start_tiling_manager() {
             vga_set_vsync_enabled(1);
             vga_set_dirty_strategy(0); // smart multi-rect blit for throughput
         }
-        uint32 hz_tmp0 = sched_get_tick_hz(); if (!hz_tmp0) hz_tmp0 = 50;
+        uint32 hz_tmp0 = hal_time_tick_hz(); if (!hz_tmp0) hz_tmp0 = 50;
         g_drag_throttle_ticks = g_gui_low_mode ? (hz_tmp0 / 40 + 1) : (hz_tmp0 / 100 + 1);
-        g_last_frame_tick = sched_get_tick_count();
+        g_last_frame_tick = (uint32)hal_time_ticks();
         // initialize virtual terminals
         vterm_init_all();
         // prime GUI heartbeat
-        g_last_gui_heartbeat_tick = sched_get_tick_count();
+        g_last_gui_heartbeat_tick = (uint32)hal_time_ticks();
 
         // initialize simple double-buffer (best-effort)
         vga_init_double_buffer();
@@ -2794,7 +2795,7 @@ void start_tiling_manager() {
         // This keeps host->guest delivery working even when the user isn't
         // running a dedicated udp-listen command.
         static uint32 last_net_tick = 0;
-        uint32 now_net_tick = sched_get_tick_count();
+        uint32 now_net_tick = (uint32)hal_time_ticks();
         if (net_is_inited() && now_net_tick != last_net_tick) {
             last_net_tick = now_net_tick;
             uint8 local_ip[4];
@@ -2832,8 +2833,8 @@ void start_tiling_manager() {
         maybe_update_icon_mode(0);
         // 1 Hz GUI heartbeat: invalidate GUI tiles once per second so they can update time-based views
         {
-            uint32 now_ticks_hb = sched_get_tick_count();
-            uint32 hz_hb = sched_get_tick_hz(); if (!hz_hb) hz_hb = 50;
+            uint32 now_ticks_hb = (uint32)hal_time_ticks();
+            uint32 hz_hb = hal_time_tick_hz(); if (!hz_hb) hz_hb = 50;
             if (now_ticks_hb - g_last_gui_heartbeat_tick >= hz_hb) {
                 for (int ti = 0; ti < MAX_TILES; ++ti) {
                     if (gui_draw_cb[ti]) {
@@ -3388,7 +3389,7 @@ void start_tiling_manager() {
                     }
                 } else {
                     // Low mode: keep updates throttled via the existing drag throttle
-                    uint32 nowt = sched_get_tick_count();
+                    uint32 nowt = (uint32)hal_time_ticks();
                     if (nowt - g_last_drag_tick >= g_drag_throttle_ticks) {
                         g_last_drag_tick = nowt;
                         w->x = new_x; w->y = new_y; w->w = new_w; w->h = new_h;
@@ -3401,7 +3402,7 @@ void start_tiling_manager() {
                 window_t* w = &g_windows[drag_win];
                 // Drag throttling in low mode
                 if (g_gui_low_mode) {
-                    uint32 nowt = sched_get_tick_count();
+                    uint32 nowt = (uint32)hal_time_ticks();
                     if (nowt - g_last_drag_tick < g_drag_throttle_ticks) {
                         // skip updating geom this loop
                     } else {
@@ -3708,7 +3709,7 @@ after_mouse_handling:
         /*
          * Idle optimization: when nothing changed this frame (no tile content redraws,
          * no pending GUI redraws, no windows pending, and not dragging), yield the CPU
-         * briefly to reduce busy-loop CPU usage. We use sched_sleep_us which halts
+         * briefly to reduce busy-loop CPU usage. We use hal_sleep_us which halts
          * the processor until the next timer/interrupt which keeps latency low.
          */
         int idle_ok = 1;
@@ -3727,10 +3728,10 @@ after_mouse_handling:
             }
         }
         if (idle_ok) {
-            /* Sleep ~2ms to yield CPU but remain responsive. This will execute
-             * `hlt` inside sched_sleep_us and wake on interrupts (mouse/keyboard/timer).
+            /* Sleep ~2ms to yield CPU but remain responsive; wakes on interrupts
+             * (mouse/keyboard/timer).
              */
-            sched_sleep_us(2000);
+            hal_sleep_us(2000);
         }
 
         // Simple frame limiter to avoid overdraw on slow CPUs
@@ -3742,8 +3743,8 @@ after_mouse_handling:
             uint32 cap30 = 33333u; if (frame_target_us_effective > cap30) frame_target_us_effective = cap30;
         }
         if (frame_target_us_effective) {
-            uint32 now_ticks = sched_get_tick_count();
-            uint32 hz = sched_get_tick_hz(); if (!hz) hz = 50;
+            uint32 now_ticks = (uint32)hal_time_ticks();
+            uint32 hz = hal_time_tick_hz(); if (!hz) hz = 50;
             // Convert target_us to ticks and enforce at least 1 tick
             uint32 target_ticks = (frame_target_us_effective * hz) / 1000000; if (target_ticks < 1) target_ticks = 1;
             uint32 elapsed = now_ticks - g_last_frame_tick;
@@ -3751,9 +3752,9 @@ after_mouse_handling:
                 uint32 remaining_ticks = target_ticks - elapsed;
                 // approx sleep
                 uint32 us_per_tick = 1000000 / hz;
-                sched_sleep_us(remaining_ticks * us_per_tick);
+                hal_sleep_us(remaining_ticks * us_per_tick);
             }
-            g_last_frame_tick = sched_get_tick_count();
+            g_last_frame_tick = (uint32)hal_time_ticks();
         }
     }
 }
@@ -3786,7 +3787,7 @@ void tiler_gui_set_mode(int mode) {
             vga_set_dirty_strategy(0);
         }
         // Update drag throttle from current HZ
-        uint32 hz0 = sched_get_tick_hz(); if (!hz0) hz0 = 50;
+        uint32 hz0 = hal_time_tick_hz(); if (!hz0) hz0 = 50;
         g_drag_throttle_ticks = g_gui_low_mode ? (hz0 / 40 + 1) : (hz0 / 100 + 1);
 
         // Force visual refresh of everything
@@ -3812,7 +3813,7 @@ void tiler_gui_set_fps_cap(int fps) {
 }
 
 void tiler_gui_set_drag_throttle_ms(int ms) {
-    uint32 hz = sched_get_tick_hz(); if (!hz) hz = 50;
+    uint32 hz = hal_time_tick_hz(); if (!hz) hz = 50;
     if (ms <= 0) {
         g_drag_throttle_ticks = (hz / 100) + 1; // minimal throttle
     } else {
@@ -3833,7 +3834,7 @@ void tiler_gui_print_status(void) {
     // Compute FPS cap from microseconds
     int fps_cap = 0; if (g_frame_target_us) fps_cap = (int)(1000000u / g_frame_target_us);
     // Convert drag throttle to ms
-    uint32 hz = sched_get_tick_hz(); if (!hz) hz = 50;
+    uint32 hz = hal_time_tick_hz(); if (!hz) hz = 50;
     int drag_ms = (int)((g_drag_throttle_ticks * 1000u) / hz);
     printf("%cGUI status:\n", 200, 200, 255);
     printf("%c  mode: %s (auto suggestion: %s)\n", 255, 255, 255,

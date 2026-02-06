@@ -25,6 +25,7 @@
 #include <ui_prefs.h>
 #include <cpu/fpu.h>
 #include <arch.h>
+#include <hal/time.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
@@ -140,12 +141,12 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     printf("Done.\n");
 
     // Enable interrupts globally now that IDT/PIC/PIT are initialized and
-    // the IRQ0 handler is registered. Without this, sched_get_tick_count()
+    // the IRQ0 handler is registered. Without this, hal_time_ticks()
     // never advances (breaking REIV playback timing and other tick-based code).
     arch_enable_interrupts();
     // Initialize watchdog with a sensitive default (~250ms)
     printf("Starting watchdog...");
-    uint32 hz = sched_get_tick_hz();
+    uint32 hz = hal_time_tick_hz();
     uint32 to = (hz ? (hz/4) : 12); // ~0.25s
     watchdog_init(to);
     printf("Done.\n");

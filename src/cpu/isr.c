@@ -10,6 +10,7 @@
 #include <watchdog.h>
 
 #include <sched.h>
+#include <hal/time.h>
 
 #include <tile_manager.h>
 #include <terminals.h>
@@ -1174,7 +1175,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             uint32 usec = (uint32)arg1;
             // Cooperative sleep to allow other tasks (UI/tiler) to run.
             // Uses a busy-wait fallback if no timer is configured.
-            sched_sleep_us(usec);
+            hal_sleep_us(usec);
             regs->eax = 0;
             break;
         }

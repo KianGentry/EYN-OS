@@ -7,7 +7,7 @@
 #include <utilities/tile_manager.h>
 #include <utilities/util.h>
 #include <watchdog.h>
-#include <misc/sched.h>
+#include <hal/time.h>
 #include <drivers/serial.h>
 #include <kb.h>
 
@@ -373,12 +373,12 @@ static void net_log(const char* msg)
 
 static uint32 net_get_ticks(void)
 {
-    return sched_get_tick_count();
+    return (uint32)hal_time_ticks();
 }
 
 static uint32 net_get_hz(void)
 {
-    return sched_get_tick_hz();
+    return hal_time_tick_hz();
 }
 
 static uint32 net_ticks_from_ms(uint32 ms)
@@ -1530,7 +1530,7 @@ int net_icmp_ping(const uint8 local_ip[4], const uint8 dst_ip[4], int count, int
             continue;
         }
 
-        uint32 send_tick = sched_get_tick_count();
+        uint32 send_tick = (uint32)hal_time_ticks();
         rc = icmp_send_echo_request(local_ip, dst_ip, dst_mac, id, seq);
         if (rc != 0) {
             printf("%cPING%c ", 255, 255, 255, 255, 255, 255);
@@ -1555,7 +1555,7 @@ int net_icmp_ping(const uint8 local_ip[4], const uint8 dst_ip[4], int count, int
             uint32 payload_len = 0;
             int found = icmp_rxq_dequeue_match(id, seq, src_ip, &payload_len);
             if (found == 1) {
-                uint32 now_tick = sched_get_tick_count();
+                uint32 now_tick = (uint32)hal_time_ticks();
                 uint32 rtt_ticks = now_tick - send_tick;
                 printf("%cPING%c ", 0, 255, 0, 255, 255, 255);
                 print_ipv4_bytes(dst_ip);
@@ -1663,7 +1663,7 @@ static int arp_resolve(const uint8 sender_ip[4], const uint8 target_ip[4], uint8
 
         if (attempt < 2) {
             net_log("[NETSTACK] ARP retry\n");
-            sched_sleep_us(ARP_RETRY_BACKOFF_MS * 1000u);
+            hal_sleep_us(ARP_RETRY_BACKOFF_MS * 1000u);
         }
     }
 

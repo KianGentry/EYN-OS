@@ -4,6 +4,7 @@
 #include <mouse.h>
 #include <util.h>
 #include <sched.h>
+#include <hal/time.h>
 #include <system.h>
 #include <eynfs.h>
 #include <string.h>
@@ -220,7 +221,7 @@ static void stats_sample_memory(void) {
 }
 
 static void stats_update_cpu(void) {
-    uint32 ticks = sched_get_tick_count();
+    uint32 ticks = (uint32)hal_time_ticks();
     uint32 idle = sched_get_idle_hlt_count();
     uint32 dt = ticks - g_stats.last_ticks;
     uint32 didle = idle - g_stats.last_idle_hlt;
@@ -269,8 +270,8 @@ static void stats_gui_draw(int tile_idx, int content_x, int content_y, int conte
     // Background
     drawRect(content_x, content_y, content_w, content_h, 16,16,16);
     // Update at most once per second to keep UI smooth
-    uint32 now_ticks = sched_get_tick_count();
-    uint32 tick_hz = sched_get_tick_hz(); if (tick_hz == 0) tick_hz = 50;
+    uint32 now_ticks = (uint32)hal_time_ticks();
+    uint32 tick_hz = hal_time_tick_hz(); if (tick_hz == 0) tick_hz = 50;
     if (now_ticks - g_stats.last_ui_update_tick >= tick_hz) {
         stats_update_cpu();
         stats_sample_memory();
@@ -326,7 +327,7 @@ static void stats_gui_draw(int tile_idx, int content_x, int content_y, int conte
     drawTextAt(cx1 - 12, y, b, 255, 200, 200);
     // CPU detail line: show busyMHz / totalMHz (estimate). Uses TSC sampled over last UI window.
     char dline[64];
-    uint32 hz = sched_get_tick_hz(); if (hz == 0) hz = 50;
+    uint32 hz = hal_time_tick_hz(); if (hz == 0) hz = 50;
     uint32 total_mhz = g_stats.cpu_mhz_total;
     uint32 busy_mhz = (total_mhz * clamp_pct_to_int(g_stats.cpu_percent)) / 100;
     if (total_mhz == 0) {
@@ -399,7 +400,7 @@ static void stats_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdat
 static void stats_cmd(string arg) {
     memset(&g_stats, 0, sizeof(g_stats));
     g_stats.sort_col = 0; g_stats.sort_dir = -1;
-    g_stats.last_ticks = sched_get_tick_count();
+    g_stats.last_ticks = (uint32)hal_time_ticks();
     g_stats.last_idle_hlt = sched_get_idle_hlt_count();
     // Decide TSC usability and prime baseline if enabled
     g_stats.disable_tsc = 0;
@@ -419,7 +420,7 @@ static void stats_cmd(string arg) {
     // Initial memory/disk sample
     stats_sample_memory();
     stats_sample_disk();
-    g_stats.last_ui_update_tick = sched_get_tick_count();
+    g_stats.last_ui_update_tick = (uint32)hal_time_ticks();
     int tile = tile_get_focused();
     tile_set_title_status(tile, "System Stats", "stats", NULL);
     tile_register_gui_client2(tile, stats_gui_draw, stats_gui_key, stats_gui_mouse, NULL);

@@ -3,6 +3,7 @@
 #include <util.h>
 #include <string.h>
 #include <sched.h>
+#include <hal/time.h>
 
 // Global kernel API structure
 eynos_kernel_api_t g_kernel_api_struct;
@@ -94,7 +95,7 @@ void eyn_kernel_yield(void) {
 }
 
 void eyn_kernel_sleep_us(uint32 microseconds) {
-    sched_sleep_us(microseconds);
+    hal_sleep_us(microseconds);
 }
 
 void eyn_kernel_api_init(void) {

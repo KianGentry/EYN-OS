@@ -8,7 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <mouse.h>
-#include <sched.h>
+#include <hal/time.h>
 #include <serial.h>
 #include <watchdog.h>
 #ifndef EYNFS_SUPERBLOCK_LBA
@@ -534,7 +534,7 @@ static void viewer_draw_image() {
         int dst_y = vy + (vh - dst_h) / 2;
 
         // Advance frame timing (tick-based)
-        uint32 hz = sched_get_tick_hz();
+        uint32 hz = hal_time_tick_hz();
         if (!hz) hz = 50;
         // default to ~30fps if metadata is odd
         uint32 fps_num = g_view.vh.fps_num ? g_view.vh.fps_num : 30;
@@ -551,7 +551,7 @@ static void viewer_draw_image() {
         uint32 tick_num = hz * fps_den;
         if (tick_num == 0) tick_num = 1;
 
-        uint32 now = sched_get_tick_count();
+        uint32 now = (uint32)hal_time_ticks();
 
         if (g_view.playing) {
             watchdog_kick("reiv-play");
@@ -727,8 +727,8 @@ static void viewer_gui_draw(int tile_idx, int cx, int cy, int cw, int ch, void* 
 
     // Immediate debug for first few draws (does not depend on tick cadence)
     if (g_view.is_reiv && g_view.dbg_draws <= 5) {
-        uint32 now = sched_get_tick_count();
-        uint32 hz = sched_get_tick_hz(); if (!hz) hz = 50;
+        uint32 now = (uint32)hal_time_ticks();
+        uint32 hz = hal_time_tick_hz(); if (!hz) hz = 50;
         char sbuf[220];
         int n = snprintf(sbuf, sizeof(sbuf),
                          "[REIV] draw#%u idx=%u/%u play=%d now=%u hz=%u next=%u\n",
@@ -748,8 +748,8 @@ static void viewer_gui_draw(int tile_idx, int cx, int cy, int cw, int ch, void* 
 
     // Throttled serial debug to diagnose “first frame only”
     if (g_view.is_reiv) {
-        uint32 now = sched_get_tick_count();
-        uint32 hz = sched_get_tick_hz();
+        uint32 now = (uint32)hal_time_ticks();
+        uint32 hz = hal_time_tick_hz();
         if (!hz) hz = 50;
         if ((int32)(now - g_view.dbg_last_print_tick) >= (int32)hz) {
             g_view.dbg_last_print_tick = now;
@@ -769,8 +769,8 @@ static void viewer_gui_key(int tile_idx, int key, void* ud) {
     if (key==0x2102) { if (g_view.zoom<8) { g_view.zoom++; changed=1; } } // Ctrl+Plus
     else if (key==0x2103) { if (g_view.zoom>1) { g_view.zoom--; changed=1; } } // Ctrl+Minus
     else if (key==' ' && g_view.is_reiv) {
-        uint32 now = sched_get_tick_count();
-        uint32 hz = sched_get_tick_hz(); if (!hz) hz = 50;
+        uint32 now = (uint32)hal_time_ticks();
+        uint32 hz = hal_time_tick_hz(); if (!hz) hz = 50;
         uint32 debounce = hz / 5; if (debounce < 2) debounce = 2; // ~200ms
         if ((int32)(now - g_view.last_toggle_tick) >= (int32)debounce) {
             g_view.last_toggle_tick = now;
@@ -815,8 +815,8 @@ static void viewer_gui_mouse(int tile_idx, const mouse_event_t* me, void* ud) {
     g_view.last_mouse_left = (uint8_t)(left_now ? 1 : 0);
 
     if (g_view.is_reiv && left_edge) {
-        uint32 now = sched_get_tick_count();
-        uint32 hz = sched_get_tick_hz(); if (!hz) hz = 50;
+        uint32 now = (uint32)hal_time_ticks();
+        uint32 hz = hal_time_tick_hz(); if (!hz) hz = 50;
         uint32 debounce = hz / 5; if (debounce < 2) debounce = 2; // ~200ms
         if ((int32)(now - g_view.last_click_tick) < (int32)debounce) {
             return;
@@ -907,7 +907,7 @@ static int load_reiv_stream(const char* path) {
     g_view.loop_locked = (g_view.vh.flags & REIV_FLAG_LOOP_LOCKED) ? 1 : 0;
     // Start the first advance slightly in the future to allow prefetch of frame 1.
     {
-        uint32 hz = sched_get_tick_hz();
+        uint32 hz = hal_time_tick_hz();
         if (!hz) hz = 50;
         uint32 fps_num = g_view.vh.fps_num ? g_view.vh.fps_num : 30;
         uint32 fps_den = g_view.vh.fps_den ? g_view.vh.fps_den : 1;
@@ -921,7 +921,7 @@ static int load_reiv_stream(const char* path) {
         if (tick_num == 0) tick_num = 1;
         uint32 inc = tick_num / fps_num;
         if (inc < 1u) inc = 1u;
-        uint32 now = sched_get_tick_count();
+        uint32 now = (uint32)hal_time_ticks();
         g_view.next_frame_tick = now + inc;
     }
 
