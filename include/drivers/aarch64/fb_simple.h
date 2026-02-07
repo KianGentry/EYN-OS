@@ -17,7 +17,11 @@ void fb_simple_set_rgb(uint8 r, uint8 g, uint8 b);
 void fb_simple_set_bg_rgb(uint8 r, uint8 g, uint8 b);
 void fb_simple_clear_rgb(uint8 r, uint8 g, uint8 b);
 void fb_simple_draw_pixel(uint32 x, uint32 y, uint8 r, uint8 g, uint8 b);
+// Draw without flushing cache (caller will flush later).
+void fb_simple_draw_pixel_noflush(uint32 x, uint32 y, uint8 r, uint8 g, uint8 b);
 void fb_simple_fill_rect(uint32 x, uint32 y, uint32 w, uint32 h, uint8 r, uint8 g, uint8 b);
+// Fill without flushing cache (caller will flush later).
+void fb_simple_fill_rect_noflush(uint32 x, uint32 y, uint32 w, uint32 h, uint8 r, uint8 g, uint8 b);
 void fb_simple_flush(void);
 
 /*

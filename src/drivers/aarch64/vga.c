@@ -89,17 +89,8 @@ int vga_system_font_acquire(void) { return 0; }
 int vga_system_font_set(uint8 drive, const char* path) { (void)drive; (void)path; return 0; }
 
 void drawPixel(int x, int y, int r, int g, int b) {
-    if (!fb_simple_ready()) return;
     if (x < 0 || y < 0) return;
-
-    uint64 base = 0;
-    uint32 fb_w = 0, fb_h = 0, stride = 0, bpp = 0;
-    if (fb_query(&base, &fb_w, &fb_h, &stride, &bpp) != 0) return;
-    if (bpp != 32) return;
-    if ((uint32)x >= fb_w || (uint32)y >= fb_h) return;
-
-    volatile uint32* p = (volatile uint32*)(uintptr_t)(base + (uint64)(uint32)y * (uint64)stride + (uint64)(uint32)x * 4ull);
-    *p = pack_rgb((uint8)r, (uint8)g, (uint8)b);
+    fb_simple_draw_pixel_noflush((uint32)x, (uint32)y, (uint8)r, (uint8)g, (uint8)b);
 }
 
 void vga_drawPixel_fb(int x, int y, int r, int g, int b) { drawPixel(x, y, r, g, b); }
@@ -116,7 +107,7 @@ void drawRect(int x, int y, int w, int h, int r, int g, int b) {
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (w <= 0 || h <= 0) return;
-    fb_simple_fill_rect((uint32)x, (uint32)y, (uint32)w, (uint32)h, (uint8)r, (uint8)g, (uint8)b);
+    fb_simple_fill_rect_noflush((uint32)x, (uint32)y, (uint32)w, (uint32)h, (uint8)r, (uint8)g, (uint8)b);
 }
 
 void vga_fillRect_fb(int x, int y, int w, int h, int r, int g, int b) { drawRect(x, y, w, h, r, g, b); }

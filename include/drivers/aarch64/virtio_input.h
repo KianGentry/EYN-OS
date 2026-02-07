@@ -28,4 +28,7 @@ int virtio_input_getc_nonblock(char* out_c);
  */
 int virtio_input_getkey_nonblock(uint32* out_key, uint32* out_mods);
 
+// Get current modifier state (HAL_KBD_MOD_* bits).
+uint32 virtio_input_get_mods(void);
+
 #endif

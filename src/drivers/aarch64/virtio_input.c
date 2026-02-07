@@ -496,6 +496,10 @@ int virtio_input_getkey_nonblock(uint32* out_key, uint32* out_mods) {
     return virtio_input_try_consume_key(out_key, out_mods);
 }
 
+uint32 virtio_input_get_mods(void) {
+    return virtio_mods_to_hal();
+}
+
 static int virtio_input_init_at_base(uint64 base) {
     if (mmio_r32(base, VIRTIO_MMIO_MAGIC_VALUE) != VIRTIO_MMIO_MAGIC) return -1;
     uint32 ver = mmio_r32(base, VIRTIO_MMIO_VERSION);

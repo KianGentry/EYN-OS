@@ -789,6 +789,12 @@ void fb_simple_draw_pixel(uint32 x, uint32 y, uint8 r, uint8 g, uint8 b) {
     fb_flush_rect(x, y, 1, 1);
 }
 
+void fb_simple_draw_pixel_noflush(uint32 x, uint32 y, uint8 r, uint8 g, uint8 b) {
+    if (!g_fb_base) return;
+    if (x >= g_fb_width || y >= g_fb_height) return;
+    fb_put_pixel(x, y, fb_color(r, g, b));
+}
+
 void fb_simple_fill_rect(uint32 x, uint32 y, uint32 w, uint32 h, uint8 r, uint8 g, uint8 b) {
     if (!g_fb_base) return;
     if (w == 0 || h == 0) return;
@@ -797,6 +803,15 @@ void fb_simple_fill_rect(uint32 x, uint32 y, uint32 w, uint32 h, uint8 r, uint8 
     if (y + h > g_fb_height) h = g_fb_height - y;
     fb_fill_rect(x, y, w, h, fb_color(r, g, b));
     fb_flush_rect(x, y, w, h);
+}
+
+void fb_simple_fill_rect_noflush(uint32 x, uint32 y, uint32 w, uint32 h, uint8 r, uint8 g, uint8 b) {
+    if (!g_fb_base) return;
+    if (w == 0 || h == 0) return;
+    if (x >= g_fb_width || y >= g_fb_height) return;
+    if (x + w > g_fb_width) w = g_fb_width - x;
+    if (y + h > g_fb_height) h = g_fb_height - y;
+    fb_fill_rect(x, y, w, h, fb_color(r, g, b));
 }
 
 void fb_simple_flush(void) {

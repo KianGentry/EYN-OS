@@ -728,6 +728,13 @@ static void viewer_gui_draw(int tile_idx, int cx, int cy, int cw, int ch, void* 
     (void)ud; g_view.tile_idx = tile_idx; g_view.content_x=cx; g_view.content_y=cy; g_view.content_w=cw; g_view.content_h=ch;
     g_view.dbg_draws++;
 
+    if (g_view.dbg_draws <= 3 && tile_idx >= 0) {
+        static char dbg_right[96];
+        snprintf(dbg_right, sizeof(dbg_right), "d=%u x=%d y=%d w=%d h=%d img=%d",
+                 (unsigned)g_view.dbg_draws, cx, cy, cw, ch, g_view.img.data ? 1 : 0);
+        tile_set_title_status(tile_idx, NULL, g_view.status_left, dbg_right);
+    }
+
     // Immediate debug for first few draws (does not depend on tick cadence)
     if (g_view.is_reiv && g_view.dbg_draws <= 5) {
         uint32 now = (uint32)hal_time_ticks();
@@ -743,6 +750,13 @@ static void viewer_gui_draw(int tile_idx, int cx, int cy, int cw, int ch, void* 
     }
 
     viewer_draw_image();
+    if (g_view.content_w > 0 && g_view.content_h > 0 && g_view.dbg_draws <= 120) {
+        drawRect(g_view.content_x + 2, g_view.content_y + 2, 32, 32, 0, 255, 0);
+        drawRect(g_view.content_x, g_view.content_y, g_view.content_w, 1, 255, 0, 0);
+        drawRect(g_view.content_x, g_view.content_y + g_view.content_h - 1, g_view.content_w, 1, 255, 0, 0);
+        drawRect(g_view.content_x, g_view.content_y, 1, g_view.content_h, 255, 0, 0);
+        drawRect(g_view.content_x + g_view.content_w - 1, g_view.content_y, 1, g_view.content_h, 255, 0, 0);
+    }
     // If playing video, request continuous redraw for smooth playback
     if (g_view.is_reiv && g_view.playing) {
         if (g_view.window.is_window) wm_set_continuous_redraw(g_view.window.window_id, 1);
@@ -1048,6 +1062,8 @@ static void open_viewer_gui(const char* path) {
     int t = tile_create_gui_tile(title_buf, g_view.status_left);
     if (t >= 0) {
         tile_register_gui_client2(t, viewer_gui_draw, viewer_gui_key, viewer_gui_mouse, NULL);
+        tile_invalidate_gui(t);
+        tile_render_once();
         if (g_view.is_reiv && g_view.playing) tile_set_gui_continuous_redraw(t, 1);
     }
 }

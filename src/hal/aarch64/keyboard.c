@@ -1,4 +1,5 @@
 #include <hal/keyboard.h>
+#include <drivers/aarch64/virtio_input.h>
 
 int uart_pl011_getc_nonblock(char* out_c);
 int virtio_input_getkey_nonblock(uint32* out_key, uint32* out_mods);
@@ -127,13 +128,18 @@ int hal_kbd_getc_nonblock(void) {
 uint32 hal_kbd_read_key_nonblock(void) {
     /* Prefer UART so -nographic remains usable. */
     uint32 key = uart_try_read_key();
-    if (key != 0) return key;
+    if (key != 0) {
+        g_mods = 0;
+        return key;
+    }
 
     uint32 mods = 0;
     if (virtio_input_getkey_nonblock(&key, &mods) == 0) {
         g_mods = mods;
         return key;
     }
+
+    g_mods = virtio_input_get_mods();
 
     return 0;
 }

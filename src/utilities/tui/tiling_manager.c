@@ -3534,6 +3534,25 @@ after_mouse_handling:
             prev_alt = cur_alt;
             prev_shift = cur_shift;
         }
+
+        // If status overlay visibility toggles, force redraw to restore any covered pixels.
+        // This must run even when key==0 so Alt-hold updates immediately.
+        {
+            static int last_overlay_state = -1;
+            int overlay_now = status_overlay_visible();
+            if (last_overlay_state != overlay_now) {
+                last_overlay_state = overlay_now;
+                g_force_full_redraw = 1;
+                g_tiles_full_content_redraw = 1;
+                for (int ti = 0; ti < tile_count; ++ti) tiles[ti].static_drawn = 0;
+                for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                    if (g_windows[wi].used && !g_windows[wi].minimized) {
+                        g_windows[wi].needs_redraw = 1;
+                        g_windows[wi].static_drawn = 0;
+                    }
+                }
+            }
+        }
         // If modal is active, handle it first and skip routing
         if (g_bg_modal.active) {
             if (handle_bg_modal_key(key)) { continue; }
@@ -3734,10 +3753,13 @@ after_mouse_handling:
             }
         }
         if (idle_ok) {
-            /* Sleep ~2ms to yield CPU but remain responsive; wakes on interrupts
-             * (mouse/keyboard/timer).
+            /* Sleep ~2ms to yield CPU but remain responsive; wakes on interrupts.
+             * On AArch64, avoid halting sleeps here so the UI keeps refreshing
+             * even when no timer interrupts are configured.
              */
+#if defined(__i386__)
             hal_sleep_us(2000);
+#endif
         }
 
         // Simple frame limiter to avoid overdraw on slow CPUs
@@ -3758,7 +3780,9 @@ after_mouse_handling:
                 uint32 remaining_ticks = target_ticks - elapsed;
                 // approx sleep
                 uint32 us_per_tick = 1000000 / hz;
+#if defined(__i386__)
                 hal_sleep_us(remaining_ticks * us_per_tick);
+#endif
             }
             g_last_frame_tick = (uint32)hal_time_ticks();
         }
