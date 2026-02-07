@@ -14,14 +14,9 @@
 #include <help_tui.h>
 #include <fs/vfs.h>
 #include <terminals.h>
+#include <utilities/shell/shell_caps.h>
 
-// Command registration indirection:
-// AArch64-full registers a portable subset from a dedicated registry TU.
-#if defined(EYNOS_DISABLE_SHELL_COMMAND_REGISTRY)
-#define EYNOS_REGISTER_SHELL_COMMAND(...)
-#else
-#define EYNOS_REGISTER_SHELL_COMMAND REGISTER_SHELL_COMMAND
-#endif
+// Use capability-gated registration so commands are visible on all builds.
 
 // Forward declarations for command handlers
 void ls_cmd(string arg);
@@ -1184,18 +1179,18 @@ void move_cmd(string ch) {
     printf("%cFile moved: %s -> %s (%d bytes)\n", 0, 255, 0, src_path, dst_path, bytes_written);
 }
 
-EYNOS_REGISTER_SHELL_COMMAND(ls, "ls", ls_cmd, CMD_STREAMING, "List files in the root directory of the selected drive.\nUsage: ls", "ls");
-EYNOS_REGISTER_SHELL_COMMAND(read, "read", read_cmd, CMD_STREAMING, "Display text files (.txt) or render markdown (.md). For images, use 'view' or 'vieww'.\nUsage: read <filename>", "read myfile.txt");
-EYNOS_REGISTER_SHELL_COMMAND(cat, "cat", cat_cmd, CMD_STREAMING, "Print a text file.\nUsage: cat <filename>", "cat test.txt");
-EYNOS_REGISTER_SHELL_COMMAND(del, "del", del, CMD_STREAMING, "Delete a file from the filesystem.\nUsage: del <filename>", "del myfile.txt");
+REGISTER_SHELL_COMMAND_REQ(ls, "ls", ls_cmd, CMD_STREAMING, "List files in the root directory of the selected drive.\nUsage: ls", "ls", SHELL_CAP_VFS);
+REGISTER_SHELL_COMMAND_REQ(read, "read", read_cmd, CMD_STREAMING, "Display text files (.txt) or render markdown (.md). For images, use 'view' or 'vieww'.\nUsage: read <filename>", "read myfile.txt", SHELL_CAP_VFS);
+REGISTER_SHELL_COMMAND_REQ(cat, "cat", cat_cmd, CMD_STREAMING, "Print a text file.\nUsage: cat <filename>", "cat test.txt", SHELL_CAP_VFS);
+REGISTER_SHELL_COMMAND_REQ(del, "del", del, CMD_STREAMING, "Delete a file from the filesystem.\nUsage: del <filename>", "del myfile.txt", SHELL_CAP_VFS);
 #if !defined(__aarch64__)
-EYNOS_REGISTER_SHELL_COMMAND(write, "write", write_cmd, CMD_STREAMING, "Open nano-like text editor for a file.\nUsage: write <filename>", "write myfile.txt");
+REGISTER_SHELL_COMMAND_REQ(write, "write", write_cmd, CMD_STREAMING, "Open nano-like text editor for a file.\nUsage: write <filename>", "write myfile.txt", SHELL_CAP_VFS);
 #endif
-EYNOS_REGISTER_SHELL_COMMAND(size, "size", size, CMD_STREAMING, "Show the size of a file in bytes.\nUsage: size <filename>", "size myfile.txt");
-EYNOS_REGISTER_SHELL_COMMAND(cd, "cd", cd, CMD_STREAMING, "Change the current directory.\nUsage: cd <directory>", "cd myfolder");
-EYNOS_REGISTER_SHELL_COMMAND(makedir, "makedir", makedir, CMD_STREAMING, "Create a new directory.\nUsage: makedir <directory>", "makedir myfolder");
-EYNOS_REGISTER_SHELL_COMMAND(deldir, "deldir", deldir, CMD_STREAMING, "Delete an empty directory.\nUsage: deldir <directory>", "deldir myfolder");
-EYNOS_REGISTER_SHELL_COMMAND(fscheck, "fscheck", fscheck, CMD_STREAMING, "Check filesystem integrity.\nUsage: fscheck", "fscheck");
-EYNOS_REGISTER_SHELL_COMMAND(copy_cmd, "copy", copy_cmd, CMD_STREAMING, "Copy a file from source to destination.\nUsage: copy <source> <destination>", "copy file1.txt file2.txt");
-EYNOS_REGISTER_SHELL_COMMAND(move_cmd, "move", move_cmd, CMD_STREAMING, "Move a file from source to destination.\nUsage: move <source> <destination>", "move file1.txt /backup/file1.txt");
-EYNOS_REGISTER_SHELL_COMMAND(fatfix_cmd, "fatfix", fatfix_cmd, CMD_STREAMING, "Scan and repair FAT32 entries incorrectly marked as directories.\nUsage: fatfix [path]", "fatfix /" );
+REGISTER_SHELL_COMMAND_REQ(size, "size", size, CMD_STREAMING, "Show the size of a file in bytes.\nUsage: size <filename>", "size myfile.txt", SHELL_CAP_VFS);
+REGISTER_SHELL_COMMAND_REQ(cd, "cd", cd, CMD_STREAMING, "Change the current directory.\nUsage: cd <directory>", "cd myfolder", SHELL_CAP_VFS);
+REGISTER_SHELL_COMMAND_REQ(makedir, "makedir", makedir, CMD_STREAMING, "Create a new directory.\nUsage: makedir <directory>", "makedir myfolder", SHELL_CAP_VFS);
+REGISTER_SHELL_COMMAND_REQ(deldir, "deldir", deldir, CMD_STREAMING, "Delete an empty directory.\nUsage: deldir <directory>", "deldir myfolder", SHELL_CAP_VFS);
+REGISTER_SHELL_COMMAND_REQ(fscheck, "fscheck", fscheck, CMD_STREAMING, "Check filesystem integrity.\nUsage: fscheck", "fscheck", SHELL_CAP_VFS);
+REGISTER_SHELL_COMMAND_REQ(copy_cmd, "copy", copy_cmd, CMD_STREAMING, "Copy a file from source to destination.\nUsage: copy <source> <destination>", "copy file1.txt file2.txt", SHELL_CAP_VFS);
+REGISTER_SHELL_COMMAND_REQ(move_cmd, "move", move_cmd, CMD_STREAMING, "Move a file from source to destination.\nUsage: move <source> <destination>", "move file1.txt /backup/file1.txt", SHELL_CAP_VFS);
+REGISTER_SHELL_COMMAND_REQ(fatfix_cmd, "fatfix", fatfix_cmd, CMD_STREAMING, "Scan and repair FAT32 entries incorrectly marked as directories.\nUsage: fatfix [path]", "fatfix /", SHELL_CAP_VFS);
