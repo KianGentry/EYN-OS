@@ -11,6 +11,7 @@
 #include <hal/time.h>
 #include <serial.h>
 #include <watchdog.h>
+#define ALIGN16 __attribute__((aligned(16)))
 #ifndef EYNFS_SUPERBLOCK_LBA
 #define EYNFS_SUPERBLOCK_LBA 2048
 #endif
@@ -77,12 +78,14 @@ typedef struct {
     char filename_base[128];
     int tile_idx;
     // Window mode support
-    int is_window; // 0=tile, 1=window
-    int window_id; // valid when is_window
+    struct ALIGN16 {
+        int is_window; // 0=tile, 1=window
+        int window_id; // valid when is_window
+    } window;
     char status_left[128];
 } viewer_t;
 
-static viewer_t g_view;
+static viewer_t g_view ALIGN16;
 
 static void viewer_free_resources(void) {
     if (g_view.img.data) {
@@ -623,7 +626,7 @@ static void viewer_draw_image() {
             // Continuous redraw drives playback.
         } else {
             // If playback stopped, turn off continuous redraw to avoid burning CPU.
-            if (g_view.is_window) wm_set_continuous_redraw(g_view.window_id, 0);
+            if (g_view.window.is_window) wm_set_continuous_redraw(g_view.window.window_id, 0);
             else tile_set_gui_continuous_redraw(g_view.tile_idx, 0);
         }
 
@@ -742,7 +745,7 @@ static void viewer_gui_draw(int tile_idx, int cx, int cy, int cw, int ch, void* 
     viewer_draw_image();
     // If playing video, request continuous redraw for smooth playback
     if (g_view.is_reiv && g_view.playing) {
-        if (g_view.is_window) wm_set_continuous_redraw(g_view.window_id, 1);
+        if (g_view.window.is_window) wm_set_continuous_redraw(g_view.window.window_id, 1);
         else tile_set_gui_continuous_redraw(g_view.tile_idx, 1);
     }
 
@@ -789,8 +792,8 @@ static void viewer_gui_key(int tile_idx, int key, void* ud) {
     else if ((key=='l' || key=='L') && g_view.is_reiv && !g_view.loop_locked) { g_view.loop_enabled = !g_view.loop_enabled; changed = 1; }
     else if (key==0x2101) { // Ctrl+Q closes
         viewer_free_resources();
-        if (g_view.is_window) {
-            wm_close_window(g_view.window_id);
+        if (g_view.window.is_window) {
+            wm_close_window(g_view.window.window_id);
         } else if (g_view.tile_idx>=0) {
             tile_unregister_gui_client(g_view.tile_idx);
         }
@@ -799,10 +802,10 @@ static void viewer_gui_key(int tile_idx, int key, void* ud) {
     if (changed) {
         if (g_view.is_reiv) g_view.scaled_valid = 0;
         if (g_view.is_reiv) {
-            if (g_view.is_window) wm_set_continuous_redraw(g_view.window_id, g_view.playing ? 1 : 0);
+            if (g_view.window.is_window) wm_set_continuous_redraw(g_view.window.window_id, g_view.playing ? 1 : 0);
             else tile_set_gui_continuous_redraw(g_view.tile_idx, g_view.playing ? 1 : 0);
         }
-        if (g_view.is_window) wm_invalidate_window(g_view.window_id);
+        if (g_view.window.is_window) wm_invalidate_window(g_view.window.window_id);
         else tile_invalidate_gui(g_view.tile_idx);
     }
 }
@@ -839,9 +842,9 @@ static void viewer_gui_mouse(int tile_idx, const mouse_event_t* me, void* ud) {
                 if (!g_view.loop_locked) g_view.loop_enabled = !g_view.loop_enabled;
                 g_view.scaled_valid = 0;
             }
-            if (g_view.is_window) {
-                wm_set_continuous_redraw(g_view.window_id, g_view.playing ? 1 : 0);
-                wm_invalidate_window(g_view.window_id);
+            if (g_view.window.is_window) {
+                wm_set_continuous_redraw(g_view.window.window_id, g_view.playing ? 1 : 0);
+                wm_invalidate_window(g_view.window.window_id);
             } else {
                 tile_set_gui_continuous_redraw(g_view.tile_idx, g_view.playing ? 1 : 0);
                 tile_invalidate_gui(g_view.tile_idx);
@@ -856,7 +859,7 @@ static void viewer_gui_mouse(int tile_idx, const mouse_event_t* me, void* ud) {
     if (g_view.dragging) {
         g_view.off_x = g_view.drag_off_x + (me->x - g_view.drag_start_x);
         g_view.off_y = g_view.drag_off_y + (me->y - g_view.drag_start_y);
-        if (g_view.is_window) wm_invalidate_window(g_view.window_id);
+        if (g_view.window.is_window) wm_invalidate_window(g_view.window.window_id);
         else tile_invalidate_gui(g_view.tile_idx);
     }
 }
@@ -956,7 +959,7 @@ static void open_viewer_gui(const char* path) {
     memset(&g_view, 0, sizeof(g_view)); g_view.zoom=1; g_view.off_x=4; g_view.off_y=4;
     strncpy(g_view.filepath, path, sizeof(g_view.filepath)-1);
     const char* b = get_basename_local(path); strncpy(g_view.filename_base, b, sizeof(g_view.filename_base)-1);
-    g_view.is_window = 0; g_view.window_id = -1;
+    g_view.window.is_window = 0; g_view.window.window_id = -1;
     snprintf(g_view.status_left, sizeof(g_view.status_left), "Ctrl+Plus/Minus: Zoom | Space: Play/Pause | L: Loop | Ctrl+X: Close");
     // Load image file from EYNFS
     // Detect magic via small read
@@ -1015,7 +1018,7 @@ static void open_viewer_window(const char* path) {
     memset(&g_view, 0, sizeof(g_view)); g_view.zoom=1; g_view.off_x=4; g_view.off_y=4;
     strncpy(g_view.filepath, path, sizeof(g_view.filepath)-1);
     const char* b = get_basename_local(path); strncpy(g_view.filename_base, b, sizeof(g_view.filename_base)-1);
-    g_view.is_window = 1; g_view.window_id = -1;
+    g_view.window.is_window = 1; g_view.window.window_id = -1;
     snprintf(g_view.status_left, sizeof(g_view.status_left), "Ctrl+Plus/Minus: Zoom | Space: Play/Pause | L: Loop | Ctrl+X: Close");
     // Detect magic via small read
     {
@@ -1058,7 +1061,7 @@ static void open_viewer_window(const char* path) {
     int win_w = 360, win_h = 280; int win_x = 40, win_y = 40;
     int wid = wm_create_window(title_buf, win_x, win_y, win_w, win_h, g_view.status_left);
     if (wid >= 0) {
-        g_view.window_id = wid;
+        g_view.window.window_id = wid;
         wm_register_gui_client2(wid, viewer_gui_draw, viewer_gui_key, viewer_gui_mouse, NULL);
         wm_set_title_status(wid, title_buf, g_view.status_left, NULL);
         wm_invalidate_window(wid);
