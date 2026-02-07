@@ -7,62 +7,22 @@ Essential Commands:
   exit            - Exits the kernel and shuts down the system.
   help            - Display this message and show all available commands with descriptions and examples.
   init            - Initialize full system services (ATA drives, etc.).
-  memory          - Memory management and testing.
-  portable        - Display portability optimizations and memory usage.
 
 Streaming Commands:
 ------------------
-  assertfail      - Trigger an assertion failure (ASSERT).
-  cat             - Print a text file.
-  catram          - Display contents of a file from RAM disk (FAT32).
-  clearbg         - Clear background image for the focused tile.
-  e1000           - Intel e1000 utilities (probe + bring-up helpers).
-  e1000probe      - Probe the Intel e1000 NIC (read-only MMIO sanity check).
-  error           - Display system error statistics and status.
-  fatfix          - Scan and repair FAT32 entries incorrectly marked as directories.
-  gfxdemo         - Draw a simple gfx test pattern.
-  lsram           - List files in the RAM disk (FAT32) with directory tree.
   memory_stats    - Show predictive memory statistics
   mmap            - Memory map a file for zero-copy access
   msync           - Synchronize memory-mapped file to disk
   munmap          - Unmap a memory-mapped file
-  netcfg          - Network configuration (defaults match QEMU user-net).
-  netstat         - Network status (netstack + ARP + UDP + ICMP).
-  pagingguards    - Install optional paging guards (null-page, .text/.rodata RO).
-  panic           - Trigger a kernel panic to test diagnostics.
-  pciscan         - Scan PCI devices and print vendor/device IDs and BAR0.
-  pf              - Intentionally trigger a page fault (read/write/exec a chosen address).
-  ping            - Send ICMP echo request(s).
   predict         - Predictive memory management
   rect            - Draw a rectangle.
-  ring3           - Switch to ring 3 and run a tiny user-mode stub (prints via int 0x80).
-  serialtest      - Write a test line to COM1 to verify serial output.
-  setbg           - Set a REI image as background for the focused tile (shows Tile/Scale/Center chooser).
   setfont         - Set the system font at runtime (loads .hex from disk into RAM).
-  size            - Show the size of a file in bytes.
-  stats           - Graphical system performance monitor with CPU, memory, disk pies and sortable table
-  theme           - Open a GUI theme editor (colors + font).
-  tiling          - Launch the tiling front-end manager.
-  userrun         - Load a raw user-mode code blob from VFS into ring 3 and run it at 0x00400000.
   validate        - Display input validation statistics and test validation.
-  view            - Open a REI image in a GUI viewer.
-  vieww           - Open a REI image in a floating window.
-  win_test        - Open a sample floating window to test compositor performance.
 
 Filesystem Commands:
 -------------------
-  cd              - Change the current directory.
-  copy            - Copy a file from source to destination.
-  del             - Delete a file from the filesystem.
-  deldir          - Delete an empty directory.
   fdisk           - List partition table or create partitions.
   format          - Format partition n (0-3) as FAT32 or EYNFS.
-  fscheck         - Check filesystem integrity.
-  ls              - List files in the root directory of the selected drive.
-  makedir         - Create a new directory.
-  move            - Move a file from source to destination.
-  read            - Display text files (.txt) or render markdown (.md).
-  write           - Open nano-like text editor for a file.
 
 System Commands:
 ---------------
@@ -72,7 +32,6 @@ System Commands:
 Utility Commands:
 ----------------
   calc            - 32-bit fixed-point calculator.
-  draw            - Create or edit a REI image with a GUI.
   echo            - Reprints a given text to the screen.
   log             - Enable or disable shell logging.
   random          - Generate random numbers.

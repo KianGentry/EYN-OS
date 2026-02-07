@@ -19,6 +19,7 @@ GRUB_MKRESCUE := $(shell command -v grub2-mkrescue 2>/dev/null || command -v gru
 # Kernel (freestanding) compiler flags
 # Note: keep frame pointers for stack traces; avoid stack protector & fortify in freestanding kernel
 KERNEL_CFLAGS = -m32 -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-common \
+		 -mno-mmx -mno-sse -mno-sse2 \
 		 -Os -fno-strict-overflow -fwrapv \
 		 -fdata-sections -ffunction-sections \
 		 -I include/ -I include/cpu -I include/drivers -I include/misc -I include/graphics -I include/network -I include/utilities -I include/utilities/shell \

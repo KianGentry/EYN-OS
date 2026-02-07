@@ -103,7 +103,26 @@ menuentry "EYN-OS" {
 EOF
 
 rm -f "${ISO_OUT}"
-TMPDIR="${TMP_ROOT}" "${GRUB_MKRESCUE_BIN}" --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o "${ISO_OUT}" "${stage_dir}/"
+
+# Some distros ship a partial `/usr/share/grub2/x86_64-efi/` (e.g. only `grubbls.efi`)
+# without the corresponding `moddep.lst` + modules. In that case `grub2-mkrescue` will
+# fail while trying to build an EFI boot image. For QEMU BIOS boot we only need i386-pc,
+# so prefer forcing the i386-pc platform directory when available.
+mkrescue_dir_arg=()
+if [[ -x "${GRUB_MKRESCUE_BIN}" ]]; then
+  if [[ -d /usr/share/grub2/x86_64-efi && ! -f /usr/share/grub2/x86_64-efi/moddep.lst ]]; then
+    if [[ -f /usr/share/grub2/i386-pc/moddep.lst ]]; then
+      mkrescue_dir_arg=( -d /usr/share/grub2/i386-pc )
+    elif [[ -f /usr/lib/grub/i386-pc/moddep.lst ]]; then
+      mkrescue_dir_arg=( -d /usr/lib/grub/i386-pc )
+    fi
+  fi
+fi
+
+# Note: Some distro builds of grub2-mkrescue have issues with `--compress=xz` that can
+# fail with "can't compress ...moddep.lst" followed by "cannot copy ...: File exists".
+# Compression doesn't matter for QEMU booting, so keep it disabled for reliability.
+TMPDIR="${TMP_ROOT}" "${GRUB_MKRESCUE_BIN}" "${mkrescue_dir_arg[@]}" --modules="multiboot" --locales="" --themes="" --fonts="" --compress=none -o "${ISO_OUT}" "${stage_dir}/"
 
 echo "Ultra-minimal ISO created: EYNOS.iso"
 ls -lh "${ISO_OUT}"
