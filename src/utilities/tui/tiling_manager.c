@@ -350,7 +350,7 @@ static rei_image_t g_max_icon_unf;
 static int g_max_icon_unf_loaded = 0;
 
 // --- Runtime theme (tile/window chrome colors) ---
-static wm_theme_t g_wm_theme = {
+static wm_theme_t g_wm_theme ALIGN16 = {
     // Default: darker gray chrome
     .title_focused_r = 96, .title_focused_g = 96, .title_focused_b = 96,
     .title_unfocused_r = 64, .title_unfocused_g = 64, .title_unfocused_b = 64,

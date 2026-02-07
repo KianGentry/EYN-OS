@@ -19,7 +19,7 @@ static inline int vterm_row_slot(int abs_row) {
     if (abs_row < 0) return 0;
     return abs_row % VTERM_HISTORY_ROWS;
 }
-typedef struct {
+typedef struct ALIGN16 {
     // Ring buffer of rows: stores visible rows + scrollback.
     char buf[VTERM_HISTORY_ROWS][TERM_COLS+1];
     int cur_x;
