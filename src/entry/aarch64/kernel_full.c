@@ -26,6 +26,7 @@ void uart_pl011_write(const char* s);
 void uart_pl011_write_hex64(uint64 v);
 
 void aarch64_shell_set_meminfo(uint64 ram_base, uint64 ram_size);
+void aarch64_multiboot_compat_init_from_fb(void);
 
 static void fb_write_hex64(uint64 v) {
     static const char* hex = "0123456789ABCDEF";
@@ -119,6 +120,9 @@ void kernel_main(uint64 dtb_ptr) {
         fb_simple_clear_rgb(255, 0, 255);
         fb_simple_write("EYN-OS AArch64 full bring-up\n");
         fb_simple_flush();
+
+        // Provide multiboot-style framebuffer information for shared VGA/GUI code.
+        aarch64_multiboot_compat_init_from_fb();
 
         /* Enable the arch-neutral gfx facade for the interactive shell. */
         gfx_init_default();

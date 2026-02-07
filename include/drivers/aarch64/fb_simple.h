@@ -21,6 +21,17 @@ void fb_simple_fill_rect(uint32 x, uint32 y, uint32 w, uint32 h, uint8 r, uint8 
 void fb_simple_flush(void);
 
 /*
+ * Draw built-in 8x8 glyphs at pixel coordinates.
+ * These are intended for higher-level compatibility layers (e.g. VGA shim).
+ *
+ * Note: these helpers do NOT flush caches on every call. Call fb_simple_flush()
+ * when you want to present the updated framebuffer.
+ */
+void fb_simple_draw_glyph8x8(uint32 x, uint32 y, uint8 ch, uint8 r, uint8 g, uint8 b);
+// Draw the same built-in 8x8 glyphs doubled vertically to approximate 8x16.
+void fb_simple_draw_glyph8x16_doubled(uint32 x, uint32 y, uint8 ch, uint8 r, uint8 g, uint8 b);
+
+/*
  * Query the detected framebuffer parameters.
  * Returns 0 on success, -1 if the framebuffer is not initialized.
  */

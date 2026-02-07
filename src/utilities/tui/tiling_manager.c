@@ -16,13 +16,16 @@ static int g_tm_initialized = 0;
 #include <hal/time.h>
 #include <watchdog.h>
 #include <ui_prefs.h>
+#if defined(__i386__)
 #include <network/netstack.h>
 #include <drivers/e1000.h>
+#endif
 
 extern uint8_t g_current_drive;
 
 #define MAX_TILES 4
 #define MAX_WINDOWS 8
+#define ALIGN16 __attribute__((aligned(16)))
 
 // Provided by the bootloader; used for framebuffer size and memory totals
 extern multiboot_info_t* g_mbi;
@@ -582,7 +585,7 @@ static rei_image_t* load_icon_for_ext_mode(const char* ext, int want16) {
 
     // Candidate filename patterns.
     // ext is treated as the full icon base name (without .rei), e.g. "file_txt", "file_none", "dir_empty", "dir_full".
-    const char* patterns16[] = {
+    static const char* const patterns16[] ALIGN16 = {
         "/icons16/%s.rei",
         "/testdir/icons16/%s.rei",
         // Legacy fallbacks
@@ -590,7 +593,7 @@ static rei_image_t* load_icon_for_ext_mode(const char* ext, int want16) {
         "/testdir/icons16/file_%s.rei",
         NULL
     };
-    const char* patterns8[] = {
+    static const char* const patterns8[] ALIGN16 = {
         "/icons/%s.rei",
         "/testdir/icons/%s.rei",
         // Legacy fallbacks
@@ -1321,7 +1324,7 @@ static int tile_index_at(int x, int y) {
 }
 
 static void load_cursor_image_try_paths(uint8 disk) {
-    const char* paths[] = { "/cursor.rei", "/ui/cursor.rei", "/testdir/cursor.rei", "/testdir/ui/cursor.rei" };
+    static const char* const paths[] ALIGN16 = { "/cursor.rei", "/ui/cursor.rei", "/testdir/cursor.rei", "/testdir/ui/cursor.rei" };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
     for (int pi = 0; pi < 4; ++pi) {
@@ -1351,7 +1354,7 @@ static void load_cursor_image_try_paths(uint8 disk) {
 static void load_cursor_variant_try_paths(uint8 disk, const char* name, rei_image_t* out_img, int* out_loaded) {
     if (out_loaded) *out_loaded = 0;
     if (!name || !out_img || !out_loaded) return;
-    const char* paths[] = {
+    static const char* const paths[] ALIGN16 = {
         "/ui/",            // primary
         "/testdir/ui/",    // compatibility
         NULL
@@ -1384,8 +1387,8 @@ static void load_cursor_variant_try_paths(uint8 disk, const char* name, rei_imag
 // Try to load a close button icon from a few candidate paths in EYNFS
 static void load_close_icon_try_paths(uint8 disk) {
     int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
-    const char* paths16[] = { "/ui16/close.rei", "/testdir/ui16/close.rei", NULL };
-    const char* paths8[] = { "/close.rei", "/ui/close.rei", "/testdir/close.rei", "/testdir/ui/close.rei", NULL };
+    static const char* const paths16[] ALIGN16 = { "/ui16/close.rei", "/testdir/ui16/close.rei", NULL };
+    static const char* const paths8[] ALIGN16 = { "/close.rei", "/ui/close.rei", "/testdir/close.rei", "/testdir/ui/close.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
 
@@ -1418,8 +1421,8 @@ static void load_close_icon_try_paths(uint8 disk) {
 // Try to load a minimize button icon from candidate paths
 static void load_min_icon_try_paths(uint8 disk) {
     int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
-    const char* paths16[] = { "/ui16/min.rei", "/testdir/ui16/min.rei", "/ui16/minimize.rei", "/testdir/ui16/minimize.rei", NULL };
-    const char* paths8[] = { "/min.rei", "/ui/min.rei", "/minimize.rei", "/ui/minimize.rei", "/testdir/min.rei", "/testdir/ui/min.rei", NULL };
+    static const char* const paths16[] ALIGN16 = { "/ui16/min.rei", "/testdir/ui16/min.rei", "/ui16/minimize.rei", "/testdir/ui16/minimize.rei", NULL };
+    static const char* const paths8[] ALIGN16 = { "/min.rei", "/ui/min.rei", "/minimize.rei", "/ui/minimize.rei", "/testdir/min.rei", "/testdir/ui/min.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
 
@@ -1452,8 +1455,8 @@ static void load_min_icon_try_paths(uint8 disk) {
 // Try to load a maximize button icon from candidate paths
 static void load_max_icon_try_paths(uint8 disk) {
     int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
-    const char* paths16[] = { "/ui16/max.rei", "/testdir/ui16/max.rei", "/ui16/maximize.rei", "/testdir/ui16/maximize.rei", NULL };
-    const char* paths8[] = { "/max.rei", "/ui/max.rei", "/maximize.rei", "/ui/maximize.rei", "/testdir/max.rei", "/testdir/ui/max.rei", NULL };
+    static const char* const paths16[] ALIGN16 = { "/ui16/max.rei", "/testdir/ui16/max.rei", "/ui16/maximize.rei", "/testdir/ui16/maximize.rei", NULL };
+    static const char* const paths8[] ALIGN16 = { "/max.rei", "/ui/max.rei", "/maximize.rei", "/ui/maximize.rei", "/testdir/max.rei", "/testdir/ui/max.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
 
@@ -1486,8 +1489,8 @@ static void load_max_icon_try_paths(uint8 disk) {
 // Try to load unfocused variants of icons
 static void load_close_icon_unf_try_paths(uint8 disk) {
     int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
-    const char* paths16[] = { "/ui16/close_unfocused.rei", "/testdir/ui16/close_unfocused.rei", NULL };
-    const char* paths8[] = { "/close_unfocused.rei", "/ui/close_unfocused.rei", "/testdir/close_unfocused.rei", "/testdir/ui/close_unfocused.rei", NULL };
+    static const char* const paths16[] ALIGN16 = { "/ui16/close_unfocused.rei", "/testdir/ui16/close_unfocused.rei", NULL };
+    static const char* const paths8[] ALIGN16 = { "/close_unfocused.rei", "/ui/close_unfocused.rei", "/testdir/close_unfocused.rei", "/testdir/ui/close_unfocused.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
 
@@ -1513,8 +1516,8 @@ static void load_close_icon_unf_try_paths(uint8 disk) {
 
 static void load_min_icon_unf_try_paths(uint8 disk) {
     int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
-    const char* paths16[] = { "/ui16/min_unfocused.rei", "/testdir/ui16/min_unfocused.rei", "/ui16/minimize_unfocused.rei", "/testdir/ui16/minimize_unfocused.rei", NULL };
-    const char* paths8[] = { "/min_unfocused.rei", "/ui/min_unfocused.rei", "/minimize_unfocused.rei", "/ui/minimize_unfocused.rei", "/testdir/min_unfocused.rei", "/testdir/ui/min_unfocused.rei", NULL };
+    static const char* const paths16[] ALIGN16 = { "/ui16/min_unfocused.rei", "/testdir/ui16/min_unfocused.rei", "/ui16/minimize_unfocused.rei", "/testdir/ui16/minimize_unfocused.rei", NULL };
+    static const char* const paths8[] ALIGN16 = { "/min_unfocused.rei", "/ui/min_unfocused.rei", "/minimize_unfocused.rei", "/ui/minimize_unfocused.rei", "/testdir/min_unfocused.rei", "/testdir/ui/min_unfocused.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
 
@@ -1540,8 +1543,8 @@ static void load_min_icon_unf_try_paths(uint8 disk) {
 
 static void load_max_icon_unf_try_paths(uint8 disk) {
     int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
-    const char* paths16[] = { "/ui16/max_unfocused.rei", "/testdir/ui16/max_unfocused.rei", "/ui16/maximize_unfocused.rei", "/testdir/ui16/maximize_unfocused.rei", NULL };
-    const char* paths8[] = { "/max_unfocused.rei", "/ui/max_unfocused.rei", "/maximize_unfocused.rei", "/ui/maximize_unfocused.rei", "/testdir/max_unfocused.rei", "/testdir/ui/max_unfocused.rei", NULL };
+    static const char* const paths16[] ALIGN16 = { "/ui16/max_unfocused.rei", "/testdir/ui16/max_unfocused.rei", "/ui16/maximize_unfocused.rei", "/testdir/ui16/maximize_unfocused.rei", NULL };
+    static const char* const paths8[] ALIGN16 = { "/max_unfocused.rei", "/ui/max_unfocused.rei", "/maximize_unfocused.rei", "/ui/maximize_unfocused.rei", "/testdir/max_unfocused.rei", "/testdir/ui/max_unfocused.rei", NULL };
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
     const char** primary = want16 ? paths16 : paths8;
@@ -2020,7 +2023,7 @@ static struct { int active; int tile; rei_image_t* img; int selected; int only_s
 // Very small modal: draws a centered box with options Tile/Scale/Center
 static void draw_bg_modal() {
     if (!g_bg_modal.active) return;
-    const char* opts_all[3] = {"Tile", "Scale", "Center"};
+    static const char* const opts_all[3] ALIGN16 = {"Tile", "Scale", "Center"};
     int opt_count = g_bg_modal.only_scale ? 1 : 3;
     const char** opts = opts_all;
     int box_w = 18 * 8; int box_h = (opt_count + 4) * 8; // simple size
@@ -2100,7 +2103,7 @@ static int handle_bg_modal_key(int key) {
 // Optional: allow mouse to click options to avoid keyboard-only selection
 static int handle_bg_modal_mouse(const mouse_event_t* me) {
     if (!g_bg_modal.active || !me) return 0;
-    const char* opts_all[3] = {"Tile", "Scale", "Center"};
+    static const char* const opts_all[3] ALIGN16 = {"Tile", "Scale", "Center"};
     int opt_count = g_bg_modal.only_scale ? 1 : 3;
     int box_w = 18 * 8; int box_h = (opt_count + 4) * 8;
     int bx = (screen_w - box_w) / 2; int by = (screen_h - box_h) / 2;
@@ -2796,6 +2799,7 @@ void start_tiling_manager() {
         // running a dedicated udp-listen command.
         static uint32 last_net_tick = 0;
         uint32 now_net_tick = (uint32)hal_time_ticks();
+#if defined(__i386__)
         if (net_is_inited() && now_net_tick != last_net_tick) {
             last_net_tick = now_net_tick;
             uint8 local_ip[4];
@@ -2810,6 +2814,7 @@ void start_tiling_manager() {
             (void)net_poll(local_ip, 128);
             e1000_irq_clear_rx_pending();
         }
+#endif
 
         // If status overlay visibility toggles, force redraw to restore any covered pixels.
         static int last_overlay_state = -1;

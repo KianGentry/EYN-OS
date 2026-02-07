@@ -676,6 +676,35 @@ static void fb_draw_glyph(uint32 x, uint32 y, uint8 ch, uint32 fg, uint32 bg) {
     fb_flush_rect(x, y, 8, 8);
 }
 
+void fb_simple_draw_glyph8x8(uint32 x, uint32 y, uint8 ch, uint8 r, uint8 g, uint8 b) {
+    if (!g_fb_base) return;
+    uint32 fg = fb_color(r, g, b);
+    const uint8* glyph = &g_font8x8[(uint32)ch * 8u];
+    for (uint32 row = 0; row < 8; row++) {
+        uint8 bits = glyph[row];
+        for (uint32 col = 0; col < 8; col++) {
+            if (bits & (1u << (7u - col))) {
+                fb_put_pixel(x + col, y + row, fg);
+            }
+        }
+    }
+}
+
+void fb_simple_draw_glyph8x16_doubled(uint32 x, uint32 y, uint8 ch, uint8 r, uint8 g, uint8 b) {
+    if (!g_fb_base) return;
+    uint32 fg = fb_color(r, g, b);
+    const uint8* glyph = &g_font8x8[(uint32)ch * 8u];
+    for (uint32 row = 0; row < 8; row++) {
+        uint8 bits = glyph[row];
+        for (uint32 col = 0; col < 8; col++) {
+            if (bits & (1u << (7u - col))) {
+                fb_put_pixel(x + col, y + row * 2u + 0u, fg);
+                fb_put_pixel(x + col, y + row * 2u + 1u, fg);
+            }
+        }
+    }
+}
+
 int fb_simple_init(uint64 dtb_ptr) {
     uint64 base = 0;
     uint64 size = 0;
