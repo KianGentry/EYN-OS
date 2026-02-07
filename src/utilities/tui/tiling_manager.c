@@ -511,12 +511,13 @@ static void load_max_icon_unf_try_paths(uint8 disk);
 // - Icon cache for small file icons -
 #define ICON_CACHE_MAX 64
 typedef struct {
-    char key[24];
-    rei_image_t img;
+    char key[32];
+    rei_image_t img ALIGN16;
     int loaded;
+    int pad;
 } icon_cache_entry_t;
 
-static icon_cache_entry_t g_icon_cache[ICON_CACHE_MAX];
+static icon_cache_entry_t g_icon_cache[ICON_CACHE_MAX] ALIGN16;
 static int g_icon_cache_count = 0;
 
 static int g_last_icon_mode_16 = -1;
