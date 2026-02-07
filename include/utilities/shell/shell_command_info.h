@@ -21,12 +21,17 @@ typedef struct {
     command_type_t type;
     const char* description;
     const char* example;
+    uint32 required_caps;
 } shell_command_info_t;
 
 // Enhanced macro to register a shell command in the .shellcmds linker section
 #define REGISTER_SHELL_COMMAND(var, cmd_name, handler_func, cmd_type, desc, ex) \
     __attribute__((section(".shellcmds"), used, aligned(sizeof(void*)))) \
-    const shell_command_info_t shell_cmd_info_##var = { cmd_name, handler_func, cmd_type, desc, ex }
+    const shell_command_info_t shell_cmd_info_##var = { cmd_name, handler_func, cmd_type, desc, ex, 0u }
+
+#define REGISTER_SHELL_COMMAND_REQ(var, cmd_name, handler_func, cmd_type, desc, ex, req_caps) \
+    __attribute__((section(".shellcmds"), used, aligned(sizeof(void*)))) \
+    const shell_command_info_t shell_cmd_info_##var = { cmd_name, handler_func, cmd_type, desc, ex, (uint32)(req_caps) }
 
 // Externs for start/stop of the section (set by linker script)
 extern const shell_command_info_t __start_shellcmds[];

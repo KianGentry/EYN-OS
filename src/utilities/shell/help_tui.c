@@ -1,5 +1,6 @@
 #include <tui.h>
 #include <shell_command_info.h>
+#include <utilities/shell/shell_caps.h>
 #include <help_tui.h>
 #include <vga.h>
 #include <util.h>
@@ -599,7 +600,11 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
 void help_tui_init_state() {
     if (g_sorted_cmds) return; // already initialized
     help_dbg_ch('B');
-    int cmd_count = (int)(__stop_shellcmds - __start_shellcmds);
+    int cmd_count = 0;
+    for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
+        if (!shell_command_is_available(cmd)) continue;
+        cmd_count++;
+    }
     if (cmd_count <= 0) return;
     if (cmd_count > 256) {
         // Something is very wrong; refuse to allocate huge tables.
@@ -610,6 +615,7 @@ void help_tui_init_state() {
     // Compute total string pool size (bounded, and only for sane kernel pointers)
     size_t pool_size = 0;
     for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
+        if (!shell_command_is_available(cmd)) continue;
         size_t ln = help_strnlen_kernel(cmd->name, 64);
         size_t ld = help_strnlen_kernel(cmd->description, 256);
         size_t le = help_strnlen_kernel(cmd->example, 256);
@@ -633,9 +639,11 @@ void help_tui_init_state() {
     char* end = g_cmd_string_pool + (pool_size ? pool_size : 1);
     int i = 0;
     for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
+        if (!shell_command_is_available(cmd)) continue;
         // copy handler and type
         g_copied_cmds[i].handler = cmd->handler;
         g_copied_cmds[i].type = cmd->type;
+        g_copied_cmds[i].required_caps = cmd->required_caps;
         // name
         {
             size_t l = help_strnlen_kernel(cmd->name, 64);

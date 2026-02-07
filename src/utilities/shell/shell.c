@@ -11,6 +11,7 @@
 #include <utilities/shell/run_command.h>
 #include <utilities/shell/shell_commands.h>
 #include <utilities/shell/shell_state.h>
+#include <utilities/shell/shell_caps.h>
 #include <utilities/assemble.h>
 #include <fs/vfs.h>
 #include <cpu/user_elf.h>
@@ -361,10 +362,13 @@ static void init_command_hash_table() {
     }
     for (size_t i = 0; i < num_commands; i++) {
         const shell_command_info_t* cmd = &__start_shellcmds[i];
-            if (cmd->name == NULL || cmd->handler == NULL) {
+        if (cmd->name == NULL || cmd->handler == NULL) {
             continue;
         }
-            if ((shell_uptr_t)cmd->name < SHELL_CMD_PTR_MIN || (shell_uptr_t)cmd->handler < SHELL_CMD_PTR_MIN) {
+        if (!shell_command_is_available(cmd)) {
+            continue;
+        }
+        if ((shell_uptr_t)cmd->name < SHELL_CMD_PTR_MIN || (shell_uptr_t)cmd->handler < SHELL_CMD_PTR_MIN) {
             continue;
         }
         uint32_t hash = command_hash(cmd->name);
@@ -394,6 +398,9 @@ linear_search:
         for (size_t i = 0; i < num_commands; i++) {
             const shell_command_info_t* cmd = &__start_shellcmds[i];
             if (cmd->name == NULL || cmd->handler == NULL) {
+                continue;
+            }
+            if (!shell_command_is_available(cmd)) {
                 continue;
             }
             if ((shell_uptr_t)cmd->name < SHELL_CMD_PTR_MIN || (shell_uptr_t)cmd->handler < SHELL_CMD_PTR_MIN) {
@@ -431,6 +438,9 @@ linear_search:
     for (size_t i = 0; i < num_commands; i++) {
         const shell_command_info_t* cmd = &__start_shellcmds[i];
         if (cmd->name == NULL || cmd->handler == NULL) {
+            continue;
+        }
+        if (!shell_command_is_available(cmd)) {
             continue;
         }
         if ((shell_uptr_t)cmd->name < SHELL_CMD_PTR_MIN || (shell_uptr_t)cmd->handler < SHELL_CMD_PTR_MIN) {
