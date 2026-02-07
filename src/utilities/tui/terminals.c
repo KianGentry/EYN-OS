@@ -13,6 +13,7 @@ extern char shell_current_path[128];
 #define INPUT_BUF_LEN 200
 #define VTERM_MAX_LINE_ICONS 16
 #define VTERM_HISTORY_ROWS 256
+#define ALIGN16 __attribute__((aligned(16)))
 
 static inline int vterm_row_slot(int abs_row) {
     if (abs_row < 0) return 0;
@@ -70,7 +71,7 @@ typedef struct {
     volatile int stdin_ready;      // 1 when line is complete (Enter pressed), 0 otherwise
 } vterm_t;
 
-static vterm_t vterms[4];
+static vterm_t vterms[4] ALIGN16;
 
 static void vterm_clear_line_icons(vterm_t* t, int row) {
     if (!t) return;
