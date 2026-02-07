@@ -963,6 +963,9 @@ static void open_viewer_gui(const char* path) {
     snprintf(g_view.status_left, sizeof(g_view.status_left), "Ctrl+Plus/Minus: Zoom | Space: Play/Pause | L: Loop | Ctrl+X: Close");
     // Load image file from EYNFS
     // Detect magic via small read
+    int rei_rc = -99;
+    int rei_br = -1;
+    uint32_t rei_size = 0;
     {
         uint8 disk = get_current_logical_drive();
         eynfs_superblock_t sb; eynfs_dir_entry_t entry; uint32_t pb, ei;
@@ -984,18 +987,40 @@ static void open_viewer_gui(const char* path) {
                             }
                         } else {
                             // Fallback: load static REI into memory
-                            if (sz < 65536) {
-                                // Re-read up to 64KB to cover typical REI images
+                            if (sz < (1u << 20)) {
+                                // Re-read up to 1MB to cover common REI images
                                 free(buf);
-                                sz = entry.size; if (sz > 65536) sz = 65536;
+                                sz = entry.size; if (sz > (1u << 20)) sz = (1u << 20);
                                 buf = (uint8*)malloc(sz);
                                 if (buf) {
                                     br = eynfs_read_file(disk, &sb, &entry, buf, (int)sz, 0);
-                                    if (br > 0) rei_parse_image(buf, br, &g_view.img);
+                                    rei_br = br;
+                                    rei_size = sz;
+                                    if (br > 0) {
+                                        int rc = rei_parse_image(buf, br, &g_view.img);
+                                        rei_rc = rc;
+                                        if (rc != 0) {
+                                            snprintf(g_view.status_left, sizeof(g_view.status_left), "REI load failed");
+                                            char sbuf[120];
+                                            int n = snprintf(sbuf, sizeof(sbuf), "[REI] load failed path=%s\n", path);
+                                            if (n > 0) serial_write(SERIAL_COM1, sbuf, n);
+                                        }
+                                    }
                                     free(buf);
                                 }
                             } else {
-                                if (br > 0) rei_parse_image(buf, br, &g_view.img);
+                                if (br > 0) {
+                                    rei_br = br;
+                                    rei_size = sz;
+                                    int rc = rei_parse_image(buf, br, &g_view.img);
+                                    rei_rc = rc;
+                                    if (rc != 0) {
+                                        snprintf(g_view.status_left, sizeof(g_view.status_left), "REI load failed");
+                                        char sbuf[120];
+                                        int n = snprintf(sbuf, sizeof(sbuf), "[REI] load failed path=%s\n", path);
+                                        if (n > 0) serial_write(SERIAL_COM1, sbuf, n);
+                                    }
+                                }
                                 free(buf);
                             }
                         }
@@ -1003,6 +1028,20 @@ static void open_viewer_gui(const char* path) {
                     else free(buf);
                 }
             }
+        }
+    }
+    if (!g_view.is_reiv) {
+        if (g_view.img.data) {
+            snprintf(g_view.status_left, sizeof(g_view.status_left), "REI %ux%u depth=%u",
+                     (unsigned)g_view.img.header.width, (unsigned)g_view.img.header.height,
+                     (unsigned)g_view.img.header.depth);
+        } else if (rei_rc != -99) {
+            snprintf(g_view.status_left, sizeof(g_view.status_left), "REI load failed (rc=%d br=%d sz=%u)",
+                     rei_rc, rei_br, (unsigned)rei_size);
+            char sbuf[160];
+            int n = snprintf(sbuf, sizeof(sbuf), "[REI] load failed rc=%d br=%d sz=%u path=%s\n",
+                             rei_rc, rei_br, (unsigned)rei_size, path);
+            if (n > 0) serial_write(SERIAL_COM1, sbuf, n);
         }
     }
     static char title_buf[128]; snprintf(title_buf, sizeof(title_buf), "%s - Viewer", g_view.filename_base);
@@ -1021,6 +1060,9 @@ static void open_viewer_window(const char* path) {
     g_view.window.is_window = 1; g_view.window.window_id = -1;
     snprintf(g_view.status_left, sizeof(g_view.status_left), "Ctrl+Plus/Minus: Zoom | Space: Play/Pause | L: Loop | Ctrl+X: Close");
     // Detect magic via small read
+    int rei_rc = -99;
+    int rei_br = -1;
+    uint32_t rei_size = 0;
     {
         uint8 disk = get_current_logical_drive();
         eynfs_superblock_t sb; eynfs_dir_entry_t entry; uint32_t pb, ei;
@@ -1045,7 +1087,18 @@ static void open_viewer_window(const char* path) {
                             buf = (uint8*)malloc(sz);
                             if (buf) {
                                 br = eynfs_read_file(disk, &sb, &entry, buf, (int)sz, 0);
-                                if (br > 0) rei_parse_image(buf, br, &g_view.img);
+                                if (br > 0) {
+                                    rei_br = br;
+                                    rei_size = sz;
+                                    int rc = rei_parse_image(buf, br, &g_view.img);
+                                    rei_rc = rc;
+                                    if (rc != 0) {
+                                        snprintf(g_view.status_left, sizeof(g_view.status_left), "REI load failed");
+                                        char sbuf[120];
+                                        int n = snprintf(sbuf, sizeof(sbuf), "[REI] load failed path=%s\n", path);
+                                        if (n > 0) serial_write(SERIAL_COM1, sbuf, n);
+                                    }
+                                }
                                 free(buf);
                             }
                         }
@@ -1054,6 +1107,20 @@ static void open_viewer_window(const char* path) {
                     }
                 }
             }
+        }
+    }
+    if (!g_view.is_reiv) {
+        if (g_view.img.data) {
+            snprintf(g_view.status_left, sizeof(g_view.status_left), "REI %ux%u depth=%u",
+                     (unsigned)g_view.img.header.width, (unsigned)g_view.img.header.height,
+                     (unsigned)g_view.img.header.depth);
+        } else if (rei_rc != -99) {
+            snprintf(g_view.status_left, sizeof(g_view.status_left), "REI load failed (rc=%d br=%d sz=%u)",
+                     rei_rc, rei_br, (unsigned)rei_size);
+            char sbuf[160];
+            int n = snprintf(sbuf, sizeof(sbuf), "[REI] load failed rc=%d br=%d sz=%u path=%s\n",
+                             rei_rc, rei_br, (unsigned)rei_size, path);
+            if (n > 0) serial_write(SERIAL_COM1, sbuf, n);
         }
     }
     static char title_buf[128]; snprintf(title_buf, sizeof(title_buf), "%s - Viewer", g_view.filename_base);
