@@ -600,11 +600,7 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
 void help_tui_init_state() {
     if (g_sorted_cmds) return; // already initialized
     help_dbg_ch('B');
-    int cmd_count = 0;
-    for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
-        if (!shell_command_is_available(cmd)) continue;
-        cmd_count++;
-    }
+    int cmd_count = (int)(__stop_shellcmds - __start_shellcmds);
     if (cmd_count <= 0) return;
     if (cmd_count > 256) {
         // Something is very wrong; refuse to allocate huge tables.
@@ -614,14 +610,19 @@ void help_tui_init_state() {
 
     // Compute total string pool size (bounded, and only for sane kernel pointers)
     size_t pool_size = 0;
+    const char* unavail_prefix = "[unavailable] ";
+    size_t unavail_prefix_len = strlen(unavail_prefix);
     for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
-        if (!shell_command_is_available(cmd)) continue;
         size_t ln = help_strnlen_kernel(cmd->name, 64);
         size_t ld = help_strnlen_kernel(cmd->description, 256);
         size_t le = help_strnlen_kernel(cmd->example, 256);
         if (ln) pool_size += ln + 1;
-        if (ld) pool_size += ld + 1;
-        if (le) pool_size += le + 1;
+        if (shell_command_is_available(cmd)) {
+            if (ld) pool_size += ld + 1;
+            if (le) pool_size += le + 1;
+        } else {
+            pool_size += unavail_prefix_len + (ld ? ld : 0) + 1;
+        }
     }
 
     help_dbg_ch('P');
@@ -639,7 +640,7 @@ void help_tui_init_state() {
     char* end = g_cmd_string_pool + (pool_size ? pool_size : 1);
     int i = 0;
     for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
-        if (!shell_command_is_available(cmd)) continue;
+        int is_available = shell_command_is_available(cmd);
         // copy handler and type
         g_copied_cmds[i].handler = cmd->handler;
         g_copied_cmds[i].type = cmd->type;
@@ -657,7 +658,7 @@ void help_tui_init_state() {
             }
         }
         // description
-        {
+        if (is_available) {
             size_t l = help_strnlen_kernel(cmd->description, 256);
             if (l && cur + l + 1 <= end) {
                 memcpy(cur, cmd->description, l);
@@ -667,18 +668,31 @@ void help_tui_init_state() {
             } else {
                 g_copied_cmds[i].description = "";
             }
-        }
-        // example
-        {
-            size_t l = help_strnlen_kernel(cmd->example, 256);
-            if (l && cur + l + 1 <= end) {
-                memcpy(cur, cmd->example, l);
-                cur[l] = '\0';
-                g_copied_cmds[i].example = cur;
-                cur += l + 1;
-            } else {
-                g_copied_cmds[i].example = "";
+            // example
+            {
+                size_t l = help_strnlen_kernel(cmd->example, 256);
+                if (l && cur + l + 1 <= end) {
+                    memcpy(cur, cmd->example, l);
+                    cur[l] = '\0';
+                    g_copied_cmds[i].example = cur;
+                    cur += l + 1;
+                } else {
+                    g_copied_cmds[i].example = "";
+                }
             }
+        } else {
+            size_t l = help_strnlen_kernel(cmd->description, 256);
+            size_t total = unavail_prefix_len + l;
+            if (cur + total + 1 <= end) {
+                memcpy(cur, unavail_prefix, unavail_prefix_len);
+                if (l) memcpy(cur + unavail_prefix_len, cmd->description, l);
+                cur[total] = '\0';
+                g_copied_cmds[i].description = cur;
+                cur += total + 1;
+            } else {
+                g_copied_cmds[i].description = unavail_prefix;
+            }
+            g_copied_cmds[i].example = "";
         }
         i++;
     }

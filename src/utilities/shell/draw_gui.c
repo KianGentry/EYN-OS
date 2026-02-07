@@ -391,4 +391,5 @@ void draw_cmd(string arg) {
 
 // Register shell command
 #include <shell_command_info.h>
-REGISTER_SHELL_COMMAND(draw_cmd_info, "draw", draw_cmd, CMD_STREAMING, "Create or edit a REI image with a GUI. Usage: draw <filename.rei>", "draw test.rei");
+#include <utilities/shell/shell_caps.h>
+REGISTER_SHELL_COMMAND_REQ(draw_cmd_info, "draw", draw_cmd, CMD_STREAMING, "Create or edit a REI image with a GUI. Usage: draw <filename.rei>", "draw test.rei", SHELL_CAP_GUI);

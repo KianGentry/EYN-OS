@@ -365,9 +365,6 @@ static void init_command_hash_table() {
         if (cmd->name == NULL || cmd->handler == NULL) {
             continue;
         }
-        if (!shell_command_is_available(cmd)) {
-            continue;
-        }
         if ((shell_uptr_t)cmd->name < SHELL_CMD_PTR_MIN || (shell_uptr_t)cmd->handler < SHELL_CMD_PTR_MIN) {
             continue;
         }
@@ -400,13 +397,13 @@ linear_search:
             if (cmd->name == NULL || cmd->handler == NULL) {
                 continue;
             }
-            if (!shell_command_is_available(cmd)) {
-                continue;
-            }
             if ((shell_uptr_t)cmd->name < SHELL_CMD_PTR_MIN || (shell_uptr_t)cmd->handler < SHELL_CMD_PTR_MIN) {
                 continue;
             }
             if (strcmp(cmd->name, name) == 0) {
+                if (!shell_command_is_available(cmd)) {
+                    return shell_unavailable_cmd;
+                }
                 return cmd->handler;
             }
         }
@@ -427,7 +424,18 @@ linear_search:
             goto linear_search;
         }
         if (strcmp(slot_name, name) == 0) {
-            return g_command_hash_table[hash].handler;
+            shell_cmd_handler_t handler = g_command_hash_table[hash].handler;
+            const shell_command_info_t* cmd = NULL;
+            for (size_t i = 0, n = (__stop_shellcmds - __start_shellcmds); i < n; ++i) {
+                if (__start_shellcmds[i].name == slot_name) {
+                    cmd = &__start_shellcmds[i];
+                    break;
+                }
+            }
+            if (cmd && !shell_command_is_available(cmd)) {
+                return shell_unavailable_cmd;
+            }
+            return handler;
         }
         hash = (hash + 1) % COMMAND_HASH_SIZE;
     }
@@ -440,13 +448,13 @@ linear_search:
         if (cmd->name == NULL || cmd->handler == NULL) {
             continue;
         }
-        if (!shell_command_is_available(cmd)) {
-            continue;
-        }
         if ((shell_uptr_t)cmd->name < SHELL_CMD_PTR_MIN || (shell_uptr_t)cmd->handler < SHELL_CMD_PTR_MIN) {
             continue;
         }
         if (strcmp(cmd->name, name) == 0) {
+            if (!shell_command_is_available(cmd)) {
+                return shell_unavailable_cmd;
+            }
             return cmd->handler;
         }
     }

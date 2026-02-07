@@ -1,6 +1,7 @@
 #include <misc/types.h>
 #include <utilities/shell/shell_command_info.h>
 #include <utilities/shell/pipeline.h>
+#include <shell.h>
 
 static const char* skip_spaces(const char* s) {
     while (s && *s && (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')) s++;
@@ -53,16 +54,15 @@ int aarch64_shell_dispatch_line(string line) {
         if (name_len > 63) break;
     }
 
-    const shell_command_info_t* cmd = __start_shellcmds;
-    while (cmd < __stop_shellcmds) {
-        if (cmd->name && streq_n(s, cmd->name, name_len)) {
-            if (cmd->handler) {
-                cmd->handler((string)line);
-                return 0;
-            }
-            return -2;
-        }
-        cmd++;
+    char name_buf[64];
+    int cpy = (name_len < (int)sizeof(name_buf) - 1) ? name_len : (int)sizeof(name_buf) - 1;
+    for (int i = 0; i < cpy; ++i) name_buf[i] = s[i];
+    name_buf[cpy] = '\0';
+
+    shell_cmd_handler_t handler = find_command(name_buf);
+    if (handler) {
+        handler((string)line);
+        return 0;
     }
 
     return -1;

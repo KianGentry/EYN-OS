@@ -3,6 +3,7 @@
 #include <vga.h>
 #include <string.h>
 #include <shell_command_info.h>
+#include <utilities/shell/shell_caps.h>
 #include <stdlib.h>
 
 static void test_draw(int tile_idx, int cx, int cy, int cw, int ch, void* ud) {
@@ -50,4 +51,4 @@ void win_test_cmd(string ch) {
     }
 }
 
-REGISTER_SHELL_COMMAND(win_test_cmd_info, "win_test", win_test_cmd, CMD_STREAMING, "Open a sample floating window to test compositor performance.", "win_test");
+REGISTER_SHELL_COMMAND_REQ(win_test_cmd_info, "win_test", win_test_cmd, CMD_STREAMING, "Open a sample floating window to test compositor performance.", "win_test", SHELL_CAP_GUI);

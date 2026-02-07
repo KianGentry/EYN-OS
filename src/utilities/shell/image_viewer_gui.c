@@ -1068,6 +1068,7 @@ static void open_viewer_window(const char* path) {
 
 // Command entry points
 #include <shell_command_info.h>
+#include <utilities/shell/shell_caps.h>
 void view_cmd(string ch) {
     uint8 i=0; while (ch[i] && ch[i] != ' ') i++; while (ch[i] && ch[i]==' ') i++;
     if (!ch[i]) { printf("%cUsage: view <file.rei>\n", 255,255,255); return; }
@@ -1075,7 +1076,7 @@ void view_cmd(string ch) {
     char abspath[128]; resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     open_viewer_gui(abspath);
 }
-REGISTER_SHELL_COMMAND(view_cmd_info, "view", view_cmd, CMD_STREAMING, "Open a REI image in a GUI viewer.\nUsage: view <file.rei>", "view eynos.rei");
+REGISTER_SHELL_COMMAND_REQ(view_cmd_info, "view", view_cmd, CMD_STREAMING, "Open a REI image in a GUI viewer.\nUsage: view <file.rei>", "view eynos.rei", SHELL_CAP_GUI);
 
 // Window variant: open viewer in a floating window
 void vieww_cmd(string ch) {
@@ -1085,4 +1086,4 @@ void vieww_cmd(string ch) {
     char abspath[128]; resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     open_viewer_window(abspath);
 }
-REGISTER_SHELL_COMMAND(vieww_cmd_info, "vieww", vieww_cmd, CMD_STREAMING, "Open a REI image in a floating window.\nUsage: vieww <file.rei>", "vieww eynos.rei");
+REGISTER_SHELL_COMMAND_REQ(vieww_cmd_info, "vieww", vieww_cmd, CMD_STREAMING, "Open a REI image in a floating window.\nUsage: vieww <file.rei>", "vieww eynos.rei", SHELL_CAP_GUI);

@@ -1,6 +1,7 @@
 #include <shell.h>
 #include <misc/types.h>
 #include <tile_manager.h>
+#include <utilities/shell/shell_caps.h>
 
 void tiling_cmd(string arg) {
     (void)arg;
@@ -9,4 +10,4 @@ void tiling_cmd(string arg) {
 
 // Register command
 #include <shell_command_info.h>
-REGISTER_SHELL_COMMAND(tiling_cmd_info, "tiling", tiling_cmd, CMD_STREAMING, "Launch the tiling front-end manager.", "tiling");
+REGISTER_SHELL_COMMAND_REQ(tiling_cmd_info, "tiling", tiling_cmd, CMD_STREAMING, "Launch the tiling front-end manager.", "tiling", SHELL_CAP_GUI);

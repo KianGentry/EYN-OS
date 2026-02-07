@@ -19,6 +19,7 @@
 #include <paging.h>
 #include <mm/vmm.h>
 #include <gdt.h>
+#include <utilities/shell/shell_caps.h>
 // vfs is used by some commands; include at top-level
 #include <fs/vfs.h>
 #include <tile_manager.h>
@@ -35,6 +36,13 @@
 #define EYNOS_REGISTER_SHELL_COMMAND(...)
 #else
 #define EYNOS_REGISTER_SHELL_COMMAND REGISTER_SHELL_COMMAND
+#endif
+
+#if defined(__aarch64__)
+#define REGISTER_SHELL_COMMAND_REQ_ARCH(var, cmd_name, handler_func, cmd_type, desc, ex, req_caps) \
+    REGISTER_SHELL_COMMAND_REQ(var, cmd_name, shell_unavailable_cmd, cmd_type, desc, ex, req_caps)
+#else
+#define REGISTER_SHELL_COMMAND_REQ_ARCH REGISTER_SHELL_COMMAND_REQ
 #endif
 
 // Forward declarations for command handlers
@@ -369,8 +377,8 @@ void sort_cmd(string ch) {
 // Command registration for background helpers
 #include <shell_command_info.h>
 #if !defined(__aarch64__)
-EYNOS_REGISTER_SHELL_COMMAND(setbg_cmd_info, "setbg", setbg_cmd, CMD_STREAMING, "Set a REI image as background for the focused tile (shows Tile/Scale/Center chooser).\nUsage: setbg <file.rei>", "setbg eynos.rei");
-EYNOS_REGISTER_SHELL_COMMAND(clearbg_cmd_info, "clearbg", clearbg_cmd, CMD_STREAMING, "Clear background image for the focused tile.", "clearbg");
+REGISTER_SHELL_COMMAND_REQ(setbg_cmd_info, "setbg", setbg_cmd, CMD_STREAMING, "Set a REI image as background for the focused tile (shows Tile/Scale/Center chooser).\nUsage: setbg <file.rei>", "setbg eynos.rei", SHELL_CAP_GUI);
+REGISTER_SHELL_COMMAND_REQ(clearbg_cmd_info, "clearbg", clearbg_cmd, CMD_STREAMING, "Clear background image for the focused tile.", "clearbg", SHELL_CAP_GUI);
 EYNOS_REGISTER_SHELL_COMMAND(setfont_cmd_info, "setfont", setfont_cmd, CMD_STREAMING, "Set the system font at runtime (loads .hex from disk into RAM).\nUsage: setfont <file.hex> | setfont builtin", "setfont /fonts/unscii-16.hex");
 #endif
 
@@ -847,7 +855,11 @@ void help_cmd(string ch) {
     printf("Commands (%u):\n", (unsigned)count);
     for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; cmd++) {
         if (!cmd->name) continue;
-        printf("  %s\n", cmd->name);
+        if (!shell_command_is_available(cmd)) {
+            printf("  %s (unavailable)\n", cmd->name);
+        } else {
+            printf("  %s\n", cmd->name);
+        }
     }
 #else
     // i386: initialize help state (if not already) and show precomputed GUI when tiling
@@ -870,30 +882,30 @@ EYNOS_REGISTER_SHELL_COMMAND(calc, "calc", calc_cmd, CMD_STREAMING, "32-bit fixe
 EYNOS_REGISTER_SHELL_COMMAND(spam, "spam", spam_cmd, CMD_STREAMING, "Spam 'EYN-OS' to the shell 100 times for fun.\nUsage: spam", "spam");
 EYNOS_REGISTER_SHELL_COMMAND(rect, "rect", draw_cmd_handler, CMD_STREAMING, "Draw a rectangle.\nUsage: rect <x> <y> <width> <height> <r> <g> <b>.\nExample: rect 10 20 100 50 255 0 0 draws a red rectangle.", "rect 10 20 100 50 255 0 0");
 EYNOS_REGISTER_SHELL_COMMAND(drive, "drive", drive_cmd, CMD_STREAMING, "Change between different drives (from lsata).\nUsage: drive <n>", "drive 0");
-EYNOS_REGISTER_SHELL_COMMAND(memory, "memory", memory_cmd, CMD_ESSENTIAL, "Memory management and testing.\nUsage: memory stats | test | stress", "memory stats");
+REGISTER_SHELL_COMMAND_REQ_ARCH(memory, "memory", memory_cmd, CMD_ESSENTIAL, "Memory management and testing.\nUsage: memory stats | test | stress", "memory stats", SHELL_CAP_MEMDIAG);
 EYNOS_REGISTER_SHELL_COMMAND(log, "log", log_cmd, CMD_STREAMING, "Enable or disable shell logging.\nUsage: log on|off", "log on");
 EYNOS_REGISTER_SHELL_COMMAND(lsata, "lsata", lsata_cmd, CMD_STREAMING, "List detected ATA drives and their details.\nUsage: lsata", "lsata");
 EYNOS_REGISTER_SHELL_COMMAND(exit, "exit", handler_exit, CMD_ESSENTIAL, "Exits the kernel and shuts down the system.\nUsage: exit", "exit");
 EYNOS_REGISTER_SHELL_COMMAND(clear, "clear", clear_cmd, CMD_ESSENTIAL, "Clears the screen and resets the shell display.\nUsage: clear", "clear");
-EYNOS_REGISTER_SHELL_COMMAND(catram, "catram", catram_cmd, CMD_STREAMING, "Display contents of a file from RAM disk (FAT32).\nUsage: catram <filename>", "catram test.txt");
-EYNOS_REGISTER_SHELL_COMMAND(lsram, "lsram", lsram_cmd, CMD_STREAMING, "List files in the RAM disk (FAT32) with directory tree.\nUsage: lsram", "lsram");
+REGISTER_SHELL_COMMAND_REQ_ARCH(catram, "catram", catram_cmd, CMD_STREAMING, "Display contents of a file from RAM disk (FAT32).\nUsage: catram <filename>", "catram test.txt", SHELL_CAP_RAMDISK);
+REGISTER_SHELL_COMMAND_REQ_ARCH(lsram, "lsram", lsram_cmd, CMD_STREAMING, "List files in the RAM disk (FAT32) with directory tree.\nUsage: lsram", "lsram", SHELL_CAP_RAMDISK);
 EYNOS_REGISTER_SHELL_COMMAND(random, "random", random_cmd, CMD_STREAMING, "Generate random numbers.\nUsage: random [count] | random [min] [max]\nExample: random 5 | random 10 20", "random 5");
 EYNOS_REGISTER_SHELL_COMMAND(sort, "sort", sort_cmd, CMD_STREAMING, "Sort strings alphabetically.\nUsage: sort <string1> <string2> <string3> ...\nExample: sort zebra apple banana", "sort zebra apple banana");
 EYNOS_REGISTER_SHELL_COMMAND(search, "search", search_cmd, CMD_STREAMING, "Search for text in filenames and file contents using Boyer-Moore algorithm.\nUsage: search <pattern> [-f|-c|-a]\nExample: search hello -a", "search hello -a");
-EYNOS_REGISTER_SHELL_COMMAND(error, "error", error_cmd, CMD_STREAMING, "Display system error statistics and status.\nUsage: error [clear|details]", "error");
+REGISTER_SHELL_COMMAND_REQ_ARCH(error, "error", error_cmd, CMD_STREAMING, "Display system error statistics and status.\nUsage: error [clear|details]", "error", SHELL_CAP_ISR_DIAG);
 EYNOS_REGISTER_SHELL_COMMAND(validate, "validate", validate_cmd, CMD_STREAMING, "Display input validation statistics and test validation.\nUsage: validate [test|stats]", "validate");
-EYNOS_REGISTER_SHELL_COMMAND(portable, "portable", portable_cmd, CMD_ESSENTIAL, "Display portability optimizations and memory usage.\nUsage: portable [stats|optimize]", "portable");
+REGISTER_SHELL_COMMAND_REQ_ARCH(portable, "portable", portable_cmd, CMD_ESSENTIAL, "Display portability optimizations and memory usage.\nUsage: portable [stats|optimize]", "portable", SHELL_CAP_MEMDIAG);
 EYNOS_REGISTER_SHELL_COMMAND(init, "init", init_cmd, CMD_ESSENTIAL, "Initialize full system services (ATA drives, etc.).\nUsage: init", "init");
-EYNOS_REGISTER_SHELL_COMMAND(pciscan_cmd_info, "pciscan", pciscan_cmd, CMD_DIAGNOSTIC, "Scan PCI devices and print vendor/device IDs and BAR0.\nUsage: pciscan [net]\nTip: e1000 usually shows as 8086:100E.", "pciscan net");
-EYNOS_REGISTER_SHELL_COMMAND(e1000probe_cmd_info, "e1000probe", e1000probe_cmd, CMD_DIAGNOSTIC, "Probe the Intel e1000 NIC (read-only MMIO sanity check).\nUsage: e1000probe", "e1000probe");
-EYNOS_REGISTER_SHELL_COMMAND(e1000_cmd_info, "e1000", e1000_cmd, CMD_DIAGNOSTIC, "Intel e1000 utilities (probe + bring-up helpers).\nUsage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx] | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-sendcur | e1000 tcp-close", "e1000 init");
+REGISTER_SHELL_COMMAND_REQ_ARCH(pciscan_cmd_info, "pciscan", pciscan_cmd, CMD_DIAGNOSTIC, "Scan PCI devices and print vendor/device IDs and BAR0.\nUsage: pciscan [net]\nTip: e1000 usually shows as 8086:100E.", "pciscan net", (SHELL_CAP_PCI | SHELL_CAP_E1000 | SHELL_CAP_NETSTACK));
+REGISTER_SHELL_COMMAND_REQ_ARCH(e1000probe_cmd_info, "e1000probe", e1000probe_cmd, CMD_DIAGNOSTIC, "Probe the Intel e1000 NIC (read-only MMIO sanity check).\nUsage: e1000probe", "e1000probe", (SHELL_CAP_PCI | SHELL_CAP_E1000 | SHELL_CAP_NETSTACK));
+REGISTER_SHELL_COMMAND_REQ_ARCH(e1000_cmd_info, "e1000", e1000_cmd, CMD_DIAGNOSTIC, "Intel e1000 utilities (probe + bring-up helpers).\nUsage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx] | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-sendcur | e1000 tcp-close", "e1000 init", (SHELL_CAP_PCI | SHELL_CAP_E1000 | SHELL_CAP_NETSTACK));
 
 static void ping_cmd(string ch);
 static void netstat_cmd(string ch);
 static void netcfg_cmd(string ch);
-EYNOS_REGISTER_SHELL_COMMAND(ping_cmd_info, "ping", ping_cmd, CMD_DIAGNOSTIC, "Send ICMP echo request(s).\nUsage: ping <dst_ip> [count] [local_ip]\nExample: ping 10.0.2.2\nNote: run 'e1000 init' first.", "ping 10.0.2.2");
-EYNOS_REGISTER_SHELL_COMMAND(netstat_cmd_info, "netstat", netstat_cmd, CMD_DIAGNOSTIC, "Network status (netstack + ARP + UDP + ICMP).\nUsage: netstat\nNote: run 'e1000 init' first for full info.", "netstat");
-EYNOS_REGISTER_SHELL_COMMAND(netcfg_cmd_info, "netcfg", netcfg_cmd, CMD_DIAGNOSTIC, "Network configuration (defaults match QEMU user-net).\nUsage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set ip|gw|mask|dns <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]\nDefault path: /config/net.cfg", "netcfg show");
+REGISTER_SHELL_COMMAND_REQ_ARCH(ping_cmd_info, "ping", ping_cmd, CMD_DIAGNOSTIC, "Send ICMP echo request(s).\nUsage: ping <dst_ip> [count] [local_ip]\nExample: ping 10.0.2.2\nNote: run 'e1000 init' first.", "ping 10.0.2.2", (SHELL_CAP_PCI | SHELL_CAP_E1000 | SHELL_CAP_NETSTACK));
+REGISTER_SHELL_COMMAND_REQ_ARCH(netstat_cmd_info, "netstat", netstat_cmd, CMD_DIAGNOSTIC, "Network status (netstack + ARP + UDP + ICMP).\nUsage: netstat\nNote: run 'e1000 init' first for full info.", "netstat", (SHELL_CAP_PCI | SHELL_CAP_E1000 | SHELL_CAP_NETSTACK));
+REGISTER_SHELL_COMMAND_REQ_ARCH(netcfg_cmd_info, "netcfg", netcfg_cmd, CMD_DIAGNOSTIC, "Network configuration (defaults match QEMU user-net).\nUsage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set ip|gw|mask|dns <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]\nDefault path: /config/net.cfg", "netcfg show", (SHELL_CAP_PCI | SHELL_CAP_E1000 | SHELL_CAP_NETSTACK));
 
 typedef struct pciscan_ctx {
     uint32 count;
@@ -2766,13 +2778,13 @@ void userrun_cmd(string ch) {
 }
 
 // Register diagnostics/testing commands
-EYNOS_REGISTER_SHELL_COMMAND(panic_cmd_info, "panic", panic_cmd, CMD_DIAGNOSTIC, "Trigger a kernel panic to test diagnostics.\nUsage: panic yes", "panic yes");
-EYNOS_REGISTER_SHELL_COMMAND(assertfail_cmd_info, "assertfail", assertfail_cmd, CMD_DIAGNOSTIC, "Trigger an assertion failure (ASSERT).\nUsage: assertfail yes", "assertfail yes");
-EYNOS_REGISTER_SHELL_COMMAND(serialtest_cmd_info, "serialtest", serialtest_cmd, CMD_STREAMING, "Write a test line to COM1 to verify serial output.\nUsage: serialtest", "serialtest");
-EYNOS_REGISTER_SHELL_COMMAND(pagingguards_cmd_info, "pagingguards", pagingguards_cmd, CMD_STREAMING, "Install optional paging guards (null-page, .text/.rodata RO).\nUsage: pagingguards", "pagingguards");
-EYNOS_REGISTER_SHELL_COMMAND(pf_cmd_info, "pf", pf_cmd, CMD_STREAMING, "Intentionally trigger a page fault (read/write/exec a chosen address).\nUsage: pf yes [addr] [r|w|x]", "pf yes 0x0 r");
-EYNOS_REGISTER_SHELL_COMMAND(ring3_cmd_info, "ring3", ring3_cmd, CMD_STREAMING, "Switch to ring 3 and run a tiny user-mode stub (prints via int 0x80).\nUsage: ring3 yes", "ring3 yes");
-EYNOS_REGISTER_SHELL_COMMAND(userrun_cmd_info, "userrun", userrun_cmd, CMD_STREAMING, "Load a raw user-mode code blob from VFS into ring 3 and run it at 0x00400000.\nThe program should use int 0x80 with EYN-OS syscall numbers (write=1, exit=2).\nUsage: userrun <path>", "userrun /testdir/user_hello.bin");
+REGISTER_SHELL_COMMAND_REQ_ARCH(panic_cmd_info, "panic", panic_cmd, CMD_DIAGNOSTIC, "Trigger a kernel panic to test diagnostics.\nUsage: panic yes", "panic yes", SHELL_CAP_PANIC);
+REGISTER_SHELL_COMMAND_REQ_ARCH(assertfail_cmd_info, "assertfail", assertfail_cmd, CMD_DIAGNOSTIC, "Trigger an assertion failure (ASSERT).\nUsage: assertfail yes", "assertfail yes", SHELL_CAP_PANIC);
+REGISTER_SHELL_COMMAND_REQ_ARCH(serialtest_cmd_info, "serialtest", serialtest_cmd, CMD_STREAMING, "Write a test line to COM1 to verify serial output.\nUsage: serialtest", "serialtest", SHELL_CAP_SERIAL);
+REGISTER_SHELL_COMMAND_REQ_ARCH(pagingguards_cmd_info, "pagingguards", pagingguards_cmd, CMD_STREAMING, "Install optional paging guards (null-page, .text/.rodata RO).\nUsage: pagingguards", "pagingguards", SHELL_CAP_PAGING);
+REGISTER_SHELL_COMMAND_REQ_ARCH(pf_cmd_info, "pf", pf_cmd, CMD_STREAMING, "Intentionally trigger a page fault (read/write/exec a chosen address).\nUsage: pf yes [addr] [r|w|x]", "pf yes 0x0 r", SHELL_CAP_PAGING);
+REGISTER_SHELL_COMMAND_REQ_ARCH(ring3_cmd_info, "ring3", ring3_cmd, CMD_STREAMING, "Switch to ring 3 and run a tiny user-mode stub (prints via int 0x80).\nUsage: ring3 yes", "ring3 yes", SHELL_CAP_RING3);
+REGISTER_SHELL_COMMAND_REQ_ARCH(userrun_cmd_info, "userrun", userrun_cmd, CMD_STREAMING, "Load a raw user-mode code blob from VFS into ring 3 and run it at 0x00400000.\nThe program should use int 0x80 with EYN-OS syscall numbers (write=1, exit=2).\nUsage: userrun <path>", "userrun /testdir/user_hello.bin", SHELL_CAP_RING3);
 
 
 // draw_cmd_handler implementation
@@ -3487,7 +3499,9 @@ void init_cmd(string ch) {
     // Best-effort load of persisted network config (does not require e1000 init).
     // Keep quiet on failure (missing file is normal).
     (void)ch;
+#if defined(__i386__)
     netcfg_try_autoload_quiet(g_current_drive);
+#endif
     
     printf("%cSystem initialization complete!\n", 0, 255, 0);
     printf("%cAll services are now available.\n", 0, 255, 0);

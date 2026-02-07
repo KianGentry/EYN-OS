@@ -9,6 +9,7 @@
 #include <eynfs.h>
 #include <string.h>
 #include <shell_command_info.h>
+#include <utilities/shell/shell_caps.h>
 
 // Simple system stats GUI: shows 3 pie charts (CPU, Memory, Disk) and a sortable table below
 // CPU usage is estimated from scheduler ticks vs. idle hlt count
@@ -128,6 +129,7 @@ static void draw_pie(int cx, int cy, int radius, float percent, int r1,int g1,in
 // No 64-bit division: use 32-bit cycles-per-tick (safe for <= ~4GHz and <=1s window)
 
 // Minimal CPUID helpers (i386+). If CPUID not supported, assume no TSC.
+#if defined(__i386__)
 static int cpu_has_cpuid(void) {
     int supported = 0;
     unsigned int eflags_before, eflags_after;
@@ -150,7 +152,10 @@ static int cpu_has_cpuid(void) {
 static void cpuid_eax(uint32 leaf, uint32* a, uint32* b, uint32* c, uint32* d) {
     uint32 ra=0, rb=0, rc=0, rd=0;
     __asm__ __volatile__("cpuid" : "=a"(ra), "=b"(rb), "=c"(rc), "=d"(rd) : "a"(leaf), "c"(0));
-    if (a) *a = ra; if (b) *b = rb; if (c) *c = rc; if (d) *d = rd;
+    if (a) *a = ra;
+    if (b) *b = rb;
+    if (c) *c = rc;
+    if (d) *d = rd;
 }
 
 static int cpu_has_tsc(void) {
@@ -166,6 +171,10 @@ static int cpu_has_invariant_tsc(void) {
     cpuid_eax(0x80000007, &a,&b,&c,&d);
     return (d & (1u<<8)) != 0; // EDX bit 8: invariant TSC
 }
+#else
+static int cpu_has_tsc(void) { return 0; }
+static int cpu_has_invariant_tsc(void) { return 0; }
+#endif
 
 static void stats_sample_disk(void) {
     // Read EYNFS superblock and count free blocks similar to fsstat_cmd
@@ -277,6 +286,7 @@ static void stats_gui_draw(int tile_idx, int content_x, int content_y, int conte
         stats_sample_memory();
         stats_sample_disk();
         if (!g_stats.disable_tsc) {
+#if defined(__i386__)
             // Estimate CPU MHz using TSC over this sampling window (avoid 64-bit division)
             uint32 tsc_lo_now, tsc_hi_now;
             __asm__ __volatile__("rdtsc" : "=a"(tsc_lo_now), "=d"(tsc_hi_now));
@@ -294,6 +304,9 @@ static void stats_gui_draw(int tile_idx, int content_x, int content_y, int conte
             }
             g_stats.tsc_lo_last = tsc_lo_now;
             g_stats.tsc_tick_last = now_ticks;
+#else
+            g_stats.disable_tsc = 1;
+#endif
         }
         g_stats.last_ui_update_tick = now_ticks;
     }
@@ -302,13 +315,18 @@ static void stats_gui_draw(int tile_idx, int content_x, int content_y, int conte
         uint32 hz2 = tick_hz ? tick_hz : 50;
         uint32 dt_ticks2 = now_ticks - g_stats.calib_start_tick;
         if (dt_ticks2 >= hz2) {
-            uint32 tsc_lo_now2, tsc_hi_now2; __asm__ __volatile__("rdtsc" : "=a"(tsc_lo_now2), "=d"(tsc_hi_now2));
+#if defined(__i386__)
+            uint32 tsc_lo_now2, tsc_hi_now2;
+            __asm__ __volatile__("rdtsc" : "=a"(tsc_lo_now2), "=d"(tsc_hi_now2));
             uint32 dcycles_lo2 = (tsc_lo_now2 >= g_stats.calib_start_tsc_lo)
                 ? (tsc_lo_now2 - g_stats.calib_start_tsc_lo)
                 : (tsc_lo_now2 + (0xFFFFFFFFu - g_stats.calib_start_tsc_lo) + 1u);
             uint32 cycles_per_sec2 = (dcycles_lo2 / dt_ticks2) * hz2;
             uint32 mhz_est2 = cycles_per_sec2 / 1000000u;
             if (mhz_est2 > 0 && mhz_est2 < 100000u) g_stats.cpu_mhz_total = mhz_est2;
+#else
+            g_stats.disable_tsc = 1;
+#endif
             g_stats.calib_pending = 0;
         }
     }
@@ -408,6 +426,7 @@ static void stats_cmd(string arg) {
         g_stats.disable_tsc = 1;
     }
     if (!g_stats.disable_tsc) {
+#if defined(__i386__)
         uint32 tsc_lo, tsc_hi;
         __asm__ __volatile__("rdtsc" : "=a"(tsc_lo), "=d"(tsc_hi));
         g_stats.tsc_lo_last = tsc_lo;
@@ -416,6 +435,9 @@ static void stats_cmd(string arg) {
         g_stats.calib_pending = 1;
         g_stats.calib_start_tick = g_stats.last_ticks;
         g_stats.calib_start_tsc_lo = g_stats.tsc_lo_last;
+#else
+        g_stats.disable_tsc = 1;
+#endif
     }
     // Initial memory/disk sample
     stats_sample_memory();
@@ -426,4 +448,4 @@ static void stats_cmd(string arg) {
     tile_register_gui_client2(tile, stats_gui_draw, stats_gui_key, stats_gui_mouse, NULL);
 }
 
-REGISTER_SHELL_COMMAND(stats_cmd_info, "stats", stats_cmd, CMD_STREAMING, "Graphical system performance monitor with CPU, memory, disk pies and sortable table", "stats");
+REGISTER_SHELL_COMMAND_REQ(stats_cmd_info, "stats", stats_cmd, CMD_STREAMING, "Graphical system performance monitor with CPU, memory, disk pies and sortable table", "stats", SHELL_CAP_GUI);

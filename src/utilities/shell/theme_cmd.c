@@ -7,6 +7,7 @@
 #include <ui_prefs.h>
 
 #include <shell_command_info.h>
+#include <utilities/shell/shell_caps.h>
 #include <string.h>
 
 
@@ -400,4 +401,4 @@ static void theme_cmd(string arg) {
     wm_invalidate_window(st->win_id);
 }
 
-REGISTER_SHELL_COMMAND(theme_cmd_info, "theme", theme_cmd, CMD_STREAMING, "Open a GUI theme editor (colors + font).", "theme");
+REGISTER_SHELL_COMMAND_REQ(theme_cmd_info, "theme", theme_cmd, CMD_STREAMING, "Open a GUI theme editor (colors + font).", "theme", SHELL_CAP_GUI);
