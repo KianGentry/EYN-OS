@@ -354,7 +354,11 @@ static int virtio_input_try_consume_event(char* out_c) {
             aarch64_dcache_clean_invalidate_poc_range(&g_events[desc_id], sizeof(g_events[desc_id]));
             virtio_input_event_t ev = g_events[desc_id];
 
-            /* Requeue descriptor */
+            /* Requeue descriptor (reinitialize in case of stray corruption). */
+            g_desc_p[desc_id].addr = (uint64)(const void*)&g_events[desc_id];
+            g_desc_p[desc_id].len = (uint32)sizeof(virtio_input_event_t);
+            g_desc_p[desc_id].flags = VIRTQ_DESC_F_WRITE;
+            g_desc_p[desc_id].next = 0;
             g_avail_p->ring[g_avail_idx & 0xF] = (uint16)desc_id;
             g_avail_idx++;
             g_avail_p->idx = g_avail_idx;
@@ -396,7 +400,11 @@ static int virtio_input_try_consume_key(uint32* out_key, uint32* out_mods) {
             aarch64_dcache_clean_invalidate_poc_range(&g_events[desc_id], sizeof(g_events[desc_id]));
             virtio_input_event_t ev = g_events[desc_id];
 
-            /* Requeue descriptor */
+            /* Requeue descriptor (reinitialize in case of stray corruption). */
+            g_desc_p[desc_id].addr = (uint64)(const void*)&g_events[desc_id];
+            g_desc_p[desc_id].len = (uint32)sizeof(virtio_input_event_t);
+            g_desc_p[desc_id].flags = VIRTQ_DESC_F_WRITE;
+            g_desc_p[desc_id].next = 0;
             g_avail_p->ring[g_avail_idx & 0xF] = (uint16)desc_id;
             g_avail_idx++;
             g_avail_p->idx = g_avail_idx;

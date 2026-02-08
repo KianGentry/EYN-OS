@@ -1117,7 +1117,10 @@ static void open_viewer_gui(const char* path) {
                 if (buf) {
                     int br = eynfs_read_file(disk, &sb, &entry, buf, (int)sz, 0);
                     if (br >= 4) {
-                        uint32_t magic = *(uint32_t*)buf;
+                        uint32_t magic = (uint32_t)buf[0]
+                            | ((uint32_t)buf[1] << 8)
+                            | ((uint32_t)buf[2] << 16)
+                            | ((uint32_t)buf[3] << 24);
                         if (magic == REIV_MAGIC) {
                             // Stream REIV instead of loading whole file
                             if (load_reiv_stream(path) != 0) {

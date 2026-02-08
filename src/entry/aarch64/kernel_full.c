@@ -11,6 +11,20 @@
 
 #include <graphics/gfx.h>
 #include <shell.h>
+#include <hal/time.h>
+
+#include <predictive_memory.h>
+#include <zero_copy.h>
+#include <kernel_api.h>
+#include <native_exec.h>
+#include <sched.h>
+#include <watchdog.h>
+#include <partition.h>
+#include <ui_prefs.h>
+#include <tile_manager.h>
+#include <help_tui.h>
+
+#include <vga.h>
 
 #include <ata.h>
 
@@ -60,6 +74,16 @@ static void aarch64_disable_alignment_check(void) {
     asm volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
     sctlr &= ~(1ull << 1); /* A (alignment check enable) */
     asm volatile("msr sctlr_el1, %0\n\tisb" :: "r"(sctlr) : "memory");
+}
+
+static int g_console_ready = 0;
+
+static void boot_log(const char* msg) {
+    if (!msg) return;
+    uart_pl011_write(msg);
+    if (g_console_ready) {
+        printf("%s", msg);
+    }
 }
 
 void kernel_main(uint64 dtb_ptr) {
@@ -116,16 +140,15 @@ void kernel_main(uint64 dtb_ptr) {
             uart_pl011_write("FB info query failed\n");
         }
 
-        /* Make the GUI window visibly change immediately (helps debug ramfb refresh). */
-        fb_simple_clear_rgb(255, 0, 255);
-        fb_simple_write("EYN-OS AArch64 full bring-up\n");
-        fb_simple_flush();
-
         // Provide multiboot-style framebuffer information for shared VGA/GUI code.
         aarch64_multiboot_compat_init_from_fb();
 
         /* Enable the arch-neutral gfx facade for the interactive shell. */
         gfx_init_default();
+        clearScreen();
+        g_console_ready = 1;
+        boot_log("EYN-OS Release 15\n");
+        boot_log("Please wait for system services to start.\n\n");
     } else {
         uart_pl011_write("FB init failed, code ");
         uart_pl011_write_hex64((uint64)fb_simple_last_error());
@@ -160,7 +183,9 @@ void kernel_main(uint64 dtb_ptr) {
         }
 
         /* Wire the legacy ATA sector API to virtio-blk. */
+        boot_log("Starting ATA driver...");
         ata_init_drives();
+        boot_log("Done.\n");
     } else {
         uart_pl011_write("virtio-blk not ready\n");
         if (fb_simple_ready()) {
@@ -201,6 +226,46 @@ void kernel_main(uint64 dtb_ptr) {
         uart_pl011_write("FDT parse failed (memory)\n");
     }
 
+    // --- Storage + VFS parity bring-up ---
+    boot_log("Starting virtual drive system...");
+    vdrive_init();
+    boot_log("Done.\n");
+
+    boot_log("Scanning drive 0 for partitions...\n");
+    {
+        disk_info_t disk;
+        if (partition_read_table(0, &disk) == 0 && disk.partition_count > 0) {
+            for (int i = 0; i < disk.partition_count; i++) {
+                if (disk.partitions[i].type == PART_TYPE_EYNFS) {
+                    vdrive_mount(0, i, 0);
+                    break;
+                }
+            }
+            for (int i = 0; i < disk.partition_count; i++) {
+                if (disk.partitions[i].type == PART_TYPE_EYNOS_SWAP) {
+                    swap_partition_init(0, i);
+                    break;
+                }
+            }
+        }
+    }
+
+    boot_log("Loading UI preferences...");
+    ui_prefs_load_apply(0);
+    boot_log("Done.\n");
+
+    boot_log("Starting predictive memory manager...");
+    predictive_memory_init();
+    boot_log("Done.\n");
+
+    boot_log("Starting zero-copy file system...");
+    zero_copy_init();
+    boot_log("Done.\n");
+
+    boot_log("Starting (Legacy) kernel API system...");
+    eyn_kernel_api_init();
+    boot_log("Done.\n");
+
     // --- Interrupts + tick bring-up ---
 
     uint64 gicd_base = 0;
@@ -230,7 +295,30 @@ void kernel_main(uint64 dtb_ptr) {
     aarch64_irq_cpu_init();
 
     aarch64_smp_boot(dtb_ptr);
+
+    boot_log("Starting scheduler...");
+    sched_init();
+    boot_log("Done.\n");
+
     arch_enable_interrupts();
+
+    boot_log("Starting watchdog...");
+    {
+        uint32 hz = hal_time_tick_hz();
+        uint32 to = (hz ? (hz / 4) : 12);
+        watchdog_init(to);
+    }
+    boot_log("Done.\n");
+
+    boot_log("Starting (Legacy) native execution system...");
+    native_exec_init();
+    boot_log("Done.\n");
+
+    boot_log("Starting Tiling Manager...");
+    start_tiling_manager();
+    boot_log("Done.\n");
+
+    help_tui_init_state();
 
     /* Drop into the shared shell core. */
     launch_shell(0);

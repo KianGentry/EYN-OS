@@ -1797,6 +1797,8 @@ static void draw_static_tile(tile_t* t, int is_focused) {
     // Draw background once and then draw decorations on top
     drawRect(t->x, t->y, t->width, t->height, 0, 0, 0);
     draw_decorations(t, is_focused);
+    // Ensure the initial frame is presented when using the backbuffer.
+    vga_mark_dirty_rect(t->x, t->y, t->width, t->height);
     t->static_drawn = 1;
     // Update decoration caches
     t->last_title_ptr = t->title;
@@ -2837,7 +2839,11 @@ void start_tiling_manager() {
         vterm_set_active(0, 1);
         // Print initial prompt into vterm 0
         vterm_print_prompt(0);
+        vterm_mark_all_dirty(0);
         layout_tiles();
+
+        g_force_full_redraw = 1;
+        g_tiles_full_content_redraw = 1;
 
         g_tm_initialized = 1;
     } else {
@@ -2891,6 +2897,10 @@ void start_tiling_manager() {
             g_tiles_full_content_redraw = 1;
             for (int ti = 0; ti < tile_count; ++ti) {
                 tiles[ti].static_drawn = 0;
+                int term = tiles[ti].term_idx;
+                if (term >= 0 && term < MAX_TILES && gui_draw_cb[term] == NULL) {
+                    vterm_mark_all_dirty(term);
+                }
             }
             for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
                 if (g_windows[wi].used && !g_windows[wi].minimized) {
@@ -2988,7 +2998,7 @@ void start_tiling_manager() {
             if (g_force_full_redraw || g_tiles_full_content_redraw || (has_gui && (gui_needs_redraw[term_for_i] || gui_continuous_redraw[term_for_i])) || tiles[i].last_drawn_version != cur_ver || rect_changed) {
                 // For GUI tiles, pre-mark the entire content area so subsequent per-primitive dirty marks
                 // merge into one big rect, ensuring a single bottom-up copy and avoiding visible sweeps.
-                if (has_gui && !gui_precise_dirty[term_for_i] && cw_now > 0 && ch_now > 0) {
+                if (has_gui && cw_now > 0 && ch_now > 0 && (!gui_precise_dirty[term_for_i] || g_force_full_redraw || g_tiles_full_content_redraw)) {
                     if (rects_intersect(cx_now, cy_now, cw_now, ch_now, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
                     vga_mark_dirty_rect(cx_now, cy_now, cw_now, ch_now);
                 }

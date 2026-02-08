@@ -28,7 +28,7 @@ static uint32 g_backbuf_h = 0;
 static uint32 g_backbuf_stride = 0;
 typedef struct { int x, y, w, h; } dirty_rect_t;
 #define MAX_DIRTY_RECTS 128
-static dirty_rect_t g_dirty_rects[MAX_DIRTY_RECTS];
+static dirty_rect_t g_dirty_rects[MAX_DIRTY_RECTS] __attribute__((aligned(16)));
 static int g_dirty_count = 0;
 static int g_exclude_valid = 0;
 static int g_exclude_x = 0;

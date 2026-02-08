@@ -923,7 +923,8 @@ int fb_simple_get_info(uint64* out_base,
     if (out_width) *out_width = g_fb_width;
     if (out_height) *out_height = g_fb_height;
     if (out_stride) *out_stride = g_fb_stride;
-    if (out_bpp) *out_bpp = g_fb_bpp;
+    // Report bits-per-pixel to match multiboot/vga expectations.
+    if (out_bpp) *out_bpp = g_fb_bpp * 8u;
     if (out_format) *out_format = (const char*)g_fb_format;
     return 0;
 }

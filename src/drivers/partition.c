@@ -23,6 +23,14 @@ static swap_partition_t g_swap_partition;
 
 // PARTITION TABLE OPERATIONS
 
+static uint32 read_le32_unaligned(const uint8 *p) {
+    const volatile uint8 *vp = (const volatile uint8 *)p;
+    return (uint32)vp[0]
+        | ((uint32)vp[1] << 8)
+        | ((uint32)vp[2] << 16)
+        | ((uint32)vp[3] << 24);
+}
+
 int partition_read_table(uint8 drive, disk_info_t *info) {
     if (!info) return -1;
     
@@ -48,8 +56,8 @@ int partition_read_table(uint8 drive, disk_info_t *info) {
         part->partition_num = i;
         part->bootable = (entry[0] == 0x80);
         part->type = entry[4];
-        part->lba_start = entry[8] | (entry[9] << 8) | (entry[10] << 16) | (entry[11] << 24);
-        part->sector_count = entry[12] | (entry[13] << 8) | (entry[14] << 16) | (entry[15] << 24);
+        part->lba_start = read_le32_unaligned(entry + 8);
+        part->sector_count = read_le32_unaligned(entry + 12);
         part->size_mb = part->sector_count / 2048;  /* 512 bytes/sector, 2048 sectors/MB */
         part->mounted = 0;
         
@@ -245,13 +253,27 @@ int vdrive_mount(uint8 physical_drive, uint8 partition_num, const char *mount_po
     }
     
     /* Set up virtual drive */
-    g_vdrives[slot].in_use = 1;
-    g_vdrives[slot].physical_drive = physical_drive;
-    g_vdrives[slot].partition_num = partition_num;
-    g_vdrives[slot].lba_offset = disk.partitions[partition_num].lba_start;
-    g_vdrives[slot].sector_count = disk.partitions[partition_num].sector_count;
+    /* Use volatile stores to avoid wide unaligned accesses on AArch64. */
+    volatile uint8 *vd8 = (volatile uint8 *)(void *)&g_vdrives[slot];
+    vd8[0] = 1; /* in_use */
+    vd8[1] = physical_drive;
+    vd8[2] = partition_num;
+
+    volatile uint32 *vd32 = (volatile uint32 *)(void *)&g_vdrives[slot].lba_offset;
+    vd32[0] = disk.partitions[partition_num].lba_start;
+    vd32[1] = disk.partitions[partition_num].sector_count;
+
     g_vdrives[slot].fs_type = disk.partitions[partition_num].fs_type;
-    strncpy(g_vdrives[slot].mount_point, mount_point, sizeof(g_vdrives[slot].mount_point) - 1);
+    if (!mount_point) {
+        mount_point = "";
+    }
+    /* Copy byte-wise to avoid unaligned stores on AArch64. */
+    for (size_t i = 0; i < sizeof(g_vdrives[slot].mount_point) - 1; i++) {
+        char c = mount_point[i];
+        g_vdrives[slot].mount_point[i] = c;
+        if (!c) break;
+    }
+    g_vdrives[slot].mount_point[sizeof(g_vdrives[slot].mount_point) - 1] = '\0';
     
     return slot;
 }
@@ -314,13 +336,17 @@ int swap_partition_init(uint8 drive, uint8 partition_num) {
         return -1;
     }
     
-    g_swap_partition.active = 1;
-    g_swap_partition.drive = drive;
-    g_swap_partition.lba_start = part->lba_start;
-    g_swap_partition.sector_count = part->sector_count;
+    /* Avoid wide unaligned stores on AArch64 by using explicit 32-bit writes. */
+    volatile uint8 *sp8 = (volatile uint8 *)(void *)&g_swap_partition;
+    sp8[0] = 1; /* active */
+    sp8[1] = drive;
+
+    volatile uint32 *sp32 = (volatile uint32 *)(void *)&g_swap_partition.lba_start;
+    sp32[0] = part->lba_start;
+    sp32[1] = part->sector_count;
     /* Each page is 4KB = 8 sectors */
-    g_swap_partition.total_pages = part->sector_count / 8;
-    g_swap_partition.used_pages = 0;
+    sp32[2] = part->sector_count / 8;
+    sp32[3] = 0;
     
     printf("%cSwap partition initialized: %u pages (%u MB)\n",
            0, 255, 0, g_swap_partition.total_pages, part->size_mb);
@@ -395,9 +421,12 @@ int partition_detect_fs(uint8 drive, uint32 lba_start) {
         return 0;
     }
     
-    /* Check for EYNFS magic at expected offset */
-    uint32 *magic = (uint32 *)(buf);
-    if (*magic == 0x45594E46) {  /* 'EYNF' */
+    /* Check for EYNFS magic at expected offset (avoid unaligned loads). */
+    uint32 magic = (uint32)buf[0]
+        | ((uint32)buf[1] << 8)
+        | ((uint32)buf[2] << 16)
+        | ((uint32)buf[3] << 24);
+    if (magic == 0x45594E46) {  /* 'EYNF' */
         return PART_TYPE_EYNFS;
     }
     

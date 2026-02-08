@@ -54,7 +54,7 @@ static void heap_init_default(void) {
      * QEMU virt typically has plenty of RAM; keep this small to match the
      * project's low-memory expectations.
      */
-    uintptr_t end = start + (2u * 1024u * 1024u); /* 2 MiB */
+    uintptr_t end = start + (8u * 1024u * 1024u); /* 8 MiB */
 
     g_heap_start = (uint8*)start;
     g_heap_end = (uint8*)end;
@@ -77,9 +77,9 @@ void aarch64_heap_init(uint64 ram_base, uint64 ram_size) {
         ram_end = (uintptr_t)(ram_base + ram_size);
     }
 
-    /* Default to a small heap; grow up to 8 MiB if RAM bounds allow. */
-    size_t desired = 2u * 1024u * 1024u;
-    size_t max_desired = 8u * 1024u * 1024u;
+    /* Default to a modest heap; grow up to 16 MiB if RAM bounds allow. */
+    size_t desired = 8u * 1024u * 1024u;
+    size_t max_desired = 16u * 1024u * 1024u;
 
     uintptr_t end = start + desired;
     if (ram_end != 0) {
