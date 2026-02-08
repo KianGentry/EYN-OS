@@ -103,7 +103,57 @@ menuentry "EYN-OS" {
 EOF
 
 rm -f "${ISO_OUT}"
-TMPDIR="${TMP_ROOT}" "${GRUB_MKRESCUE_BIN}" --modules="multiboot" --locales="" --themes="" --fonts="" --compress=xz -o "${ISO_OUT}" "${stage_dir}/"
+
+find_grub_platform_dir() {
+  local platform="$1"
+  local base
+  for base in /usr/share/grub2 /usr/lib/grub /usr/share/grub; do
+    if [[ -d "${base}/${platform}" ]]; then
+      echo "${base}/${platform}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+
+# If the system has a partial/broken x86_64-efi directory (e.g. contains only *.efi,
+# missing moddep.lst/modules), grub2-mkrescue errors out even for BIOS/QEMU use.
+# Work around by overriding the base directory to one that contains only i386-pc.
+mkrescue_dir_arg=()
+if grub_i386_dir="$(find_grub_platform_dir i386-pc 2>/dev/null)"; then
+  # If x86_64-efi exists but is missing moddep.lst, grub2-mkrescue tends to error.
+  # For qemu-system-i386 we only need i386-pc, so force that directory.
+  if [[ -d "$(dirname "${grub_i386_dir}")/x86_64-efi" && ! -f "$(dirname "${grub_i386_dir}")/x86_64-efi/moddep.lst" ]]; then
+    echo "Note: Detected incomplete GRUB x86_64-efi; forcing BIOS-only build using ${grub_i386_dir}." >&2
+    mkrescue_dir_arg=(--directory="${grub_i386_dir}")
+  fi
+fi
+
+run_mkrescue() {
+  local compress_mode="$1"
+  if [[ "${compress_mode}" == "none" ]]; then
+    compress_mode="no"
+  fi
+  echo "Running grub-mkrescue (compress=${compress_mode})..."
+  TMPDIR="${TMP_ROOT}" "${GRUB_MKRESCUE_BIN}" "${mkrescue_dir_arg[@]}" --modules="multiboot" --locales="" --themes="" --fonts="" --compress="${compress_mode}" -o "${ISO_OUT}" "${stage_dir}/"
+}
+
+# Some grub2-mkrescue builds (distro-dependent) can fail while staging EFI files with:
+#   ... moddep.lst ... File exists
+# Retrying with --compress=none avoids that code path.
+compress_pref="${EYNOS_GRUB_COMPRESS:-xz}"
+set +e
+run_mkrescue "${compress_pref}"
+mkrescue_rc=$?
+set -e
+
+if (( mkrescue_rc != 0 )); then
+  echo "Warning: grub-mkrescue failed with compress=${compress_pref}. Retrying with --compress=no..." >&2
+  rm -f "${ISO_OUT}" || true
+  rm_rf_best_effort "${TMP_ROOT}/grub."*
+  run_mkrescue "no"
+fi
 
 echo "Ultra-minimal ISO created: EYNOS.iso"
 ls -lh "${ISO_OUT}"

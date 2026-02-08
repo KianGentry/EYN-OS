@@ -35,6 +35,8 @@ start:
         cli ; clears interrupts 
 
         mov esp, stack_space
+        and esp, 0xFFFFFFF0
+        sub esp, 8
         push ebx
         push eax
 
