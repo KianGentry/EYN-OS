@@ -54,6 +54,10 @@ void vterm_get_char_color_abs(int idx, int row, int col, int* out_r, int* out_g,
 // Monotonic version counter for each vterm that increments when content changes.
 // Use to drive incremental redraws in the tiler.
 int vterm_get_version(int idx);
+// Dirty-row tracking to support partial redraws in the tiler.
+int vterm_is_row_dirty(int idx, int row);
+void vterm_clear_row_dirty(int idx, int row);
+void vterm_mark_all_dirty(int idx);
 
 // Get per-vterm current working directory (read-only pointer).
 const char* vterm_get_cwd(int idx);

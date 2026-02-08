@@ -56,6 +56,8 @@ void tile_invalidate_gui(int tile_idx);
 // When enabled, the tiler will redraw this GUI tile every frame (subject to global FPS cap).
 // Useful for animation/video playback without needing to spam invalidations.
 void tile_set_gui_continuous_redraw(int tile_idx, int enabled);
+// When enabled, GUI tiles are expected to mark their own dirty rects precisely.
+void tile_set_gui_precise_dirty(int tile_idx, int enabled);
 
 // Render a single tiler frame immediately.
 // Useful when the main tiler loop is blocked (e.g. while running a ring3 task)
@@ -91,6 +93,8 @@ void wm_invalidate_window(int win_id);
 
 // When enabled, the tiler will redraw this window every frame (subject to global FPS cap).
 void wm_set_continuous_redraw(int win_id, int enabled);
+// When enabled, GUI windows are expected to mark their own dirty rects precisely.
+void wm_set_precise_dirty(int win_id, int enabled);
 
 // Close the window
 void wm_close_window(int win_id);

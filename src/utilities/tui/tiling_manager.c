@@ -218,6 +218,7 @@ static void* gui_userdata[MAX_TILES];
 // Redraw gating for GUI clients: only redraw when invalidated or when rect/version/force changes
 static int gui_needs_redraw[MAX_TILES];
 static int gui_continuous_redraw[MAX_TILES];
+static int gui_precise_dirty[MAX_TILES];
 
 static int screen_w = 640; // pixels
 static int screen_h = 480; // pixels
@@ -453,6 +454,8 @@ typedef struct {
     // caches
     int last_focused;
     int static_drawn;
+    int content_valid;
+    int last_cx, last_cy, last_cw, last_ch;
     // callbacks
     tile_gui_draw_cb draw_cb;
     tile_gui_key_cb key_cb;
@@ -460,6 +463,7 @@ typedef struct {
     void* userdata;
     int needs_redraw;
     int continuous_redraw;
+    int precise_dirty;
     // state
     int minimized;
     int maximized;
@@ -958,11 +962,18 @@ static void wm_draw_content(window_t* w) {
     int cw = w->w - 2;
     int ch = w->h - (th + sh) - 2;
     if (cw > 0 && ch > 0) {
-        drawRect(cx, cy, cw, ch, 0, 0, 0);
         if (!w->minimized) {
-            if (w->draw_cb) w->draw_cb(-1, cx, cy, cw, ch, w->userdata);
+            if (w->draw_cb) {
+                w->draw_cb(-1, cx, cy, cw, ch, w->userdata);
+            } else {
+                drawRect(cx, cy, cw, ch, 0, 0, 0);
+            }
         }
-        vga_mark_dirty_rect(cx, cy, cw, ch);
+        if (!w->precise_dirty || !w->draw_cb || !w->content_valid) {
+            vga_mark_dirty_rect(cx, cy, cw, ch);
+        }
+        w->content_valid = 1;
+        w->last_cx = cx; w->last_cy = cy; w->last_cw = cw; w->last_ch = ch;
     }
 }
 
@@ -1103,6 +1114,8 @@ int wm_create_window(const char* title, int x, int y, int w, int h, const char* 
             g_windows[i].userdata = NULL;
             g_windows[i].needs_redraw = 1;
             g_windows[i].continuous_redraw = 0;
+            g_windows[i].precise_dirty = 0;
+            g_windows[i].content_valid = 0;
             g_windows[i].static_drawn = 0;
             g_windows[i].last_focused = 0;
             g_windows[i].minimized = 0;
@@ -1126,6 +1139,8 @@ void wm_register_gui_client2(int win_id, tile_gui_draw_cb draw_cb, tile_gui_key_
     g_windows[win_id].userdata = userdata;
     g_windows[win_id].needs_redraw = 1;
     g_windows[win_id].continuous_redraw = 0;
+    g_windows[win_id].precise_dirty = 0;
+    g_windows[win_id].content_valid = 0;
 }
 
 void wm_unregister_gui_client(int win_id) {
@@ -1136,6 +1151,8 @@ void wm_unregister_gui_client(int win_id) {
     g_windows[win_id].userdata = NULL;
     g_windows[win_id].needs_redraw = 0;
     g_windows[win_id].continuous_redraw = 0;
+    g_windows[win_id].precise_dirty = 0;
+    g_windows[win_id].content_valid = 0;
 }
 
 void wm_set_title_status(int win_id, const char* title, const char* status_left, const char* status_right) {
@@ -1144,17 +1161,25 @@ void wm_set_title_status(int win_id, const char* title, const char* status_left,
     g_windows[win_id].status_left = status_left;
     g_windows[win_id].status_right = status_right;
     g_windows[win_id].static_drawn = 0;
+    g_windows[win_id].content_valid = 0;
 }
 
 void wm_invalidate_window(int win_id) {
     if (win_id < 0 || win_id >= MAX_WINDOWS || !g_windows[win_id].used) return;
     g_windows[win_id].needs_redraw = 1;
+    g_windows[win_id].content_valid = 0;
 }
 
 void wm_set_continuous_redraw(int win_id, int enabled) {
     if (win_id < 0 || win_id >= MAX_WINDOWS || !g_windows[win_id].used) return;
     g_windows[win_id].continuous_redraw = enabled ? 1 : 0;
     if (g_windows[win_id].continuous_redraw) g_windows[win_id].needs_redraw = 1;
+    g_windows[win_id].content_valid = 0;
+}
+
+void wm_set_precise_dirty(int win_id, int enabled) {
+    if (win_id < 0 || win_id >= MAX_WINDOWS || !g_windows[win_id].used) return;
+    g_windows[win_id].precise_dirty = enabled ? 1 : 0;
 }
 
 void wm_close_window(int win_id) {
@@ -1784,8 +1809,9 @@ static void draw_static_tile(tile_t* t, int is_focused) {
 }
 
 // Draw the dynamic/content area for a tile (invoked each frame or when content changes)
-static void draw_tile_content(const tile_t* t) {
-    if (t->type == TILE_EMPTY) return;
+static int draw_tile_content(const tile_t* t) {
+    if (t->type == TILE_EMPTY) return 0;
+    int used_partial = 0;
     int title_h = get_title_height(t);
     int sh = status_overlay_visible() ? status_bar_height_px() : 0;
     int cw = vga_text_cell_w();
@@ -1797,22 +1823,29 @@ static void draw_tile_content(const tile_t* t) {
     int max_lines = (t->height - (title_h + sh + 2)) / line_h;
     int content_w = t->width - 2; // leave 1px border on left/right
     int content_h = t->height - (title_h + sh) - 2; // leave 1px top/bottom border
+    int cols = (content_w > 0 && cw > 0) ? (content_w / cw) : 1;
+    if (cols < 1) cols = 1;
+    int has_gui = (gui_draw_cb[t->term_idx] != NULL);
+    int ti_bg = t - tiles;
+    tile_bg_t* bg = (ti_bg >= 0 && ti_bg < MAX_TILES) ? &g_tile_bg[ti_bg] : NULL;
+    int has_bg = (bg && bg->img && bg->img->data && bg->mode != BG_NONE);
+    int allow_partial = (!has_gui && !has_bg && content_w > 0 && content_h > 0 && cols >= TERM_COLS);
+    int skip_full_clear = (has_gui && gui_precise_dirty[t->term_idx]);
     int bg_bright = -1; // -1 unknown; 0=dark; 1=bright
     if (content_w > 0 && content_h > 0) {
-        // Always start with a clean content area to avoid any residuals around centered/scaled images
-        drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
-        // Debug: show number of registered redirect icons (non-invasive onscreen feedback)
-        if (shell_redirect_icon_count > 0) {
-            char label[8];
-            int n = (shell_redirect_icon_count > 9) ? 9 : shell_redirect_icon_count;
-            label[0] = 'I'; label[1] = 'c'; label[2] = ':'; label[3] = '0' + n; label[4] = '\0';
-            for (int i = 0; label[i]; ++i) drawCharAt(content_x + i * cw, content_y, (int)(unsigned char)label[i], 255, 200, 0);
-        }
-        // Draw configured background (if any); else clear to black
-        int ti_bg = t - tiles;
-        tile_bg_t* bg = (ti_bg >= 0 && ti_bg < MAX_TILES) ? &g_tile_bg[ti_bg] : NULL;
-        int drew_bg = 0;
-        if (bg && bg->img && bg->img->data && bg->mode != BG_NONE) {
+        if (!allow_partial && !skip_full_clear) {
+            // Always start with a clean content area to avoid any residuals around centered/scaled images
+            drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
+            // Debug: show number of registered redirect icons (non-invasive onscreen feedback)
+            if (shell_redirect_icon_count > 0) {
+                char label[8];
+                int n = (shell_redirect_icon_count > 9) ? 9 : shell_redirect_icon_count;
+                label[0] = 'I'; label[1] = 'c'; label[2] = ':'; label[3] = '0' + n; label[4] = '\0';
+                for (int i = 0; label[i]; ++i) drawCharAt(content_x + i * cw, content_y, (int)(unsigned char)label[i], 255, 200, 0);
+            }
+            // Draw configured background (if any); else clear to black
+            int drew_bg = 0;
+            if (bg && bg->img && bg->img->data && bg->mode != BG_NONE) {
             const rei_image_t* im = bg->img; int iw = im->header.width, ih = im->header.height; int depth = im->header.depth; const uint8_t* base = im->data;
             if (bg->mode == BG_TILE) {
                 for (int yy = 0; yy < content_h; ++yy) {
@@ -1861,19 +1894,18 @@ static void draw_tile_content(const tile_t* t) {
                 else if (depth == REI_DEPTH_RGBA) { const uint8_t* p=row+sx*4; if (p[3]>=128){ uint8_t r8=p[0],g8=p[1],b8=p[2]; apply_darken(&r8,&g8,&b8,bg->darken); luma = rgb_luma(r8,g8,b8);} }
                 bg_bright = (luma >= 128) ? 1 : 0;
             }
-        }
-        if (!drew_bg) {
-            // No background configured
-            drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
+            }
+            if (!drew_bg) {
+                // No background configured
+                drawRect(content_x, content_y, content_w, content_h, 0, 0, 0);
+            }
         }
     }
     if (gui_draw_cb[t->term_idx]) {
         gui_draw_cb[t->term_idx](t - tiles, content_x, content_y, content_w, content_h, gui_userdata[t->term_idx]);
+        return 0;
     } else {
         // Soft-wrapped rendering: draw from the end of the buffer using visual rows.
-        // Compute visible columns from content width.
-        int cols = content_w / cw;
-        if (cols < 1) cols = 1;
     // Determine the absolute last row to show (cursor row minus scrollback offset)
     int end_row = vterm_get_cursor_row(t->term_idx) - vterm_get_scroll(t->term_idx);
         // Build visual rows backward: fill from bottom up
@@ -1886,120 +1918,139 @@ static void draw_tile_content(const tile_t* t) {
             int len = 0; while (src[len] && len < TERM_COLS) len++;
             // number of wrapped segments for this row (at least 1)
             int wraps = (len + cols - 1) / cols; if (wraps < 1) wraps = 1;
-            for (int w = wraps - 1; w >= 0 && vis_row >= 0; --w) {
-                int start_col = w * cols;
-                int line_indent_px = 0;
-                // Icons are anchored to character columns within this line.
-                // Draw every icon whose anchor column falls within this wrapped segment.
-                int icon_count = vterm_get_line_icon_count(t->term_idx, abs_row);
-                if (icon_count > 0) {
-                    int py_icon = content_y + vis_row * line_h;
-                    for (int ii = 0; ii < icon_count; ++ii) {
-                        int icon_anchor_col = 0;
-                        const char* line_icon_key = vterm_get_line_icon_key_n(t->term_idx, abs_row, ii, &icon_anchor_col);
-                        if (!line_icon_key) continue;
-                        if (icon_anchor_col < start_col || icon_anchor_col >= start_col + cols) continue;
-
-                        // If we're in 16x mode, only use 16x16 icons when the text stream
-                        // reserved enough character cells (typically two spaces for 16px-wide icons
-                        // in an 8px-wide text grid). This keeps older output readable after font/icon
-                        // mode changes.
-                        int want16_global = (vga_text_cell_h() >= 16) ? 1 : 0;
-                        int want16_icon = want16_global;
-                        if (want16_global) {
-                            if (icon_anchor_col < 0 || icon_anchor_col + 1 >= TERM_COLS) {
-                                want16_icon = 0;
-                            } else {
-                                char c0 = src[icon_anchor_col];
-                                char c1 = src[icon_anchor_col + 1];
-                                if (c0 != ' ' || c1 != ' ') want16_icon = 0;
-                            }
-                        }
-
-                        rei_image_t* icon = load_icon_for_ext_mode(line_icon_key, want16_icon);
-                        if (!icon) icon = load_icon_for_ext_mode("file_none", want16_icon);
-                        if (icon) {
-                            int icon_x = content_x + (icon_anchor_col - start_col) * cw;
-                            int icon_y = py_icon;
-                            int ih = icon->header.height;
-                            if (fh > ih) icon_y = py_icon + (fh - ih) / 2;
-                            draw_rei_at(icon, icon_x, icon_y);
-                        }
-                    }
-                }
-
-                for (int cc = 0; cc < cols; ++cc) {
-                    int px = content_x + cc * cw + line_indent_px;
+            if (!allow_partial || vterm_is_row_dirty(t->term_idx, abs_row)) {
+                for (int w = wraps - 1; w >= 0 && vis_row >= 0; --w) {
+                    int start_col = w * cols;
+                    int line_indent_px = 0;
                     int py = content_y + vis_row * line_h;
-                    // Horizontal & vertical clipping
-                    if (px + (cw - 1) < content_x || px >= content_x + content_w) continue;
-                    if (py + (fh - 1) < content_y || py >= content_y + content_h) continue;
-                    int src_col = start_col + cc;
-                    char ch = ' ';
-                    int rr = 200, gg = 200, bb = 200;
-                    if (src_col < len) {
-                        ch = src[src_col];
-                        vterm_get_char_color_abs(t->term_idx, abs_row, src_col, &rr, &gg, &bb);
+                    if (allow_partial) {
+                        drawRect(content_x, py, content_w, line_h, 0, 0, 0);
+                        vga_mark_dirty_rect(content_x, py, content_w, line_h);
                     }
-                    // Adaptive default text brightness against background
-                    if (bg_bright != -1 && rr == 200 && gg == 200 && bb == 200) {
-                        if (bg_bright) { rr = 40; gg = 40; bb = 40; } else { rr = 230; gg = 230; bb = 230; }
-                    } else {
-                        // If a background is set but adaptive is off, lift default gray to white-ish
-                        int ti_bg_idx2 = t - tiles;
-                        if (ti_bg_idx2 >= 0 && ti_bg_idx2 < MAX_TILES) {
-                            tile_bg_t* bgp2 = &g_tile_bg[ti_bg_idx2];
-                            if (bgp2->img && bgp2->mode != BG_NONE && !bgp2->adapt_text) {
-                                if (rr == 200 && gg == 200 && bb == 200) { rr = 240; gg = 240; bb = 240; }
+                    // Icons are anchored to character columns within this line.
+                    // Draw every icon whose anchor column falls within this wrapped segment.
+                    int icon_count = vterm_get_line_icon_count(t->term_idx, abs_row);
+                    if (icon_count > 0) {
+                        int py_icon = content_y + vis_row * line_h;
+                        for (int ii = 0; ii < icon_count; ++ii) {
+                            int icon_anchor_col = 0;
+                            const char* line_icon_key = vterm_get_line_icon_key_n(t->term_idx, abs_row, ii, &icon_anchor_col);
+                            if (!line_icon_key) continue;
+                            if (icon_anchor_col < start_col || icon_anchor_col >= start_col + cols) continue;
+
+                            // If we're in 16x mode, only use 16x16 icons when the text stream
+                            // reserved enough character cells (typically two spaces for 16px-wide icons
+                            // in an 8px-wide text grid). This keeps older output readable after font/icon
+                            // mode changes.
+                            int want16_global = (vga_text_cell_h() >= 16) ? 1 : 0;
+                            int want16_icon = want16_global;
+                            if (want16_global) {
+                                if (icon_anchor_col < 0 || icon_anchor_col + 1 >= TERM_COLS) {
+                                    want16_icon = 0;
+                                } else {
+                                    char c0 = src[icon_anchor_col];
+                                    char c1 = src[icon_anchor_col + 1];
+                                    if (c0 != ' ' || c1 != ' ') want16_icon = 0;
+                                }
+                            }
+
+                            rei_image_t* icon = load_icon_for_ext_mode(line_icon_key, want16_icon);
+                            if (!icon) icon = load_icon_for_ext_mode("file_none", want16_icon);
+                            if (icon) {
+                                int icon_x = content_x + (icon_anchor_col - start_col) * cw;
+                                int icon_y = py_icon;
+                                int ih = icon->header.height;
+                                if (fh > ih) icon_y = py_icon + (fh - ih) / 2;
+                                draw_rei_at(icon, icon_x, icon_y);
                             }
                         }
-                    }
-                    // Optional local darken: semi-transparent darken behind non-space glyphs
-                    {
-                        int ti_bg_idx3 = t - tiles;
-                        if (ti_bg_idx3 >= 0 && ti_bg_idx3 < MAX_TILES) {
-                            tile_bg_t* bgp3 = &g_tile_bg[ti_bg_idx3];
-                            if (bgp3->img && bgp3->mode != BG_NONE && bgp3->local_darken && ch != ' ') {
-                                // Multiply darken by ~50% for a softer look
-                                vga_darkenRect_bb(px, py, cw, fh, 128);
-                            }
-                        }
-                    }
-                    int is_sel = vterm_is_selected(t->term_idx, abs_row, src_col);
-                    if (is_sel) {
-                        // selection background teal-ish
-                        drawRect(px, py, cw, fh, 0, 128, 128);
-                    }
-                    // Optional text shadow: draw small dark offset before main glyph
-                    int ti_bg_idx = t - tiles;
-                    int use_shadow = 0; int sr = 0, sg = 0, sb = 0;
-                    if (ti_bg_idx >= 0 && ti_bg_idx < MAX_TILES) {
-                        tile_bg_t* bgp = &g_tile_bg[ti_bg_idx];
-                        if (bgp->img && bgp->text_shadow) {
-                            use_shadow = 1;
-                            // Choose shadow color opposing the text brightness slightly for contrast
-                            // If text is bright, use darker shadow; if text is dark, use very dark gray
-                            if (rr + gg + bb > 380) { sr = 0; sg = 0; sb = 0; }
-                            else { sr = 10; sg = 10; sb = 10; }
-                        }
-                    }
-                    if (use_shadow) {
-                        // 1px down-right shadow
-                        drawCharAt(px + 1, py + 1, (int)(unsigned char)ch, sr, sg, sb);
                     }
 
-                    // Draw main character
-                    drawCharAt(px, py, (int)(unsigned char)ch, rr, gg, bb);
-                    // Then overlay underscore cursor at the logical caret position
-                    if (abs_row == cursor_row && start_col + cc == cursor_col) {
-                        drawCharAt(px, py, (int)'_', 220, 220, 220);
+                    for (int cc = 0; cc < cols; ++cc) {
+                        int px = content_x + cc * cw + line_indent_px;
+                        // Horizontal & vertical clipping
+                        if (px + (cw - 1) < content_x || px >= content_x + content_w) continue;
+                        if (py + (fh - 1) < content_y || py >= content_y + content_h) continue;
+                        int src_col = start_col + cc;
+                        char ch = ' ';
+                        int rr = 200, gg = 200, bb = 200;
+                        if (src_col < len) {
+                            ch = src[src_col];
+                            vterm_get_char_color_abs(t->term_idx, abs_row, src_col, &rr, &gg, &bb);
+                        }
+                        // Adaptive default text brightness against background
+                        if (bg_bright != -1 && rr == 200 && gg == 200 && bb == 200) {
+                            if (bg_bright) { rr = 40; gg = 40; bb = 40; } else { rr = 230; gg = 230; bb = 230; }
+                        } else {
+                            // If a background is set but adaptive is off, lift default gray to white-ish
+                            int ti_bg_idx2 = t - tiles;
+                            if (ti_bg_idx2 >= 0 && ti_bg_idx2 < MAX_TILES) {
+                                tile_bg_t* bgp2 = &g_tile_bg[ti_bg_idx2];
+                                if (bgp2->img && bgp2->mode != BG_NONE && !bgp2->adapt_text) {
+                                    if (rr == 200 && gg == 200 && bb == 200) { rr = 240; gg = 240; bb = 240; }
+                                }
+                            }
+                        }
+                        // Optional local darken: semi-transparent darken behind non-space glyphs
+                        {
+                            int ti_bg_idx3 = t - tiles;
+                            if (ti_bg_idx3 >= 0 && ti_bg_idx3 < MAX_TILES) {
+                                tile_bg_t* bgp3 = &g_tile_bg[ti_bg_idx3];
+                                if (bgp3->img && bgp3->mode != BG_NONE && bgp3->local_darken && ch != ' ') {
+                                    // Multiply darken by ~50% for a softer look
+                                    vga_darkenRect_bb(px, py, cw, fh, 128);
+                                }
+                            }
+                        }
+                        int is_sel = vterm_is_selected(t->term_idx, abs_row, src_col);
+                        if (is_sel) {
+                            // selection background teal-ish
+                            drawRect(px, py, cw, fh, 0, 128, 128);
+                        }
+                        // Optional text shadow: draw small dark offset before main glyph
+                        int ti_bg_idx = t - tiles;
+                        int use_shadow = 0; int sr = 0, sg = 0, sb = 0;
+                        if (ti_bg_idx >= 0 && ti_bg_idx < MAX_TILES) {
+                            tile_bg_t* bgp = &g_tile_bg[ti_bg_idx];
+                            if (bgp->img && bgp->text_shadow) {
+                                use_shadow = 1;
+                                // Choose shadow color opposing the text brightness slightly for contrast
+                                // If text is bright, use darker shadow; if text is dark, use very dark gray
+                                if (rr + gg + bb > 380) { sr = 0; sg = 0; sb = 0; }
+                                else { sr = 10; sg = 10; sb = 10; }
+                            }
+                        }
+                        if (use_shadow) {
+                            // 1px down-right shadow
+                            drawCharAt(px + 1, py + 1, (int)(unsigned char)ch, sr, sg, sb);
+                        }
+
+                        // Draw main character
+                        drawCharAt(px, py, (int)(unsigned char)ch, rr, gg, bb);
+                        // Then overlay underscore cursor at the logical caret position
+                        if (abs_row == cursor_row && start_col + cc == cursor_col) {
+                            drawCharAt(px, py, (int)'_', 220, 220, 220);
+                        }
                     }
+                    if (allow_partial) used_partial = 1;
+                    vis_row--;
                 }
-                vis_row--;
+                if (allow_partial) vterm_clear_row_dirty(t->term_idx, abs_row);
+            } else {
+                vis_row -= wraps;
             }
             abs_row--;
         }
+        if (allow_partial && abs_row < 0 && vis_row >= 0) {
+            for (int vr = vis_row; vr >= 0; --vr) {
+                int py = content_y + vr * line_h;
+                drawRect(content_x, py, content_w, line_h, 0, 0, 0);
+                vga_mark_dirty_rect(content_x, py, content_w, line_h);
+            }
+            used_partial = 1;
+        }
     }
+    return used_partial ? 1 : 0;
 }
 
 // Public API implementations (minimal, local helper functions)
@@ -2260,6 +2311,7 @@ void tile_register_gui_client(int tile_idx, tile_gui_draw_cb draw_cb, tile_gui_k
     gui_userdata[term] = userdata;
     gui_needs_redraw[term] = 1;
     gui_continuous_redraw[term] = 0;
+    gui_precise_dirty[term] = 0;
 }
 
 void tile_register_gui_client2(int tile_idx, tile_gui_draw_cb draw_cb, tile_gui_key_cb key_cb, tile_gui_mouse_cb mouse_cb, void* userdata) {
@@ -2273,6 +2325,7 @@ void tile_register_gui_client2(int tile_idx, tile_gui_draw_cb draw_cb, tile_gui_
     gui_userdata[term] = userdata;
     gui_needs_redraw[term] = 1;
     gui_continuous_redraw[term] = 0;
+    gui_precise_dirty[term] = 0;
 }
 
 void tile_register_gui_close_cb(int tile_idx, tile_gui_close_cb close_cb_fn) {
@@ -2313,6 +2366,7 @@ void tile_unregister_gui_client(int tile_idx) {
         // No GUI anymore; clear any pending GUI invalidation
         gui_needs_redraw[term] = 0;
         gui_continuous_redraw[term] = 0;
+        gui_precise_dirty[term] = 0;
     }
 
     // If this tile is a shell, restore its title/status to the default shell values
@@ -2347,6 +2401,13 @@ void tile_set_gui_continuous_redraw(int tile_idx, int enabled) {
     if (gui_continuous_redraw[term]) gui_needs_redraw[term] = 1;
 }
 
+void tile_set_gui_precise_dirty(int tile_idx, int enabled) {
+    if (tile_idx < 0 || tile_idx >= MAX_TILES) return;
+    int term = tiles[tile_idx].term_idx;
+    if (term < 0 || term >= MAX_TILES) term = tile_idx;
+    gui_precise_dirty[term] = enabled ? 1 : 0;
+}
+
 void tile_render_once(void) {
     // This is intentionally a minimal subset of the main tiler loop: it only
     // redraws tiles and swaps buffers. It does not poll keyboard/mouse or run
@@ -2377,7 +2438,7 @@ void tile_render_once(void) {
         if (!tiles[i].static_drawn) {
             draw_static_tile(&tiles[i], i == focused);
         }
-        draw_tile_content(&tiles[i]);
+        (void)draw_tile_content(&tiles[i]);
         if (status_overlay_visible()) draw_tile_status_overlay(&tiles[i]);
         tiles[i].last_drawn_version = vterm_get_version(tiles[i].term_idx);
     }
@@ -2708,7 +2769,11 @@ void start_tiling_manager() {
             vga_set_vsync_enabled(1);
             vga_set_dirty_strategy(1); // single-rect blit to minimize tearing
         } else {
+        #if defined(__aarch64__)
+            g_frame_target_us = 16666; // ~60 FPS cap
+        #else
             g_frame_target_us = 0;     // unlimited
+        #endif
             vga_set_vsync_enabled(1);
             vga_set_dirty_strategy(0); // smart multi-rect blit for throughput
         }
@@ -2877,14 +2942,15 @@ void start_tiling_manager() {
         if (g_force_full_redraw) tiles[i].static_drawn = 0; // force static re-render
         int decor_fresh = 0;
         if (!tiles[i].static_drawn) { draw_static_tile(&tiles[i], i == focused); decor_fresh = 1; }
-            // Redraw decorations: in low mode, only when changed; otherwise each frame for freshness
+            // Redraw decorations: in low mode or when windows are present, only when changed.
             int need_redraw_decor = 1;
-            if (g_gui_low_mode) {
+            if (g_gui_low_mode || g_window_count > 0) {
                 need_redraw_decor = 0;
                 int th_now_dec = get_title_height(&tiles[i]);
+                int show_status_now = status_overlay_visible();
                 if (!tiles[i].static_drawn || tiles[i].last_title_ptr != tiles[i].title ||
                     tiles[i].last_status_left_ptr != tiles[i].status_left || tiles[i].last_status_right_ptr != tiles[i].status_right ||
-                    tiles[i].last_focused != (i == focused)) {
+                    tiles[i].last_focused != (i == focused) || tiles[i].last_show_status != show_status_now) {
                     need_redraw_decor = 1;
                 }
             }
@@ -2896,6 +2962,8 @@ void start_tiling_manager() {
                 tiles[i].last_status_left_ptr = tiles[i].status_left;
                 tiles[i].last_status_right_ptr = tiles[i].status_right;
                 tiles[i].last_focused = (i == focused);
+                tiles[i].last_show_status = status_overlay_visible();
+                if (g_window_count > 0) g_any_tile_content_redrew = 1;
             }
             // Compute current content rect for this tile
             int th_now = get_title_height(&tiles[i]);
@@ -2906,6 +2974,7 @@ void start_tiling_manager() {
             // Only redraw content if the vterm version changed since last draw, rect changed, or GUI was invalidated
             unsigned int cur_ver = vterm_get_version(tiles[i].term_idx);
             int content_redrew = 0;
+            int content_self_marked = 0;
             int rect_changed = (cx_now != tiles[i].last_cx) || (cy_now != tiles[i].last_cy) || (cw_now != tiles[i].last_cw) || (ch_now != tiles[i].last_ch);
             int term_for_i = tiles[i].term_idx;
             if (rect_changed && term_for_i >= 0 && term_for_i < MAX_TILES) {
@@ -2913,14 +2982,17 @@ void start_tiling_manager() {
                 gui_needs_redraw[term_for_i] = 1;
             }
             int has_gui = (gui_draw_cb[term_for_i] != NULL);
+            if (rect_changed && !has_gui) {
+                vterm_mark_all_dirty(term_for_i);
+            }
             if (g_force_full_redraw || g_tiles_full_content_redraw || (has_gui && (gui_needs_redraw[term_for_i] || gui_continuous_redraw[term_for_i])) || tiles[i].last_drawn_version != cur_ver || rect_changed) {
                 // For GUI tiles, pre-mark the entire content area so subsequent per-primitive dirty marks
                 // merge into one big rect, ensuring a single bottom-up copy and avoiding visible sweeps.
-                if (has_gui && cw_now > 0 && ch_now > 0) {
+                if (has_gui && !gui_precise_dirty[term_for_i] && cw_now > 0 && ch_now > 0) {
                     if (rects_intersect(cx_now, cy_now, cw_now, ch_now, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
                     vga_mark_dirty_rect(cx_now, cy_now, cw_now, ch_now);
                 }
-                draw_tile_content(&tiles[i]);
+                content_self_marked = draw_tile_content(&tiles[i]);
                 tiles[i].last_drawn_version = cur_ver;
                 tiles[i].last_cx = cx_now; tiles[i].last_cy = cy_now; tiles[i].last_cw = cw_now; tiles[i].last_ch = ch_now;
                 content_redrew = 1;
@@ -2958,8 +3030,10 @@ void start_tiling_manager() {
                 int has_gui2 = (term_for_i2 >= 0 && term_for_i2 < MAX_TILES && gui_draw_cb[term_for_i2] != NULL);
                 if (!has_gui2) {
                     if (cw_now > 0 && ch_now > 0) {
-                        if (rects_intersect(cx_now, cy_now, cw_now, ch_now, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
-                        vga_mark_dirty_rect(cx_now, cy_now, cw_now, ch_now);
+                        if (!content_self_marked) {
+                            if (rects_intersect(cx_now, cy_now, cw_now, ch_now, prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h)) g_dirty_hits_prev_cursor = 1;
+                            vga_mark_dirty_rect(cx_now, cy_now, cw_now, ch_now);
+                        }
                     }
                 }
             } else {

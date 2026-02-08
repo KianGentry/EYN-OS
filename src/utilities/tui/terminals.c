@@ -55,6 +55,9 @@ typedef struct ALIGN16 {
     // Now expected to be 0; reserve space in the text stream with leading spaces instead.
     uint8_t line_indent_px[VTERM_HISTORY_ROWS];
 
+    // Per-row dirty flags for partial redraws (slot-based).
+    uint8_t dirty_rows[VTERM_HISTORY_ROWS];
+
     unsigned int version; // increments when content changes
     // Simple selection for current input line: active flag and [start,end) columns
     int sel_active;
@@ -72,6 +75,18 @@ typedef struct ALIGN16 {
 } vterm_t;
 
 static vterm_t vterms[4] ALIGN16;
+
+static void vterm_mark_dirty_row(vterm_t* t, int abs_row) {
+    if (!t) return;
+    int slot = vterm_row_slot(abs_row);
+    if (slot < 0 || slot >= VTERM_HISTORY_ROWS) return;
+    t->dirty_rows[slot] = 1;
+}
+
+static void vterm_mark_all_dirty_local(vterm_t* t) {
+    if (!t) return;
+    memset(t->dirty_rows, 1, sizeof(t->dirty_rows));
+}
 
 static void vterm_clear_line_icons(vterm_t* t, int row) {
     if (!t) return;
@@ -113,6 +128,7 @@ void vterm_init_all() {
                 vterms[i].char_g[r][c] = 200;
                 vterms[i].char_b[r][c] = 200;
             }
+            vterms[i].dirty_rows[r] = 1;
         }
         vterms[i].version = 1;
         vterms[i].sel_active = 0;
@@ -138,6 +154,7 @@ void vterm_set_scroll(int idx, int scroll) {
     if (vterms[idx].scroll != scroll) {
         vterms[idx].scroll = scroll;
         vterms[idx].version++;
+        vterm_mark_all_dirty_local(&vterms[idx]);
     }
 }
 
@@ -209,6 +226,7 @@ static void vterm_render_input(int idx) {
     t->cur_y = abs_row;
     t->cur_x = t->input_start_col + t->input_pos;
     t->version++;
+    vterm_mark_dirty_row(t, abs_row);
 }
 
 void vterm_write_char(int idx, char ch) {
@@ -219,12 +237,14 @@ void vterm_write_char(int idx, char ch) {
     if (t->scroll != 0) {
         t->scroll = 0;
         t->version++;
+        vterm_mark_all_dirty_local(t);
     }
 
     if (ch == '\r') return;
 
     // Explicit newline
     if (ch == '\n') {
+        int prev_row = t->cur_y;
         t->cur_x = 0;
         t->cur_y++;
         if (t->cur_y - t->head_row >= VTERM_HISTORY_ROWS) {
@@ -242,11 +262,15 @@ void vterm_write_char(int idx, char ch) {
         }
         vterm_clear_line_icons(t, row);
         t->version++;
+        vterm_mark_dirty_row(t, prev_row);
+        vterm_mark_dirty_row(t, t->cur_y);
+        vterm_mark_all_dirty_local(t);
         return;
     }
 
     // Soft wrap
     if (t->cur_x >= TERM_COLS) {
+        int prev_row = t->cur_y;
         t->cur_x = 0;
         t->cur_y++;
         if (t->cur_y - t->head_row >= VTERM_HISTORY_ROWS) {
@@ -263,6 +287,9 @@ void vterm_write_char(int idx, char ch) {
             t->char_b[row][c] = 200;
         }
         vterm_clear_line_icons(t, row);
+        vterm_mark_dirty_row(t, prev_row);
+        vterm_mark_dirty_row(t, t->cur_y);
+        vterm_mark_all_dirty_local(t);
     }
 
     int row = vterm_row_slot(t->cur_y);
@@ -286,6 +313,7 @@ void vterm_write_char(int idx, char ch) {
         t->line_b[row] = 200;
     }
     t->version++;
+    vterm_mark_dirty_row(t, t->cur_y);
 
     // If a ring3 task is active, mark UI dirty so IRQ0 will repaint all tiles.
     if (g_user_task_active) {
@@ -316,6 +344,7 @@ void vterm_backspace_output(int idx) {
     t->char_b[row][t->cur_x] = bb;
 
     t->version++;
+    vterm_mark_dirty_row(t, t->cur_y);
 
     // If a ring3 task is active, mark UI dirty so IRQ0 will repaint all tiles.
     if (g_user_task_active) {
@@ -369,8 +398,10 @@ static void vterm_append_line(int idx, const char* line) {
             t->char_g[row][c] = 200;
             t->char_b[row][c] = 200;
         }
+        vterm_mark_dirty_row(t, t->cur_y);
         t->cur_x = copy;
         t->cur_y++;
+        vterm_mark_all_dirty_local(t);
         if (t->cur_y - t->head_row >= VTERM_HISTORY_ROWS) {
             t->head_row = t->cur_y - (VTERM_HISTORY_ROWS - 1);
         }
@@ -428,6 +459,7 @@ const char* vterm_get_line_icon_key_n(int idx, int row, int n, int* out_anchor_c
         t->input_buf[0] = '\0';
         t->input_pos = 0;
         t->version++;
+        vterm_mark_all_dirty_local(t);
     }
 
 // Each vterm can accept full key handling similar to readStr_with_history: editing, history, enter to execute
@@ -443,6 +475,7 @@ void vterm_handle_key(int idx, int key) {
         t->sel_start_col = 0;
         t->sel_end_col = len;
         t->version++;
+        vterm_mark_dirty_row(t, t->input_row);
         return;
     }
     if (key == 0x2105) { // Ctrl+L -> select current line (same as all for single-line input)
@@ -451,6 +484,7 @@ void vterm_handle_key(int idx, int key) {
         t->sel_start_col = 0;
         t->sel_end_col = len;
         t->version++;
+        vterm_mark_dirty_row(t, t->input_row);
         return;
     }
     // Shift+Arrow selection extension indicated via 0x3000 bit combined with base 0x1001..0x1004
@@ -469,6 +503,7 @@ void vterm_handle_key(int idx, int key) {
             // Up/Down not meaningful for single-line input; ignore
         }
         t->version++;
+        vterm_mark_dirty_row(t, t->input_row);
         return;
     }
 
@@ -524,6 +559,7 @@ void vterm_handle_key(int idx, int key) {
         t->sel_active = 0;
         // force a redraw so caret overlay updates when moving within existing text
         t->version++;
+        vterm_mark_dirty_row(t, t->input_row);
         return;
     }
     if (key == 0x1004) { // Right
@@ -535,6 +571,7 @@ void vterm_handle_key(int idx, int key) {
         t->sel_active = 0;
         // force a redraw so caret overlay updates when moving within existing text
         t->version++;
+        vterm_mark_dirty_row(t, t->input_row);
         return;
     }
 
@@ -762,6 +799,29 @@ void vterm_handle_key(int idx, int key) {
 int vterm_get_version(int idx) {
     if (idx < 0 || idx >= 4) return 0;
     return vterms[idx].version;
+}
+
+int vterm_is_row_dirty(int idx, int row) {
+    if (idx < 0 || idx >= 4) return 0;
+    vterm_t* t = &vterms[idx];
+    if (row < t->head_row || row > t->cur_y) return 0;
+    int slot = vterm_row_slot(row);
+    if (slot < 0 || slot >= VTERM_HISTORY_ROWS) return 0;
+    return t->dirty_rows[slot] ? 1 : 0;
+}
+
+void vterm_clear_row_dirty(int idx, int row) {
+    if (idx < 0 || idx >= 4) return;
+    vterm_t* t = &vterms[idx];
+    if (row < t->head_row || row > t->cur_y) return;
+    int slot = vterm_row_slot(row);
+    if (slot < 0 || slot >= VTERM_HISTORY_ROWS) return;
+    t->dirty_rows[slot] = 0;
+}
+
+void vterm_mark_all_dirty(int idx) {
+    if (idx < 0 || idx >= 4) return;
+    vterm_mark_all_dirty_local(&vterms[idx]);
 }
 
 // Return the tail-visible line for a vterm given visible_count.

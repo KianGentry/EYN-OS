@@ -77,6 +77,18 @@ typedef struct {
     char filepath[128];
     char filename_base[128];
     int tile_idx;
+    // Cached draw-state (aligned to avoid unaligned 64-bit loads on AArch64)
+    struct ALIGN16 {
+        int last_content_x, last_content_y, last_content_w, last_content_h;
+        int last_zoom, last_off_x, last_off_y;
+        int last_is_reiv;
+        uint32_t last_frame_index_drawn;
+        int last_playing;
+        int last_loop_enabled;
+        int last_loop_locked;
+        int last_ctrl_h;
+        int last_dst_x, last_dst_y, last_dst_w, last_dst_h;
+    } draw;
     // Window mode support
     struct ALIGN16 {
         int is_window; // 0=tile, 1=window
@@ -84,6 +96,25 @@ typedef struct {
     } window;
     char status_left[128];
 } viewer_t;
+
+// Alias legacy field names to the aligned draw-state block.
+#define last_content_x draw.last_content_x
+#define last_content_y draw.last_content_y
+#define last_content_w draw.last_content_w
+#define last_content_h draw.last_content_h
+#define last_zoom draw.last_zoom
+#define last_off_x draw.last_off_x
+#define last_off_y draw.last_off_y
+#define last_is_reiv draw.last_is_reiv
+#define last_frame_index_drawn draw.last_frame_index_drawn
+#define last_playing draw.last_playing
+#define last_loop_enabled draw.last_loop_enabled
+#define last_loop_locked draw.last_loop_locked
+#define last_ctrl_h draw.last_ctrl_h
+#define last_dst_x draw.last_dst_x
+#define last_dst_y draw.last_dst_y
+#define last_dst_w draw.last_dst_w
+#define last_dst_h draw.last_dst_h
 
 static viewer_t g_view ALIGN16;
 
@@ -133,6 +164,23 @@ static void viewer_free_resources(void) {
     g_view.scaled_h = 0;
     g_view.scaled_src_frame_index = 0xFFFFFFFFu;
     g_view.scaled_valid = 0;
+    g_view.last_content_x = -1;
+    g_view.last_content_y = -1;
+    g_view.last_content_w = -1;
+    g_view.last_content_h = -1;
+    g_view.last_zoom = -1;
+    g_view.last_off_x = 0x7FFFFFFF;
+    g_view.last_off_y = 0x7FFFFFFF;
+    g_view.last_is_reiv = -1;
+    g_view.last_frame_index_drawn = 0xFFFFFFFFu;
+    g_view.last_playing = -1;
+    g_view.last_loop_enabled = -1;
+    g_view.last_loop_locked = -1;
+    g_view.last_ctrl_h = -1;
+    g_view.last_dst_x = -1;
+    g_view.last_dst_y = -1;
+    g_view.last_dst_w = -1;
+    g_view.last_dst_h = -1;
 }
 
 static void reiv_scale_rgb565_nn(uint16_t* dst, uint32_t dst_w, uint32_t dst_h, const uint16_t* src, uint32_t src_w, uint32_t src_h) {
@@ -512,6 +560,21 @@ static int reiv_stream_load_frame(uint32_t frame_index) {
 static void viewer_draw_image() {
     // Drawing a frame can take long enough to starve the WM watchdog heartbeat.
     watchdog_kick("viewer-draw");
+    int content_changed = (g_view.content_x != g_view.last_content_x) || (g_view.content_y != g_view.last_content_y) ||
+                         (g_view.content_w != g_view.last_content_w) || (g_view.content_h != g_view.last_content_h);
+    int view_changed = content_changed || (g_view.zoom != g_view.last_zoom) || (g_view.off_x != g_view.last_off_x) ||
+                       (g_view.off_y != g_view.last_off_y) || (g_view.last_is_reiv != g_view.is_reiv);
+    if (g_view.content_w <= 0 || g_view.content_h <= 0) {
+        g_view.last_content_x = g_view.content_x;
+        g_view.last_content_y = g_view.content_y;
+        g_view.last_content_w = g_view.content_w;
+        g_view.last_content_h = g_view.content_h;
+        g_view.last_zoom = g_view.zoom;
+        g_view.last_off_x = g_view.off_x;
+        g_view.last_off_y = g_view.off_y;
+        g_view.last_is_reiv = g_view.is_reiv;
+        return;
+    }
     if (g_view.is_reiv) {
         if (!g_view.frame565) return;
         // Reserve a small control bar at the bottom of the content region
@@ -525,6 +588,7 @@ static void viewer_draw_image() {
         // Fit-to-view while preserving aspect ratio
         int src_w = (int)g_view.vh.width;
         int src_h = (int)g_view.vh.height;
+        if (src_w <= 0 || src_h <= 0) return;
         int dst_w = vw;
         int dst_h = (vw > 0) ? (src_h * vw) / src_w : 0;
         if (dst_h > vh && vh > 0) {
@@ -630,62 +694,120 @@ static void viewer_draw_image() {
             else tile_set_gui_continuous_redraw(g_view.tile_idx, 0);
         }
 
-        // Always redraw to avoid flicker/tearing artifacts from partial swaps.
-        // Optimize by caching a pre-scaled RGB565 frame and using a fast 1:1 RGB565 blit.
-        drawRect(g_view.content_x, g_view.content_y, g_view.content_w, g_view.content_h, 0,0,0);
+        int dst_changed = (dst_x != g_view.last_dst_x) || (dst_y != g_view.last_dst_y) ||
+                          (dst_w != g_view.last_dst_w) || (dst_h != g_view.last_dst_h);
+        int frame_changed = (g_view.frame_index != g_view.last_frame_index_drawn);
+        int ctrl_changed = (g_view.playing != g_view.last_playing) || (g_view.loop_enabled != g_view.last_loop_enabled) ||
+                           (g_view.loop_locked != g_view.last_loop_locked) || (g_view.last_ctrl_h != ctrl_h);
+        if (!view_changed && !dst_changed && !frame_changed && !ctrl_changed) return;
 
-        if (dst_w == (int)g_view.vh.width && dst_h == (int)g_view.vh.height) {
+        // Optimize by caching a pre-scaled RGB565 frame and using a fast 1:1 RGB565 blit.
+        if (view_changed || dst_changed) {
+            drawRect(g_view.content_x, g_view.content_y, g_view.content_w, g_view.content_h, 0,0,0);
             vga_mark_dirty_rect(g_view.content_x, g_view.content_y, g_view.content_w, g_view.content_h);
-            watchdog_kick("reiv-blit");
-            vga_blit_rgb565_bb(dst_x, dst_y, g_view.frame565, (int)g_view.vh.width, (int)g_view.vh.height);
-        } else {
-            uint32_t need_w = (uint32_t)dst_w;
-            uint32_t need_h = (uint32_t)dst_h;
-            uint32_t need_px = need_w * need_h;
-            if (!g_view.scaled565 || g_view.scaled_w != need_w || g_view.scaled_h != need_h) {
-                if (g_view.scaled565) { free(g_view.scaled565); g_view.scaled565 = NULL; }
-                // Allocate scaled buffer (RGB565)
-                g_view.scaled565 = (uint16_t*)malloc(need_px * 2u);
-                g_view.scaled_w = need_w;
-                g_view.scaled_h = need_h;
-                g_view.scaled_valid = 0;
-            }
-            if (g_view.scaled565) {
-                if (!g_view.scaled_valid || g_view.scaled_src_frame_index != g_view.frame_index) {
-                    watchdog_kick("reiv-scale");
-                    reiv_scale_rgb565_nn(g_view.scaled565, g_view.scaled_w, g_view.scaled_h,
-                                         g_view.frame565, (uint32_t)g_view.vh.width, (uint32_t)g_view.vh.height);
-                    g_view.scaled_src_frame_index = g_view.frame_index;
-                    g_view.scaled_valid = 1;
-                }
-                vga_mark_dirty_rect(g_view.content_x, g_view.content_y, g_view.content_w, g_view.content_h);
+        }
+
+        if (frame_changed || view_changed || dst_changed) {
+            if (dst_w == (int)g_view.vh.width && dst_h == (int)g_view.vh.height) {
+                vga_mark_dirty_rect(dst_x, dst_y, dst_w, dst_h);
                 watchdog_kick("reiv-blit");
-                vga_blit_rgb565_bb(dst_x, dst_y, g_view.scaled565, (int)g_view.scaled_w, (int)g_view.scaled_h);
+                vga_blit_rgb565_bb(dst_x, dst_y, g_view.frame565, (int)g_view.vh.width, (int)g_view.vh.height);
             } else {
-                // Fallback if allocation failed
-                vga_mark_dirty_rect(g_view.content_x, g_view.content_y, g_view.content_w, g_view.content_h);
-                watchdog_kick("reiv-blit");
-                vga_blit_rgb565_scaled_bb(dst_x, dst_y, dst_w, dst_h, g_view.frame565, (int)g_view.vh.width, (int)g_view.vh.height);
+                uint32_t need_w = (uint32_t)dst_w;
+                uint32_t need_h = (uint32_t)dst_h;
+                uint64_t need_px64 = (uint64_t)need_w * (uint64_t)need_h;
+                if (need_w == 0 || need_h == 0) return;
+                if (need_px64 > (uint64_t)(SIZE_MAX / 2u)) {
+                    // Avoid overflowed allocation; fallback to direct scaled blit.
+                    vga_mark_dirty_rect(dst_x, dst_y, dst_w, dst_h);
+                    watchdog_kick("reiv-blit");
+                    vga_blit_rgb565_scaled_bb(dst_x, dst_y, dst_w, dst_h, g_view.frame565, (int)g_view.vh.width, (int)g_view.vh.height);
+                    goto reiv_controls;
+                }
+                uint32_t need_px = (uint32_t)need_px64;
+                if (!g_view.scaled565 || g_view.scaled_w != need_w || g_view.scaled_h != need_h) {
+                    if (g_view.scaled565) { free(g_view.scaled565); g_view.scaled565 = NULL; }
+                    // Allocate scaled buffer (RGB565)
+                    g_view.scaled565 = (uint16_t*)malloc(need_px * 2u);
+                    g_view.scaled_w = need_w;
+                    g_view.scaled_h = need_h;
+                    g_view.scaled_valid = 0;
+                }
+                if (g_view.scaled565) {
+                    if (!g_view.scaled_valid || g_view.scaled_src_frame_index != g_view.frame_index) {
+                        watchdog_kick("reiv-scale");
+                        reiv_scale_rgb565_nn(g_view.scaled565, g_view.scaled_w, g_view.scaled_h,
+                                             g_view.frame565, (uint32_t)g_view.vh.width, (uint32_t)g_view.vh.height);
+                        g_view.scaled_src_frame_index = g_view.frame_index;
+                        g_view.scaled_valid = 1;
+                    }
+                    vga_mark_dirty_rect(dst_x, dst_y, dst_w, dst_h);
+                    watchdog_kick("reiv-blit");
+                    vga_blit_rgb565_bb(dst_x, dst_y, g_view.scaled565, (int)g_view.scaled_w, (int)g_view.scaled_h);
+                } else {
+                    // Fallback if allocation failed
+                    vga_mark_dirty_rect(dst_x, dst_y, dst_w, dst_h);
+                    watchdog_kick("reiv-blit");
+                    vga_blit_rgb565_scaled_bb(dst_x, dst_y, dst_w, dst_h, g_view.frame565, (int)g_view.vh.width, (int)g_view.vh.height);
+                }
             }
         }
 
         // Controls bar
+    reiv_controls:
         int cy = g_view.content_y + g_view.content_h - ctrl_h;
         if (cy < g_view.content_y) cy = g_view.content_y;
-        drawRect(g_view.content_x, cy, g_view.content_w, ctrl_h, 24, 24, 24);
+        if (ctrl_changed || view_changed) {
+            drawRect(g_view.content_x, cy, g_view.content_w, ctrl_h, 24, 24, 24);
+            vga_mark_dirty_rect(g_view.content_x, cy, g_view.content_w, ctrl_h);
+        }
         const char* play_txt = g_view.playing ? "Pause" : "Play";
         char loop_txt[32];
         if (g_view.loop_locked) snprintf(loop_txt, sizeof(loop_txt), "Loop: On");
         else snprintf(loop_txt, sizeof(loop_txt), "Loop: %s", g_view.loop_enabled ? "On" : "Off");
-        drawTextAt(g_view.content_x + 6, cy + 4, play_txt, 255, 255, 255);
-        drawTextAt(g_view.content_x + 70, cy + 4, loop_txt, 200, 200, 200);
+        if (ctrl_changed || view_changed) {
+            drawTextAt(g_view.content_x + 6, cy + 4, play_txt, 255, 255, 255);
+            drawTextAt(g_view.content_x + 70, cy + 4, loop_txt, 200, 200, 200);
+        }
+        g_view.last_content_x = g_view.content_x;
+        g_view.last_content_y = g_view.content_y;
+        g_view.last_content_w = g_view.content_w;
+        g_view.last_content_h = g_view.content_h;
+        g_view.last_zoom = g_view.zoom;
+        g_view.last_off_x = g_view.off_x;
+        g_view.last_off_y = g_view.off_y;
+        g_view.last_is_reiv = g_view.is_reiv;
+        g_view.last_frame_index_drawn = g_view.frame_index;
+        g_view.last_playing = g_view.playing;
+        g_view.last_loop_enabled = g_view.loop_enabled;
+        g_view.last_loop_locked = g_view.loop_locked;
+        g_view.last_ctrl_h = ctrl_h;
+        g_view.last_dst_x = dst_x;
+        g_view.last_dst_y = dst_y;
+        g_view.last_dst_w = dst_w;
+        g_view.last_dst_h = dst_h;
         return;
     }
 
+    if (!g_view.img.data) {
+        if (view_changed) {
+            drawRect(g_view.content_x, g_view.content_y, g_view.content_w, g_view.content_h, 0,0,0);
+            vga_mark_dirty_rect(g_view.content_x, g_view.content_y, g_view.content_w, g_view.content_h);
+        }
+        g_view.last_content_x = g_view.content_x;
+        g_view.last_content_y = g_view.content_y;
+        g_view.last_content_w = g_view.content_w;
+        g_view.last_content_h = g_view.content_h;
+        g_view.last_zoom = g_view.zoom;
+        g_view.last_off_x = g_view.off_x;
+        g_view.last_off_y = g_view.off_y;
+        g_view.last_is_reiv = g_view.is_reiv;
+        return;
+    }
+
+    if (!view_changed) return;
     // Clear content area for non-REIV images
     drawRect(g_view.content_x, g_view.content_y, g_view.content_w, g_view.content_h, 0,0,0);
-
-    if (!g_view.img.data) return;
     // Draw image with zoom and pan
     int ox = g_view.content_x + g_view.off_x;
     int oy = g_view.content_y + g_view.off_y;
@@ -722,11 +844,20 @@ static void viewer_draw_image() {
             }
         }
     }
+    g_view.last_content_x = g_view.content_x;
+    g_view.last_content_y = g_view.content_y;
+    g_view.last_content_w = g_view.content_w;
+    g_view.last_content_h = g_view.content_h;
+    g_view.last_zoom = g_view.zoom;
+    g_view.last_off_x = g_view.off_x;
+    g_view.last_off_y = g_view.off_y;
+    g_view.last_is_reiv = g_view.is_reiv;
 }
 
 static void viewer_gui_draw(int tile_idx, int cx, int cy, int cw, int ch, void* ud) {
     (void)ud; g_view.tile_idx = tile_idx; g_view.content_x=cx; g_view.content_y=cy; g_view.content_w=cw; g_view.content_h=ch;
     g_view.dbg_draws++;
+
 
     if (g_view.dbg_draws <= 3 && tile_idx >= 0) {
         static char dbg_right[96];
@@ -735,28 +866,7 @@ static void viewer_gui_draw(int tile_idx, int cx, int cy, int cw, int ch, void* 
         tile_set_title_status(tile_idx, NULL, g_view.status_left, dbg_right);
     }
 
-    // Immediate debug for first few draws (does not depend on tick cadence)
-    if (g_view.is_reiv && g_view.dbg_draws <= 5) {
-        uint32 now = (uint32)hal_time_ticks();
-        uint32 hz = hal_time_tick_hz(); if (!hz) hz = 50;
-        char sbuf[220];
-        int n = snprintf(sbuf, sizeof(sbuf),
-                         "[REIV] draw#%u idx=%u/%u play=%d now=%u hz=%u next=%u\n",
-                         (unsigned)g_view.dbg_draws,
-                         (unsigned)g_view.frame_index, (unsigned)g_view.vh.frame_count,
-                         g_view.playing ? 1 : 0,
-                         (unsigned)now, (unsigned)hz, (unsigned)g_view.next_frame_tick);
-        if (n > 0) serial_write(SERIAL_COM1, sbuf, n);
-    }
-
     viewer_draw_image();
-    if (g_view.content_w > 0 && g_view.content_h > 0 && g_view.dbg_draws <= 120) {
-        drawRect(g_view.content_x + 2, g_view.content_y + 2, 32, 32, 0, 255, 0);
-        drawRect(g_view.content_x, g_view.content_y, g_view.content_w, 1, 255, 0, 0);
-        drawRect(g_view.content_x, g_view.content_y + g_view.content_h - 1, g_view.content_w, 1, 255, 0, 0);
-        drawRect(g_view.content_x, g_view.content_y, 1, g_view.content_h, 255, 0, 0);
-        drawRect(g_view.content_x + g_view.content_w - 1, g_view.content_y, 1, g_view.content_h, 255, 0, 0);
-    }
     // If playing video, request continuous redraw for smooth playback
     if (g_view.is_reiv && g_view.playing) {
         if (g_view.window.is_window) wm_set_continuous_redraw(g_view.window.window_id, 1);
@@ -971,6 +1081,23 @@ fail_out:
 static void open_viewer_gui(const char* path) {
     viewer_free_resources();
     memset(&g_view, 0, sizeof(g_view)); g_view.zoom=1; g_view.off_x=4; g_view.off_y=4;
+    g_view.last_content_x = -1;
+    g_view.last_content_y = -1;
+    g_view.last_content_w = -1;
+    g_view.last_content_h = -1;
+    g_view.last_zoom = -1;
+    g_view.last_off_x = 0x7FFFFFFF;
+    g_view.last_off_y = 0x7FFFFFFF;
+    g_view.last_is_reiv = -1;
+    g_view.last_frame_index_drawn = 0xFFFFFFFFu;
+    g_view.last_playing = -1;
+    g_view.last_loop_enabled = -1;
+    g_view.last_loop_locked = -1;
+    g_view.last_ctrl_h = -1;
+    g_view.last_dst_x = -1;
+    g_view.last_dst_y = -1;
+    g_view.last_dst_w = -1;
+    g_view.last_dst_h = -1;
     strncpy(g_view.filepath, path, sizeof(g_view.filepath)-1);
     const char* b = get_basename_local(path); strncpy(g_view.filename_base, b, sizeof(g_view.filename_base)-1);
     g_view.window.is_window = 0; g_view.window.window_id = -1;
@@ -1062,6 +1189,7 @@ static void open_viewer_gui(const char* path) {
     int t = tile_create_gui_tile(title_buf, g_view.status_left);
     if (t >= 0) {
         tile_register_gui_client2(t, viewer_gui_draw, viewer_gui_key, viewer_gui_mouse, NULL);
+        tile_set_gui_precise_dirty(t, 1);
         tile_invalidate_gui(t);
         tile_render_once();
         if (g_view.is_reiv && g_view.playing) tile_set_gui_continuous_redraw(t, 1);
@@ -1071,6 +1199,23 @@ static void open_viewer_gui(const char* path) {
 static void open_viewer_window(const char* path) {
     viewer_free_resources();
     memset(&g_view, 0, sizeof(g_view)); g_view.zoom=1; g_view.off_x=4; g_view.off_y=4;
+    g_view.last_content_x = -1;
+    g_view.last_content_y = -1;
+    g_view.last_content_w = -1;
+    g_view.last_content_h = -1;
+    g_view.last_zoom = -1;
+    g_view.last_off_x = 0x7FFFFFFF;
+    g_view.last_off_y = 0x7FFFFFFF;
+    g_view.last_is_reiv = -1;
+    g_view.last_frame_index_drawn = 0xFFFFFFFFu;
+    g_view.last_playing = -1;
+    g_view.last_loop_enabled = -1;
+    g_view.last_loop_locked = -1;
+    g_view.last_ctrl_h = -1;
+    g_view.last_dst_x = -1;
+    g_view.last_dst_y = -1;
+    g_view.last_dst_w = -1;
+    g_view.last_dst_h = -1;
     strncpy(g_view.filepath, path, sizeof(g_view.filepath)-1);
     const char* b = get_basename_local(path); strncpy(g_view.filename_base, b, sizeof(g_view.filename_base)-1);
     g_view.window.is_window = 1; g_view.window.window_id = -1;
@@ -1146,6 +1291,7 @@ static void open_viewer_window(const char* path) {
     if (wid >= 0) {
         g_view.window.window_id = wid;
         wm_register_gui_client2(wid, viewer_gui_draw, viewer_gui_key, viewer_gui_mouse, NULL);
+        wm_set_precise_dirty(wid, 1);
         wm_set_title_status(wid, title_buf, g_view.status_left, NULL);
         wm_invalidate_window(wid);
         if (g_view.is_reiv && g_view.playing) wm_set_continuous_redraw(wid, 1);

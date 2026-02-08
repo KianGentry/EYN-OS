@@ -23,6 +23,8 @@ void fb_simple_fill_rect(uint32 x, uint32 y, uint32 w, uint32 h, uint8 r, uint8 
 // Fill without flushing cache (caller will flush later).
 void fb_simple_fill_rect_noflush(uint32 x, uint32 y, uint32 w, uint32 h, uint8 r, uint8 g, uint8 b);
 void fb_simple_flush(void);
+// Flush a specific region (cache clean) without redrawing.
+void fb_simple_flush_rect(uint32 x, uint32 y, uint32 w, uint32 h);
 
 /*
  * Draw built-in 8x8 glyphs at pixel coordinates.
@@ -34,6 +36,10 @@ void fb_simple_flush(void);
 void fb_simple_draw_glyph8x8(uint32 x, uint32 y, uint8 ch, uint8 r, uint8 g, uint8 b);
 // Draw the same built-in 8x8 glyphs doubled vertically to approximate 8x16.
 void fb_simple_draw_glyph8x16_doubled(uint32 x, uint32 y, uint8 ch, uint8 r, uint8 g, uint8 b);
+// Draw a glyph into a caller-provided ARGB/XRGB buffer (no flush).
+void fb_simple_draw_glyph8x16_doubled_buf(uint32* dst, uint32 dst_w, uint32 dst_h,
+							 uint32 dst_stride_bytes, uint32 x, uint32 y,
+							 uint8 ch, uint8 r, uint8 g, uint8 b);
 
 /*
  * Query the detected framebuffer parameters.

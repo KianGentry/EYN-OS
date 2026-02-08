@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 
 // AArch64 VGA compatibility shim:
 // The existing TUI/tiler stack is wired to the VGA drawing API. On AArch64-full
@@ -20,6 +21,54 @@ int vga_default_b = 200;
 static int g_active_window = 0;
 static int g_vsync_enabled = 1;
 static int g_dirty_strategy = 0;
+
+static uint32* g_backbuf = NULL;
+static uint32 g_backbuf_w = 0;
+static uint32 g_backbuf_h = 0;
+static uint32 g_backbuf_stride = 0;
+typedef struct { int x, y, w, h; } dirty_rect_t;
+#define MAX_DIRTY_RECTS 128
+static dirty_rect_t g_dirty_rects[MAX_DIRTY_RECTS];
+static int g_dirty_count = 0;
+static int g_exclude_valid = 0;
+static int g_exclude_x = 0;
+static int g_exclude_y = 0;
+static int g_exclude_w = 0;
+static int g_exclude_h = 0;
+
+static int rects_overlap_or_touch(dirty_rect_t a, dirty_rect_t b) {
+    int ax1 = a.x, ay1 = a.y, ax2 = a.x + a.w, ay2 = a.y + a.h;
+    int bx1 = b.x, by1 = b.y, bx2 = b.x + b.w, by2 = b.y + b.h;
+    return !(ax2 <= bx1 || bx2 <= ax1 || ay2 <= by1 || by2 <= ay1);
+}
+
+static void rect_union_inplace(dirty_rect_t* dst, dirty_rect_t src) {
+    int x1 = dst->x < src.x ? dst->x : src.x;
+    int y1 = dst->y < src.y ? dst->y : src.y;
+    int x2 = (dst->x + dst->w) > (src.x + src.w) ? (dst->x + dst->w) : (src.x + src.w);
+    int y2 = (dst->y + dst->h) > (src.y + src.h) ? (dst->y + dst->h) : (src.y + src.h);
+    dst->x = x1; dst->y = y1; dst->w = x2 - x1; dst->h = y2 - y1;
+}
+
+static void blit_backbuf_rect(uint64 base, uint32 stride, uint32 fb_w, uint32 fb_h,
+                              int x, int y, int w, int h) {
+    if (!g_backbuf || w <= 0 || h <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (w <= 0 || h <= 0) return;
+    uint32 x1 = (uint32)x + (uint32)w;
+    uint32 y1 = (uint32)y + (uint32)h;
+    if ((uint32)x >= fb_w || (uint32)y >= fb_h) return;
+    if (x1 > fb_w) x1 = fb_w;
+    if (y1 > fb_h) y1 = fb_h;
+    uint8* dst = (uint8*)(uintptr_t)base;
+    for (int row = (int)y1 - 1; row >= (int)y; --row) {
+        uint8* dst_row = dst + (uint32)row * stride + (uint32)x * 4u;
+        uint32* src_row = g_backbuf + (uint32)row * g_backbuf_w + (uint32)x;
+        memcpy(dst_row, src_row, (size_t)(x1 - (uint32)x) * 4u);
+    }
+        fb_simple_flush_rect((uint32)x, (uint32)y, x1 - (uint32)x, y1 - (uint32)y);
+}
 
 // Optional: while redirect is active, stream output to a vterm.
 static int g_shell_redirect_stream_vterm = -1;
@@ -90,10 +139,17 @@ int vga_system_font_set(uint8 drive, const char* path) { (void)drive; (void)path
 
 void drawPixel(int x, int y, int r, int g, int b) {
     if (x < 0 || y < 0) return;
+    if (g_backbuf && (uint32)x < g_backbuf_w && (uint32)y < g_backbuf_h) {
+        g_backbuf[(uint32)y * g_backbuf_w + (uint32)x] = pack_rgb((uint8)r, (uint8)g, (uint8)b);
+        return;
+    }
     fb_simple_draw_pixel_noflush((uint32)x, (uint32)y, (uint8)r, (uint8)g, (uint8)b);
 }
 
-void vga_drawPixel_fb(int x, int y, int r, int g, int b) { drawPixel(x, y, r, g, b); }
+void vga_drawPixel_fb(int x, int y, int r, int g, int b) {
+    if (x < 0 || y < 0) return;
+    fb_simple_draw_pixel((uint32)x, (uint32)y, (uint8)r, (uint8)g, (uint8)b);
+}
 void vga_drawPixel_bb(int x, int y, int r, int g, int b) { drawPixel(x, y, r, g, b); }
 
 void vga_blendPixel_bb(int x, int y, int r, int g, int b, int a) {
@@ -107,10 +163,34 @@ void drawRect(int x, int y, int w, int h, int r, int g, int b) {
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (w <= 0 || h <= 0) return;
+    if (g_backbuf) {
+        uint32 color = pack_rgb((uint8)r, (uint8)g, (uint8)b);
+        uint32 x0 = (uint32)x;
+        uint32 y0 = (uint32)y;
+        uint32 x1 = x0 + (uint32)w;
+        uint32 y1 = y0 + (uint32)h;
+        if (x0 >= g_backbuf_w || y0 >= g_backbuf_h) return;
+        if (x1 > g_backbuf_w) x1 = g_backbuf_w;
+        if (y1 > g_backbuf_h) y1 = g_backbuf_h;
+        for (uint32 yy = y0; yy < y1; ++yy) {
+            uint32* row = g_backbuf + yy * g_backbuf_w + x0;
+            for (uint32 xx = x0; xx < x1; ++xx) {
+                *row++ = color;
+            }
+        }
+        return;
+    }
     fb_simple_fill_rect_noflush((uint32)x, (uint32)y, (uint32)w, (uint32)h, (uint8)r, (uint8)g, (uint8)b);
 }
 
-void vga_fillRect_fb(int x, int y, int w, int h, int r, int g, int b) { drawRect(x, y, w, h, r, g, b); }
+void vga_fillRect_fb(int x, int y, int w, int h, int r, int g, int b) {
+    if (!fb_simple_ready()) return;
+    if (w <= 0 || h <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (w <= 0 || h <= 0) return;
+    fb_simple_fill_rect((uint32)x, (uint32)y, (uint32)w, (uint32)h, (uint8)r, (uint8)g, (uint8)b);
+}
 
 void drawLine(int x1, int y1, int x2, int y2, int r, int g, int b) {
     // Simple Bresenham
@@ -138,6 +218,12 @@ void drawCharAt_font(int font_handle, int x, int y, int charnum, int r, int g, i
     (void)font_handle;
     if (!fb_simple_ready()) return;
     if (x < 0 || y < 0) return;
+    if (g_backbuf) {
+        fb_simple_draw_glyph8x16_doubled_buf(g_backbuf, g_backbuf_w, g_backbuf_h, g_backbuf_stride,
+                                             (uint32)x, (uint32)y, (uint8)charnum,
+                                             (uint8)r, (uint8)g, (uint8)b);
+        return;
+    }
     fb_simple_draw_glyph8x16_doubled((uint32)x, (uint32)y, (uint8)charnum, (uint8)r, (uint8)g, (uint8)b);
 }
 
@@ -197,18 +283,154 @@ void vga_set_shell_redirect_stream_vterm(int vterm_idx) { g_shell_redirect_strea
 void vga_clear_shell_redirect_stream_vterm(void) { g_shell_redirect_stream_vterm = -1; }
 
 // Double buffering / dirty-rect API: we draw directly to FB and flush on swap.
-void vga_init_double_buffer(void) { }
-void vga_mark_dirty_rect(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
-void vga_begin_frame(void) { }
-void vga_set_swap_exclude(int x, int y, int w, int h) { (void)x; (void)y; (void)w; (void)h; }
-void vga_clear_swap_exclude(void) { }
+void vga_init_double_buffer(void) {
+    uint64 base = 0;
+    uint32 fb_w = 0, fb_h = 0, stride = 0, bpp = 0;
+    if (fb_query(&base, &fb_w, &fb_h, &stride, &bpp) != 0) return;
+    if (bpp != 32 || fb_w == 0 || fb_h == 0) return;
 
-void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h) {
-    (void)x; (void)y; (void)w; (void)h;
-    fb_flush_full();
+    if (g_backbuf && g_backbuf_w == fb_w && g_backbuf_h == fb_h) return;
+    if (g_backbuf) { free(g_backbuf); g_backbuf = NULL; }
+
+    size_t sz = (size_t)fb_w * (size_t)fb_h * 4u;
+    g_backbuf = (uint32*)malloc(sz);
+    if (!g_backbuf) return;
+    g_backbuf_w = fb_w;
+    g_backbuf_h = fb_h;
+    g_backbuf_stride = fb_w * 4u;
+    memset(g_backbuf, 0, sz);
+}
+void vga_mark_dirty_rect(int x, int y, int w, int h) {
+    if (!g_backbuf) return;
+    if (w <= 0 || h <= 0) return;
+    int sw = (int)g_backbuf_w;
+    int sh = (int)g_backbuf_h;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > sw) w = sw - x;
+    if (y + h > sh) h = sh - y;
+    if (w <= 0 || h <= 0) return;
+
+    dirty_rect_t nr = { x, y, w, h };
+    for (int i = 0; i < g_dirty_count; ++i) {
+        if (rects_overlap_or_touch(g_dirty_rects[i], nr)) {
+            rect_union_inplace(&g_dirty_rects[i], nr);
+            for (int j = 0; j < g_dirty_count; ) {
+                if (j != i && rects_overlap_or_touch(g_dirty_rects[i], g_dirty_rects[j])) {
+                    rect_union_inplace(&g_dirty_rects[i], g_dirty_rects[j]);
+                    g_dirty_rects[j] = g_dirty_rects[g_dirty_count - 1];
+                    g_dirty_count--;
+                    continue;
+                }
+                ++j;
+            }
+            return;
+        }
+    }
+    if (g_dirty_count < MAX_DIRTY_RECTS) {
+        g_dirty_rects[g_dirty_count++] = nr;
+        return;
+    }
+    int minx = nr.x, miny = nr.y, maxx = nr.x + nr.w, maxy = nr.y + nr.h;
+    for (int i = 0; i < g_dirty_count; ++i) {
+        if (g_dirty_rects[i].x < minx) minx = g_dirty_rects[i].x;
+        if (g_dirty_rects[i].y < miny) miny = g_dirty_rects[i].y;
+        int rx2 = g_dirty_rects[i].x + g_dirty_rects[i].w;
+        int ry2 = g_dirty_rects[i].y + g_dirty_rects[i].h;
+        if (rx2 > maxx) maxx = rx2;
+        if (ry2 > maxy) maxy = ry2;
+    }
+    g_dirty_rects[0].x = minx; g_dirty_rects[0].y = miny;
+    g_dirty_rects[0].w = maxx - minx; g_dirty_rects[0].h = maxy - miny;
+    g_dirty_count = 1;
 }
 
-void vga_swap_buffers(void) { fb_flush_full(); }
+void vga_begin_frame(void) {
+    g_dirty_count = 0;
+}
+void vga_set_swap_exclude(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0) { g_exclude_valid = 0; return; }
+    g_exclude_x = x;
+    g_exclude_y = y;
+    g_exclude_w = w;
+    g_exclude_h = h;
+    g_exclude_valid = 1;
+}
+
+void vga_clear_swap_exclude(void) {
+    g_exclude_valid = 0;
+}
+
+void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h) {
+    uint64 base = 0;
+    uint32 fb_w = 0, fb_h = 0, stride = 0, bpp = 0;
+    if (fb_query(&base, &fb_w, &fb_h, &stride, &bpp) != 0) return;
+    if (bpp != 32 || fb_w == 0 || fb_h == 0) return;
+    if (!g_backbuf) {
+        fb_flush_full();
+        return;
+    }
+    blit_backbuf_rect(base, stride, fb_w, fb_h, x, y, w, h);
+}
+
+void vga_swap_buffers(void) {
+    uint64 base = 0;
+    uint32 fb_w = 0, fb_h = 0, stride = 0, bpp = 0;
+    if (fb_query(&base, &fb_w, &fb_h, &stride, &bpp) != 0) return;
+    if (bpp != 32 || fb_w == 0 || fb_h == 0) return;
+    if (!g_backbuf) {
+        fb_flush_full();
+        return;
+    }
+    if (g_dirty_count <= 0) return;
+
+    if (g_dirty_strategy == 1 && g_dirty_count > 1) {
+        int minx = g_dirty_rects[0].x, miny = g_dirty_rects[0].y;
+        int maxx = g_dirty_rects[0].x + g_dirty_rects[0].w;
+        int maxy = g_dirty_rects[0].y + g_dirty_rects[0].h;
+        for (int i = 1; i < g_dirty_count; ++i) {
+            int rx2 = g_dirty_rects[i].x + g_dirty_rects[i].w;
+            int ry2 = g_dirty_rects[i].y + g_dirty_rects[i].h;
+            if (g_dirty_rects[i].x < minx) minx = g_dirty_rects[i].x;
+            if (g_dirty_rects[i].y < miny) miny = g_dirty_rects[i].y;
+            if (rx2 > maxx) maxx = rx2;
+            if (ry2 > maxy) maxy = ry2;
+        }
+        g_dirty_rects[0].x = minx; g_dirty_rects[0].y = miny;
+        g_dirty_rects[0].w = maxx - minx; g_dirty_rects[0].h = maxy - miny;
+        g_dirty_count = 1;
+    }
+    for (int rix = 0; rix < g_dirty_count; ++rix) {
+        int x0 = g_dirty_rects[rix].x;
+        int y0 = g_dirty_rects[rix].y;
+        int x1 = x0 + g_dirty_rects[rix].w;
+        int y1 = y0 + g_dirty_rects[rix].h;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > (int)fb_w) x1 = (int)fb_w;
+        if (y1 > (int)fb_h) y1 = (int)fb_h;
+        if (x1 <= x0 || y1 <= y0) continue;
+
+        if (g_exclude_valid && g_exclude_w > 0 && g_exclude_h > 0) {
+            int ex0 = g_exclude_x;
+            int ey0 = g_exclude_y;
+            int ex1 = g_exclude_x + g_exclude_w;
+            int ey1 = g_exclude_y + g_exclude_h;
+            // top
+            blit_backbuf_rect(base, stride, fb_w, fb_h, x0, y0, x1 - x0, ey0 - y0);
+            // bottom
+            blit_backbuf_rect(base, stride, fb_w, fb_h, x0, ey1, x1 - x0, y1 - ey1);
+            // left
+            blit_backbuf_rect(base, stride, fb_w, fb_h, x0, ey0, ex0 - x0, ey1 - ey0);
+            // right
+            blit_backbuf_rect(base, stride, fb_w, fb_h, ex1, ey0, x1 - ex1, ey1 - ey0);
+        } else {
+            blit_backbuf_rect(base, stride, fb_w, fb_h, x0, y0, x1 - x0, y1 - y0);
+        }
+    }
+
+    g_dirty_count = 0;
+}
 
 void vga_blit_rgb565_bb(int dst_x, int dst_y, const uint16_t* src, int src_w, int src_h) {
     if (!src || src_w <= 0 || src_h <= 0) return;
@@ -266,10 +488,17 @@ int vga_capture_fb_region(int x, int y, int w, int h, unsigned char* out_buf, in
     int needed = w * h * 4;
     if (!out_buf || out_buf_len < needed) return -1;
 
-    const uint8* fb = (const uint8*)(uintptr_t)base;
-    for (int row = 0; row < h; ++row) {
-        const uint8* src = fb + (uint32)(y + row) * stride + (uint32)x * 4u;
-        memcpy(out_buf + row * w * 4, src, (size_t)(w * 4));
+    if (g_backbuf) {
+        for (int row = 0; row < h; ++row) {
+            uint32* src = g_backbuf + (uint32)(y + row) * g_backbuf_w + (uint32)x;
+            memcpy(out_buf + row * w * 4, src, (size_t)(w * 4));
+        }
+    } else {
+        const uint8* fb = (const uint8*)(uintptr_t)base;
+        for (int row = 0; row < h; ++row) {
+            const uint8* src = fb + (uint32)(y + row) * stride + (uint32)x * 4u;
+            memcpy(out_buf + row * w * 4, src, (size_t)(w * 4));
+        }
     }
     return needed;
 }
@@ -285,6 +514,15 @@ int vga_restore_fb_region(int x, int y, int w, int h, const unsigned char* in_bu
     if ((uint32)(y + h) > fb_h) h = (int)(fb_h - (uint32)y);
     int needed = w * h * 4;
     if (!in_buf || in_buf_len < needed) return -1;
+
+    if (g_backbuf) {
+        for (int row = 0; row < h; ++row) {
+            uint32* dst = g_backbuf + (uint32)(y + row) * g_backbuf_w + (uint32)x;
+            memcpy(dst, in_buf + row * w * 4, (size_t)(w * 4));
+        }
+        vga_blit_backbuffer_region_to_fb(x, y, w, h);
+        return needed;
+    }
 
     uint8* fb = (uint8*)(uintptr_t)base;
     for (int row = 0; row < h; ++row) {
