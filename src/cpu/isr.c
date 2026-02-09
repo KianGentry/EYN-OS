@@ -320,6 +320,10 @@ uint32 get_last_error_eip() {
 #define SYSCALL_CAP_GUI_CREATE 45
 #define SYSCALL_CAP_GUI_ATTACH 46
 
+// Deterministic execution mode
+#define SYSCALL_DET_ENABLE 47
+#define SYSCALL_DET_STEP 48
+
 typedef struct {
     uint32 type;
     int32 a;
@@ -1453,6 +1457,18 @@ uint32 syscall_dispatch(regs_t* regs) {
             // Uses a busy-wait fallback if no timer is configured.
             sched_sleep_us(usec);
             regs->eax = 0;
+            break;
+        }
+        case SYSCALL_DET_ENABLE: {
+            int enabled = (int)arg1;
+            sched_det_enable(enabled ? 1 : 0);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_DET_STEP: {
+            uint32 max_events = (uint32)arg1;
+            int processed = sched_det_step(max_events);
+            regs->eax = (uint32)processed;
             break;
         }
         case SYSCALL_GUI_CREATE: {

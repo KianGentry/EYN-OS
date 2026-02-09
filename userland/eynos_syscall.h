@@ -54,6 +54,10 @@ enum {
     // Capability-based file descriptor write/seek operations
     EYN_SYSCALL_CAP_FD_WRITE = 43,
     EYN_SYSCALL_CAP_FD_SEEK = 44,
+
+    // Deterministic execution mode
+    EYN_SYSCALL_DET_ENABLE = 47,
+    EYN_SYSCALL_DET_STEP = 48,
 };
 
 enum {
@@ -287,6 +291,28 @@ static inline int eyn_sys_cap_gui_attach(const char* title, const char* status_l
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_CAP_GUI_ATTACH), "b"(title), "c"(status_left), "d"(out_cap)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_det_enable(int enabled) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_DET_ENABLE), "b"(enabled ? 1 : 0)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_det_step(uint32_t max_events) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_DET_STEP), "b"(max_events)
         : "memory"
     );
     return ret;

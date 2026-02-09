@@ -2,6 +2,7 @@
 #include <system.h>
 #include <irq.h>
 #include <watchdog.h>
+#include <stddef.h>
 
 #define SCHED_WORK_MAX 64
 #define SCHED_WORK_PRIOS 8
@@ -21,8 +22,34 @@ static uint32 g_timeslice_ticks = 5; // ~50ms at 100Hz
 static uint32 g_current_slice = 0;
 static volatile uint32 g_idle_hlt_count = 0; // counts ticks elapsed while idling (not raw HLTs)
 
+#define DET_QUEUE_CAP 256
+
+typedef struct det_event_t {
+    uint8 type;
+    uint8 irq;
+    uint16 _pad;
+} det_event_t;
+
+enum {
+    DET_EVENT_IRQ = 1,
+};
+
+static det_event_t g_det_queue[DET_QUEUE_CAP];
+static volatile uint16 g_det_head = 0;
+static volatile uint16 g_det_tail = 0;
+static volatile int g_det_enabled = 0;
+static volatile int g_det_processing = 0;
+
 static void sched_irq0_handler(void) {
     sched_tick();
+}
+
+static inline void sched_cli(void) {
+    __asm__ __volatile__("cli");
+}
+
+static inline void sched_sti(void) {
+    __asm__ __volatile__("sti");
 }
 
 void sched_init(void) {
@@ -61,6 +88,10 @@ void sched_sleep_us(uint32 microseconds) {
 }
 
 void sched_tick(void) {
+    if (g_det_enabled) {
+        (void)sched_det_queue_irq(0);
+        return;
+    }
     g_ticks++;
     // Update watchdog each tick
     watchdog_on_tick();
@@ -83,6 +114,16 @@ void sched_set_timeslice_ticks(uint32 ticks) {
 
 // default weak hook: does nothing; will be implemented with real context switches later
 __attribute__((weak)) void sched_on_timeslice_end(void) {}
+
+static void sched_tick_det(void) {
+    g_ticks++;
+    watchdog_on_tick();
+    if (++g_current_slice >= g_timeslice_ticks) {
+        g_current_slice = 0;
+        extern void sched_on_timeslice_end(void);
+        sched_on_timeslice_end();
+    }
+}
 
 static void sched_work_enqueue(int idx) {
     if (idx < 0 || idx >= SCHED_WORK_MAX) return;
@@ -219,6 +260,68 @@ int sched_work_on_timeslice_end(void) {
 
     g_sched_work_inflight = 0;
     return ran;
+}
+
+void sched_det_enable(int enabled) {
+    g_det_enabled = enabled ? 1 : 0;
+    if (g_det_enabled) {
+        sched_cli();
+        g_det_head = 0;
+        g_det_tail = 0;
+        sched_sti();
+    }
+}
+
+int sched_det_is_enabled(void) {
+    return g_det_enabled != 0;
+}
+
+int sched_det_queue_irq(int irq) {
+    if (!g_det_enabled) return -1;
+
+    sched_cli();
+    uint16 next = (uint16)((g_det_tail + 1u) % DET_QUEUE_CAP);
+    if (next == g_det_head) {
+        sched_sti();
+        return -1;
+    }
+    g_det_queue[g_det_tail].type = DET_EVENT_IRQ;
+    g_det_queue[g_det_tail].irq = (uint8)irq;
+    g_det_tail = next;
+    sched_sti();
+    return 0;
+}
+
+int sched_det_step(uint32 max_events) {
+    if (!g_det_enabled) return 0;
+    if (g_det_processing) return 0;
+    g_det_processing = 1;
+
+    if (max_events == 0) max_events = 1;
+
+    uint32 processed = 0;
+    while (processed < max_events) {
+        sched_cli();
+        if (g_det_head == g_det_tail) {
+            sched_sti();
+            break;
+        }
+        det_event_t ev = g_det_queue[g_det_head];
+        g_det_head = (uint16)((g_det_head + 1u) % DET_QUEUE_CAP);
+        sched_sti();
+
+        if (ev.type == DET_EVENT_IRQ) {
+            if (ev.irq == 0) {
+                sched_tick_det();
+            } else {
+                irq_dispatch_deferred((int)ev.irq);
+            }
+        }
+        processed++;
+    }
+
+    g_det_processing = 0;
+    return (int)processed;
 }
 
 uint32 sched_get_tick_count(void) { return g_ticks; }

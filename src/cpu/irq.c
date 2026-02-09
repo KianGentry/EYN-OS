@@ -5,6 +5,7 @@
 #include <vga.h>
 #include <tile_manager.h>
 #include <watchdog.h>
+#include <sched.h>
 
 extern void poll_keyboard_for_ctrl_c();
 
@@ -118,8 +119,7 @@ void pic_send_eoi(int irq) {
     outportb(PIC1_COMMAND, PIC_EOI);
 }
 
-// common C-level IRQ dispatcher called from assembly stubs
-void irq_dispatch_c(int irq_number) {
+static void irq_dispatch_core(int irq_number, int send_eoi) {
     if (irq_number < 0 || irq_number >= 16) {
         return;
     }
@@ -151,7 +151,9 @@ void irq_dispatch_c(int irq_number) {
             g_user_task_ui_dirty = 0;
             g_abort_to_shell = 1;
             printf("^C\n");
-            pic_send_eoi(irq_number);
+            if (send_eoi) {
+                pic_send_eoi(irq_number);
+            }
             return;
         }
 
@@ -172,7 +174,24 @@ void irq_dispatch_c(int irq_number) {
     if (h) {
         h();
     }
-    pic_send_eoi(irq_number);
+    if (send_eoi) {
+        pic_send_eoi(irq_number);
+    }
+}
+
+// common C-level IRQ dispatcher called from assembly stubs
+void irq_dispatch_c(int irq_number) {
+    if (sched_det_is_enabled()) {
+        if (sched_det_queue_irq(irq_number) == 0) {
+            pic_send_eoi(irq_number);
+            return;
+        }
+    }
+    irq_dispatch_core(irq_number, 1);
+}
+
+void irq_dispatch_deferred(int irq_number) {
+    irq_dispatch_core(irq_number, 0);
 }
 
 

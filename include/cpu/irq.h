@@ -16,6 +16,9 @@ void pic_send_eoi(int irq);
 // C-level IRQ dispatcher used by assembly stubs.
 void irq_dispatch_c(int irq_number);
 
+// Deferred IRQ dispatch for deterministic mode (no PIC EOI).
+void irq_dispatch_deferred(int irq_number);
+
 #endif // IRQ_H
 
 

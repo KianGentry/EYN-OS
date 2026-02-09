@@ -53,6 +53,12 @@ int sched_work_unready(uint32 id);
 int sched_work_update_budget(uint32 id, uint32 budget_ticks);
 int sched_work_on_timeslice_end(void);
 
+// Deterministic execution mode
+void sched_det_enable(int enabled);
+int sched_det_is_enabled(void);
+int sched_det_queue_irq(int irq);
+int sched_det_step(uint32 max_events);
+
 // Lightweight timing/usage getters ---
 // Monotonic scheduler tick counter (increments in IRQ0 handler)
 uint32 sched_get_tick_count(void);
