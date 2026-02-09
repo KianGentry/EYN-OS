@@ -9,7 +9,7 @@
 #include <fat32.h>
 #include <vga.h> // for printf
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 extern char* readStr();
 

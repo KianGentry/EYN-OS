@@ -26,7 +26,7 @@
 #include <eynfs.h>
 #include <shell_command_info.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 extern uint8_t g_current_drive;
 

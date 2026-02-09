@@ -4,7 +4,7 @@
 #include <util.h>
 #include <string.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // Command handlers for zero-copy operations
 void zopen_cmd(string arg);

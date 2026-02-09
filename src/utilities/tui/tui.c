@@ -4,7 +4,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // Screen dimensions (to be set by tui_init)
 static int tui_screen_width = 80;

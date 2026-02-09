@@ -12,7 +12,7 @@ static int g_tm_initialized = 0;
 #include <utilities/util.h>
 #include <misc/types.h>
 // allow sleeping the CPU when tiling manager is idle
-#include <sched.h>
+#include <misc/sched.h>
 #include <watchdog.h>
 #include <ui_prefs.h>
 #include <network/netstack.h>

@@ -4,7 +4,7 @@
 #include <string.h>
 #include <ata.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // Define NULL if not available
 #ifndef NULL

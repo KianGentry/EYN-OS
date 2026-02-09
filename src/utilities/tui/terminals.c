@@ -7,7 +7,7 @@
 // Use the shared terminal API/definitions so TERM_ROWS/TERM_COLS stay consistent
 #include <terminals.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // shell_current_path is maintained by the main shell code
 extern char shell_current_path[128];

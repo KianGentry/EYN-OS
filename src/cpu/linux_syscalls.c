@@ -6,7 +6,7 @@
 #include <kb.h>
 #include <network/netstack.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // Very small per-process FD table for now
 #define LINUX_MAX_FD 32

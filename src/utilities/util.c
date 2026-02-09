@@ -11,7 +11,7 @@
 #include <cpu/segdom.h>
 #include <cpu/gdt.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 volatile int g_user_interrupt = 0;
 volatile int g_user_task_active = 0;

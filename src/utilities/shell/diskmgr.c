@@ -14,7 +14,7 @@
 #include <eynfs.h>
 #include <ata.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // DISK MANAGER COMMAND
 

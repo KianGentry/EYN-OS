@@ -12,7 +12,7 @@
 #include <terminals.h>
 #include <isr.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // Defined in src/boot/kernel.asm; this is the top of the kernel stack.
 extern uint32 stack_space;

@@ -5,7 +5,7 @@
 #include <vga.h>
 #include <tile_manager.h>
 #include <watchdog.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 extern void poll_keyboard_for_ctrl_c();
 

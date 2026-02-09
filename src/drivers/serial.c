@@ -3,7 +3,7 @@
 #include <vga.h>
 #include <string.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // Global serial ports
 serial_port_t g_serial_ports[4] = {

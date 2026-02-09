@@ -10,7 +10,7 @@
 #include <types.h>
 #include <utilities/shell/alias.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // Global variables
 file_descriptor_t g_file_descriptors[MAX_FDS];

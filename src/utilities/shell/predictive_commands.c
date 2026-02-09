@@ -4,7 +4,7 @@
 #include <util.h>
 #include <string.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // Command handlers for predictive memory management
 void predict_cmd(string arg);

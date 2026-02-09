@@ -8,7 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <mouse.h>
-#include <sched.h>
+#include <misc/sched.h>
 #include <serial.h>
 #include <watchdog.h>
 #ifndef EYNFS_SUPERBLOCK_LBA

@@ -1,5 +1,5 @@
 #include <watchdog.h>
-#include <sched.h>
+#include <misc/sched.h>
 #include <panic.h>
 #include <string.h>
 

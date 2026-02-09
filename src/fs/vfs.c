@@ -5,7 +5,7 @@
 #include <system.h>
 #include <util.h>  // for malloc/free
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 

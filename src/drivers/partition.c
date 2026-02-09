@@ -12,7 +12,7 @@
 #include <util.h>
 #include <ata.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // GLOBAL STATE
 

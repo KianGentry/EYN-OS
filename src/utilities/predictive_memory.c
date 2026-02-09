@@ -5,7 +5,7 @@
 #include <eynfs.h>
 #include <stdint.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // Global predictive memory state
 static predictive_allocator_t g_predictive_allocator;

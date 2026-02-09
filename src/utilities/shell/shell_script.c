@@ -8,7 +8,7 @@
 #include <types.h>
 #include <math.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // EYNFS constants
 #define EYNFS_SUPERBLOCK_LBA 2048

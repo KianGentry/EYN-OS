@@ -2,7 +2,7 @@
 #include <vga.h>
 #include <util.h>
 #include <string.h>
-#include <sched.h>
+#include <misc/sched.h>
 #include <context.h>
 
 // Global kernel API structure

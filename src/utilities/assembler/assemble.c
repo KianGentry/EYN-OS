@@ -9,7 +9,7 @@
 #include <assemble.h>
 #include <utilities/linker.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 int g_asm_verbose = 0;
 #include <shell_command_info.h>
 

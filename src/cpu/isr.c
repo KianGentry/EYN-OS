@@ -10,7 +10,7 @@
 #include <watchdog.h>
 #include <capabilities.h>
 
-#include <sched.h>
+#include <misc/sched.h>
 
 #include <tile_manager.h>
 #include <terminals.h>

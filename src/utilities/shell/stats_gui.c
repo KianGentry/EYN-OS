@@ -3,7 +3,7 @@
 #include <vga.h>
 #include <mouse.h>
 #include <util.h>
-#include <sched.h>
+#include <misc/sched.h>
 #include <system.h>
 #include <eynfs.h>
 #include <string.h>

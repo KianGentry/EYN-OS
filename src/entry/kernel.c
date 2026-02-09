@@ -12,7 +12,7 @@
 #include <paging.h>
 #include <kernel_api.h>
 #include <native_exec.h>
-#include <sched.h>
+#include <misc/sched.h>
 #include <irq.h>
 #include <tile_manager.h>
 #include <serial.h>

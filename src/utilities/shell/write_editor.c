@@ -16,7 +16,7 @@
 #include <vga.h>
 #include <fs/vfs.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern void* fat32_disk_img;
 

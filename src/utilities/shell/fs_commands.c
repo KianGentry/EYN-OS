@@ -15,7 +15,7 @@
 #include <fs/vfs.h>
 #include <terminals.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // Forward declarations for command handlers
 void ls_cmd(string arg);

@@ -9,7 +9,7 @@
 #include <ata.h>
 #include <watchdog.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 #include <fs/fs_txn.h>
 
 #define EYNFS_BLOCK_SIZE 512 // For now, fixed block size

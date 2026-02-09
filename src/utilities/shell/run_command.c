@@ -9,7 +9,7 @@
 #include <fs_commands.h> // resolve_path, shell_current_path
 #include <cpu/user_elf.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 extern uint8 g_current_drive;
 

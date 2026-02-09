@@ -9,7 +9,7 @@
 #include <fs_commands.h>
 #include <stdint.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;

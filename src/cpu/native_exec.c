@@ -7,7 +7,7 @@
 #include <vga.h>
 #include <kb.h>
 #include <drivers/flat_exe_format.h>
-#include <sched.h>
+#include <misc/sched.h>
 #include <context.h>
 
 // Minimal ELF32 structures for parsing 32-bit little-endian ELF files

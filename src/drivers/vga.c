@@ -12,7 +12,7 @@
 #include <watchdog.h>
 #include <fs/vfs.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 extern multiboot_info_t *g_mbi;
 
