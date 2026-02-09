@@ -26,6 +26,7 @@
 #include <cpu/fpu.h>
 #include <arch.h>
 #include <capabilities.h>
+#include <crashlog.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
@@ -109,6 +110,9 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
             }
         }
     }
+
+    // Initialize crash log after VFS is available.
+    crashlog_init(0);
 
     // Load and apply persisted UI preferences (theme + font) if present.
     // Safe to do here: VFS is usable after vdrive_init()+mount.

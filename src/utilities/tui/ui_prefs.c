@@ -4,12 +4,20 @@
 #include <tile_manager.h>
 #include <vga.h>
 #include <string.h>
+#include <crashlog.h>
 
 #define UI_PREFS_PATH_PRIMARY "/config/ui.cfg"
 #define UI_PREFS_PATH_FALLBACK "/ui.cfg"
 
 static char g_ui_font_path[96] = "/fonts/unscii-16.hex";
 static int g_ui_status_bar_mode = 0; // 0=hold Alt, 1=pinned
+static uint32 g_ui_prefs_epoch = 1;
+
+typedef struct ui_prefs_snapshot_t {
+    char font_path[96];
+    uint8 status_bar_mode;
+    uint8 _pad[3];
+} ui_prefs_snapshot_t;
 
 const char* ui_prefs_get_font_path(void) {
     return g_ui_font_path;
@@ -100,11 +108,21 @@ static int try_read_prefs(uint8 drive, const char* path, char* buf, int buf_sz) 
 }
 
 int ui_prefs_load_apply(uint8 drive) {
+    ui_prefs_snapshot_t snap;
+    if (crashlog_recover_latest(CRASHLOG_OBJ_UI_PREFS, 1, &snap, sizeof(snap), &g_ui_prefs_epoch) > 0) {
+        if (snap.font_path[0]) {
+            if (vga_system_font_set(drive, snap.font_path) == 0) {
+                ui_prefs_set_font_path(snap.font_path);
+            }
+        }
+        ui_prefs_set_status_bar_mode((int)snap.status_bar_mode);
+    }
+
     char buf[2048];
     int ok = 0;
     if (try_read_prefs(drive, UI_PREFS_PATH_PRIMARY, buf, (int)sizeof(buf)) != 0) {
         if (try_read_prefs(drive, UI_PREFS_PATH_FALLBACK, buf, (int)sizeof(buf)) != 0) {
-            return -1;
+            return (snap.font_path[0] || snap.status_bar_mode) ? 0 : -1;
         }
     }
 
@@ -202,6 +220,13 @@ int ui_prefs_save(uint8 drive) {
 
     // Prefer /config/ui.cfg; fall back to /ui.cfg.
     ensure_config_dir(drive);
+    ui_prefs_snapshot_t snap;
+    memset(&snap, 0, sizeof(snap));
+    strncpy(snap.font_path, ui_prefs_get_font_path(), sizeof(snap.font_path) - 1);
+    snap.font_path[sizeof(snap.font_path) - 1] = '\0';
+    snap.status_bar_mode = (uint8)ui_prefs_get_status_bar_mode();
+    g_ui_prefs_epoch++;
+    (void)crashlog_checkpoint(CRASHLOG_OBJ_UI_PREFS, 1, g_ui_prefs_epoch, &snap, sizeof(snap));
     if (write_prefs(drive, UI_PREFS_PATH_PRIMARY, out, (uint32)n) == 0) return 0;
     if (write_prefs(drive, UI_PREFS_PATH_FALLBACK, out, (uint32)n) == 0) return 0;
     return -1;

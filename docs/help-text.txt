@@ -15,6 +15,7 @@ Streaming Commands:
   assertfail      - Trigger an assertion failure (ASSERT).
   catram          - Display contents of a file from RAM disk (FAT32).
   clearbg         - Clear background image for the focused tile.
+  crashlog        - Inspect or clear the crash-consistent kernel object log.
   e1000           - Intel e1000 utilities (probe + bring-up helpers).
   e1000probe      - Probe the Intel e1000 NIC (read-only MMIO sanity check).
   error           - Display system error statistics and status.

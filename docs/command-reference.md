@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2026-02-09 10:27:02
+This document is auto-generated from the source code. Last updated: 2026-02-09 10:50:15
 
-**Total Commands:** 66
+**Total Commands:** 67
 
 ## Table of Contents
 
@@ -183,6 +183,25 @@ Clear background image for the focused tile.
 **Example:**
 ```bash
 clearbg
+```
+
+---
+
+### crashlog
+
+**Handler:** `crashlog_cmd`
+
+**Type:** CMD_DIAGNOSTIC
+
+**File:** `shell_commands.c`
+
+**Description:**
+Inspect or clear the crash-consistent kernel object log.
+Usage: crashlog dump | crashlog clear yes
+
+**Example:**
+```bash
+crashlog dump
 ```
 
 ---
@@ -1287,7 +1306,7 @@ run user_hello.uelf
 | Category | Count |
 |----------|-------|
 | Essential Commands | 6 |
-| Streaming Commands | 34 |
+| Streaming Commands | 35 |
 | Filesystem Commands | 12 |
 | System Commands | 2 |
 | Utility Commands | 10 |

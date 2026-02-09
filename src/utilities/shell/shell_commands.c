@@ -26,6 +26,7 @@
 #include <drivers/pci.h>
 #include <drivers/e1000.h>
 #include <network/netstack.h>
+#include <crashlog.h>
 
 // Forward declarations for command handlers
 void help_cmd(string arg);
@@ -64,6 +65,7 @@ void userrun_cmd(string arg);
 void setbg_cmd(string arg);
 void clearbg_cmd(string arg);
 void setfont_cmd(string arg);
+void crashlog_cmd(string arg);
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
@@ -243,6 +245,90 @@ void setfont_cmd(string ch) {
     printf("%cSystem font set to %s.\n", 0, 255, 0, abspath);
     // Force a full repaint so all tiles/UI re-render with the new font metrics.
     tile_render_once();
+}
+
+static const char* crashlog_obj_name(uint32 obj_type) {
+    switch (obj_type) {
+        case CRASHLOG_OBJ_UI_PREFS: return "ui_prefs";
+        default: return "unknown";
+    }
+}
+
+static void crashlog_print_hex(const uint8* data, uint32 len, uint32 max_len) {
+    uint32 limit = (len < max_len) ? len : max_len;
+    for (uint32 i = 0; i < limit; ++i) {
+        printf("%02x", (unsigned)data[i]);
+        if (i + 1 < limit) printf(" ");
+    }
+    if (len > limit) printf(" ...");
+    printf("\n");
+}
+
+void crashlog_cmd(string ch) {
+    uint8 i = 0;
+    while (ch[i] && ch[i] != ' ') i++;
+    while (ch[i] == ' ') i++;
+
+    if (!ch[i]) {
+        printf("Usage: crashlog dump | crashlog clear yes\n");
+        return;
+    }
+
+    char subcmd[16] = {0};
+    uint8 j = 0;
+    while (ch[i] && ch[i] != ' ' && j < sizeof(subcmd) - 1) {
+        subcmd[j++] = ch[i++];
+    }
+    subcmd[j] = '\0';
+
+    while (ch[i] == ' ') i++;
+
+    if (strcmp(subcmd, "dump") == 0) {
+        int count = crashlog_get_record_count();
+        if (count <= 0) {
+            printf("Crashlog: empty\n");
+            return;
+        }
+
+        printf("Crashlog records: %d\n", count);
+        for (uint32 idx = 0; idx < (uint32)count; ++idx) {
+            crashlog_record_info_t info;
+            if (crashlog_get_record_info(idx, &info) != 0) {
+                printf("  [%d] invalid\n", (int)idx);
+                continue;
+            }
+
+            printf("  [%d] type=%u (%s) id=%u epoch=%u len=%u checksum=%08x\n",
+                   (int)idx, (unsigned)info.obj_type, crashlog_obj_name(info.obj_type),
+                   (unsigned)info.obj_id, (unsigned)info.epoch, (unsigned)info.data_len,
+                   (unsigned)info.checksum);
+
+            uint8 data[CRASHLOG_MAX_DATA];
+            int n = crashlog_get_record_data(idx, data, sizeof(data));
+            if (n > 0) {
+                printf("       data: ");
+                crashlog_print_hex(data, (uint32)n, 16);
+            }
+        }
+
+        return;
+    }
+
+    if (strcmp(subcmd, "clear") == 0) {
+        if (strcmp(&ch[i], "yes") != 0) {
+            printf("Usage: crashlog clear yes\n");
+            return;
+        }
+
+        if (crashlog_clear() == 0) {
+            printf("Crashlog cleared.\n");
+        } else {
+            printf("Error: failed to clear crashlog.\n");
+        }
+        return;
+    }
+
+    printf("Usage: crashlog dump | crashlog clear yes\n");
 }
 
 // history command implementation
@@ -840,6 +926,7 @@ REGISTER_SHELL_COMMAND(rect, "rect", draw_cmd_handler, CMD_STREAMING, "Draw a re
 REGISTER_SHELL_COMMAND(drive, "drive", drive_cmd, CMD_STREAMING, "Change between different drives (from lsata).\nUsage: drive <n>", "drive 0");
 REGISTER_SHELL_COMMAND(memory, "memory", memory_cmd, CMD_ESSENTIAL, "Memory management and testing.\nUsage: memory stats | test | stress", "memory stats");
 REGISTER_SHELL_COMMAND(log, "log", log_cmd, CMD_STREAMING, "Enable or disable shell logging.\nUsage: log on|off", "log on");
+REGISTER_SHELL_COMMAND(crashlog_cmd_info, "crashlog", crashlog_cmd, CMD_DIAGNOSTIC, "Inspect or clear the crash-consistent kernel object log.\nUsage: crashlog dump | crashlog clear yes", "crashlog dump");
 REGISTER_SHELL_COMMAND(lsata, "lsata", lsata_cmd, CMD_STREAMING, "List detected ATA drives and their details.\nUsage: lsata", "lsata");
 REGISTER_SHELL_COMMAND(exit, "exit", handler_exit, CMD_ESSENTIAL, "Exits the kernel and shuts down the system.\nUsage: exit", "exit");
 REGISTER_SHELL_COMMAND(clear, "clear", clear_cmd, CMD_ESSENTIAL, "Clears the screen and resets the shell display.\nUsage: clear", "clear");
