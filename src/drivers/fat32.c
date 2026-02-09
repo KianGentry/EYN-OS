@@ -4,12 +4,34 @@
 #include <util.h>
 #include <system.h>
 #include <string.h>
+#include <context.h>
+#include <sched.h>
 
 extern multiboot_info_t *g_mbi;
+
+static int fat32_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void fat32_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 // Read BPB from disk image
 int fat32_read_bpb(void* disk_img, struct fat32_bpb* bpb) {
     if (!disk_img || !bpb) return -1;
+    if (!fat32_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     // BPB is at offset 0
             memcpy(bpb, (char*)disk_img, sizeof(struct fat32_bpb));
     return 0;
@@ -18,6 +40,7 @@ int fat32_read_bpb(void* disk_img, struct fat32_bpb* bpb) {
 // List root directory entries (simple, no subdirs, no LFN)
 int fat32_list_root(void* disk_img, struct fat32_bpb* bpb) {
     if (!disk_img || !bpb) return -1;
+    if (!fat32_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 sec_per_clus = bpb->SecPerClus;
     uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
@@ -28,6 +51,7 @@ int fat32_list_root(void* disk_img, struct fat32_bpb* bpb) {
     
     uint32 cluster = root_clus;
     while (cluster < 0x0FFFFFF8) { // FAT32 end-of-chain
+        fat32_ctx_account(SCHED_COST_FS);
         uint32 dir_sec = first_data_sec + ((cluster - 2) * sec_per_clus);
         uint32 dir_offset = dir_sec * byts_per_sec;
         struct fat32_dir_entry* entries = (struct fat32_dir_entry*)((char*)disk_img + dir_offset);
@@ -53,6 +77,7 @@ int fat32_list_root(void* disk_img, struct fat32_bpb* bpb) {
 
 int fat32_read_file(void* disk_img, struct fat32_bpb* bpb, const char* filename, char* buf, int bufsize) {
     if (!disk_img || !bpb || !filename || !buf) return -1;
+    if (!fat32_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 sec_per_clus = bpb->SecPerClus;
     uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
@@ -63,6 +88,7 @@ int fat32_read_file(void* disk_img, struct fat32_bpb* bpb, const char* filename,
     
     uint32 cluster = root_clus;
     while (cluster < 0x0FFFFFF8) { // FAT32 end-of-chain
+        fat32_ctx_account(SCHED_COST_FS);
         uint32 dir_sec = first_data_sec + ((cluster - 2) * sec_per_clus);
         uint32 dir_offset = dir_sec * byts_per_sec;
         struct fat32_dir_entry* entries = (struct fat32_dir_entry*)((char*)disk_img + dir_offset);
@@ -108,6 +134,7 @@ uint32 fat32_next_cluster(void* disk_img, struct fat32_bpb* bpb, uint32 cluster)
 // List all entries in a directory given its starting cluster
 int fat32_list_dir(void* disk_img, struct fat32_bpb* bpb, uint32 start_cluster) {
     if (!disk_img || !bpb || start_cluster < 2) return -1;
+    if (!fat32_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 sec_per_clus = bpb->SecPerClus;
     uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
@@ -117,6 +144,7 @@ int fat32_list_dir(void* disk_img, struct fat32_bpb* bpb, uint32 start_cluster) 
 
     uint32 cluster = start_cluster;
     while (cluster < 0x0FFFFFF8) { // FAT32 end-of-chain
+        fat32_ctx_account(SCHED_COST_FS);
         uint32 dir_sec = first_data_sec + ((cluster - 2) * sec_per_clus);
         uint32 dir_offset = dir_sec * byts_per_sec;
         struct fat32_dir_entry* entries = (struct fat32_dir_entry*)((char*)disk_img + dir_offset);
@@ -141,6 +169,7 @@ int fat32_list_dir(void* disk_img, struct fat32_bpb* bpb, uint32 start_cluster) 
 // Find a directory entry by name in a directory, returns cluster or -1 if not found
 int fat32_find_entry(void* disk_img, struct fat32_bpb* bpb, uint32 dir_cluster, const char* name, struct fat32_dir_entry* out_entry) {
     if (!disk_img || !bpb || dir_cluster < 2 || !name) return -1;
+    if (!fat32_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 sec_per_clus = bpb->SecPerClus;
     uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
@@ -150,6 +179,7 @@ int fat32_find_entry(void* disk_img, struct fat32_bpb* bpb, uint32 dir_cluster, 
 
     uint32 cluster = dir_cluster;
     while (cluster < 0x0FFFFFF8) {
+        fat32_ctx_account(SCHED_COST_FS);
         uint32 dir_sec = first_data_sec + ((cluster - 2) * sec_per_clus);
         uint32 dir_offset = dir_sec * byts_per_sec;
         struct fat32_dir_entry* entries = (struct fat32_dir_entry*)((char*)disk_img + dir_offset);
@@ -177,6 +207,7 @@ int fat32_find_entry(void* disk_img, struct fat32_bpb* bpb, uint32 dir_cluster, 
 
 int fat32_write_file(void* disk_img, struct fat32_bpb* bpb, const char* filename, const char* buf, int bufsize) {
     if (!disk_img || !bpb || !filename || !buf || bufsize <= 0) return -1;
+    if (!fat32_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 sec_per_clus = bpb->SecPerClus;
     uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
@@ -191,6 +222,7 @@ int fat32_write_file(void* disk_img, struct fat32_bpb* bpb, const char* filename
 
     // 1. Check if file already exists
     for (int i = 0; i < entry_count; i++) {
+        if ((i & 0x3F) == 0) fat32_ctx_account(SCHED_COST_FS);
         if (entries[i].Name[0] == 0x00) break;
         if ((entries[i].Attr & 0x0F) == 0x0F) continue;
         if (entries[i].Name[0] == 0xE5) continue;
@@ -220,6 +252,7 @@ int fat32_write_file(void* disk_img, struct fat32_bpb* bpb, const char* filename
     uint32 total_clusters = (bpb->TotSec32 - first_data_sec) / sec_per_clus;
     uint32 first_free_clus = 2;
     for (; first_free_clus < total_clusters + 2; first_free_clus++) {
+        if ((first_free_clus & 0xFF) == 0) fat32_ctx_account(SCHED_COST_FS);
         if ((fat[first_free_clus] & 0x0FFFFFFF) == 0) break;
     }
     if (first_free_clus >= total_clusters + 2) return -4; // No free cluster
@@ -261,6 +294,7 @@ int fat32_write_file(void* disk_img, struct fat32_bpb* bpb, const char* filename
 // Read BPB from a given partition start sector
 int fat32_read_bpb_sector(uint8 drive, uint32 partition_lba_start, struct fat32_bpb* bpb) {
     if (!bpb) return -1;
+    if (!fat32_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     uint8 sector[512];
     if (ata_read_sector(drive, partition_lba_start, sector) != 0) {
         return -1;
@@ -272,6 +306,7 @@ int fat32_read_bpb_sector(uint8 drive, uint32 partition_lba_start, struct fat32_
 // List root directory entries from a real drive
 int fat32_list_root_sector(uint8 drive, uint32 partition_lba_start, struct fat32_bpb* bpb) {
     if (!bpb) return -1;
+    if (!fat32_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 sec_per_clus = bpb->SecPerClus;
     uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
@@ -283,6 +318,7 @@ int fat32_list_root_sector(uint8 drive, uint32 partition_lba_start, struct fat32
     uint8 sector[512];
     uint32 cluster = root_clus;
     while (cluster < 0x0FFFFFF8) {
+        fat32_ctx_account(SCHED_COST_FS);
         uint32 cluster_first_sec = first_data_sec + ((cluster - 2) * sec_per_clus);
         for (uint32 sec = 0; sec < sec_per_clus; sec++) {
             if (ata_read_sector(drive, partition_lba_start + cluster_first_sec + sec, sector) != 0) {
@@ -310,6 +346,7 @@ int fat32_list_root_sector(uint8 drive, uint32 partition_lba_start, struct fat32
 
 int fat32_read_file_sector(uint8 drive, uint32 partition_lba_start, struct fat32_bpb* bpb, const char* filename, char* buf, int bufsize) {
     if (!bpb || !filename || !buf) return -1;
+    if (!fat32_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 sec_per_clus = bpb->SecPerClus;
     uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
@@ -321,6 +358,7 @@ int fat32_read_file_sector(uint8 drive, uint32 partition_lba_start, struct fat32
     uint8 sector[512];
     uint32 cluster = root_clus;
     while (cluster < 0x0FFFFFF8) {
+        fat32_ctx_account(SCHED_COST_FS);
         uint32 cluster_first_sec = first_data_sec + ((cluster - 2) * sec_per_clus);
     for (uint32 sec = 0; sec < sec_per_clus; sec++) {
             if (ata_read_sector(drive, partition_lba_start + cluster_first_sec + sec, sector) != 0) {
@@ -347,6 +385,7 @@ int fat32_read_file_sector(uint8 drive, uint32 partition_lba_start, struct fat32
                 uint32 bytes_read = 0;
                     uint32 current_clus = first_clus;
                     while (current_clus < 0x0FFFFFF8 && bytes_read < file_size) {
+                        fat32_ctx_account(SCHED_COST_FS);
                         uint32 data_sec = first_data_sec + ((current_clus - 2) * sec_per_clus);
                     for (uint32 s = 0; s < sec_per_clus && bytes_read < file_size; s++) {
                             if (ata_read_sector(drive, partition_lba_start + data_sec + s, sector) != 0) {
@@ -371,6 +410,7 @@ int fat32_read_file_sector(uint8 drive, uint32 partition_lba_start, struct fat32
 
 int fat32_write_file_sector(uint8 drive, uint32 partition_lba_start, struct fat32_bpb* bpb, const char* filename, const char* buf, int bufsize) {
     if (!bpb || !filename || !buf || bufsize <= 0) return -1;
+    if (!fat32_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 sec_per_clus = bpb->SecPerClus;
     uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
@@ -388,6 +428,7 @@ int fat32_write_file_sector(uint8 drive, uint32 partition_lba_start, struct fat3
     // First, check if file exists and find a free directory entry
     uint32 cluster = root_clus;
     while(cluster < 0x0FFFFFF8) {
+        fat32_ctx_account(SCHED_COST_FS);
         uint32 cluster_first_sec = first_data_sec + ((cluster - 2) * sec_per_clus);
         for (uint32 sec = 0; sec < sec_per_clus; sec++) {
             if (ata_read_sector(drive, partition_lba_start + cluster_first_sec + sec, sector) != 0) return -10;
@@ -418,6 +459,7 @@ int fat32_write_file_sector(uint8 drive, uint32 partition_lba_start, struct fat3
     uint32 free_clus = 0;
 
     for(uint32 i = 2; i < total_clusters + 2; i++) {
+        if ((i & 0xFF) == 0) fat32_ctx_account(SCHED_COST_FS);
         uint32 current_fat_sec = rsvd_sec_cnt + (i * 4 / byts_per_sec);
         if (ata_read_sector(drive, partition_lba_start + current_fat_sec, sector) != 0) return -5;
         uint32* fat = (uint32*)sector;
@@ -471,6 +513,7 @@ int fat32_write_file_sector(uint8 drive, uint32 partition_lba_start, struct fat3
 
 // Helper: get next cluster in chain from sector-based device
 uint32 fat32_next_cluster_sector(uint8 drive, uint32 partition_lba_start, struct fat32_bpb* bpb, uint32 cluster) {
+    if (!fat32_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return 0x0FFFFFF8;
     uint8 sector[512];
     uint32 fat_offset = bpb->RsvdSecCnt;
     uint32 fat_sec_num = fat_offset + (cluster * 4 / bpb->BytsPerSec);
@@ -485,6 +528,7 @@ uint32 fat32_next_cluster_sector(uint8 drive, uint32 partition_lba_start, struct
 // Find a directory entry by 8.3 name in a directory on a real drive
 int fat32_find_entry_sector(uint8 drive, struct fat32_bpb* bpb, uint32 dir_cluster, const char* fat_83_name, struct fat32_dir_entry* out_entry) {
     if (!bpb || !fat_83_name || dir_cluster < 2) return -1;
+    if (!fat32_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 sec_per_clus = bpb->SecPerClus;
     uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
@@ -495,6 +539,7 @@ int fat32_find_entry_sector(uint8 drive, struct fat32_bpb* bpb, uint32 dir_clust
     uint8 sector[512];
     uint32 cluster = dir_cluster;
     while (cluster < 0x0FFFFFF8) {
+        fat32_ctx_account(SCHED_COST_FS);
         uint32 cluster_first_sec = first_data_sec + ((cluster - 2) * sec_per_clus);
         for (uint32 sec = 0; sec < sec_per_clus; ++sec) {
             if (ata_read_sector(drive, part_lba + cluster_first_sec + sec, sector) != 0) return -2;
@@ -520,6 +565,7 @@ int fat32_find_entry_sector(uint8 drive, struct fat32_bpb* bpb, uint32 dir_clust
 
 // Find and return the LBA start of the first valid FAT32 partition
 uint32 fat32_get_partition_lba_start(uint8 drive) {
+    if (!fat32_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return 0;
     uint8 mbr[512];
     if (ata_read_sector(drive, 0, mbr) != 0) {
         return 0; // Cannot read MBR
@@ -555,6 +601,7 @@ uint32 fat32_get_partition_lba_start(uint8 drive) {
 
 int fat32_format_partition(uint8 drive, uint8 partition_num) {
     if (partition_num < 1 || partition_num > 4) return -1;
+    if (!fat32_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
 
     uint8 mbr[512];
     if (ata_read_sector(drive, 0, mbr) != 0) return -2;
@@ -619,6 +666,7 @@ int fat32_format_partition(uint8 drive, uint8 partition_num) {
     for (uint32 f = 0; f < bpb.NumFATs; f++) {
         uint32 fat_start = start_lba + bpb.RsvdSecCnt + (f * bpb.FATSz32);
         for (uint32 i = 0; i < bpb.FATSz32; i++) {
+            if ((i & 0xFF) == 0) fat32_ctx_account(SCHED_COST_FS);
             if (ata_write_sector(drive, fat_start + i, sector) != 0) return -8;
         }
     }
@@ -637,6 +685,7 @@ int fat32_format_partition(uint8 drive, uint8 partition_num) {
     uint32 root_dir_start_sec = start_lba + first_data_sec;
     memset(sector, 0, 512);
     for (uint8 i = 0; i < bpb.SecPerClus; i++) {
+        if ((i & 0xF) == 0) fat32_ctx_account(SCHED_COST_FS);
         if (ata_write_sector(drive, root_dir_start_sec + i, sector) != 0) return -12;
     }
 

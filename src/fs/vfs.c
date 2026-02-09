@@ -4,8 +4,29 @@
 #include <string.h>
 #include <system.h>
 #include <util.h>  // for malloc/free
+#include <context.h>
+#include <sched.h>
 
 #define EYNFS_SUPERBLOCK_LBA 2048
+
+static int vfs_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void vfs_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 // Internal: FAT32 helpers for absolute path traversal (8.3 only for now)
 static int fat32_path_to_entry(uint8 drive, struct fat32_bpb* bpb, const char* abspath, struct fat32_dir_entry* out, uint32* out_cluster) {
@@ -123,6 +144,7 @@ fail:
 }
 
 vfs_fs_type_t vfs_detect(uint8 drive) {
+    if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return VFS_FS_NONE;
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         return VFS_FS_EYNFS;
@@ -137,6 +159,7 @@ vfs_fs_type_t vfs_detect(uint8 drive) {
 
 int vfs_get_file_size(uint8 drive, const char* path, uint32* out_size) {
     if (!path || !out_size) return -1;
+    if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; uint32_t pb, idx;
@@ -157,6 +180,7 @@ int vfs_get_file_size(uint8 drive, const char* path, uint32* out_size) {
 
 int vfs_read_file(uint8 drive, const char* path, void* buf, int bufsize) {
     if (!path || !buf || bufsize <= 0) return -1;
+    if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; uint32_t pb, idx;
@@ -181,6 +205,7 @@ int vfs_read_file(uint8 drive, const char* path, void* buf, int bufsize) {
     uint32 cur = file_first;
     uint8 sector[512];
     while (cur < 0x0FFFFFF8 && bytes_read < file_size) {
+        vfs_ctx_account(SCHED_COST_FS);
         uint32 data_sec = first_data_sec + ((cur - 2) * sec_per_clus);
         for (uint32 s = 0; s < sec_per_clus && bytes_read < file_size; ++s) {
             if (ata_read_sector(drive, part_lba + data_sec + s, sector) != 0) return -6;
@@ -196,6 +221,7 @@ int vfs_read_file(uint8 drive, const char* path, void* buf, int bufsize) {
 
 int vfs_read_file_at(uint8 drive, const char* path, void* buf, int bufsize, uint32 offset) {
     if (!path || !buf || bufsize <= 0) return -1;
+    if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
 
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -237,6 +263,7 @@ int vfs_read_file_at(uint8 drive, const char* path, void* buf, int bufsize, uint
     uint32 bytes_read = 0;
     uint8 sector[512];
     while (cur < 0x0FFFFFF8 && bytes_read < want) {
+        vfs_ctx_account(SCHED_COST_FS);
         uint32 data_sec = first_data_sec + ((cur - 2) * sec_per_clus);
         for (uint32 s = 0; s < sec_per_clus && bytes_read < want; ++s) {
             if (ata_read_sector(drive, part_lba + data_sec + s, sector) != 0) return -6;
@@ -264,6 +291,7 @@ int vfs_read_file_at(uint8 drive, const char* path, void* buf, int bufsize, uint
 
 int vfs_stat(uint8 drive, const char* path, vfs_stat_t* st) {
     if (!path || !st) return -1;
+    if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; if (eynfs_traverse_path(drive, &sb, path, &ent, NULL, NULL) != 0) return -2;
@@ -289,6 +317,7 @@ int vfs_listdir(uint8 drive, const char* path,
                 int (*cb)(const char* name, int is_dir, uint32 size, void* user),
                 void* user) {
     if (!path || !cb) return -1;
+    if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         // Resolve path to directory
@@ -303,6 +332,7 @@ int vfs_listdir(uint8 drive, const char* path,
         const int max_blocks = 4096; // safety bound; still allows tens of thousands of entries
 
         while (current_block && block_count < max_blocks) {
+            if ((block_count & 0xF) == 0) vfs_ctx_account(SCHED_COST_FS);
             if (ata_read_sector(drive, EYNFS_SUPERBLOCK_LBA + current_block, buf) != 0) return -3;
 
             uint32_t next_block = *(uint32_t*)buf;
@@ -339,6 +369,7 @@ int vfs_listdir(uint8 drive, const char* path,
     uint32 first_data_sec = bpb.RsvdSecCnt + (bpb.NumFATs * bpb.FATSz32);
     uint8 sector[512];
     while (clus < 0x0FFFFFF8) {
+        vfs_ctx_account(SCHED_COST_FS);
         uint32 base = first_data_sec + ((clus - 2) * sec_per_clus);
         for (uint32 s = 0; s < sec_per_clus; ++s) {
             if (ata_read_sector(drive, part_lba + base + s, sector) != 0) return -6;
@@ -382,6 +413,7 @@ static void vfs_split_path(const char* abspath, char* parent_out, size_t parent_
 
 int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) {
     if (!path || !buf) return -1;
+    if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     // EYNFS fast-path
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -426,6 +458,7 @@ int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) 
     if (clusters_needed > 0) {
         const uint8* p = (const uint8*)buf; uint32 remaining = size; uint32 cur = new_first;
         while (cur >= 2 && cur < 0x0FFFFFF8) {
+            vfs_ctx_account(SCHED_COST_FS);
             uint32 data_sec = first_data_sec + ((cur - 2) * bpb.SecPerClus);
             for (uint32 s = 0; s < bpb.SecPerClus; ++s) {
                 uint8 secbuf[512];
@@ -456,6 +489,7 @@ int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) 
         uint8 sector[512];
         uint32 cluster = parent_clus;
         while (cluster < 0x0FFFFFF8) {
+            vfs_ctx_account(SCHED_COST_FS);
             uint32 cluster_first_sec = first_data_sec + ((cluster - 2) * bpb.SecPerClus);
             for (uint32 sec = 0; sec < bpb.SecPerClus; ++sec) {
                 if (ata_read_sector(drive, part_lba + cluster_first_sec + sec, sector) != 0) return -14;
@@ -485,6 +519,7 @@ int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) 
     uint8 sector[512];
     uint32 cluster = parent_clus;
     while (cluster < 0x0FFFFFF8) {
+        vfs_ctx_account(SCHED_COST_FS);
         uint32 cluster_first_sec = first_data_sec + ((cluster - 2) * bpb.SecPerClus);
         for (uint32 sec = 0; sec < bpb.SecPerClus; ++sec) {
             if (ata_read_sector(drive, part_lba + cluster_first_sec + sec, sector) != 0) return -17;
@@ -512,6 +547,7 @@ int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) 
 // Create a directory
 int vfs_mkdir(uint8 drive, const char* path) {
     if (!path || path[0] != '/') return -1;
+    if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     // EYNFS
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -566,6 +602,7 @@ int vfs_mkdir(uint8 drive, const char* path) {
     // fatname already computed above
     uint8 sector[512]; uint32 cluster = pclus;
     while (cluster < 0x0FFFFFF8) {
+        vfs_ctx_account(SCHED_COST_FS);
         uint32 csec = first_data_sec + ((cluster - 2) * bpb.SecPerClus);
         for (uint32 s = 0; s < bpb.SecPerClus; ++s) {
             if (ata_read_sector(drive, part_lba + csec + s, sector) != 0) return -14;
@@ -589,6 +626,7 @@ int vfs_mkdir(uint8 drive, const char* path) {
 // Remove an empty directory
 int vfs_rmdir(uint8 drive, const char* path) {
     if (!path || strcmp(path, "/") == 0) return -1;
+    if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     // EYNFS
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -601,6 +639,7 @@ int vfs_rmdir(uint8 drive, const char* path) {
         int block_count = 0;
         const int max_blocks = 4096;
         while (current_block && block_count < max_blocks) {
+            if ((block_count & 0xF) == 0) vfs_ctx_account(SCHED_COST_FS);
             if (ata_read_sector(drive, EYNFS_SUPERBLOCK_LBA + current_block, buf) != 0) return -2;
             uint32_t next_block = *(uint32_t*)buf;
             const eynfs_dir_entry_t* entries = (const eynfs_dir_entry_t*)(buf + 4);
@@ -628,6 +667,7 @@ int vfs_rmdir(uint8 drive, const char* path) {
     uint32 first_data_sec = bpb.RsvdSecCnt + (bpb.NumFATs * bpb.FATSz32);
     uint8 sector[512]; uint32 cluster = dclus;
     while (cluster < 0x0FFFFFF8) {
+        vfs_ctx_account(SCHED_COST_FS);
         uint32 csec = first_data_sec + ((cluster - 2) * bpb.SecPerClus);
         for (uint32 s=0;s<bpb.SecPerClus;++s) {
             if (ata_read_sector(drive, part_lba + csec + s, sector) != 0) return -12;
@@ -653,6 +693,7 @@ int vfs_rmdir(uint8 drive, const char* path) {
     char fatname[12]; to_fat32_83(base, fatname);
     cluster = pclus;
     while (cluster < 0x0FFFFFF8) {
+        vfs_ctx_account(SCHED_COST_FS);
         uint32 csec = first_data_sec + ((cluster - 2) * bpb.SecPerClus);
         for (uint32 s=0;s<bpb.SecPerClus;++s) {
             if (ata_read_sector(drive, part_lba + csec + s, sector) != 0) return -15;
@@ -679,6 +720,7 @@ int vfs_rmdir(uint8 drive, const char* path) {
 // Remove a file
 int vfs_unlink(uint8 drive, const char* path) {
     if (!path || path[0] != '/') return -1;
+    if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     // EYNFS
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -717,6 +759,7 @@ int vfs_unlink(uint8 drive, const char* path) {
     uint32 first_data_sec = bpb.RsvdSecCnt + (bpb.NumFATs * bpb.FATSz32);
     uint8 sector[512]; uint32 cluster = pclus;
     while (cluster < 0x0FFFFFF8) {
+        vfs_ctx_account(SCHED_COST_FS);
         uint32 csec = first_data_sec + ((cluster - 2) * bpb.SecPerClus);
         for (uint32 s=0;s<bpb.SecPerClus;++s) {
             if (ata_read_sector(drive, part_lba + csec + s, sector) != 0) return -13;
