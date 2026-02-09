@@ -5,7 +5,7 @@
 #include <eynfs.h>
 #include <stdint.h>
 #include <context.h>
-#include <sched.h>
+#include <misc/sched.h>
 
 // Global zero-copy state
 static zero_copy_file_t* g_zero_copy_files = NULL;  // Dynamic array

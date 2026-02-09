@@ -18,6 +18,7 @@
 #include <fs/vfs.h>
 #include <fs_commands.h>
 #include <eynfs.h>
+#include <context.h>
 extern multiboot_info_t *g_mbi;
 
 // Global error tracking
@@ -323,6 +324,25 @@ uint32 get_last_error_eip() {
 // Deterministic execution mode
 #define SYSCALL_DET_ENABLE 47
 #define SYSCALL_DET_STEP 48
+
+static int syscall_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void syscall_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 typedef struct {
     uint32 type;
@@ -1018,6 +1038,10 @@ uint32 syscall_dispatch(regs_t* regs) {
 
     switch (syscall_num) {
         case SYSCALL_WRITE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) {
+                regs->eax = (uint32)-1;
+                break;
+            }
             if (arg1 == 1) {
                 const char* user_buf = (const char*)arg2;
                 int len = (int)arg3;
@@ -1037,6 +1061,7 @@ uint32 syscall_dispatch(regs_t* regs) {
                 // Copy user memory in small chunks to avoid faults/overruns.
                 int pos = 0;
                 while (pos < len) {
+                    syscall_ctx_account(SCHED_COST_CONSOLE);
                     int chunk = len - pos;
                     if (chunk > 256) chunk = 256;
                     char tmp[256];
@@ -1156,6 +1181,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             }
 
             // file read
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             user_fd_t* ufd = user_fd_get(fd);
             if (!ufd || ufd->is_dir) { regs->eax = (uint32)-1; break; }
 
@@ -1164,6 +1190,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_OPEN: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             const char* user_path = (const char*)arg1;
             if (!user_path) { regs->eax = (uint32)-1; break; }
 
@@ -1243,6 +1270,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_MINT_FD: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             int fd = (int)arg1;
             uint32 req_rights = (uint32)arg2;
             void* user_cap_out = (void*)arg3;
@@ -1268,6 +1296,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_FD_READ: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             char* user_buf = (char*)arg2;
             int maxlen = (int)arg3;
@@ -1298,6 +1327,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_FD_WRITE: {
+            if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             const void* user_buf = (const void*)arg2;
             int len = (int)arg3;
@@ -1314,6 +1344,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_FD_SEEK: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             int32 offset = (int32)arg2;
             int whence = (int)arg3;
@@ -1329,6 +1360,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GETDENTS: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             int fd = (int)arg1;
             void* user_buf = (void*)arg2;
             int buflen = (int)arg3;
@@ -1355,6 +1387,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
 
         case SYSCALL_WRITEFILE: {
+            if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             const char* user_path = (const char*)arg1;
             const void* user_buf = (const void*)arg2;
             int len = (int)arg3;
@@ -1472,6 +1505,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_CREATE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_create(title_ptr=arg1, status_left_ptr=arg2)
             if (!tile_is_tiling_active() || !g_user_task_active) { regs->eax = (uint32)-1; break; }
@@ -1526,6 +1560,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_CREATE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const char* user_title = (const char*)arg1;
             const char* user_status = (const char*)arg2;
             void* user_cap_out = (void*)arg3;
@@ -1589,6 +1624,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_MINT_GUI: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             int handle = (int)arg1;
             uint32 req_rights = (uint32)arg2;
             void* user_cap_out = (void*)arg3;
@@ -1614,6 +1650,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_SET_TITLE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_set_title(handle=arg1, title_ptr=arg2)
             if (!tile_is_tiling_active() || !g_user_task_active) { regs->eax = (uint32)-1; break; }
@@ -1653,6 +1690,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_ATTACH: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_attach(title_ptr=arg1, status_left_ptr=arg2)
             // Binds a GUI client to the tile backing the current ring3 task.
@@ -1719,6 +1757,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_ATTACH: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const char* user_title = (const char*)arg1;
             const char* user_status = (const char*)arg2;
             void* user_cap_out = (void*)arg3;
@@ -1792,6 +1831,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_BEGIN: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_begin(handle)
             int handle = (int)arg1;
@@ -1802,6 +1842,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_CLEAR: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_clear(handle, rgb_ptr)
             int handle = (int)arg1;
@@ -1822,6 +1863,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_FILL_RECT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_fill_rect(handle, rect_ptr)
             int handle = (int)arg1;
@@ -1846,6 +1888,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_DRAW_TEXT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_draw_text(handle, textcmd_ptr)
             int handle = (int)arg1;
@@ -1873,6 +1916,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
 
         case SYSCALL_GUI_DRAW_LINE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_draw_line(handle, line_ptr)
             int handle = (int)arg1;
@@ -1897,6 +1941,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_PRESENT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_present(handle)
             int handle = (int)arg1;
@@ -1911,6 +1956,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
 
         case SYSCALL_GUI_GET_CONTENT_SIZE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_get_content_size(handle, out_size_ptr)
             int handle = (int)arg1;
@@ -1929,6 +1975,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_SET_FONT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_set_font(handle, path_ptr). If path is NULL or empty, resets to the system default font.
             int handle = (int)arg1;
@@ -1962,6 +2009,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_SET_CONTINUOUS_REDRAW: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_set_continuous_redraw(handle, enabled)
             int handle = (int)arg1;
@@ -1973,6 +2021,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_BLIT_RGB565: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_blit_rgb565(handle, blit_ptr)
             int handle = (int)arg1;
@@ -2015,6 +2064,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
         case SYSCALL_GUI_POLL_EVENT:
         case SYSCALL_GUI_WAIT_EVENT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_poll_event(handle, out_event_ptr, out_size)
             // gui_wait_event(handle, out_event_ptr, out_size)
@@ -2045,6 +2095,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_BEGIN: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
@@ -2055,6 +2106,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_CLEAR: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             const void* user_rgb = (const void*)arg2;
             cap_t cap;
@@ -2075,6 +2127,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_FILL_RECT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             const void* user_rect = (const void*)arg2;
             cap_t cap;
@@ -2099,6 +2152,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_DRAW_TEXT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             const void* user_cmd = (const void*)arg2;
             cap_t cap;
@@ -2125,6 +2179,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_DRAW_LINE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             const void* user_cmd = (const void*)arg2;
             cap_t cap;
@@ -2149,6 +2204,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_PRESENT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
@@ -2160,6 +2216,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_GET_CONTENT_SIZE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             void* user_out = (void*)arg2;
             cap_t cap;
@@ -2178,6 +2235,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_SET_TITLE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             const char* user_title = (const char*)arg2;
             if (!user_title) { regs->eax = (uint32)-1; break; }
@@ -2219,6 +2277,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_SET_FONT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             const char* user_path = (const char*)arg2;
             cap_t cap;
@@ -2252,6 +2311,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_SET_CONTINUOUS_REDRAW: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             int enabled = (int)arg2;
             cap_t cap;
@@ -2263,6 +2323,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_BLIT_RGB565: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             const void* user_cmd = (const void*)arg2;
             cap_t cap;
@@ -2305,6 +2366,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
         case SYSCALL_CAP_GUI_POLL_EVENT:
         case SYSCALL_CAP_GUI_WAIT_EVENT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             void* user_out = (void*)arg2;
             int out_sz = (int)arg3;
@@ -2335,6 +2397,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_CAP_GUI_CLOSE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }

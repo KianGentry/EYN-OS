@@ -3,14 +3,27 @@
 #include <util.h>
 #include <string.h>
 #include <sched.h>
+#include <context.h>
 
 // Global kernel API structure
 eynos_kernel_api_t g_kernel_api_struct;
 eynos_kernel_api_t* g_kernel_api = &g_kernel_api_struct;
 
+static int kernel_api_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
 // Kernel API function implementations
 void eyn_kernel_output(const char* str, uint32 len) {
     if (!str || len == 0) return;
+    if (!kernel_api_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     
     // Use printf for output (it handles the VGA driver internally)
     // Create a null-terminated string for printf
@@ -54,6 +67,9 @@ uint32 eyn_kernel_system(uint32 function, uint32 var1, uint32 var2) {
             
         case EYN_SYSTEM_DEBUG_DUMP:
             // Dump memory at address var1, length var2
+            if (!kernel_api_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) {
+                return (uint32)-1;
+            }
             if (var1 && var2 && var2 <= 256) {
                 printf("[DEBUG] Memory dump at 0x%X, length %d:\n", var1, var2);
                 uint8* ptr = (uint8*)var1;
@@ -66,16 +82,25 @@ uint32 eyn_kernel_system(uint32 function, uint32 var1, uint32 var2) {
             return 0;
             
         case EYN_SYSTEM_REBOOT:
+            if (!kernel_api_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) {
+                return (uint32)-1;
+            }
             printf("[SYSTEM] Reboot requested\n");
             // In a real implementation, this would trigger a reboot
             return 0;
             
         case EYN_SYSTEM_SHUTDOWN:
+            if (!kernel_api_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) {
+                return (uint32)-1;
+            }
             printf("[SYSTEM] Shutdown requested\n");
             // In a real implementation, this would trigger a shutdown
             return 0;
             
         default:
+            if (!kernel_api_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) {
+                return (uint32)-1;
+            }
             printf("[SYSTEM] Unknown system function: %d\n", function);
             return (uint32)-1;
     }

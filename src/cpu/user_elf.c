@@ -11,6 +11,8 @@
 #include <tile_manager.h>
 #include <terminals.h>
 #include <isr.h>
+#include <context.h>
+#include <sched.h>
 
 // Defined in src/boot/kernel.asm; this is the top of the kernel stack.
 extern uint32 stack_space;
@@ -18,6 +20,17 @@ extern uint32 stack_space;
 volatile uint16 g_user_segdom_cs = GDT_USER_CS;
 volatile uint16 g_user_segdom_ds = GDT_USER_DS;
 static segdom_t g_user_segdom;
+
+static int user_elf_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // Minimal ELF32 structures for parsing 32-bit little-endian ELF files
 typedef struct {
@@ -148,6 +161,8 @@ static uint32 user_stack_build_argv(uint32 user_stack_top, const char* prog_absp
 int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
     if (!abspath || !abspath[0]) return -1;
 
+    if (!user_elf_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+
     vfs_stat_t st;
     if (vfs_stat(drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE || st.size <= 0) {
         printf("%cError: file not found: %s\n", 255, 0, 0, abspath);
@@ -160,12 +175,17 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
         return -1;
     }
 
+    if (!user_elf_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     uint8* file = (uint8*)malloc((size_t)st.size);
     if (!file) {
         printf("%cError: out of memory.\n", 255, 0, 0);
         return -1;
     }
 
+    if (!user_elf_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) {
+        free(file);
+        return -1;
+    }
     int n = vfs_read_file(drive, abspath, file, (int)st.size);
     if (n < 0) {
         printf("%cError: failed to read ELF.\n", 255, 0, 0);
