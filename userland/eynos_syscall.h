@@ -29,6 +29,27 @@ enum {
     EYN_SYSCALL_CAP_MINT_FD = 25,
     EYN_SYSCALL_CAP_FD_READ = 26,
     EYN_SYSCALL_CAP_FD_CLOSE = 27,
+
+    // Capability-based GUI operations
+    EYN_SYSCALL_CAP_MINT_GUI = 28,
+    EYN_SYSCALL_CAP_GUI_BEGIN = 29,
+    EYN_SYSCALL_CAP_GUI_CLEAR = 30,
+    EYN_SYSCALL_CAP_GUI_FILL_RECT = 31,
+    EYN_SYSCALL_CAP_GUI_DRAW_TEXT = 32,
+    EYN_SYSCALL_CAP_GUI_PRESENT = 33,
+    EYN_SYSCALL_CAP_GUI_POLL_EVENT = 34,
+    EYN_SYSCALL_CAP_GUI_WAIT_EVENT = 35,
+    EYN_SYSCALL_CAP_GUI_DRAW_LINE = 36,
+    EYN_SYSCALL_CAP_GUI_GET_CONTENT_SIZE = 37,
+    EYN_SYSCALL_CAP_GUI_SET_TITLE = 38,
+    EYN_SYSCALL_CAP_GUI_SET_FONT = 39,
+    EYN_SYSCALL_CAP_GUI_SET_CONTINUOUS_REDRAW = 40,
+    EYN_SYSCALL_CAP_GUI_BLIT_RGB565 = 41,
+    EYN_SYSCALL_CAP_GUI_CLOSE = 42,
+
+    // Capability-based file descriptor write/seek operations
+    EYN_SYSCALL_CAP_FD_WRITE = 43,
+    EYN_SYSCALL_CAP_FD_SEEK = 44,
 };
 
 enum {
@@ -46,6 +67,7 @@ enum {
     EYN_CAP_R_SIGNAL = 1u << 3,
     EYN_CAP_R_GRANT = 1u << 4,
     EYN_CAP_R_CLOSE = 1u << 5,
+    EYN_CAP_R_SEEK = 1u << 6,
 };
 
 typedef struct {
@@ -173,6 +195,226 @@ static inline int eyn_sys_net_close(int socket_id) {
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_NET_CLOSE), "b"(socket_id)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_mint_fd(int fd, uint32_t rights, eyn_cap_t* out_cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_MINT_FD), "b"(fd), "c"(rights), "d"(out_cap)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_fd_read(const eyn_cap_t* cap, void* buf, int len) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_FD_READ), "b"(cap), "c"(buf), "d"(len)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_fd_write(const eyn_cap_t* cap, const void* buf, int len) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_FD_WRITE), "b"(cap), "c"(buf), "d"(len)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_fd_seek(const eyn_cap_t* cap, int offset, int whence) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_FD_SEEK), "b"(cap), "c"(offset), "d"(whence)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_fd_close(const eyn_cap_t* cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_FD_CLOSE), "b"(cap)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_mint_gui(int handle, uint32_t rights, eyn_cap_t* out_cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_MINT_GUI), "b"(handle), "c"(rights), "d"(out_cap)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_begin(const eyn_cap_t* cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_BEGIN), "b"(cap)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_clear(const eyn_cap_t* cap, const void* rgb) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_CLEAR), "b"(cap), "c"(rgb)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_fill_rect(const eyn_cap_t* cap, const void* rect) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_FILL_RECT), "b"(cap), "c"(rect)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_draw_text(const eyn_cap_t* cap, const void* text_cmd) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_DRAW_TEXT), "b"(cap), "c"(text_cmd)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_draw_line(const eyn_cap_t* cap, const void* line_cmd) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_DRAW_LINE), "b"(cap), "c"(line_cmd)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_present(const eyn_cap_t* cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_PRESENT), "b"(cap)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_get_content_size(const eyn_cap_t* cap, void* out_size) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_GET_CONTENT_SIZE), "b"(cap), "c"(out_size)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_set_title(const eyn_cap_t* cap, const char* title) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_SET_TITLE), "b"(cap), "c"(title)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_set_font(const eyn_cap_t* cap, const char* path) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_SET_FONT), "b"(cap), "c"(path)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_set_continuous_redraw(const eyn_cap_t* cap, int enabled) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_SET_CONTINUOUS_REDRAW), "b"(cap), "c"(enabled)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_blit_rgb565(const eyn_cap_t* cap, const void* blit_cmd) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_BLIT_RGB565), "b"(cap), "c"(blit_cmd)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_poll_event(const eyn_cap_t* cap, void* out_event, int out_sz) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_POLL_EVENT), "b"(cap), "c"(out_event), "d"(out_sz)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_wait_event(const eyn_cap_t* cap, void* out_event, int out_sz) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_WAIT_EVENT), "b"(cap), "c"(out_event), "d"(out_sz)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_close(const eyn_cap_t* cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_CLOSE), "b"(cap)
         : "memory"
     );
     return ret;

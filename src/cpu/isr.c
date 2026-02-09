@@ -295,6 +295,27 @@ uint32 get_last_error_eip() {
 #define SYSCALL_CAP_FD_READ 26
 #define SYSCALL_CAP_FD_CLOSE 27
 
+// Capability-based GUI operations
+#define SYSCALL_CAP_MINT_GUI 28
+#define SYSCALL_CAP_GUI_BEGIN 29
+#define SYSCALL_CAP_GUI_CLEAR 30
+#define SYSCALL_CAP_GUI_FILL_RECT 31
+#define SYSCALL_CAP_GUI_DRAW_TEXT 32
+#define SYSCALL_CAP_GUI_PRESENT 33
+#define SYSCALL_CAP_GUI_POLL_EVENT 34
+#define SYSCALL_CAP_GUI_WAIT_EVENT 35
+#define SYSCALL_CAP_GUI_DRAW_LINE 36
+#define SYSCALL_CAP_GUI_GET_CONTENT_SIZE 37
+#define SYSCALL_CAP_GUI_SET_TITLE 38
+#define SYSCALL_CAP_GUI_SET_FONT 39
+#define SYSCALL_CAP_GUI_SET_CONTINUOUS_REDRAW 40
+#define SYSCALL_CAP_GUI_BLIT_RGB565 41
+#define SYSCALL_CAP_GUI_CLOSE 42
+
+// Capability-based file descriptor write/seek operations
+#define SYSCALL_CAP_FD_WRITE 43
+#define SYSCALL_CAP_FD_SEEK 44
+
 typedef struct {
     uint32 type;
     int32 a;
@@ -398,6 +419,9 @@ static int g_user_self_tile_idx = -1;
 
 static void user_gui_free_entry(user_gui_t* e) {
     if (!e) return;
+
+    cap_revoke_object(e, CAP_OBJ_USER_GUI);
+
 	if (e->font_handle > 0) {
 		vga_font_release(e->font_handle);
 		e->font_handle = 0;
@@ -589,6 +613,7 @@ void syscall_reset_user_guis(void) {
         if (tile_is_tiling_active() && tile_idx0 >= 0) {
             tile_unregister_gui_client(tile_idx0);
         }
+        cap_revoke_object(&g_user_guis[0], CAP_OBJ_USER_GUI);
         if (g_user_guis[0].font_handle > 0) {
             vga_font_release(g_user_guis[0].font_handle);
             g_user_guis[0].font_handle = 0;
@@ -705,6 +730,31 @@ static user_fd_t* user_fd_from_cap(const cap_t* cap, uint32 required_rights, int
     if (!cap_validate(cap, ufd, CAP_OBJ_USER_FD, required_rights)) return NULL;
     if (out_fd) *out_fd = idx;
     return ufd;
+}
+
+static int user_gui_index_from_ptr(const user_gui_t* ptr) {
+    if (!ptr) return -1;
+    uint32 base = (uint32)(uint32)&g_user_guis[0];
+    uint32 end = (uint32)(uint32)&g_user_guis[USER_GUI_MAX];
+    uint32 p = (uint32)(uint32)ptr;
+    if (p < base || p >= end) return -1;
+    uint32 off = p - base;
+    if (off % sizeof(user_gui_t) != 0) return -1;
+    int idx = (int)(off / sizeof(user_gui_t));
+    if (idx < 0 || idx >= USER_GUI_MAX) return -1;
+    if (&g_user_guis[idx] != ptr) return -1;
+    return idx;
+}
+
+static user_gui_t* user_gui_from_cap(const cap_t* cap, uint32 required_rights, int* out_handle) {
+    if (!cap) return NULL;
+    user_gui_t* e = (user_gui_t*)(uint32)cap->obj;
+    int idx = user_gui_index_from_ptr(e);
+    if (idx < 0) return NULL;
+    if (!g_user_guis[idx].used) return NULL;
+    if (!cap_validate(cap, e, CAP_OBJ_USER_GUI, required_rights)) return NULL;
+    if (out_handle) *out_handle = idx;
+    return e;
 }
 
 
@@ -894,6 +944,57 @@ static int syscall_read_file(user_fd_t* ufd, char* user_dst, int maxlen) {
     }
 
     return total;
+}
+
+static int syscall_write_file_from_fd(user_fd_t* ufd, const void* user_src, int len) {
+    if (!ufd || !user_src || len < 0) return -1;
+    if (ufd->is_dir) return -1;
+
+    if (ufd->offset != 0) {
+        // Current VFS has no per-offset write; only support overwrite from start.
+        return -1;
+    }
+
+    const int max_len = 256 * 1024;
+    if (len > max_len) return -1;
+
+    uint8* kbuf = (uint8*)malloc((size_t)len);
+    if (!kbuf) return -1;
+    if (copyin(kbuf, user_src, (size_t)len) != 0) {
+        free(kbuf);
+        return -1;
+    }
+
+    int written = vfs_write_file(ufd->drive, ufd->path, kbuf, (uint32)len);
+    free(kbuf);
+    if (written < 0) return -1;
+
+    ufd->offset = (uint32)written;
+    ufd->size = (uint32)written;
+    return written;
+}
+
+static int syscall_seek_fd(user_fd_t* ufd, int32 offset, int whence) {
+    if (!ufd || ufd->is_dir) return -1;
+
+    int64 base = 0;
+    if (whence == 0) {
+        base = 0;
+    } else if (whence == 1) {
+        base = (int64)ufd->offset;
+    } else if (whence == 2) {
+        base = (int64)ufd->size;
+    } else {
+        return -1;
+    }
+
+    int64 next = base + (int64)offset;
+    if (next < 0) return -1;
+    if (next > (int64)ufd->size) {
+        next = (int64)ufd->size;
+    }
+    ufd->offset = (uint32)next;
+    return (int)ufd->offset;
 }
 
 // C dispatcher called by the assembly stub. Returns value in EAX to user.
@@ -1138,7 +1239,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             user_fd_t* ufd = user_fd_get(fd);
             if (!ufd) { regs->eax = (uint32)-1; break; }
 
-            uint32 allowed = CAP_R_READ | CAP_R_CLOSE;
+            uint32 allowed = CAP_R_READ | CAP_R_WRITE | CAP_R_SEEK | CAP_R_CLOSE;
             uint32 rights = req_rights ? (req_rights & allowed) : allowed;
             if (rights == 0) { regs->eax = (uint32)-1; break; }
 
@@ -1182,6 +1283,37 @@ uint32 syscall_dispatch(regs_t* regs) {
             cap_revoke_object(ufd, CAP_OBJ_USER_FD);
             ufd->used = 0;
             regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_FD_WRITE: {
+            const void* user_cap_ptr = (const void*)arg1;
+            const void* user_buf = (const void*)arg2;
+            int len = (int)arg3;
+            if (len < 0) { regs->eax = (uint32)-1; break; }
+
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+
+            user_fd_t* ufd = user_fd_from_cap(&cap, CAP_R_WRITE, NULL);
+            if (!ufd) { regs->eax = (uint32)-1; break; }
+
+            int written = syscall_write_file_from_fd(ufd, user_buf, len);
+            regs->eax = (written < 0) ? (uint32)-1 : (uint32)written;
+            break;
+        }
+        case SYSCALL_CAP_FD_SEEK: {
+            const void* user_cap_ptr = (const void*)arg1;
+            int32 offset = (int32)arg2;
+            int whence = (int)arg3;
+
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+
+            user_fd_t* ufd = user_fd_from_cap(&cap, CAP_R_SEEK, NULL);
+            if (!ufd) { regs->eax = (uint32)-1; break; }
+
+            int next = syscall_seek_fd(ufd, offset, whence);
+            regs->eax = (next < 0) ? (uint32)-1 : (uint32)next;
             break;
         }
         case SYSCALL_GETDENTS: {
@@ -1366,6 +1498,31 @@ uint32 syscall_dispatch(regs_t* regs) {
             tile_invalidate_decorations(tile_idx);
             tile_invalidate_gui(tile_idx);
             regs->eax = (uint32)handle;
+            break;
+        }
+        case SYSCALL_CAP_MINT_GUI: {
+            int handle = (int)arg1;
+            uint32 req_rights = (uint32)arg2;
+            void* user_cap_out = (void*)arg3;
+            if (!user_cap_out) { regs->eax = (uint32)-1; break; }
+
+            user_gui_t* e = user_gui_get(handle);
+            if (!e) { regs->eax = (uint32)-1; break; }
+
+            uint32 allowed = CAP_R_READ | CAP_R_WRITE | CAP_R_CLOSE;
+            uint32 rights = req_rights ? (req_rights & allowed) : allowed;
+            if (rights == 0) { regs->eax = (uint32)-1; break; }
+
+            cap_t cap;
+            if (cap_mint(&cap, e, CAP_OBJ_USER_GUI, rights) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            if (copyout(user_cap_out, &cap, sizeof(cap)) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            regs->eax = 0;
             break;
         }
         case SYSCALL_GUI_SET_TITLE: {
@@ -1711,6 +1868,308 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (copyout(user_out, &ev, sizeof(ev)) != 0) { regs->eax = (uint32)-1; break; }
             regs->eax = 1;
         gui_event_done:
+            break;
+        }
+        case SYSCALL_CAP_GUI_BEGIN: {
+            const void* user_cap_ptr = (const void*)arg1;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
+            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+            e->cmd_count = 0;
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_GUI_CLEAR: {
+            const void* user_cap_ptr = (const void*)arg1;
+            const void* user_rgb = (const void*)arg2;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
+            if (!e || e->tile_idx < 0 || !user_rgb) { regs->eax = (uint32)-1; break; }
+            typedef struct { uint8 r, g, b, _pad; } rgb_t;
+            rgb_t rgb;
+            if (copyin(&rgb, user_rgb, sizeof(rgb)) != 0) { regs->eax = (uint32)-1; break; }
+            if (e->cmd_count >= (int)(sizeof(e->cmds) / sizeof(e->cmds[0]))) { regs->eax = (uint32)-1; break; }
+            user_gui_cmd_t* c = &e->cmds[e->cmd_count++];
+            memset(c, 0, sizeof(*c));
+            c->type = USER_GUI_CMD_CLEAR;
+            c->r = rgb.r;
+            c->g = rgb.g;
+            c->b = rgb.b;
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_GUI_FILL_RECT: {
+            const void* user_cap_ptr = (const void*)arg1;
+            const void* user_rect = (const void*)arg2;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
+            if (!e || e->tile_idx < 0 || !user_rect) { regs->eax = (uint32)-1; break; }
+            typedef struct { int32 x, y, w, h; uint8 r, g, b, _pad; } rect_t;
+            rect_t rect;
+            if (copyin(&rect, user_rect, sizeof(rect)) != 0) { regs->eax = (uint32)-1; break; }
+            if (e->cmd_count >= (int)(sizeof(e->cmds) / sizeof(e->cmds[0]))) { regs->eax = (uint32)-1; break; }
+            user_gui_cmd_t* c = &e->cmds[e->cmd_count++];
+            memset(c, 0, sizeof(*c));
+            c->type = USER_GUI_CMD_FILL_RECT;
+            c->x = (int)rect.x;
+            c->y = (int)rect.y;
+            c->w = (int)rect.w;
+            c->h = (int)rect.h;
+            c->r = rect.r;
+            c->g = rect.g;
+            c->b = rect.b;
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_GUI_DRAW_TEXT: {
+            const void* user_cap_ptr = (const void*)arg1;
+            const void* user_cmd = (const void*)arg2;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
+            if (!e || e->tile_idx < 0 || !user_cmd) { regs->eax = (uint32)-1; break; }
+            typedef struct { int32 x, y; uint8 r, g, b, _pad; const char* text; } textcmd_t;
+            textcmd_t t;
+            if (copyin(&t, user_cmd, sizeof(t)) != 0) { regs->eax = (uint32)-1; break; }
+            if (!t.text) { regs->eax = (uint32)-1; break; }
+            if (e->cmd_count >= (int)(sizeof(e->cmds) / sizeof(e->cmds[0]))) { regs->eax = (uint32)-1; break; }
+            user_gui_cmd_t* c = &e->cmds[e->cmd_count++];
+            memset(c, 0, sizeof(*c));
+            c->type = USER_GUI_CMD_TEXT;
+            c->x = (int)t.x;
+            c->y = (int)t.y;
+            c->r = t.r;
+            c->g = t.g;
+            c->b = t.b;
+            if (copyin_cstr(c->text, sizeof(c->text), t.text) != 0) {
+                c->text[0] = '\0';
+            }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_GUI_DRAW_LINE: {
+            const void* user_cap_ptr = (const void*)arg1;
+            const void* user_cmd = (const void*)arg2;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
+            if (!e || e->tile_idx < 0 || !user_cmd) { regs->eax = (uint32)-1; break; }
+            typedef struct { int32 x1, y1, x2, y2; uint8 r, g, b, _pad; } linecmd_t;
+            linecmd_t l;
+            if (copyin(&l, user_cmd, sizeof(l)) != 0) { regs->eax = (uint32)-1; break; }
+            if (e->cmd_count >= (int)(sizeof(e->cmds) / sizeof(e->cmds[0]))) { regs->eax = (uint32)-1; break; }
+            user_gui_cmd_t* c = &e->cmds[e->cmd_count++];
+            memset(c, 0, sizeof(*c));
+            c->type = USER_GUI_CMD_LINE;
+            c->x = (int)l.x1;
+            c->y = (int)l.y1;
+            c->x2 = (int)l.x2;
+            c->y2 = (int)l.y2;
+            c->r = l.r;
+            c->g = l.g;
+            c->b = l.b;
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_GUI_PRESENT: {
+            const void* user_cap_ptr = (const void*)arg1;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
+            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+            tile_invalidate_gui(e->tile_idx);
+            tile_render_once();
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_GUI_GET_CONTENT_SIZE: {
+            const void* user_cap_ptr = (const void*)arg1;
+            void* user_out = (void*)arg2;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_READ, NULL);
+            if (!e || e->tile_idx < 0 || !user_out) { regs->eax = (uint32)-1; break; }
+
+            int cx = 0, cy = 0, cw = 0, ch = 0;
+            tile_get_content_rect(e->tile_idx, &cx, &cy, &cw, &ch);
+            typedef struct { int32 w, h; } gui_size_t;
+            gui_size_t s;
+            s.w = (int32)cw;
+            s.h = (int32)ch;
+            if (copyout(user_out, &s, sizeof(s)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_GUI_SET_TITLE: {
+            const void* user_cap_ptr = (const void*)arg1;
+            const char* user_title = (const char*)arg2;
+            if (!user_title) { regs->eax = (uint32)-1; break; }
+
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+
+            int handle = -1;
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, &handle);
+            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+
+            char title_tmp[96];
+            if (copyin_cstr(title_tmp, sizeof(title_tmp), user_title) != 0) { regs->eax = (uint32)-1; break; }
+            trim_trailing_crlf(title_tmp);
+
+            if (handle == 0) {
+                int tile_idx = -1;
+                if (g_user_task_term >= 0) tile_idx = tile_find_by_term(g_user_task_term);
+                if (tile_idx < 0) tile_idx = tile_get_focused();
+                if (tile_idx < 0) { regs->eax = (uint32)-1; break; }
+                char* new_title = kstrdup_bounded(title_tmp, sizeof(title_tmp) - 1);
+                if (!new_title) { regs->eax = (uint32)-1; break; }
+                if (g_user_self_title) free(g_user_self_title);
+                g_user_self_title = new_title;
+                g_user_self_tile_idx = tile_idx;
+                tile_set_title_status(tile_idx, g_user_self_title, NULL, NULL);
+                tile_invalidate_decorations(tile_idx);
+                regs->eax = 0;
+                break;
+            }
+
+            char* new_title = kstrdup_bounded(title_tmp, sizeof(title_tmp) - 1);
+            if (!new_title) { regs->eax = (uint32)-1; break; }
+            if (e->title) free(e->title);
+            e->title = new_title;
+            tile_set_title_status(e->tile_idx, e->title, e->status_left, NULL);
+            tile_invalidate_decorations(e->tile_idx);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_GUI_SET_FONT: {
+            const void* user_cap_ptr = (const void*)arg1;
+            const char* user_path = (const char*)arg2;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
+            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+
+            int new_font = vga_system_font_acquire();
+            if (user_path) {
+                char path[128];
+                if (copyin_cstr(path, sizeof(path), user_path) == 0) {
+                    trim_trailing_crlf(path);
+                    if (path[0]) {
+                        const char* cwd = "/";
+                        if (g_user_task_active) cwd = vterm_get_cwd(g_user_task_term);
+                        char abspath[128];
+                        resolve_path(path, cwd, abspath, sizeof(abspath));
+                        extern uint8 g_current_drive;
+                        uint8 drive = g_current_drive;
+                        int h = vga_font_acquire_hex(drive, abspath);
+                        if (h > 0) new_font = h;
+                    }
+                }
+            }
+
+            if (e->font_handle != new_font) {
+                if (e->font_handle > 0) vga_font_release(e->font_handle);
+                e->font_handle = new_font;
+            }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_GUI_SET_CONTINUOUS_REDRAW: {
+            const void* user_cap_ptr = (const void*)arg1;
+            int enabled = (int)arg2;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
+            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+            tile_set_gui_continuous_redraw(e->tile_idx, enabled ? 1 : 0);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_GUI_BLIT_RGB565: {
+            const void* user_cap_ptr = (const void*)arg1;
+            const void* user_cmd = (const void*)arg2;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
+            if (!e || e->tile_idx < 0 || !user_cmd) { regs->eax = (uint32)-1; break; }
+
+            typedef struct {
+                int32 src_w;
+                int32 src_h;
+                const uint16* pixels;
+                int32 dst_w;
+                int32 dst_h;
+            } gui_blit_rgb565_t;
+
+            gui_blit_rgb565_t cmd;
+            if (copyin(&cmd, user_cmd, sizeof(cmd)) != 0) { regs->eax = (uint32)-1; break; }
+            if (!cmd.pixels || cmd.src_w <= 0 || cmd.src_h <= 0) { regs->eax = (uint32)-1; break; }
+
+            const int max_w = 320;
+            const int max_h = 200;
+            if (cmd.src_w > max_w || cmd.src_h > max_h) { regs->eax = (uint32)-1; break; }
+
+            size_t need = (size_t)cmd.src_w * (size_t)cmd.src_h * sizeof(uint16);
+            if (need == 0 || need > (size_t)(max_w * max_h * 2)) { regs->eax = (uint32)-1; break; }
+
+            if (!e->blit_buf || e->blit_w != cmd.src_w || e->blit_h != cmd.src_h) {
+                if (e->blit_buf) { free(e->blit_buf); e->blit_buf = NULL; }
+                e->blit_buf = (uint16*)malloc(need);
+                if (!e->blit_buf) { regs->eax = (uint32)-1; break; }
+                e->blit_w = cmd.src_w;
+                e->blit_h = cmd.src_h;
+            }
+
+            if (copyin((uint8*)e->blit_buf, cmd.pixels, need) != 0) { regs->eax = (uint32)-1; break; }
+            e->blit_dst_w = cmd.dst_w;
+            e->blit_dst_h = cmd.dst_h;
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_GUI_POLL_EVENT:
+        case SYSCALL_CAP_GUI_WAIT_EVENT: {
+            const void* user_cap_ptr = (const void*)arg1;
+            void* user_out = (void*)arg2;
+            int out_sz = (int)arg3;
+            if (!user_out || out_sz < (int)sizeof(user_gui_event_t)) { regs->eax = (uint32)-1; break; }
+
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_READ, NULL);
+            if (!e) { regs->eax = (uint32)-1; break; }
+
+            user_gui_event_t ev;
+            int have = 0;
+            if (syscall_num == SYSCALL_CAP_GUI_WAIT_EVENT) {
+                while (!(have = user_gui_pop_event(e, &ev))) {
+                    if (g_user_interrupt) { regs->eax = (uint32)-1; goto cap_gui_event_done; }
+                    __asm__ __volatile__("sti");
+                    __asm__ __volatile__("hlt");
+                    __asm__ __volatile__("cli");
+                }
+            } else {
+                have = user_gui_pop_event(e, &ev);
+            }
+
+            if (!have) { regs->eax = 0; break; }
+            if (copyout(user_out, &ev, sizeof(ev)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 1;
+        cap_gui_event_done:
+            break;
+        }
+        case SYSCALL_CAP_GUI_CLOSE: {
+            const void* user_cap_ptr = (const void*)arg1;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+
+            int handle = -1;
+            user_gui_t* e = user_gui_from_cap(&cap, CAP_R_CLOSE, &handle);
+            if (!e || handle <= 0) { regs->eax = (uint32)-1; break; }
+            user_gui_free_entry(e);
+            regs->eax = 0;
             break;
         }
         case SYSCALL_EXIT: {

@@ -21,6 +21,7 @@ enum {
     CAP_R_SIGNAL = 1u << 3,
     CAP_R_GRANT = 1u << 4,
     CAP_R_CLOSE = 1u << 5,
+    CAP_R_SEEK  = 1u << 6,
 };
 
 typedef struct cap_t {
