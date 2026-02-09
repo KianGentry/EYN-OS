@@ -7,6 +7,7 @@
 #include <vga.h>
 #include <kb.h>
 #include <drivers/flat_exe_format.h>
+#include <sched.h>
 
 // Minimal ELF32 structures for parsing 32-bit little-endian ELF files
 typedef struct {
@@ -1279,6 +1280,9 @@ void native_exit(int code) {
 
 // scheduler hook called on timeslice end
 void sched_on_timeslice_end(void) {
+    if (sched_work_on_timeslice_end()) {
+        return;
+    }
     if (g_current_index < 0) return;
     int next = next_active_index(g_current_index);
     if (next >= 0 && next != g_current_index) {

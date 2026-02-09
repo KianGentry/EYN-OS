@@ -26,6 +26,33 @@ void sched_set_timeslice_ticks(uint32 ticks);
 // called when a timeslice ends to trigger a context switch (stub)
 void sched_on_timeslice_end(void);
 
+// Object-centric scheduler support
+#define SCHED_WORK_CPU_ANY 0xFFFFFFFFu
+
+typedef struct sched_work sched_work_t;
+struct sched_work {
+	uint32 id;
+	uint32 priority;
+	uint32 affinity_mask;
+	uint32 budget_ticks;
+	uint32 budget_left;
+	uint32 cache_hint;
+	void (*run)(sched_work_t* w);
+	void* userdata;
+	int next;
+	uint8 in_queue;
+	uint8 _pad[3];
+};
+
+void sched_work_init(void);
+int sched_work_register(void (*run)(sched_work_t*), void* userdata,
+						uint32 priority, uint32 affinity_mask,
+						uint32 budget_ticks, uint32 cache_hint);
+int sched_work_set_ready(uint32 id);
+int sched_work_unready(uint32 id);
+int sched_work_update_budget(uint32 id, uint32 budget_ticks);
+int sched_work_on_timeslice_end(void);
+
 // Lightweight timing/usage getters ---
 // Monotonic scheduler tick counter (increments in IRQ0 handler)
 uint32 sched_get_tick_count(void);
