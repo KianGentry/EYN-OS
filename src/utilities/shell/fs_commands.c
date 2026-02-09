@@ -14,6 +14,8 @@
 #include <help_tui.h>
 #include <fs/vfs.h>
 #include <terminals.h>
+#include <context.h>
+#include <sched.h>
 
 // Forward declarations for command handlers
 void ls_cmd(string arg);
@@ -47,6 +49,25 @@ extern void poll_keyboard_for_ctrl_c();
 #define MAX_ENTRIES 128  // Increased from 9 to 128 to support larger directories
 
 extern char shell_current_path[128]; // from shell.c
+
+static int fs_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void fs_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 // Helper: resolve relative/absolute path to absolute
 void resolve_path(const char* input, const char* cwd, char* out, size_t outsz) {
@@ -105,6 +126,7 @@ void cd(string input) {
     arg[j] = '\0';
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+    if (!fs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     if (strcmp(abspath, "/") == 0) {
         strncpy(shell_current_path, "/", sizeof(shell_current_path)-1);
         shell_current_path[sizeof(shell_current_path)-1] = '\0';
@@ -282,6 +304,7 @@ static int vfs_ls_collect_cb(const char* name, int is_dir, uint32 size, void* us
     if (c->count >= MAX_ENTRIES) return 1; // stop
 
     ls_entry_t* e = &c->entries[c->count++];
+    if ((c->count & 0xF) == 0) fs_ctx_account(SCHED_COST_FS);
     safe_strcpy(e->name, name, sizeof(e->name));
     e->is_dir = is_dir;
 
@@ -376,6 +399,8 @@ void ls(string input) {
     } else {
         resolve_path("", shell_current_path, abspath, sizeof(abspath));
     }
+
+    if (!fs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
 
     // Check if it's a valid directory
     vfs_stat_t st;
@@ -478,6 +503,8 @@ void read_cmd(string ch) {
         filename[j++] = ch[i++];
     }
     filename[j] = '\0';
+
+    if (!fs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Check file extension for smart detection
     int name_len = strlen(filename);
@@ -515,6 +542,7 @@ void del(string ch) {
     arg[j] = '\0';
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+    if (!fs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
     vfs_stat_t st;
     if (vfs_stat(disk, abspath, &st) != 0 || st.type != VFS_NODE_FILE) {
         printf("%cFile not found: %s\n", 255, 0, 0, abspath);
@@ -543,6 +571,7 @@ void write_cmd(string ch) {
     arg[j] = '\0';
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return;
     // Pass the full path to write_editor for subdirectory support
     write_editor(abspath, disk);
 }
@@ -585,6 +614,7 @@ void to_fat32_83(const char* input, char* output)
 // writefat implementation
 void writefat(string ch)
 {
+    if (!fs_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     uint32 partition_lba_start = fat32_get_partition_lba_start(0);
     struct fat32_bpb bpb;
     if (fat32_read_bpb_sector(0, partition_lba_start, &bpb) != 0) {
@@ -660,6 +690,7 @@ static int fatfix_dir(uint8 drive, const char* dirpath) {
     uint32 first_data_sec = bpb.RsvdSecCnt + (bpb.NumFATs * bpb.FATSz32);
     uint8 sector[512]; uint32 cluster = dclus; int fixes = 0;
     while (cluster < 0x0FFFFFF8) {
+        fs_ctx_account(SCHED_COST_FS);
         uint32 csec = first_data_sec + ((cluster - 2) * bpb.SecPerClus);
         for (uint32 s=0; s<bpb.SecPerClus; ++s) {
             if (ata_read_sector(drive, part_lba + csec + s, sector) != 0) return -3;
@@ -705,6 +736,7 @@ static int fatfix_dir(uint8 drive, const char* dirpath) {
 
 void fatfix_cmd(string ch) {
     uint8 disk = g_current_drive;
+    if (!fs_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     // Parse optional path arg
     uint8 i = 0; while (ch[i] && ch[i] != ' ') i++; while (ch[i] && ch[i] == ' ') i++;
     char arg[128] = {0}; uint8 j = 0; if (ch[i]) { while (ch[i] && ch[i] != ' ' && j < 127) arg[j++] = ch[i++]; arg[j]='\0'; }
@@ -723,6 +755,7 @@ void fatfix_cmd(string ch) {
 
 // catram implementation
 void catram(string ch) {
+    if (!fs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     if (!fat32_disk_img) {
         printf("%cFAT32 disk image not loaded!\n", 255, 0, 0);
         return;
@@ -830,6 +863,7 @@ void catram(string ch) {
 // lsram implementation
 void lsram(string input) 
 {
+    if (!fs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     if (!fat32_disk_img) 
     {
         printf("%cFAT32 disk image not loaded!\n", 255, 0, 0);
@@ -899,6 +933,7 @@ void lsram(string input)
 // writeram implementation
 void writeram(string ch)
 {
+    if (!fs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
     if (!fat32_disk_img) {
         printf("%cFAT32 disk image not loaded!\n", 255, 0, 0);
         return;
@@ -947,6 +982,7 @@ void writeram(string ch)
 }
 
 int write_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
+    if (!fs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     int written = vfs_write_file(disk, filename, buf, (uint32)len);
     if (written != len) {
         printf("Failed to write file data: expected %d, got %d\n", len, written);
@@ -958,6 +994,7 @@ int write_output_to_file(const char* buf, int len, const char* filename, uint8_t
 
 // Append output to file using EYNFS append mode
 int append_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     // Read existing contents if any
     vfs_stat_t st;
     int existing_len = 0;
@@ -987,6 +1024,7 @@ int append_output_to_file(const char* buf, int len, const char* filename, uint8_
 
 // Filesystem integrity check
 int check_filesystem_integrity(uint8_t disk) {
+    if (!fs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, EYNFS_SUPERBLOCK_LBA, &sb) != 0) {
         printf("Cannot read superblock - filesystem may be corrupted.\n");
@@ -1047,6 +1085,7 @@ void makedir(string ch) {
     arg[j] = '\0';
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+    if (!fs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
     if (vfs_mkdir(disk, abspath) == 0) {
         printf("%cDirectory '%s' created successfully.\n", 0, 255, 0, abspath);
     } else {
@@ -1070,6 +1109,7 @@ void deldir(string ch) {
     arg[j] = '\0';
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+    if (!fs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
     if (vfs_rmdir(disk, abspath) == 0) {
         printf("%cDirectory '%s' deleted successfully.\n", 0, 255, 0, abspath);
     } else {
@@ -1080,6 +1120,7 @@ void deldir(string ch) {
 // fscheck command implementation
 void fscheck(string ch) {
     uint8 disk = g_current_drive;
+    if (!fs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     printf("Checking filesystem integrity on drive %d...\n", disk);
     int result = check_filesystem_integrity(disk);
     if (result == 0) {
@@ -1101,6 +1142,7 @@ void copy_cmd(string ch) {
     while (ch[i] && ch[i] == ' ') i++;
     if (!ch[i]) { printf("%cError: Destination filename required.\n", 255, 0, 0); return; }
     char dest[128] = {0}; j = 0; while (ch[i] && ch[i] != ' ' && j < 127) { dest[j++] = ch[i++]; } dest[j] = '\0';
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return;
     // Resolve to absolute
     char src_path[256], dst_path[256]; resolve_path(source, shell_current_path, src_path, sizeof(src_path)); resolve_path(dest, shell_current_path, dst_path, sizeof(dst_path));
     if (strcmp(src_path, dst_path) == 0) { printf("%cError: Source and destination are the same.\n", 255, 0, 0); return; }
@@ -1133,6 +1175,7 @@ void move_cmd(string ch) {
     while (ch[i] && ch[i] == ' ') i++;
     if (!ch[i]) { printf("%cError: Destination filename required.\n", 255, 0, 0); return; }
     char dest[128] = {0}; j = 0; while (ch[i] && ch[i] != ' ' && j < 127) { dest[j++] = ch[i++]; } dest[j] = '\0';
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return;
     char src_path[256], dst_path[256]; resolve_path(source, shell_current_path, src_path, sizeof(src_path)); resolve_path(dest, shell_current_path, dst_path, sizeof(dst_path));
     if (strcmp(src_path, dst_path) == 0) { printf("%cError: Source and destination are the same.\n", 255, 0, 0); return; }
     uint8 disk = g_current_drive; vfs_stat_t st;

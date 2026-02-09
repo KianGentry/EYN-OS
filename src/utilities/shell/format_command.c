@@ -8,11 +8,33 @@
 #include <eynfs.h>
 #include <fat32.h>
 #include <vga.h> // for printf
+#include <context.h>
+#include <sched.h>
 
 extern char* readStr();
 
+static int format_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void format_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
 // Helper function to format a partition as EYNFS
 int eynfs_format_partition(uint8 drive, uint8 part_num) {
+    if (!format_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     printf("%cStarting EYNFS format for partition %d...\n", 255, 255, 0, part_num);
     
     // Read MBR to get partition info
@@ -48,6 +70,7 @@ int eynfs_format_partition(uint8 drive, uint8 part_num) {
     printf("%cErasing disk...\n", 255, 255, 0);
     uint8 zero_sector[EYNFS_BLOCK_SIZE] = {0};
     for (uint32 i = 0; i < 2048; i++) {
+        if ((i & 0x3F) == 0) format_ctx_account(SCHED_COST_FS);
         int write_result = ata_write_sector(drive, start_lba + i, zero_sector);
         if (write_result != 0) {
             printf("%cFailed to erase sector %d\n", 255, 0, 0, i);
@@ -141,6 +164,7 @@ void format_cmd_handler(string ch) {
             return;
         }
     }
+    if (!format_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     printf("%cThis will erase all data on partition %d. Are you sure? (y/n): ", 255, 165, 0, part_num);
     string confirm = readStr();
     printf("\n");

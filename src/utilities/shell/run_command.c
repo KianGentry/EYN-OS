@@ -8,11 +8,24 @@
 #include <string.h>
 #include <fs_commands.h> // resolve_path, shell_current_path
 #include <cpu/user_elf.h>
+#include <context.h>
+#include <sched.h>
 
 extern uint8 g_current_drive;
 
 // Function declarations
 void run_cmd(string arg);
+
+static int run_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 void run_command(string arg) {
     // Parse filename
@@ -27,6 +40,8 @@ void run_command(string arg) {
     uint8 j = 0;
     while (arg[i] && arg[i] != ' ' && j < 63) filename[j++] = arg[i++];
     filename[j] = 0;
+
+    if (!run_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
 
     // Parse remaining args (space-separated; no quoting support).
     const int MAX_ARGS = 16;

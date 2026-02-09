@@ -8,9 +8,30 @@
 #include <system.h>
 #include <fs_commands.h>
 #include <stdint.h>
+#include <context.h>
+#include <sched.h>
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
+
+static int subcmd_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void subcmd_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 // SEARCH SUB-COMMANDS
 
@@ -34,6 +55,7 @@ void search_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t d
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Check if file matches size criteria
@@ -126,6 +148,8 @@ void search_size_cmd(string ch) {
     }
     
     printf("%cSearching for files %s %d bytes...\n", 255, 255, 255, operator, size_value);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -147,6 +171,7 @@ void search_type_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t d
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Check if file has the specified extension
@@ -194,6 +219,8 @@ void search_type_cmd(string ch) {
     extension[j] = '\0';
     
     printf("%cSearching for files with extension '%s'...\n", 255, 255, 255, extension);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -215,6 +242,7 @@ void search_empty_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t 
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         if (entries[i].type == EYNFS_TYPE_FILE) {
@@ -258,6 +286,8 @@ void search_empty_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t 
 // Main search_empty command implementation
 void search_empty_cmd(string ch) {
     printf("%cSearching for empty files and directories...\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -279,6 +309,7 @@ void search_depth_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t 
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Check if name matches pattern
@@ -341,6 +372,8 @@ void search_depth_cmd(string ch) {
     pattern[j] = '\0';
     
     printf("%cSearching for '%s' within depth %d...\n", 255, 255, 255, pattern, max_depth);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -364,6 +397,7 @@ void ls_tree_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_b
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Print indentation
@@ -414,6 +448,8 @@ void ls_tree_cmd(string ch) {
     
     printf("%cDirectory tree (max depth: %d):\n", 255, 255, 255, max_depth);
     printf("%c/\n", 120, 120, 255);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -435,6 +471,7 @@ void ls_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_b
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Print indentation
@@ -488,6 +525,8 @@ void ls_size_cmd(string ch) {
     }
     
     printf("%cDirectory listing with sizes (depth: %d):\n", 255, 255, 255, max_depth);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -509,6 +548,7 @@ void ls_detail_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Print indentation
@@ -564,6 +604,8 @@ void ls_detail_cmd(string ch) {
     
     printf("%cDetailed directory listing (depth: %d):\n", 255, 255, 255, max_depth);
     printf("%cFormat: [TYPE] name (size, block)\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -580,6 +622,8 @@ void ls_detail_cmd(string ch) {
 // Filesystem status command
 void fsstat_cmd(string ch) {
     printf("%c=== Filesystem Status ===\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -598,6 +642,7 @@ void fsstat_cmd(string ch) {
     // Calculate free blocks
     int free_blocks = 0;
     for (int i = 0; i < sb.total_blocks; i++) {
+        if ((i & 0xFF) == 0) subcmd_ctx_account(SCHED_COST_FS);
         uint8_t bitmap_byte = 0;
         ata_read_sector(g_current_drive, EYNFS_SUPERBLOCK_LBA + 1 + (i / 8), &bitmap_byte);
         if (!(bitmap_byte & (1 << (i % 8)))) {
@@ -616,6 +661,8 @@ void fsstat_cmd(string ch) {
 // Cache statistics command
 void cache_stats_cmd(string ch) {
     printf("%c=== Cache Statistics ===\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get cache statistics from EYNFS
     uint32_t cache_hits, cache_misses;
@@ -637,6 +684,8 @@ void cache_stats_cmd(string ch) {
 // Clear cache command
 void cache_clear_cmd(string ch) {
     printf("%cClearing all caches...\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
     
     eynfs_cache_clear();
     
@@ -646,6 +695,8 @@ void cache_clear_cmd(string ch) {
 // Reset cache statistics command
 void cache_reset_cmd(string ch) {
     printf("%cResetting cache statistics...\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
     
     eynfs_reset_cache_stats();
     
@@ -655,6 +706,8 @@ void cache_reset_cmd(string ch) {
 // Block usage visualization command
 void blockmap_cmd(string ch) {
     printf("%c=== Block Usage Map ===\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -669,6 +722,7 @@ void blockmap_cmd(string ch) {
     // Display block map in a grid format
     int blocks_per_line = 64;
     for (int i = 0; i < sb.total_blocks; i++) {
+        if ((i & 0xFF) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (i % blocks_per_line == 0 && i > 0) {
             printf("\n%c", 255, 255, 255);
         }
@@ -696,6 +750,8 @@ void blockmap_cmd(string ch) {
 // Debug superblock command
 void debug_superblock_cmd(string ch) {
     printf("%c=== Superblock Debug Info ===\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -718,6 +774,7 @@ void debug_superblock_cmd(string ch) {
     printf("%c", 255, 255, 255);
     
     for (int i = 0; i < 32; i++) {
+        if ((i & 0xF) == 0) subcmd_ctx_account(SCHED_COST_FS);
         uint8_t bitmap_byte = 0;
         ata_read_sector(g_current_drive, EYNFS_SUPERBLOCK_LBA + 1 + i, &bitmap_byte);
         printf("%02X ", bitmap_byte);
@@ -740,6 +797,8 @@ void debug_directory_cmd(string ch) {
         printf("%cExample: debug_directory /games\n", 255, 255, 255);
         return;
     }
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Parse path
     char path[128] = {0};
@@ -786,6 +845,7 @@ void debug_directory_cmd(string ch) {
     
     printf("%cDirectory entries (%d total):\n", 255, 255, 255, count);
     for (int k = 0; k < count; k++) {
+        if ((k & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[k].name[0] == '\0') {
             printf("%c  [%d] <empty>\n", 120, 120, 255, k);
         } else {
@@ -821,6 +881,8 @@ void read_raw_cmd(string ch) {
     // Resolve path
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Always print raw content to the terminal, regardless of tiling/window state
     // Try EYNFS first (direct display path)
@@ -919,6 +981,8 @@ void read_md_cmd(string ch) {
     // Resolve path
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Try EYNFS first
     eynfs_superblock_t sb;
@@ -1008,6 +1072,8 @@ void read_image_cmd(string ch) {
     // Resolve path
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Use VFS so images load from either filesystem
     vfs_stat_t st;

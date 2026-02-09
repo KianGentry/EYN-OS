@@ -15,6 +15,8 @@
 #include <tile_manager.h>
 #include <vga.h>
 #include <fs/vfs.h>
+#include <context.h>
+#include <sched.h>
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern void* fat32_disk_img;
 
@@ -35,6 +37,17 @@ static int write_editor_scroll_y = 0;
 static int write_editor_scroll_x = 0;
 static int write_editor_modified = 0;
 static int write_editor_show_whitespace = 0;
+
+static int write_editor_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // Selection and clipboard state
 static int write_editor_sel_active = 0;
@@ -594,6 +607,7 @@ static int write_editor_delete_active_selection(void) {
 
 // Load file content into editor buffer
 int load_file_to_write_editor(const char* path, uint8 disk) {
+    if (!write_editor_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     write_editor_open_warn_active = 0;
     write_editor_open_warn_line1[0] = '\0';
     write_editor_open_warn_line2[0] = '\0';
@@ -715,6 +729,7 @@ int load_file_to_write_editor(const char* path, uint8 disk) {
 
 // Save editor buffer to file
 int save_write_editor_buffer(const char* path, uint8 disk) {
+    if (!write_editor_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     // Calculate total size needed
     int total_size = 0;
     for (int i = 0; i < write_editor_num_lines; i++) {

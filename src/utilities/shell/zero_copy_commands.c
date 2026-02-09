@@ -3,6 +3,8 @@
 #include <vga.h>
 #include <util.h>
 #include <string.h>
+#include <context.h>
+#include <sched.h>
 
 // Command handlers for zero-copy operations
 void zopen_cmd(string arg);
@@ -13,6 +15,17 @@ void zseek_cmd(string arg);
 void zsplice_cmd(string arg);
 void ztee_cmd(string arg);
 void zstats_cmd(string arg);
+
+static int zc_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // Register commands with the shell system
 REGISTER_SHELL_COMMAND(zopen_cmd_info, "zopen", zopen_cmd, CMD_STREAMING,
@@ -29,6 +42,7 @@ REGISTER_SHELL_COMMAND(zwrite_cmd_info, "zwrite", zwrite_cmd, CMD_STREAMING,
 
 REGISTER_SHELL_COMMAND(zseek_cmd_info, "zseek", zseek_cmd, CMD_STREAMING,
                        "Seek in zero-copy file", "zseek <fd> <offset> [set|cur|end]");
+
 
 REGISTER_SHELL_COMMAND(zsplice_cmd_info, "zsplice", zsplice_cmd, CMD_STREAMING,
                        "Splice data between files", "zsplice <fd_in> <fd_out> <count>");
@@ -69,6 +83,11 @@ void zopen_cmd(string arg) {
             flags = ZERO_COPY_READ_WRITE;
         }
     }
+
+    uint32 caps = CAP_READ_FS;
+    if (flags == ZERO_COPY_WRITE_ONLY) caps = CAP_WRITE_FS;
+    if (flags == ZERO_COPY_READ_WRITE) caps = CAP_READ_FS | CAP_WRITE_FS;
+    if (!zc_ctx_allow(caps, SCHED_COST_FS)) return;
     
     int fd = zero_copy_open(filename, flags);
     if (fd >= 0) {
@@ -114,6 +133,8 @@ void zread_cmd(string arg) {
         printf("%cExample: zread 0 100\n", 255, 255, 255);
         return;
     }
+
+    if (!zc_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Parse file descriptor
     int fd = 0;
@@ -166,6 +187,8 @@ void zwrite_cmd(string arg) {
         printf("%cExample: zwrite 0 Hello World\n", 255, 255, 255);
         return;
     }
+
+    if (!zc_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
     
     // Parse file descriptor
     int fd = 0;
@@ -208,6 +231,8 @@ void zseek_cmd(string arg) {
         printf("%cExample: zseek 0 100 set\n", 255, 255, 255);
         return;
     }
+
+    if (!zc_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Parse file descriptor
     int fd = 0;
@@ -265,6 +290,8 @@ void zsplice_cmd(string arg) {
         printf("%cExample: zsplice 0 1 100\n", 255, 255, 255);
         return;
     }
+
+    if (!zc_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return;
     
     // Parse input file descriptor
     int fd_in = 0;
@@ -320,6 +347,8 @@ void ztee_cmd(string arg) {
         printf("%cExample: ztee 0 1 100\n", 255, 255, 255);
         return;
     }
+
+    if (!zc_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return;
     
     // Parse input file descriptor
     int fd_in = 0;

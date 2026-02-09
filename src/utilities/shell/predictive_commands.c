@@ -3,6 +3,8 @@
 #include <vga.h>
 #include <util.h>
 #include <string.h>
+#include <context.h>
+#include <sched.h>
 
 // Command handlers for predictive memory management
 void predict_cmd(string arg);
@@ -10,6 +12,17 @@ void mmap_cmd(string arg);
 void munmap_cmd(string arg);
 void msync_cmd(string arg);
 void memory_stats_cmd(string arg);
+
+static int pred_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // Register commands
 REGISTER_SHELL_COMMAND(predict_cmd_info, "predict", predict_cmd, CMD_STREAMING, "Predictive memory management", "predict [stats|reset|optimize]");
@@ -82,6 +95,9 @@ void mmap_cmd(string arg) {
     if (arg[i] && strncmp(&arg[i], "readonly", 8) == 0) {
         read_only = 1;
     }
+
+    uint32 caps = read_only ? CAP_READ_FS : (CAP_READ_FS | CAP_WRITE_FS);
+    if (!pred_ctx_allow(caps, SCHED_COST_FS)) return;
     
     void* addr;
     size_t size;
@@ -146,6 +162,8 @@ void msync_cmd(string arg) {
         printf("%cExample: msync 0x12345678\n", 255, 255, 255);
         return;
     }
+
+    if (!pred_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
     
     // Parse hexadecimal address
     uint32_t addr = 0;

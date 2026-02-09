@@ -7,6 +7,8 @@
 #include <shell_command_info.h>
 #include <types.h>
 #include <math.h>
+#include <context.h>
+#include <sched.h>
 
 // EYNFS constants
 #define EYNFS_SUPERBLOCK_LBA 2048
@@ -36,8 +38,28 @@ static void set_var(shell_script_context_t* ctx, const char* key, const char* va
 static void expand_vars(const char* in, char* out, size_t outsz, shell_script_context_t* ctx);
 static void substitute_command_outputs(const char* in, char* out, size_t outsz, shell_script_context_t* ctx);
 
+static int script_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* cctx = current_command_context;
+    if (cctx && !cap_check(cctx->caps, caps)) return 0;
+    if (cctx) {
+        scheduler_account(cctx->wo, cost);
+        scheduler_yield_if_needed(cctx->wo);
+        if (sched_det_is_enabled()) cctx->det_seq++;
+    }
+    return 1;
+}
+
+static void script_ctx_account(uint32 cost) {
+    command_context_t* cctx = current_command_context;
+    if (!cctx) return;
+    scheduler_account(cctx->wo, cost);
+    scheduler_yield_if_needed(cctx->wo);
+    if (sched_det_is_enabled()) cctx->det_seq++;
+}
+
 // Execute a shell script file
 exec_result_t execute_shell_script(const char* filename) {
+    if (!script_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return EXEC_ERROR_EXECUTION_FAILED;
     shell_script_context_t ctx;
     memset(&ctx, 0, sizeof(ctx));
     
@@ -63,6 +85,7 @@ exec_result_t execute_shell_script(const char* filename) {
 
 // Parse and execute a shell script file
 static int parse_shell_file(const char* filename, shell_script_context_t* ctx) {
+    if (!script_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     // read EYNFS superblock
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(0, EYNFS_SUPERBLOCK_LBA, &sb) != 0 || sb.magic != EYNFS_MAGIC) {
@@ -89,6 +112,7 @@ static int parse_shell_file(const char* filename, shell_script_context_t* ctx) {
     
     // read the shell script file
     uint32_t size = entry.size;
+    if (!script_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     char* script_content = (char*)malloc(size + 1);
     if (!script_content) {
         printf("%cError: Memory allocation failed\n", 255, 0, 0);
@@ -127,6 +151,7 @@ static int parse_shell_file(const char* filename, shell_script_context_t* ctx) {
         memcpy(ctx->current_line, line_start, line_len);
         ctx->current_line[line_len] = '\0';
         ctx->line_number++;
+        if ((ctx->line_number & 0x3F) == 0) script_ctx_account(SCHED_COST_FS);
         
         // trim whitespace
         trim_whitespace(ctx->current_line);

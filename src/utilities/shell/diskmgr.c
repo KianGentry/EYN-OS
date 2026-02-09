@@ -13,8 +13,21 @@
 #include <shell_command_info.h>
 #include <eynfs.h>
 #include <ata.h>
+#include <context.h>
+#include <sched.h>
 
 // DISK MANAGER COMMAND
+
+static int diskmgr_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 static void diskmgr_show_help(void) {
     printf("Disk Manager Commands:\n");
@@ -34,6 +47,7 @@ static void diskmgr_show_help(void) {
 }
 
 static void diskmgr_show_all(void) {
+    if (!diskmgr_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     printf("%c=== Disk Manager ===%c\n", 0, 255, 255, 255, 255, 255);
     
     /* Check drives 0 and 1 */
@@ -56,6 +70,7 @@ static void diskmgr_show_all(void) {
 }
 
 static void diskmgr_create_partition(const char *args) {
+    if (!diskmgr_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     /* Parse: <drive> <start_lba> <size_mb> <type> */
     uint8 drive = 0;
     uint32 start_lba = 0;
@@ -111,6 +126,7 @@ static void diskmgr_create_partition(const char *args) {
 }
 
 static void diskmgr_delete_partition(const char *args) {
+    if (!diskmgr_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     int pos = 0;
     while (args[pos] == ' ') pos++;
     
@@ -128,6 +144,7 @@ static void diskmgr_delete_partition(const char *args) {
 }
 
 static void diskmgr_format_partition(const char *args) {
+    if (!diskmgr_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     int pos = 0;
     while (args[pos] == ' ') pos++;
     
@@ -233,6 +250,7 @@ static void diskmgr_format_partition(const char *args) {
 }
 
 static void diskmgr_mount_partition(const char *args) {
+    if (!diskmgr_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     int pos = 0;
     while (args[pos] == ' ') pos++;
     
@@ -265,6 +283,7 @@ static void diskmgr_mount_partition(const char *args) {
 }
 
 static void diskmgr_unmount(const char *args) {
+    if (!diskmgr_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     int pos = 0;
     while (args[pos] == ' ') pos++;
     
@@ -282,6 +301,7 @@ static void diskmgr_unmount(const char *args) {
 }
 
 static void diskmgr_init_swap(const char *args) {
+    if (!diskmgr_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     int pos = 0;
     while (args[pos] == ' ') pos++;
     
@@ -321,6 +341,7 @@ void diskmgr_cmd_handler(string ch) {
     if (strEql(subcmd, "help")) {
         diskmgr_show_help();
     } else if (strEql(subcmd, "info")) {
+        if (!diskmgr_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
         uint8 drive = (uint8)(ch[i] - '0');
         disk_info_t disk;
         if (partition_read_table(drive, &disk) == 0) {

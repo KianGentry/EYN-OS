@@ -9,6 +9,8 @@
 #include <eynfs.h>
 #include <types.h>
 #include <utilities/shell/alias.h>
+#include <context.h>
+#include <sched.h>
 
 // Global variables
 file_descriptor_t g_file_descriptors[MAX_FDS];
@@ -16,6 +18,25 @@ background_process_t g_background_processes[MAX_BACKGROUND_PROCESSES];
 int g_next_fd = 3;  // Start after stdin, stdout, stderr
 int g_next_bg_pid = 1;
 char* g_pipeline_input_data = NULL;  // Pipeline input data for filter commands
+
+static int pipeline_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void pipeline_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 // Initialize pipeline system
 void init_pipeline_system(void) {
@@ -460,6 +481,7 @@ void close_fd(int fd) {
 // Read file content for input redirection
 char* read_file_for_input_redirection(const char* filename) {
     if (!filename) return NULL;
+    if (!pipeline_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return NULL;
     
     // Try to read the file using the filesystem
     int fd = open(filename, EYNFS_READ);
@@ -496,6 +518,7 @@ int execute_simple_command(command_t* cmd) {
     char* input_data = NULL;
     for (int i = 0; i < cmd->fd_count; i++) {
         if (cmd->fds[i].type == REDIR_INPUT && cmd->fds[i].filename) {
+            if (!pipeline_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
             // Read file content for input redirection
             input_data = read_file_for_input_redirection(cmd->fds[i].filename);
             if (input_data) {
@@ -523,6 +546,7 @@ int execute_simple_command(command_t* cmd) {
     }
     
     if (has_output_redirect) {
+        if (!pipeline_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
         // Use existing shell redirection mechanism
         start_shell_redirect();
         
@@ -762,6 +786,7 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
     int cmd_index = 0;
     
     while (cmd) {
+        if ((cmd_index & 0x3) == 0) pipeline_ctx_account(SCHED_COST_FS);
         // Start shell redirection to capture output
         start_shell_redirect();
         
