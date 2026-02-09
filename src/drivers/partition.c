@@ -11,8 +11,29 @@
 #include <vga.h>
 #include <util.h>
 #include <ata.h>
+#include <context.h>
+#include <sched.h>
 
 // GLOBAL STATE
+
+static int part_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void part_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 /* Virtual drive table */
 static virtual_drive_t g_vdrives[MAX_VIRTUAL_DRIVES];
@@ -25,6 +46,7 @@ static swap_partition_t g_swap_partition;
 
 int partition_read_table(uint8 drive, disk_info_t *info) {
     if (!info) return -1;
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     
     memset(info, 0, sizeof(disk_info_t));
     info->drive = drive;
@@ -41,6 +63,7 @@ int partition_read_table(uint8 drive, disk_info_t *info) {
     
     /* Parse partition entries */
     for (int i = 0; i < MBR_MAX_PARTITIONS; i++) {
+        if ((i & 0x3) == 0) part_ctx_account(SCHED_COST_FS);
         uint8 *entry = mbr + MBR_PARTITION_TABLE_OFFSET + (i * MBR_PARTITION_ENTRY_SIZE);
         
         partition_info_t *part = &info->partitions[i];
@@ -68,6 +91,7 @@ int partition_read_table(uint8 drive, disk_info_t *info) {
 
 int partition_write_table(uint8 drive, const disk_info_t *info) {
     if (!info) return -1;
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     
     /* Read existing MBR to preserve boot code */
     uint8 mbr[512];
@@ -78,6 +102,7 @@ int partition_write_table(uint8 drive, const disk_info_t *info) {
     
     /* Write partition entries */
     for (int i = 0; i < MBR_MAX_PARTITIONS; i++) {
+        if ((i & 0x3) == 0) part_ctx_account(SCHED_COST_FS);
         const partition_info_t *part = &info->partitions[i];
         uint8 *entry = mbr + MBR_PARTITION_TABLE_OFFSET + (i * MBR_PARTITION_ENTRY_SIZE);
         
@@ -115,6 +140,7 @@ int partition_write_table(uint8 drive, const disk_info_t *info) {
 }
 
 int partition_create(uint8 drive, uint32 start_lba, uint32 size_sectors, uint8 type) {
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     disk_info_t disk;
     if (partition_read_table(drive, &disk) != 0) {
         return -1;
@@ -123,6 +149,7 @@ int partition_create(uint8 drive, uint32 start_lba, uint32 size_sectors, uint8 t
     /* Find free partition slot */
     int free_slot = -1;
     for (int i = 0; i < MBR_MAX_PARTITIONS; i++) {
+        if ((i & 0x3) == 0) part_ctx_account(SCHED_COST_FS);
         if (disk.partitions[i].type == PART_TYPE_EMPTY) {
             free_slot = i;
             break;
@@ -137,6 +164,7 @@ int partition_create(uint8 drive, uint32 start_lba, uint32 size_sectors, uint8 t
     /* Check for overlap with existing partitions */
     uint32 end_lba = start_lba + size_sectors;
     for (int i = 0; i < MBR_MAX_PARTITIONS; i++) {
+        if ((i & 0x3) == 0) part_ctx_account(SCHED_COST_FS);
         if (disk.partitions[i].type != PART_TYPE_EMPTY) {
             uint32 p_start = disk.partitions[i].lba_start;
             uint32 p_end = p_start + disk.partitions[i].sector_count;
@@ -171,6 +199,7 @@ int partition_create(uint8 drive, uint32 start_lba, uint32 size_sectors, uint8 t
 
 int partition_delete(uint8 drive, uint8 partition_num) {
     if (partition_num >= MBR_MAX_PARTITIONS) return -1;
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     
     disk_info_t disk;
     if (partition_read_table(drive, &disk) != 0) {
@@ -193,6 +222,7 @@ int partition_delete(uint8 drive, uint8 partition_num) {
 
 int partition_set_bootable(uint8 drive, uint8 partition_num) {
     if (partition_num >= MBR_MAX_PARTITIONS) return -1;
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     
     disk_info_t disk;
     if (partition_read_table(drive, &disk) != 0) {
@@ -201,6 +231,7 @@ int partition_set_bootable(uint8 drive, uint8 partition_num) {
     
     /* Clear bootable flag on all partitions, set on target */
     for (int i = 0; i < MBR_MAX_PARTITIONS; i++) {
+        if ((i & 0x3) == 0) part_ctx_account(SCHED_COST_FS);
         disk.partitions[i].bootable = (i == partition_num);
     }
     
@@ -216,11 +247,13 @@ int vdrive_init(void) {
 }
 
 int vdrive_mount(uint8 physical_drive, uint8 partition_num, const char *mount_point) {
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     if (!g_vdrives_initialized) vdrive_init();
     
     /* Find free slot */
     int slot = -1;
     for (int i = 0; i < MAX_VIRTUAL_DRIVES; i++) {
+        if ((i & 0x3) == 0) part_ctx_account(SCHED_COST_FS);
         if (!g_vdrives[i].in_use) {
             slot = i;
             break;
@@ -257,7 +290,9 @@ int vdrive_mount(uint8 physical_drive, uint8 partition_num, const char *mount_po
 }
 
 int vdrive_unmount(const char *mount_point) {
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     for (int i = 0; i < MAX_VIRTUAL_DRIVES; i++) {
+        if ((i & 0x3) == 0) part_ctx_account(SCHED_COST_FS);
         if (g_vdrives[i].in_use && strEql(g_vdrives[i].mount_point, mount_point)) {
             g_vdrives[i].in_use = 0;
             return 0;
@@ -274,7 +309,9 @@ virtual_drive_t* vdrive_get(uint8 drive_num) {
 }
 
 virtual_drive_t* vdrive_find_by_mount(const char *mount_point) {
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return 0;
     for (int i = 0; i < MAX_VIRTUAL_DRIVES; i++) {
+        if ((i & 0x3) == 0) part_ctx_account(SCHED_COST_FS);
         if (g_vdrives[i].in_use && strEql(g_vdrives[i].mount_point, mount_point)) {
             return &g_vdrives[i];
         }
@@ -296,6 +333,7 @@ int vdrive_translate_lba(uint8 vdrive, uint32 lba, uint8 *phys_drive, uint32 *ph
 // SWAP PARTITION OPERATIONS
 
 int swap_partition_init(uint8 drive, uint8 partition_num) {
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     memset(&g_swap_partition, 0, sizeof(g_swap_partition));
     
     disk_info_t disk;
@@ -338,6 +376,7 @@ int swap_partition_read_page(uint32 page_num, void *buffer) {
     
     /* Read 8 sectors (4KB page) */
     for (int i = 0; i < 8; i++) {
+        if ((i & 0x3) == 0) part_ctx_account(SCHED_COST_FS);
         if (ata_read_sector(g_swap_partition.drive, lba + i, buf + (i * 512)) != 0) {
             return -1;
         }
@@ -356,6 +395,7 @@ int swap_partition_write_page(uint32 page_num, const void *buffer) {
     
     /* Write 8 sectors (4KB page) */
     for (int i = 0; i < 8; i++) {
+        if ((i & 0x3) == 0) part_ctx_account(SCHED_COST_FS);
         if (ata_write_sector(g_swap_partition.drive, lba + i, buf + (i * 512)) != 0) {
             return -1;
         }
@@ -390,6 +430,7 @@ const char* partition_type_name(uint8 type) {
 }
 
 int partition_detect_fs(uint8 drive, uint32 lba_start) {
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return 0;
     uint8 buf[512];
     if (ata_read_sector(drive, lba_start, buf) != 0) {
         return 0;

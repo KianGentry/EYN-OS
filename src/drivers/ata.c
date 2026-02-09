@@ -3,6 +3,8 @@
 #include <vga.h>
 #include <string.h>
 #include <ata.h>
+#include <context.h>
+#include <sched.h>
 
 // Define NULL if not available
 #ifndef NULL
@@ -55,6 +57,25 @@
 #define ATA_FEATURE_SATA_ENABLE 0x10
 #define ATA_FEATURE_SATA_DISABLE 0x90
 
+static int ata_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void ata_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
 static drive_info_t detected_drives[8];
 
 // logical drive mapping system
@@ -88,6 +109,7 @@ static int ata_poll(uint16 io_base) {
 
 // Enhanced drive detection for SATA compatibility
 int ata_detect_drive(uint8 drive) {
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
     uint8 slavebit = (drive & 1) ? 0xB0 : 0xA0;
     
@@ -152,6 +174,7 @@ void ata_init_drives() {
 }
 
 int ata_identify(uint8 drive, uint16* identify_data) {
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
     uint8 slavebit = (drive & 1) ? 0xB0 : 0xA0;
     
@@ -215,6 +238,7 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
     if (drive >= 8 || !detected_drives[drive].present) {
         return -1;
     }
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     
     uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
     uint8 slavebit = (drive & 1) ? 0xF0 : 0xE0;
@@ -232,7 +256,9 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
     
     // Wait for BSY to clear with better error handling
     int timeout = 100000;
-    while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout);
+    while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout) {
+        if ((timeout & 0x3FFF) == 0) ata_ctx_account(SCHED_COST_FS);
+    }
     if (timeout == 0) { 
         // vga printf formatter does not support %u
         printf("ATA read timeout: Drive %d LBA %d - BSY timeout\n", (int)drive, (int)lba);
@@ -250,7 +276,9 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
     
     // Wait for DRQ to set
     timeout = 100000;
-    while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRQ) && --timeout);
+    while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRQ) && --timeout) {
+        if ((timeout & 0x3FFF) == 0) ata_ctx_account(SCHED_COST_FS);
+    }
     if (timeout == 0) { 
         printf("ATA read timeout: Drive %d LBA %d - DRQ timeout\n", (int)drive, (int)lba);
         return -1; 
@@ -271,6 +299,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
     if (drive >= 8 || !detected_drives[drive].present) {
         return -1;
     }
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     
     uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
     uint8 slavebit = (drive & 1) ? 0xF0 : 0xE0;
@@ -288,7 +317,9 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
 
     // Wait for BSY to clear with better error handling
     int timeout = 100000;
-    while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout);
+    while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout) {
+        if ((timeout & 0x3FFF) == 0) ata_ctx_account(SCHED_COST_FS);
+    }
     if (timeout == 0) { 
         printf("ATA write timeout: Drive %d LBA %d - BSY timeout\n", (int)drive, (int)lba);
         return -1; 
@@ -304,7 +335,9 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
     
     // Wait for DRQ to set
     timeout = 100000;
-    while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRQ) && --timeout);
+    while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRQ) && --timeout) {
+        if ((timeout & 0x3FFF) == 0) ata_ctx_account(SCHED_COST_FS);
+    }
     if (timeout == 0) { 
         printf("ATA write timeout: Drive %d LBA %d - DRQ timeout\n", (int)drive, (int)lba);
         return -1; 
@@ -320,13 +353,17 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
 
     // Wait for BSY to clear and DRDY to set after writing
     timeout = 1000000;
-    while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout);
+    while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout) {
+        if ((timeout & 0x3FFF) == 0) ata_ctx_account(SCHED_COST_FS);
+    }
     if (timeout == 0) { 
         return -1; 
     }
     
     timeout = 1000000;
-    while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRDY) && --timeout);
+    while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRDY) && --timeout) {
+        if ((timeout & 0x3FFF) == 0) ata_ctx_account(SCHED_COST_FS);
+    }
     if (timeout == 0) { 
         return -1; 
     }
@@ -388,6 +425,7 @@ int ata_read_sector_retry(uint8 drive, uint32 lba, uint8* buf, int max_retries) 
     int result;
     
     while (retries < max_retries) {
+        if ((retries & 0x3) == 0) ata_ctx_account(SCHED_COST_FS);
         result = ata_read_sector(drive, lba, buf);
         if (result == 0) {
             return 0; // Success
@@ -413,6 +451,7 @@ int ata_write_sector_retry(uint8 drive, uint32 lba, const uint8* buf, int max_re
     int result;
     
     while (retries < max_retries) {
+        if ((retries & 0x3) == 0) ata_ctx_account(SCHED_COST_FS);
         result = ata_write_sector(drive, lba, buf);
         if (result == 0) {
             return 0; // Success
@@ -437,6 +476,7 @@ int ata_get_drive_status(uint8 drive, char* status_buffer, int buffer_size) {
     if (drive >= 8 || !detected_drives[drive].present || !status_buffer) {
         return -1;
     }
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     
     drive_info_t* info = &detected_drives[drive];
     
@@ -485,6 +525,7 @@ int ata_get_drive_status(uint8 drive, char* status_buffer, int buffer_size) {
 
 // List all detected drives
 void ata_list_drives(void) {
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     printf("Detected ATA/SATA drives:\n");
     for (int i = 0; i < 8; i++) {
         if (detected_drives[i].present) {
