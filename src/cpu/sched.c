@@ -1,4 +1,4 @@
-#include <sched.h>
+#include <misc/sched.h>
 #include <system.h>
 #include <irq.h>
 #include <watchdog.h>

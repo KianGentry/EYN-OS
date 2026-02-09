@@ -6,6 +6,8 @@
 #include <util.h>
 // Use the shared terminal API/definitions so TERM_ROWS/TERM_COLS stay consistent
 #include <terminals.h>
+#include <context.h>
+#include <sched.h>
 
 // shell_current_path is maintained by the main shell code
 extern char shell_current_path[128];
@@ -71,6 +73,17 @@ typedef struct {
 } vterm_t;
 
 static vterm_t vterms[4];
+
+static int vterm_ctx_allow(uint32 caps) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, SCHED_COST_CONSOLE);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 static void vterm_clear_line_icons(vterm_t* t, int row) {
     if (!t) return;
@@ -156,6 +169,7 @@ int vterm_get_scroll(int idx) {
         char prompt[64];
         int n = snprintf(prompt, sizeof(prompt), "%d:%s! ", logical, t->cwd);
         for (int i = 0; i < n; ++i) {
+            if ((i & 0x7) == 0) vterm_ctx_allow(CAP_WRITE_CONSOLE);
             // write the char then override its color to match prompt styling
             vterm_write_char(idx, prompt[i]);
             // color drive and leading ':' and '/' as gray, '!' as yellow, rest default
@@ -211,6 +225,7 @@ static void vterm_render_input(int idx) {
 }
 
 void vterm_write_char(int idx, char ch) {
+    if (!vterm_ctx_allow(CAP_WRITE_CONSOLE)) return;
     if (idx < 0 || idx >= 4) return;
     vterm_t* t = &vterms[idx];
     if (!t->active) t->active = 1;

@@ -25,8 +25,29 @@
 #include <vga.h>
 #include <eynfs.h>
 #include <shell_command_info.h>
+#include <context.h>
+#include <sched.h>
 
 extern uint8_t g_current_drive;
+
+static int link_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void link_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 // Section header string table contents (must match exact layout)
 // Byte layout: "\0.symtab\0.strtab\0.shstrtab\0.text\0.rodata\0"
@@ -85,6 +106,7 @@ static int build_strtab(const LinkConfig *cfg, char *strtab, int max_size) {
     strtab[pos++] = '\0';  // First byte is always null
     
     for (int i = 0; i < cfg->symbol_count; i++) {
+        if ((i & 0x7) == 0) link_ctx_account(SCHED_COST_ALLOC);
         int len = strlen(cfg->symbols[i].name);
         if (pos + len + 1 > max_size) return -1;
         memcpy(strtab + pos, cfg->symbols[i].name, len + 1);
@@ -144,6 +166,7 @@ uint32 link_calc_file_size(const LinkConfig *cfg) {
 }
 
 int link_write_uelf(const LinkConfig *cfg, const char *output_path) {
+    if (!link_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     if (!cfg || !output_path || !output_path[0]) return -1;
     if (!cfg->text.data || cfg->text.size == 0) return -1;
     
@@ -309,6 +332,7 @@ int link_write_uelf(const LinkConfig *cfg, const char *output_path) {
     
     // First pass: add local symbols
     for (int i = 0; i < cfg->symbol_count; i++) {
+        if ((i & 0x7) == 0) link_ctx_account(SCHED_COST_ALLOC);
         if (cfg->symbols[i].binding == STB_LOCAL) {
             syms[sym_idx].st_name = find_strtab_offset(strtab, strtab_size, cfg->symbols[i].name);
             syms[sym_idx].st_value = cfg->symbols[i].value;
@@ -322,6 +346,7 @@ int link_write_uelf(const LinkConfig *cfg, const char *output_path) {
     
     // Second pass: add global symbols
     for (int i = 0; i < cfg->symbol_count; i++) {
+        if ((i & 0x7) == 0) link_ctx_account(SCHED_COST_ALLOC);
         if (cfg->symbols[i].binding != STB_LOCAL) {
             syms[sym_idx].st_name = find_strtab_offset(strtab, strtab_size, cfg->symbols[i].name);
             syms[sym_idx].st_value = cfg->symbols[i].value;
@@ -357,6 +382,7 @@ int link_write_uelf(const LinkConfig *cfg, const char *output_path) {
     uint8 zero[64];
     memset(zero, 0, sizeof(zero));
     while (current_offset < text_offset) {
+        link_ctx_account(SCHED_COST_FS);
         uint32 pad = text_offset - current_offset;
         if (pad > sizeof(zero)) pad = sizeof(zero);
         if (eynfs_stream_write(&stream, zero, pad) < 0) {
@@ -375,6 +401,7 @@ int link_write_uelf(const LinkConfig *cfg, const char *output_path) {
     
     // Pad to rodata_offset
     while (current_offset < rodata_offset) {
+        link_ctx_account(SCHED_COST_FS);
         uint32 pad = rodata_offset - current_offset;
         if (pad > sizeof(zero)) pad = sizeof(zero);
         if (eynfs_stream_write(&stream, zero, pad) < 0) {
@@ -395,6 +422,7 @@ int link_write_uelf(const LinkConfig *cfg, const char *output_path) {
     
     // Pad to symtab_offset
     while (current_offset < symtab_offset) {
+        link_ctx_account(SCHED_COST_FS);
         uint32 pad = symtab_offset - current_offset;
         if (pad > sizeof(zero)) pad = sizeof(zero);
         if (eynfs_stream_write(&stream, zero, pad) < 0) {
@@ -427,6 +455,7 @@ int link_write_uelf(const LinkConfig *cfg, const char *output_path) {
     
     // Pad to section headers
     while (current_offset < shdr_offset) {
+        link_ctx_account(SCHED_COST_FS);
         uint32 pad = shdr_offset - current_offset;
         if (pad > sizeof(zero)) pad = sizeof(zero);
         if (eynfs_stream_write(&stream, zero, pad) < 0) {

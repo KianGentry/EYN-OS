@@ -3,6 +3,8 @@
 #include <system.h>
 #include <string.h>
 #include <stdint.h>
+#include <context.h>
+#include <sched.h>
 
 // Screen dimensions (to be set by tui_init)
 static int tui_screen_width = 80;
@@ -15,6 +17,17 @@ static int tui_cur_y = 0;
 // exported flag, updated by tui_read_key
 int tui_alt_pressed = 0;
 int tui_shift_pressed = 0;
+
+static int tui_ctx_allow(uint32 caps) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, SCHED_COST_CONSOLE);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // Helper to compute pixel position for cell coords (kept for potential future use)
 static __attribute__((unused)) void tui_set_cursor(int x, int y) {
@@ -29,6 +42,7 @@ void tui_init(int screen_width, int screen_height) {
 }
 
 void tui_clear() {
+    if (!tui_ctx_allow(CAP_WRITE_CONSOLE)) return;
     clearScreen();
 }
 
@@ -37,6 +51,7 @@ void tui_refresh() {
 }
 
 void tui_draw_text(int x, int y, const char* text, tui_style_t style) {
+    if (!tui_ctx_allow(CAP_WRITE_CONSOLE)) return;
     int cw = vga_text_cell_w();
     int ch = vga_text_cell_h();
     int rr = 0, gg = 0, bb = 0;
@@ -54,6 +69,7 @@ void tui_draw_text(int x, int y, const char* text, tui_style_t style) {
 }
 
 void tui_draw_window(const tui_window_t* win) {
+    if (!tui_ctx_allow(CAP_WRITE_CONSOLE)) return;
     // Draw titlebar
     int title_len = strlen(win->title);
     char titlebar[win->width + 1];
@@ -89,6 +105,7 @@ void tui_draw_window(const tui_window_t* win) {
 void tui_draw_list(const tui_window_t* win, const char** items, int item_count, int selected_index, int scroll_offset, tui_style_t style, tui_style_t selected_style) {
     int max_visible = win->height - 3;
     for (int i = 0; i < max_visible && (i + scroll_offset) < item_count; ++i) {
+        if ((i & 0x7) == 0) tui_ctx_allow(CAP_WRITE_CONSOLE);
         int idx = i + scroll_offset;
         if (idx == selected_index) {
             tui_draw_text(win->x + 1, win->y + 2 + i, "!", selected_style);
@@ -100,6 +117,7 @@ void tui_draw_list(const tui_window_t* win, const char** items, int item_count, 
 }
 
 void tui_draw_text_area(const tui_window_t* win, const char* text, int scroll_offset, tui_style_t style) {
+    if (!tui_ctx_allow(CAP_WRITE_CONSOLE)) return;
     int cell_w = vga_text_cell_w();
     int cell_h = vga_text_cell_h();
     int max_lines = win->height - 3;
@@ -107,6 +125,7 @@ void tui_draw_text_area(const tui_window_t* win, const char* text, int scroll_of
     int x = win->x + 1;
     int line = 0, col = 0;
     for (int i = 0; text[i] != '\0' && line < max_lines + scroll_offset; ++i) {
+        if ((i & 0x3F) == 0) tui_ctx_allow(CAP_WRITE_CONSOLE);
         if (line >= scroll_offset) {
             // Draw this character at the appropriate pixel position directly to avoid
             // any global console cursor side effects.
@@ -135,6 +154,7 @@ void tui_draw_text_area(const tui_window_t* win, const char* text, int scroll_of
 }
 
 void tui_draw_status_bar(const tui_window_t* win, const char* text, tui_style_t style) {
+    if (!tui_ctx_allow(CAP_WRITE_CONSOLE)) return;
     int cw = vga_text_cell_w();
     int ch = vga_text_cell_h();
     // If a window is provided, draw the status bar just below the window; otherwise, draw at the screen bottom.

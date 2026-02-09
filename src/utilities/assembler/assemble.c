@@ -8,6 +8,8 @@
 #include <eynfs.h>
 #include <assemble.h>
 #include <utilities/linker.h>
+#include <context.h>
+#include <sched.h>
 int g_asm_verbose = 0;
 #include <shell_command_info.h>
 
@@ -116,8 +118,28 @@ extern uint8_t g_current_drive;
 static int g_asm_error_count = 0;
 static int g_asm_warning_count = 0;
 
+static int asm_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void asm_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
 // Colored error/warning printing ---
 void print_error(const char* file, int line, const char* msg, const char* line_text) {
+    if (!asm_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     g_asm_error_count++;
     // Bright red: 255,0,0
     printf("\n");
@@ -131,6 +153,7 @@ void print_error(const char* file, int line, const char* msg, const char* line_t
 }
 
 void print_warning(const char* file, int line, const char* msg, const char* line_text) {
+    if (!asm_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     g_asm_warning_count++;
     // Pink: 255,105,180
     printf("\n");
@@ -1558,6 +1581,7 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
 // Reads the entire file at 'filename' from the current drive into a buffer allocated with my_malloc.
 // Returns pointer and sets out_size, or NULL on error.
 char* read_file_to_buffer(const char* filename, uint32_t* out_size) {
+    if (!asm_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return 0;
     printf("[assemble] read_file_to_buffer: filename='%s'\n", filename);
     printf("[assemble] g_current_drive = %d\n", g_current_drive);
     eynfs_superblock_t sb;
@@ -1607,7 +1631,11 @@ static void symbol_table_free(SymbolTable* table) {
 static int estimate_text_size_bytes(AST* ast) {
     int sz = 0;
     if (!ast) return 0;
+    int ctr = 0;
     for (Instruction* inst = ast->instructions; inst; inst = inst->next) {
+        if ((++ctr & 0xF) == 0) {
+            asm_ctx_account(SCHED_COST_ALLOC);
+        }
         if (inst->section != SECTION_TEXT) continue;
         sz += estimate_instr_size(inst);
     }
@@ -1636,6 +1664,7 @@ int assemble(const char *input_path, const char *output_path) {
     // Output mode selection
     const char* out_ext = strrchr(output_path, '.');
     int want_uelf = (out_ext && strcmp(out_ext, ".uelf") == 0) ? 1 : 0;
+    if (want_uelf && !asm_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return 1;
 
     if (want_uelf) {
         // Ring3 loader expects segments in the user range starting at 0x00400000.
@@ -1778,13 +1807,19 @@ int assemble(const char *input_path, const char *output_path) {
     if (code && code_size > 0) {
         uint32_t prev = code_size < 16 ? (uint32_t)code_size : 16;
         printf("[assemble] code[0..%d):", (int)prev);
-        for (uint32_t i = 0; i < prev; i++) printf(" %02X", code[i]);
+        for (uint32_t i = 0; i < prev; i++) {
+            if ((i & 0xF) == 0) asm_ctx_account(SCHED_COST_CONSOLE);
+            printf(" %02X", code[i]);
+        }
         printf("\n");
     }
     if (data && data_size > 0) {
         uint32_t prev = data_size < 16 ? (uint32_t)data_size : 16;
         printf("[assemble] data[0..%d):", (int)prev);
-        for (uint32_t i = 0; i < prev; i++) printf(" %02X", data[i]);
+        for (uint32_t i = 0; i < prev; i++) {
+            if ((i & 0xF) == 0) asm_ctx_account(SCHED_COST_CONSOLE);
+            printf(" %02X", data[i]);
+        }
         printf("\n");
     }
     
@@ -1798,6 +1833,7 @@ int assemble(const char *input_path, const char *output_path) {
     
     // Stream the output to disk to reduce peak memory
     eynfs_stream_t stream;
+    if (!asm_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return 1;
     if (eynfs_stream_begin(g_current_drive, output_path, &stream) != 0) {
         printf("[assemble] Failed to open stream for output file\n");
         return 1;

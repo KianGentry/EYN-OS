@@ -4,6 +4,8 @@
 #include <string.h>
 #include <eynfs.h>
 #include <stdint.h>
+#include <context.h>
+#include <sched.h>
 
 // Global zero-copy state
 static zero_copy_file_t* g_zero_copy_files = NULL;  // Dynamic array
@@ -11,6 +13,25 @@ static uint8_t g_zero_copy_max_files = 16;  // Default limit
 static uint8_t g_zero_copy_fd_count = 0;
 static uint32_t g_zero_copy_stats = 0;
 static uint32_t g_zero_copy_operations = 0;
+
+static int zero_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void zero_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 // Get optimal zero-copy file limit based on available memory
 static uint8_t get_max_zero_copy_files() {
@@ -25,6 +46,9 @@ static uint8_t get_max_zero_copy_files() {
         uint32_t entries = g_mbi->mmap_length / sizeof(multiboot_memory_map_t);
         
         for (uint32_t i = 0; i < entries && i < 50; i++) {
+            if ((i & 0x7u) == 0) {
+                zero_ctx_account(SCHED_COST_FS);
+            }
             if (mmap[i].type == MULTIBOOT_MEMORY_AVAILABLE) {
                 total_ram += mmap[i].len;
             }
@@ -49,6 +73,7 @@ static uint8_t get_max_zero_copy_files() {
 
 // Initialize zero-copy system
 void zero_copy_init(void) {
+    if (!zero_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
     // Calculate optimal file limit based on available memory
     g_zero_copy_max_files = get_max_zero_copy_files();
     
@@ -74,6 +99,7 @@ void zero_copy_init(void) {
 
 // Open file with zero-copy operations
 int zero_copy_open(const char* path, uint8_t flags) {
+    if (!zero_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
     printf("%c[ZERO-COPY] Opening file: %s (flags: %d)\n", 0, 255, 0, path, flags);
     
     if (!g_zero_copy_files) {
@@ -181,6 +207,7 @@ int zero_copy_close(int fd) {
 
 // Zero-copy read operation
 size_t zero_copy_read(int fd, void* buf, size_t count) {
+    if (!zero_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return (size_t)-1;
     if (fd < 0 || fd >= g_zero_copy_fd_count) {
         printf("%cError: Invalid file descriptor: %d\n", 255, 0, 0, fd);
         return -1;
@@ -212,6 +239,7 @@ size_t zero_copy_read(int fd, void* buf, size_t count) {
 
 // Zero-copy write operation
 size_t zero_copy_write(int fd, const void* buf, size_t count) {
+    if (!zero_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return (size_t)-1;
     if (fd < 0 || fd >= g_zero_copy_fd_count) {
         printf("%cError: Invalid file descriptor: %d\n", 255, 0, 0, fd);
         return -1;
@@ -243,6 +271,7 @@ size_t zero_copy_write(int fd, const void* buf, size_t count) {
 
 // Seek in zero-copy file
 int zero_copy_seek(int fd, int32_t offset, int whence) {
+    if (!zero_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     if (fd < 0 || fd >= g_zero_copy_fd_count) {
         printf("%cError: Invalid file descriptor: %d\n", 255, 0, 0, fd);
         return -1;
@@ -269,6 +298,7 @@ int zero_copy_seek(int fd, int32_t offset, int whence) {
 
 // Memory mapping for zero-copy operations
 void* zero_copy_mmap(void* addr, size_t length, uint8_t flags, int fd, int32_t offset) {
+    if (!zero_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return NULL;
     if (fd >= 0 && fd < g_zero_copy_fd_count) {
         zero_copy_file_t* file = &g_zero_copy_files[fd];
         if (offset + length > file->file_size) {
@@ -295,7 +325,11 @@ int zero_copy_munmap(void* addr, size_t length) {
 
 // Synchronize zero-copy memory to disk
 int zero_copy_msync(void* addr, size_t length, uint8_t flags) {
+    if (!zero_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     for (int i = 0; i < g_zero_copy_fd_count; i++) {
+        if ((i & 0x7) == 0) {
+            zero_ctx_account(SCHED_COST_FS);
+        }
         zero_copy_file_t* file = &g_zero_copy_files[i];
         if (file->mapped_address && 
             addr >= file->mapped_address && 
@@ -313,6 +347,7 @@ int zero_copy_msync(void* addr, size_t length, uint8_t flags) {
 
 // Advanced zero-copy operations
 int zero_copy_splice(int fd_in, int fd_out, size_t count) {
+    if (!zero_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     if (fd_in < 0 || fd_in >= g_zero_copy_fd_count || fd_out < 0 || fd_out >= g_zero_copy_fd_count) {
         printf("%cError: Invalid file descriptors\n", 255, 0, 0);
         return -1;
@@ -334,6 +369,7 @@ int zero_copy_splice(int fd_in, int fd_out, size_t count) {
 }
 
 int zero_copy_tee(int fd_in, int fd_out, size_t count) {
+    if (!zero_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     if (fd_in < 0 || fd_in >= g_zero_copy_fd_count || fd_out < 0 || fd_out >= g_zero_copy_fd_count) {
         printf("%cError: Invalid file descriptors\n", 255, 0, 0);
         return -1;
@@ -360,6 +396,9 @@ void print_zero_copy_stats(void) {
     printf("%cTotal operations: %d\n", 255, 255, 255, g_zero_copy_operations);
     printf("%cOpen files: %d\n", 255, 255, 255, g_zero_copy_fd_count);
     for (int i = 0; i < g_zero_copy_fd_count; i++) {
+        if ((i & 0x7) == 0) {
+            zero_ctx_account(SCHED_COST_FS);
+        }
         zero_copy_file_t* file = &g_zero_copy_files[i];
         if (file->mapped_address) {
             printf("%cFile %d: size=%d, offset=%d, accesses=%d, dirty=%d\n", 255, 255, 255, i, file->file_size, file->current_offset, file->access_count, file->dirty);

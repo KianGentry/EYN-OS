@@ -94,6 +94,22 @@ void ui_return_from_user_task(void) {
     }
 }
 
+static int mem_ctx_allow(void) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, CAP_ALLOC_MEMORY)) {
+        return 0;
+    }
+    return 1;
+}
+
+static void mem_ctx_account(void) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, SCHED_COST_ALLOC);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
 uint32_t __stack_chk_fail(){
     return 0;
 }
@@ -538,6 +554,9 @@ static uint32 find_free_block(uint32 size) {
     while (current != NO_BLOCK && blocks_checked < 100) { // Prevent infinite loops
         block_header_t* block = (block_header_t*)(heap_start + current);
         blocks_checked++;
+        if ((blocks_checked & 0x7) == 0) {
+            mem_ctx_account();
+        }
         
         // Validate block integrity. If this fails, the heap metadata is unsafe
         // to traverse (we cannot safely read block->next), so fail fast.
@@ -581,8 +600,13 @@ static void split_block(uint32 block_offset, uint32 needed_size) {
 
 static void merge_free_blocks() {
     uint32 current = first_block;
+    int blocks_checked = 0;
     while (current != NO_BLOCK) {
         block_header_t* block = (block_header_t*)(heap_start + current);
+        blocks_checked++;
+        if ((blocks_checked & 0x7) == 0) {
+            mem_ctx_account();
+        }
         
         // Validate block integrity
         if (!validate_block(block, current)) {
@@ -609,15 +633,10 @@ static void merge_free_blocks() {
 }
 
 void* malloc(size_t nbytes) {
-    command_context_t* ctx = current_command_context;
-    if (ctx && !cap_check(ctx->caps, CAP_ALLOC_MEMORY)) {
+    if (!mem_ctx_allow()) {
         return NULL;
     }
-    if (ctx) {
-        scheduler_account(ctx->wo, SCHED_COST_ALLOC);
-        scheduler_yield_if_needed(ctx->wo);
-        if (sched_det_is_enabled()) ctx->det_seq++;
-    }
+    mem_ctx_account();
     // Lazy initialization
     ensure_memory_initialized();
     
@@ -662,6 +681,8 @@ void* malloc(size_t nbytes) {
 }
 
 void free(void* ptr) {
+    if (!mem_ctx_allow()) return;
+    mem_ctx_account();
     if (!ptr) return;
     
     // Lazy initialization check
@@ -710,15 +731,10 @@ void free(void* ptr) {
 }
 
 void* realloc(void* ptr, size_t new_size) {
-    command_context_t* ctx = current_command_context;
-    if (ctx && !cap_check(ctx->caps, CAP_ALLOC_MEMORY)) {
+    if (!mem_ctx_allow()) {
         return NULL;
     }
-    if (ctx) {
-        scheduler_account(ctx->wo, SCHED_COST_ALLOC);
-        scheduler_yield_if_needed(ctx->wo);
-        if (sched_det_is_enabled()) ctx->det_seq++;
-    }
+    mem_ctx_account();
     if (!ptr) return malloc(new_size);
     if (new_size <= 0) {
         free(ptr);
@@ -760,6 +776,8 @@ void* realloc(void* ptr, size_t new_size) {
 }
 
 void* calloc(size_t count, size_t size) {
+    if (!mem_ctx_allow()) return NULL;
+    mem_ctx_account();
     // Lazy initialization
     ensure_memory_initialized();
     
@@ -858,6 +876,9 @@ uint32 get_heap_used(void) {
     int guard = 0;
     while (current != NO_BLOCK && guard++ < 20000) {
         block_header_t* block = (block_header_t*)(heap_start + current);
+        if ((guard & 0xFF) == 0) {
+            mem_ctx_account();
+        }
         if (!validate_block(block, current)) {
             break;
         }

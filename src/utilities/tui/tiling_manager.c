@@ -17,8 +17,28 @@ static int g_tm_initialized = 0;
 #include <ui_prefs.h>
 #include <network/netstack.h>
 #include <drivers/e1000.h>
+#include <context.h>
 
 extern uint8_t g_current_drive;
+
+static int tm_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void tm_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 #define MAX_TILES 4
 #define MAX_WINDOWS 8
@@ -390,6 +410,7 @@ static tile_bg_t g_tile_bg[MAX_TILES];
 static void bg_convert_rgba_to_rgb(rei_image_t* im) {
     if (!im || !im->data) return;
     if (im->header.depth != REI_DEPTH_RGBA) return;
+    if (!tm_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
     int w = im->header.width, h = im->header.height;
     size_t out_sz = (size_t)w * (size_t)h * (size_t)REI_DEPTH_RGB;
     uint8_t* rgb = (uint8_t*)malloc(out_sz);
@@ -397,6 +418,7 @@ static void bg_convert_rgba_to_rgb(rei_image_t* im) {
     const uint8_t* src = im->data;
     size_t si = 0, di = 0; size_t total = (size_t)w * (size_t)h;
     for (size_t i = 0; i < total; ++i) {
+        if ((i & 0x3FF) == 0) tm_ctx_account(SCHED_COST_ALLOC);
         uint8_t r8 = src[si + 0], g8 = src[si + 1], b8 = src[si + 2], a = src[si + 3];
         if (a < 128) { r8 = g8 = b8 = 0; }
         rgb[di + 0] = r8; rgb[di + 1] = g8; rgb[di + 2] = b8;
@@ -565,6 +587,7 @@ static void maybe_update_icon_mode(uint8 disk) {
 // Try a few candidate paths for an icon with given extension and load into cache entry
 static rei_image_t* load_icon_for_ext_mode(const char* ext, int want16) {
     if (!ext) return NULL;
+    if (!tm_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return NULL;
 
     want16 = want16 ? 1 : 0;
     char cache_key[24];
@@ -573,6 +596,7 @@ static rei_image_t* load_icon_for_ext_mode(const char* ext, int want16) {
 
     // Check cache first
     for (int i = 0; i < g_icon_cache_count; ++i) {
+        if ((i & 0x7) == 0) tm_ctx_account(SCHED_COST_FS);
         if (strcmp(g_icon_cache[i].key, cache_key) == 0) {
             return g_icon_cache[i].loaded ? &g_icon_cache[i].img : NULL;
         }
@@ -613,6 +637,7 @@ static rei_image_t* load_icon_for_ext_mode(const char* ext, int want16) {
         const char** patterns = (pass == 0) ? primary : fallback;
         if (!patterns) continue;
         for (int pi = 0; patterns[pi]; ++pi) {
+            if ((pi & 0x3) == 0) tm_ctx_account(SCHED_COST_FS);
             watchdog_kick("wm-iconload");
             snprintf(pathbuf, sizeof(pathbuf), patterns[pi], ext);
             eynfs_dir_entry_t entry;
