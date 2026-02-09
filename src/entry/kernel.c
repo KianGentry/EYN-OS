@@ -25,6 +25,7 @@
 #include <ui_prefs.h>
 #include <cpu/fpu.h>
 #include <arch.h>
+#include <capabilities.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
@@ -71,6 +72,9 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     vmm_init(ram);
     vmm_enable_paging();
     printf("Done.\n");
+
+    // Initialize capability secret/registry before any user-facing objects.
+    cap_init();
     
     printf("Starting ATA driver...");
     // Initialize ATA drives immediately

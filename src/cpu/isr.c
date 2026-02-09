@@ -8,6 +8,7 @@
 #include <kb.h>
 #include <panic.h>
 #include <watchdog.h>
+#include <capabilities.h>
 
 #include <sched.h>
 
@@ -289,6 +290,11 @@ uint32 get_last_error_eip() {
 // GUI RGB565 blit (userland framebuffer)
 #define SYSCALL_GUI_BLIT_RGB565 24
 
+// Capability-based file descriptor operations
+#define SYSCALL_CAP_MINT_FD 25
+#define SYSCALL_CAP_FD_READ 26
+#define SYSCALL_CAP_FD_CLOSE 27
+
 typedef struct {
     uint32 type;
     int32 a;
@@ -340,6 +346,9 @@ static user_fd_t g_user_fds[USER_FD_MAX];
 
 void syscall_reset_user_fds(void) {
     for (int i = 0; i < USER_FD_MAX; ++i) {
+        if (g_user_fds[i].used) {
+            cap_revoke_object(&g_user_fds[i], CAP_OBJ_USER_FD);
+        }
         g_user_fds[i].used = 0;
         g_user_fds[i].is_dir = 0;
         g_user_fds[i].offset = 0;
@@ -668,6 +677,37 @@ static user_fd_t* user_fd_get(int fd) {
     return &g_user_fds[fd];
 }
 
+static int user_fd_index_from_ptr(const user_fd_t* ptr) {
+    if (!ptr) return -1;
+    uint32 base = (uint32)(uint32)&g_user_fds[0];
+    uint32 end = (uint32)(uint32)&g_user_fds[USER_FD_MAX];
+    uint32 p = (uint32)(uint32)ptr;
+    if (p < base || p >= end) return -1;
+    uint32 off = p - base;
+    if (off % sizeof(user_fd_t) != 0) return -1;
+    int idx = (int)(off / sizeof(user_fd_t));
+    if (idx < 0 || idx >= USER_FD_MAX) return -1;
+    if (&g_user_fds[idx] != ptr) return -1;
+    return idx;
+}
+
+static int syscall_cap_copyin(const void* user_cap_ptr, cap_t* out) {
+    if (!user_cap_ptr || !out) return -1;
+    return copyin(out, user_cap_ptr, sizeof(*out));
+}
+
+static user_fd_t* user_fd_from_cap(const cap_t* cap, uint32 required_rights, int* out_fd) {
+    if (!cap) return NULL;
+    user_fd_t* ufd = (user_fd_t*)(uint32)cap->obj;
+    int idx = user_fd_index_from_ptr(ufd);
+    if (idx < 0) return NULL;
+    if (!g_user_fds[idx].used) return NULL;
+    if (!cap_validate(cap, ufd, CAP_OBJ_USER_FD, required_rights)) return NULL;
+    if (out_fd) *out_fd = idx;
+    return ufd;
+}
+
+
 typedef struct {
     uint8 is_dir;
     uint8 _pad[3];
@@ -820,6 +860,42 @@ static void syscall_maybe_render_ui(void) {
 #define SYSCALL_WRITEFILE_DEBUG 0
 #endif
 
+static int syscall_read_file(user_fd_t* ufd, char* user_dst, int maxlen) {
+    if (!ufd || !user_dst || maxlen <= 0) return 0;
+    if (ufd->is_dir) return -1;
+
+    if (ufd->offset == 0) {
+        if (SYSCALL_DEBUG) {
+            printf("[SYSCALL:READ file] drive=%d path='%s' size=%d max=%d\n",
+                   (int)ufd->drive, ufd->path, (int)ufd->size, maxlen);
+        }
+    }
+
+    char tmp[256];
+    int remaining = maxlen;
+    int total = 0;
+    while (remaining > 0) {
+        int chunk = remaining;
+        if (chunk > (int)sizeof(tmp)) chunk = (int)sizeof(tmp);
+        int n = vfs_read_file_at(ufd->drive, ufd->path, tmp, chunk, ufd->offset);
+        if (n < 0) return -1;
+        if (n == 0) {
+            if (total == 0 && SYSCALL_DEBUG) {
+                printf("[SYSCALL:READ file] EOF at off=%d (size=%d)\n",
+                       (int)ufd->offset, (int)ufd->size);
+            }
+            break;
+        }
+        if (copyout(user_dst + total, tmp, (size_t)n) != 0) return -1;
+        ufd->offset += (uint32)n;
+        total += n;
+        remaining -= n;
+        if (n < chunk) break;
+    }
+
+    return total;
+}
+
 // C dispatcher called by the assembly stub. Returns value in EAX to user.
 uint32 syscall_dispatch(regs_t* regs) {
     uint32 syscall_num = regs->eax;
@@ -970,38 +1046,8 @@ uint32 syscall_dispatch(regs_t* regs) {
             user_fd_t* ufd = user_fd_get(fd);
             if (!ufd || ufd->is_dir) { regs->eax = (uint32)-1; break; }
 
-            if (ufd->offset == 0) {
-                if (SYSCALL_DEBUG) {
-                    printf("[SYSCALL:READ file] fd=%d drive=%d path='%s' size=%d max=%d\n",
-                           fd, (int)ufd->drive, ufd->path, (int)ufd->size, maxlen);
-                }
-            }
-
-            char tmp[256];
-            int remaining = maxlen;
-            int total = 0;
-            char* user_dst = (char*)arg2;
-            while (remaining > 0) {
-                int chunk = remaining;
-                if (chunk > (int)sizeof(tmp)) chunk = (int)sizeof(tmp);
-                int n = vfs_read_file_at(ufd->drive, ufd->path, tmp, chunk, ufd->offset);
-                if (n < 0) { regs->eax = (uint32)-1; return regs->eax; }
-                if (n == 0) {
-                    if (total == 0) {
-                        if (SYSCALL_DEBUG) {
-                            printf("[SYSCALL:READ file] EOF at off=%d (size=%d)\n",
-                                   (int)ufd->offset, (int)ufd->size);
-                        }
-                    }
-                    break;
-                }
-                if (copyout(user_dst + total, tmp, (size_t)n) != 0) { regs->eax = (uint32)-1; return regs->eax; }
-                ufd->offset += (uint32)n;
-                total += n;
-                remaining -= n;
-                if (n < chunk) break;
-            }
-            regs->eax = (uint32)total;
+            int n = syscall_read_file(ufd, (char*)arg2, maxlen);
+            regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
             break;
         }
         case SYSCALL_OPEN: {
@@ -1078,7 +1124,63 @@ uint32 syscall_dispatch(regs_t* regs) {
             int fd = (int)arg1;
             if (fd < 0 || fd >= USER_FD_MAX) { regs->eax = (uint32)-1; break; }
             if (fd <= 2) { regs->eax = 0; break; }
+            cap_revoke_object(&g_user_fds[fd], CAP_OBJ_USER_FD);
             g_user_fds[fd].used = 0;
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_MINT_FD: {
+            int fd = (int)arg1;
+            uint32 req_rights = (uint32)arg2;
+            void* user_cap_out = (void*)arg3;
+            if (!user_cap_out) { regs->eax = (uint32)-1; break; }
+
+            user_fd_t* ufd = user_fd_get(fd);
+            if (!ufd) { regs->eax = (uint32)-1; break; }
+
+            uint32 allowed = CAP_R_READ | CAP_R_CLOSE;
+            uint32 rights = req_rights ? (req_rights & allowed) : allowed;
+            if (rights == 0) { regs->eax = (uint32)-1; break; }
+
+            cap_t cap;
+            if (cap_mint(&cap, ufd, CAP_OBJ_USER_FD, rights) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            if (copyout(user_cap_out, &cap, sizeof(cap)) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CAP_FD_READ: {
+            const void* user_cap_ptr = (const void*)arg1;
+            char* user_buf = (char*)arg2;
+            int maxlen = (int)arg3;
+            if (maxlen < 0) { regs->eax = (uint32)-1; break; }
+            if (maxlen > SYSCALL_IO_MAX) maxlen = SYSCALL_IO_MAX;
+
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+
+            user_fd_t* ufd = user_fd_from_cap(&cap, CAP_R_READ, NULL);
+            if (!ufd) { regs->eax = (uint32)-1; break; }
+
+            int n = syscall_read_file(ufd, user_buf, maxlen);
+            regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
+            break;
+        }
+        case SYSCALL_CAP_FD_CLOSE: {
+            const void* user_cap_ptr = (const void*)arg1;
+            cap_t cap;
+            if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
+
+            int fd = -1;
+            user_fd_t* ufd = user_fd_from_cap(&cap, CAP_R_CLOSE, &fd);
+            if (!ufd || fd <= 2) { regs->eax = (uint32)-1; break; }
+            cap_revoke_object(ufd, CAP_OBJ_USER_FD);
+            ufd->used = 0;
             regs->eax = 0;
             break;
         }

@@ -24,7 +24,38 @@ enum {
     EYN_SYSCALL_NET_SENDTO   = 11,  // Send UDP via socket_id
     EYN_SYSCALL_NET_RECVFROM = 12,  // Receive UDP from socket_id
     EYN_SYSCALL_NET_CLOSE    = 13,  // Close socket_id
+
+    // Capability-based file descriptor operations
+    EYN_SYSCALL_CAP_MINT_FD = 25,
+    EYN_SYSCALL_CAP_FD_READ = 26,
+    EYN_SYSCALL_CAP_FD_CLOSE = 27,
 };
+
+enum {
+    EYN_CAP_OBJ_USER_FD = 1,
+    EYN_CAP_OBJ_USER_GUI = 2,
+    EYN_CAP_OBJ_THREAD = 3,
+    EYN_CAP_OBJ_IPC = 4,
+    EYN_CAP_OBJ_MEMORY = 5,
+};
+
+enum {
+    EYN_CAP_R_READ = 1u << 0,
+    EYN_CAP_R_WRITE = 1u << 1,
+    EYN_CAP_R_EXEC = 1u << 2,
+    EYN_CAP_R_SIGNAL = 1u << 3,
+    EYN_CAP_R_GRANT = 1u << 4,
+    EYN_CAP_R_CLOSE = 1u << 5,
+};
+
+typedef struct {
+    uint32_t obj;
+    uint32_t type;
+    uint32_t rights;
+    uint32_t epoch;
+    uint32_t tag_lo;
+    uint32_t tag_hi;
+} eyn_cap_t;
 
 static inline int eyn_sys_write(int fd, const void* buf, int len) {
     int ret;
@@ -142,6 +173,39 @@ static inline int eyn_sys_net_close(int socket_id) {
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_NET_CLOSE), "b"(socket_id)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_mint_fd(int fd, uint32_t rights, eyn_cap_t* out_cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_MINT_FD), "b"(fd), "c"(rights), "d"(out_cap)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_fd_read(const eyn_cap_t* cap, void* buf, int len) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_FD_READ), "b"(cap), "c"(buf), "d"(len)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_fd_close(const eyn_cap_t* cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_FD_CLOSE), "b"(cap)
         : "memory"
     );
     return ret;
