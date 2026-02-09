@@ -363,8 +363,8 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
         return -1;
     }
 
-    uint32 seg_base = map_start;
-    uint32 seg_limit = USER_STACK_TOP - map_start;
+    uint32 seg_base = 0;
+    uint32 seg_limit = USER_STACK_TOP;
     segdom_init(&g_user_segdom, seg_base, seg_limit);
     g_user_segdom_cs = g_user_segdom.user_cs;
     g_user_segdom_ds = g_user_segdom.user_ds;

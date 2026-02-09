@@ -21,10 +21,11 @@ static seg_desc_t segdesc_make(uint32 base, uint32 limit, uint8 access, uint8 gr
 }
 
 static void segdom_build_ldt(segdom_t* dom, uint32 base, uint32 limit_bytes) {
-    uint32 limit = limit_bytes;
+    if (limit_bytes == 0) limit_bytes = 1;
+    uint32 limit = limit_bytes - 1;
     uint8 gran = SEGDESC_GRAN_BYTE;
     if (limit_bytes > 0xFFFFFu) {
-        limit = (limit_bytes >> 12);
+        limit = (limit_bytes - 1) >> 12;
         gran = SEGDESC_GRAN_4K;
     }
 

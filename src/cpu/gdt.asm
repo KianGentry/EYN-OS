@@ -66,12 +66,15 @@ enter_user_mode_segdom:
     mov bx, [esp + 12]    ; user_cs (16-bit)
     mov cx, [esp + 16]    ; user_ds (16-bit)
 
+    movzx ebx, bx
+    movzx ecx, cx
+
     mov ds, cx
     mov es, cx
     mov fs, cx
     mov gs, cx
 
-    push dword cx         ; SS
+    push ecx              ; SS
     push edx              ; ESP
 
     pushfd
@@ -79,7 +82,7 @@ enter_user_mode_segdom:
     or ecx, 0x200         ; IF=1
     push ecx              ; EFLAGS
 
-    push dword bx         ; CS
+    push ebx              ; CS
     push eax              ; EIP
 
     iretd
