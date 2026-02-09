@@ -8,6 +8,7 @@
 #include <kb.h>
 #include <drivers/flat_exe_format.h>
 #include <sched.h>
+#include <context.h>
 
 // Minimal ELF32 structures for parsing 32-bit little-endian ELF files
 typedef struct {
@@ -71,6 +72,17 @@ static int native_verbose = 0;
 // EYNFS constants
 #define EYNFS_SUPERBLOCK_LBA 2048
 
+static int native_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
 // Minimal Linux i386 user stack initializer: argc=1, argv[0]=filename, envp={"TERM=eyn"}, auxv terminator
 static void prepare_linux_user_stack(native_process_t* p, const char* filename) {
     if (!p || !p->stack_start || !p->stack_size) return;
@@ -132,6 +144,8 @@ void native_exec_init(void) {
 // Load a program from EYNFS
 exec_result_t native_load_program(const char* filename, native_process_t* process) {
     // Loading program
+
+    if (!native_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return EXEC_ERROR_INVALID_FORMAT;
     
     // Read EYNFS superblock
     eynfs_superblock_t sb;
@@ -151,6 +165,7 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
     
     // Read file
     uint32_t size = entry.size;
+    if (!native_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return EXEC_ERROR_MEMORY_ALLOC;
     char* buf = (char*)malloc(size);
     if (!buf) {
         // Out of memory

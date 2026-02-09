@@ -5,9 +5,22 @@
 #include <vga.h>
 #include <kb.h>
 #include <network/netstack.h>
+#include <context.h>
+#include <sched.h>
 
 // Very small per-process FD table for now
 #define LINUX_MAX_FD 32
+
+static int linux_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 typedef struct {
     int in_use;
@@ -19,6 +32,7 @@ typedef struct {
 
 static linux_fd* get_fd_table(native_process_t* p) {
     if (!p->linux_fd_table) {
+        if (!linux_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
         p->linux_fd_table = (void*)malloc(sizeof(linux_fd) * LINUX_MAX_FD);
         if (p->linux_fd_table) memset(p->linux_fd_table, 0, sizeof(linux_fd) * LINUX_MAX_FD);
     }
@@ -32,6 +46,7 @@ static int fd_alloc(linux_fd* tbl) {
 
 static int sys_write(native_process_t* proc, uint32 fd, const void* buf, uint32 count) {
     if (fd == 1 || fd == 2) {
+        if (!linux_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return -1;
         // stdout/stderr -> console
         // Print as a string (truncate non-printables and stop at count)
         char out[256];
@@ -64,6 +79,7 @@ static int sys_read(native_process_t* proc, uint32 fd, void* buf, uint32 count) 
     }
     linux_fd* tbl = get_fd_table(proc);
     if (!tbl || fd >= LINUX_MAX_FD || !tbl[fd].in_use) return -1;
+    if (!linux_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     // Map to VFS read by path (inefficient but simple)
     uint32 sz = 0;
     if (vfs_get_file_size(0, tbl[fd].path, &sz) != 0) return -1;
@@ -71,6 +87,7 @@ static int sys_read(native_process_t* proc, uint32 fd, void* buf, uint32 count) 
     uint32 remain = sz - tbl[fd].pos;
     if (count > remain) count = remain;
     // Read slice: VFS currently reads full file; use tmp then copy
+    if (!linux_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     void* tmp = malloc(sz);
     if (!tmp) return -1;
     int got = vfs_read_file(0, tbl[fd].path, tmp, sz);
@@ -83,6 +100,7 @@ static int sys_read(native_process_t* proc, uint32 fd, void* buf, uint32 count) 
 
 static int sys_open(native_process_t* proc, const char* path, int flags, int mode) {
     (void)mode;
+    if (!linux_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     linux_fd* tbl = get_fd_table(proc);
     if (!tbl) return -1;
     int fd = fd_alloc(tbl);
@@ -105,6 +123,7 @@ static int sys_close(native_process_t* proc, uint32 fd) {
 static int sys_fstat(native_process_t* proc, uint32 fd, void* statbuf) {
     (void)proc;
     if (!statbuf) return -1;
+    if (!linux_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     // Try to populate a Linux-ish i386 struct stat with minimal fields
     // struct stat (i386) layout varies; we fill st_mode, st_size, st_blksize, st_blocks, and set a few zeros.
     // We assume callers only check S_IFCHR for fds 1/2 or size>0 for files.
@@ -141,6 +160,7 @@ static int sys_fstat(native_process_t* proc, uint32 fd, void* statbuf) {
 static int sys_lseek(native_process_t* proc, uint32 fd, int32 offset, int whence) {
     linux_fd* tbl = get_fd_table(proc);
     if (!tbl || fd >= LINUX_MAX_FD || !tbl[fd].in_use) return -1;
+    if (!linux_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
     uint32 base = 0;
     uint32 sz = 0;
     if (vfs_get_file_size(0, tbl[fd].path, &sz) != 0) sz = tbl[fd].size;
