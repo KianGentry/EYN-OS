@@ -7,12 +7,17 @@
 #include <fs/vfs.h>
 #include <mm/vmm.h>
 #include <cpu/gdt.h>
+#include <cpu/segdom.h>
 #include <tile_manager.h>
 #include <terminals.h>
 #include <isr.h>
 
 // Defined in src/boot/kernel.asm; this is the top of the kernel stack.
 extern uint32 stack_space;
+
+volatile uint16 g_user_segdom_cs = GDT_USER_CS;
+volatile uint16 g_user_segdom_ds = GDT_USER_DS;
+static segdom_t g_user_segdom;
 
 // Minimal ELF32 structures for parsing 32-bit little-endian ELF files
 typedef struct {
@@ -358,10 +363,17 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
         return -1;
     }
 
+    uint32 seg_base = map_start;
+    uint32 seg_limit = USER_STACK_TOP - map_start;
+    segdom_init(&g_user_segdom, seg_base, seg_limit);
+    g_user_segdom_cs = g_user_segdom.user_cs;
+    g_user_segdom_ds = g_user_segdom.user_ds;
+    segdom_load(&g_user_segdom);
+
     // Enter ring3 at ELF entry.
     printf("%c[elfrun] entering user mode: %s (entry=0x%X)\n", 0, 255, 0, abspath, (unsigned)entry);
     tss_set_kernel_stack((uint32)&stack_space);
-    enter_user_mode(entry, user_esp);
+    enter_user_mode_segdom(entry, user_esp, g_user_segdom_cs, g_user_segdom_ds);
 
     return 0;
 }

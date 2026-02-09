@@ -47,6 +47,10 @@ enum {
     EYN_SYSCALL_CAP_GUI_BLIT_RGB565 = 41,
     EYN_SYSCALL_CAP_GUI_CLOSE = 42,
 
+    // Capability-based GUI create/attach (returns caps directly)
+    EYN_SYSCALL_CAP_GUI_CREATE = 45,
+    EYN_SYSCALL_CAP_GUI_ATTACH = 46,
+
     // Capability-based file descriptor write/seek operations
     EYN_SYSCALL_CAP_FD_WRITE = 43,
     EYN_SYSCALL_CAP_FD_SEEK = 44,
@@ -266,6 +270,28 @@ static inline int eyn_sys_cap_mint_gui(int handle, uint32_t rights, eyn_cap_t* o
     return ret;
 }
 
+static inline int eyn_sys_cap_gui_create(const char* title, const char* status_left, eyn_cap_t* out_cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_CREATE), "b"(title), "c"(status_left), "d"(out_cap)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_cap_gui_attach(const char* title, const char* status_left, eyn_cap_t* out_cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_CAP_GUI_ATTACH), "b"(title), "c"(status_left), "d"(out_cap)
+        : "memory"
+    );
+    return ret;
+}
+
 static inline int eyn_sys_cap_gui_begin(const eyn_cap_t* cap) {
     int ret;
     __asm__ __volatile__(
@@ -418,6 +444,18 @@ static inline int eyn_sys_cap_gui_close(const eyn_cap_t* cap) {
         : "memory"
     );
     return ret;
+}
+
+static inline void eyn_user_read_segments(uint16_t* out_cs, uint16_t* out_ds) {
+    uint16_t cs = 0;
+    uint16_t ds = 0;
+    __asm__ __volatile__(
+        "mov %%cs, %0\n\t"
+        "mov %%ds, %1\n\t"
+        : "=r"(cs), "=r"(ds)
+    );
+    if (out_cs) *out_cs = cs;
+    if (out_ds) *out_ds = ds;
 }
 
 static inline int eyn_sys_cap_mint_fd(int fd, uint32_t rights, eyn_cap_t* out_cap) {

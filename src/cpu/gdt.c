@@ -47,7 +47,7 @@ typedef struct {
     uint16 iomap_base;
 } __attribute__((packed)) tss_entry_t;
 
-static gdt_entry_t gdt_entries[6];
+static gdt_entry_t gdt_entries[7];
 static gdt_ptr_t gdt_ptr;
 static tss_entry_t g_tss;
 
@@ -95,7 +95,7 @@ void tss_set_kernel_stack(uint32 esp0) {
 }
 
 void gdt_init(void) {
-    gdt_ptr.limit = (uint16)(sizeof(gdt_entry_t) * 6 - 1);
+    gdt_ptr.limit = (uint16)(sizeof(gdt_entry_t) * 7 - 1);
     gdt_ptr.base = (uint32)&gdt_entries;
 
     /* 0: null */
@@ -114,6 +114,14 @@ void gdt_init(void) {
     asm volatile("mov %%esp, %0" : "=r"(esp));
     write_tss(5, GDT_KERNEL_DS, esp);
 
+    /* 6: LDT (initialized empty; updated by gdt_set_ldt_descriptor) */
+    gdt_set_gate(6, 0, 0, 0, 0);
+
     gdt_flush((uint32)&gdt_ptr);
     tss_flush(GDT_TSS_SEL);
+}
+
+void gdt_set_ldt_descriptor(uint32 base, uint32 limit) {
+    /* 0x82 = present, DPL=0, system, type=2 (LDT) */
+    gdt_set_gate(6, base, limit, 0x82, 0x00);
 }

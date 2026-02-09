@@ -8,6 +8,8 @@
 #include <shell.h>
 #include <mm/vmm.h>
 #include <isr.h>
+#include <cpu/segdom.h>
+#include <cpu/gdt.h>
 
 volatile int g_user_interrupt = 0;
 volatile int g_user_task_active = 0;
@@ -54,6 +56,9 @@ void user_task_cleanup_mappings(void) {
     g_user_code_base = 0;
     g_user_code_pages = 0;
     g_user_stack_page = 0;
+
+    g_user_segdom_cs = GDT_USER_CS;
+    g_user_segdom_ds = GDT_USER_DS;
 
     // Reset stack metadata for the kernel address space.
     vmm_kernel_as.stack_bottom = USER_STACK_TOP - PAGE_SIZE;

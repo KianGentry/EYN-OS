@@ -6,6 +6,7 @@ global syscall_entry
 extern syscall_dispatch
 extern g_abort_to_shell
 extern g_user_task_active
+extern g_user_segdom_ds
 extern stack_space
 extern stack_bottom
 extern ui_return_from_user_task
@@ -78,7 +79,11 @@ syscall_entry:
     mov ax, [esp + 8]
     test ax, 3
     jz .ret_kernel
+    mov ax, [g_user_segdom_ds]
+    test ax, ax
+    jnz .ret_user_seg
     mov ax, 0x23
+.ret_user_seg:
     mov ds, ax
     mov es, ax
     mov fs, ax

@@ -67,6 +67,10 @@ enum {
     EYN_SYSCALL_CAP_GUI_BLIT_RGB565 = 41,
     EYN_SYSCALL_CAP_GUI_CLOSE = 42,
 
+    // Capability-based GUI create/attach (returns caps directly)
+    EYN_SYSCALL_CAP_GUI_CREATE = 45,
+    EYN_SYSCALL_CAP_GUI_ATTACH = 46,
+
     // Capability-based file descriptor write/seek operations
     EYN_SYSCALL_CAP_FD_WRITE = 43,
     EYN_SYSCALL_CAP_FD_SEEK = 44,
@@ -170,6 +174,14 @@ static inline int eyn_sys_cap_mint_gui(int handle, uint32_t rights, eyn_cap_t* o
     return eyn_syscall3_iip(EYN_SYSCALL_CAP_MINT_GUI, handle, (int)rights, out_cap);
 }
 
+static inline int eyn_sys_cap_gui_create(const char* title, const char* status_left, eyn_cap_t* out_cap) {
+    return eyn_syscall3_ppi(EYN_SYSCALL_CAP_GUI_CREATE, title, status_left, (int)(uintptr_t)out_cap);
+}
+
+static inline int eyn_sys_cap_gui_attach(const char* title, const char* status_left, eyn_cap_t* out_cap) {
+    return eyn_syscall3_ppi(EYN_SYSCALL_CAP_GUI_ATTACH, title, status_left, (int)(uintptr_t)out_cap);
+}
+
 static inline int eyn_sys_cap_gui_begin(const eyn_cap_t* cap) {
     return eyn_syscall1(EYN_SYSCALL_CAP_GUI_BEGIN, (int)(uintptr_t)cap);
 }
@@ -224,6 +236,18 @@ static inline int eyn_sys_cap_gui_wait_event(const eyn_cap_t* cap, void* out_eve
 
 static inline int eyn_sys_cap_gui_close(const eyn_cap_t* cap) {
     return eyn_syscall1(EYN_SYSCALL_CAP_GUI_CLOSE, (int)(uintptr_t)cap);
+}
+
+static inline void eyn_user_read_segments(uint16_t* out_cs, uint16_t* out_ds) {
+    uint16_t cs = 0;
+    uint16_t ds = 0;
+    __asm__ __volatile__(
+        "mov %%cs, %0\n\t"
+        "mov %%ds, %1\n\t"
+        : "=r"(cs), "=r"(ds)
+    );
+    if (out_cs) *out_cs = cs;
+    if (out_ds) *out_ds = ds;
 }
 
 static inline int eyn_syscall1(int n, int a1) {

@@ -316,6 +316,10 @@ uint32 get_last_error_eip() {
 #define SYSCALL_CAP_FD_WRITE 43
 #define SYSCALL_CAP_FD_SEEK 44
 
+// Capability-based GUI creation/attach (returns caps directly)
+#define SYSCALL_CAP_GUI_CREATE 45
+#define SYSCALL_CAP_GUI_ATTACH 46
+
 typedef struct {
     uint32 type;
     int32 a;
@@ -910,6 +914,10 @@ static void syscall_maybe_render_ui(void) {
 #define SYSCALL_WRITEFILE_DEBUG 0
 #endif
 
+#ifndef GUI_HANDLE_SYSCALLS_DISABLED
+#define GUI_HANDLE_SYSCALLS_DISABLED 1
+#endif
+
 static int syscall_read_file(user_fd_t* ufd, char* user_dst, int maxlen) {
     if (!ufd || !user_dst || maxlen <= 0) return 0;
     if (ufd->is_dir) return -1;
@@ -1448,6 +1456,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_CREATE: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_create(title_ptr=arg1, status_left_ptr=arg2)
             if (!tile_is_tiling_active() || !g_user_task_active) { regs->eax = (uint32)-1; break; }
 
@@ -1500,6 +1509,69 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = (uint32)handle;
             break;
         }
+        case SYSCALL_CAP_GUI_CREATE: {
+            const char* user_title = (const char*)arg1;
+            const char* user_status = (const char*)arg2;
+            void* user_cap_out = (void*)arg3;
+            if (!user_title || !user_cap_out) { regs->eax = (uint32)-1; break; }
+            if (!tile_is_tiling_active() || !g_user_task_active) { regs->eax = (uint32)-1; break; }
+
+            char title_tmp[96];
+            if (copyin_cstr(title_tmp, sizeof(title_tmp), user_title) != 0) { regs->eax = (uint32)-1; break; }
+            trim_trailing_crlf(title_tmp);
+            if (!title_tmp[0]) strncpy(title_tmp, "User App", sizeof(title_tmp) - 1);
+            title_tmp[sizeof(title_tmp) - 1] = '\0';
+
+            char status_tmp[64];
+            status_tmp[0] = '\0';
+            if (user_status) {
+                if (copyin_cstr(status_tmp, sizeof(status_tmp), user_status) != 0) {
+                    status_tmp[0] = '\0';
+                }
+                trim_trailing_crlf(status_tmp);
+            }
+
+            int handle = user_gui_alloc_handle();
+            if (handle < 0) { regs->eax = (uint32)-1; break; }
+
+            user_gui_t* e = &g_user_guis[handle];
+            e->title = kstrdup_bounded(title_tmp, sizeof(title_tmp) - 1);
+            e->status_left = status_tmp[0] ? kstrdup_bounded(status_tmp, sizeof(status_tmp) - 1) : NULL;
+            e->font_handle = vga_system_font_acquire();
+            if (!e->title) {
+                user_gui_free_entry(e);
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            int tile_idx = tile_create_gui_tile(e->title, e->status_left);
+            if (tile_idx < 0) {
+                user_gui_free_entry(e);
+                regs->eax = (uint32)-1;
+                break;
+            }
+            e->tile_idx = tile_idx;
+            e->cmd_count = 0;
+            e->ev_head = 0;
+            e->ev_tail = 0;
+            tile_register_gui_client2(tile_idx, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)handle);
+            tile_invalidate_decorations(tile_idx);
+            tile_invalidate_gui(tile_idx);
+
+            uint32 rights = CAP_R_READ | CAP_R_WRITE | CAP_R_CLOSE;
+            cap_t cap;
+            if (cap_mint(&cap, e, CAP_OBJ_USER_GUI, rights) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            if (copyout(user_cap_out, &cap, sizeof(cap)) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            regs->eax = 0;
+            break;
+        }
         case SYSCALL_CAP_MINT_GUI: {
             int handle = (int)arg1;
             uint32 req_rights = (uint32)arg2;
@@ -1526,6 +1598,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_SET_TITLE: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_set_title(handle=arg1, title_ptr=arg2)
             if (!tile_is_tiling_active() || !g_user_task_active) { regs->eax = (uint32)-1; break; }
             int handle = (int)arg1;
@@ -1564,6 +1637,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_ATTACH: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_attach(title_ptr=arg1, status_left_ptr=arg2)
             // Binds a GUI client to the tile backing the current ring3 task.
             if (!tile_is_tiling_active() || !g_user_task_active) { regs->eax = (uint32)-1; break; }
@@ -1628,7 +1702,81 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = 0;
             break;
         }
+        case SYSCALL_CAP_GUI_ATTACH: {
+            const char* user_title = (const char*)arg1;
+            const char* user_status = (const char*)arg2;
+            void* user_cap_out = (void*)arg3;
+            if (!user_title || !user_cap_out) { regs->eax = (uint32)-1; break; }
+            if (!tile_is_tiling_active() || !g_user_task_active) { regs->eax = (uint32)-1; break; }
+
+            int tile_idx = -1;
+            if (g_user_task_term >= 0) tile_idx = tile_find_by_term(g_user_task_term);
+            if (tile_idx < 0) { regs->eax = (uint32)-1; break; }
+
+            char title_tmp[96];
+            if (copyin_cstr(title_tmp, sizeof(title_tmp), user_title) != 0) { regs->eax = (uint32)-1; break; }
+            trim_trailing_crlf(title_tmp);
+            if (!title_tmp[0]) strncpy(title_tmp, "User App", sizeof(title_tmp) - 1);
+            title_tmp[sizeof(title_tmp) - 1] = '\0';
+
+            char status_tmp[64];
+            status_tmp[0] = '\0';
+            if (user_status) {
+                if (copyin_cstr(status_tmp, sizeof(status_tmp), user_status) != 0) status_tmp[0] = '\0';
+                trim_trailing_crlf(status_tmp);
+            }
+
+            user_gui_t* e = &g_user_guis[0];
+            if (e->used) {
+                if (e->title) free(e->title);
+                if (e->status_left) free(e->status_left);
+                e->title = NULL;
+                e->status_left = NULL;
+                if (e->font_handle > 0) {
+                    vga_font_release(e->font_handle);
+                    e->font_handle = 0;
+                }
+                if (e->blit_buf) {
+                    free(e->blit_buf);
+                    e->blit_buf = NULL;
+                }
+                e->blit_w = 0;
+                e->blit_h = 0;
+                e->blit_dst_w = 0;
+                e->blit_dst_h = 0;
+            }
+
+            e->used = 1;
+            e->tile_idx = tile_idx;
+            e->title = kstrdup_bounded(title_tmp, sizeof(title_tmp) - 1);
+            e->status_left = status_tmp[0] ? kstrdup_bounded(status_tmp, sizeof(status_tmp) - 1) : NULL;
+            e->font_handle = vga_system_font_acquire();
+            if (!e->title) { regs->eax = (uint32)-1; break; }
+            e->cmd_count = 0;
+            e->ev_head = 0;
+            e->ev_tail = 0;
+
+            tile_set_title_status(tile_idx, e->title, e->status_left, NULL);
+            tile_register_gui_client2(tile_idx, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)0);
+            tile_invalidate_decorations(tile_idx);
+            tile_invalidate_gui(tile_idx);
+
+            uint32 rights = CAP_R_READ | CAP_R_WRITE | CAP_R_CLOSE;
+            cap_t cap;
+            if (cap_mint(&cap, e, CAP_OBJ_USER_GUI, rights) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            if (copyout(user_cap_out, &cap, sizeof(cap)) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            regs->eax = 0;
+            break;
+        }
         case SYSCALL_GUI_BEGIN: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_begin(handle)
             int handle = (int)arg1;
             user_gui_t* e = user_gui_get(handle);
@@ -1638,6 +1786,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_CLEAR: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_clear(handle, rgb_ptr)
             int handle = (int)arg1;
             const void* user_rgb = (const void*)arg2;
@@ -1657,6 +1806,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_FILL_RECT: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_fill_rect(handle, rect_ptr)
             int handle = (int)arg1;
             const void* user_rect = (const void*)arg2;
@@ -1680,6 +1830,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_DRAW_TEXT: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_draw_text(handle, textcmd_ptr)
             int handle = (int)arg1;
             const void* user_cmd = (const void*)arg2;
@@ -1706,6 +1857,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
 
         case SYSCALL_GUI_DRAW_LINE: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_draw_line(handle, line_ptr)
             int handle = (int)arg1;
             const void* user_cmd = (const void*)arg2;
@@ -1729,6 +1881,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_PRESENT: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_present(handle)
             int handle = (int)arg1;
             user_gui_t* e = user_gui_get(handle);
@@ -1742,6 +1895,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
 
         case SYSCALL_GUI_GET_CONTENT_SIZE: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_get_content_size(handle, out_size_ptr)
             int handle = (int)arg1;
             void* user_out = (void*)arg2;
@@ -1759,6 +1913,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_SET_FONT: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_set_font(handle, path_ptr). If path is NULL or empty, resets to the system default font.
             int handle = (int)arg1;
             const char* user_path = (const char*)arg2;
@@ -1791,6 +1946,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_SET_CONTINUOUS_REDRAW: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_set_continuous_redraw(handle, enabled)
             int handle = (int)arg1;
             int enabled = (int)arg2;
@@ -1801,6 +1957,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GUI_BLIT_RGB565: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_blit_rgb565(handle, blit_ptr)
             int handle = (int)arg1;
             const void* user_cmd = (const void*)arg2;
@@ -1842,6 +1999,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
         case SYSCALL_GUI_POLL_EVENT:
         case SYSCALL_GUI_WAIT_EVENT: {
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_poll_event(handle, out_event_ptr, out_size)
             // gui_wait_event(handle, out_event_ptr, out_size)
             int handle = (int)arg1;

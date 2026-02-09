@@ -5,6 +5,7 @@ BITS 32
 global gdt_flush
 global tss_flush
 global enter_user_mode
+global enter_user_mode_segdom
 
 section .text
 
@@ -53,6 +54,32 @@ enter_user_mode:
     push ecx              ; EFLAGS
 
     push dword 0x1B       ; CS
+    push eax              ; EIP
+
+    iretd
+
+; void enter_user_mode_segdom(uint32 entry, uint32 user_stack_top, uint16 user_cs, uint16 user_ds)
+; Sets user segments from parameters and irets to CPL=3.
+enter_user_mode_segdom:
+    mov eax, [esp + 4]    ; entry
+    mov edx, [esp + 8]    ; user_stack_top
+    mov bx, [esp + 12]    ; user_cs (16-bit)
+    mov cx, [esp + 16]    ; user_ds (16-bit)
+
+    mov ds, cx
+    mov es, cx
+    mov fs, cx
+    mov gs, cx
+
+    push dword cx         ; SS
+    push edx              ; ESP
+
+    pushfd
+    pop ecx
+    or ecx, 0x200         ; IF=1
+    push ecx              ; EFLAGS
+
+    push dword bx         ; CS
     push eax              ; EIP
 
     iretd
