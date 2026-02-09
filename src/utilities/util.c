@@ -10,6 +10,8 @@
 #include <isr.h>
 #include <cpu/segdom.h>
 #include <cpu/gdt.h>
+#include <context.h>
+#include <sched.h>
 
 volatile int g_user_interrupt = 0;
 volatile int g_user_task_active = 0;
@@ -607,6 +609,15 @@ static void merge_free_blocks() {
 }
 
 void* malloc(size_t nbytes) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, CAP_ALLOC_MEMORY)) {
+        return NULL;
+    }
+    if (ctx) {
+        scheduler_account(ctx->wo, SCHED_COST_ALLOC);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
     // Lazy initialization
     ensure_memory_initialized();
     
@@ -699,6 +710,15 @@ void free(void* ptr) {
 }
 
 void* realloc(void* ptr, size_t new_size) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, CAP_ALLOC_MEMORY)) {
+        return NULL;
+    }
+    if (ctx) {
+        scheduler_account(ctx->wo, SCHED_COST_ALLOC);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
     if (!ptr) return malloc(new_size);
     if (new_size <= 0) {
         free(ptr);

@@ -8,6 +8,9 @@
 #include <drivers/serial.h>
 #include <ata.h>
 #include <watchdog.h>
+#include <context.h>
+#include <sched.h>
+#include <fs/fs_txn.h>
 
 #define EYNFS_BLOCK_SIZE 512 // For now, fixed block size
 #define EYNFS_SUPERBLOCK_LBA 2048 // Standard superblock location
@@ -48,6 +51,17 @@ typedef struct {
 
 #define EYNFS_DIR_CACHE_SIZE 8
 static eynfs_dir_cache_entry_t dir_cache[EYNFS_DIR_CACHE_SIZE];
+
+static int eynfs_ctx_check(uint32 cap, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, cap)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // Initialize caches
 static void eynfs_init_caches() {
@@ -310,6 +324,10 @@ static int eynfs_alloc_block_optimized(uint8 drive, eynfs_superblock_t *sb) {
 
 // Read the EYNFS superblock from disk
 int eynfs_read_superblock(uint8 drive, uint32 lba, eynfs_superblock_t *sb) {
+    if (!eynfs_ctx_check(CAP_READ_FS, SCHED_COST_FS)) return -1;
+    if (current_command_context) {
+        fs_txn_touch(drive, FS_TXN_TAG_SUPERBLOCK, (uint32)sizeof(*sb));
+    }
     uint8 buf[EYNFS_BLOCK_SIZE];
     if (ata_read_sector(drive, lba, buf) != 0) {
         return -1;
@@ -562,7 +580,11 @@ int eynfs_free_block(uint8 drive, eynfs_superblock_t *sb, uint32_t block) {
 // Find an entry by name in a directory block
 // Returns 0 if found, -1 if not found
 int eynfs_find_in_dir(uint8 drive, const eynfs_superblock_t *sb, uint32_t dir_block, const char *name, eynfs_dir_entry_t *out_entry, uint32_t *out_index) {
+    if (!eynfs_ctx_check(CAP_READ_FS, SCHED_COST_FS)) return -1;
     if (!sb || !name || !name[0]) return -1;
+    if (current_command_context) {
+        fs_txn_touch(drive, FS_TXN_TAG_DIR, (uint32)sizeof(eynfs_dir_entry_t));
+    }
 
     // Check directory cache first (best-effort). The cache may be partial (4KB),
     // so a cache miss must fall back to a full on-disk scan.
@@ -588,6 +610,10 @@ int eynfs_find_in_dir(uint8 drive, const eynfs_superblock_t *sb, uint32_t dir_bl
     const int max_blocks = 4096; // safety bound
 
     while (current_block && block_count < max_blocks) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+        }
         uint8 buf[EYNFS_BLOCK_SIZE];
         if (eynfs_cache_get_block(drive, current_block, buf) != 0) return -1;
 
@@ -833,8 +859,12 @@ int eynfs_delete_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
 // Read up to bufsize bytes from a file's data block chain, starting at offset
 // Returns number of bytes read, or -1 on error
 int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_entry_t *entry, void *buf, size_t bufsize, size_t offset) {
+    if (!eynfs_ctx_check(CAP_READ_FS, SCHED_COST_FS)) return -1;
     if (!entry || entry->type != EYNFS_TYPE_FILE) return -1;
     if (offset >= entry->size) return 0;
+    if (current_command_context) {
+        fs_txn_touch(drive, FS_TXN_TAG_FILE, (uint32)bufsize);
+    }
     uint32_t block_num = entry->first_block;
     size_t bytes_left = entry->size - offset;
     if (bufsize < bytes_left) bytes_left = bufsize;
@@ -844,6 +874,10 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
     // Skip blocks and bytes up to offset
     uint32_t kick_ctr = 0;
     while (block_num && skip >= (EYNFS_BLOCK_SIZE-4)) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+        }
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
         uint32_t next_block = *(uint32_t*)block;
@@ -852,6 +886,10 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
     }
     // Now at the block containing the offset
     if (block_num && bytes_left > 0) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+        }
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
         uint32_t next_block = *(uint32_t*)block;
@@ -865,6 +903,10 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
     }
     // Read remaining blocks
     while (block_num && bytes_left > 0) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+        }
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
         uint32_t next_block = *(uint32_t*)block;

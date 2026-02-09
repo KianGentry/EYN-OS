@@ -11,6 +11,8 @@
 #include <serial.h>
 #include <watchdog.h>
 #include <fs/vfs.h>
+#include <context.h>
+#include <sched.h>
 
 extern multiboot_info_t *g_mbi;
 
@@ -1051,6 +1053,16 @@ static int vga_format_to_buffer(char* out, int out_cap, const char* fmt, va_list
 
 void printf(const char* format, ...) 
 {
+	command_context_t* ctx = current_command_context;
+	if (ctx && !cap_check(ctx->caps, CAP_WRITE_CONSOLE)) {
+		return;
+	}
+	if (ctx) {
+		scheduler_account(ctx->wo, SCHED_COST_CONSOLE);
+		scheduler_yield_if_needed(ctx->wo);
+		if (sched_det_is_enabled()) ctx->det_seq++;
+	}
+
 	va_list ap;
 	va_start(ap, format);
 

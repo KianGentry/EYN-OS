@@ -17,6 +17,7 @@
 #include <cpu/user_elf.h>
 #include <vga.h>
 #include <fat32.h>
+#include <context.h>
 #define COMMAND_HASH_SIZE 256
 typedef struct {
     const char* name;                 // command name key
@@ -523,6 +524,13 @@ void handler_assemble(string arg) {
 
 // Enhanced command handling with unified registration
 void handle_shell_command(string input) {
+    command_context_t ctx;
+    command_context_t* prev_ctx = command_context_get();
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.caps = CAP_ALL;
+    ctx.drive = g_current_drive;
+    command_context_set(&ctx);
+
     // Expand aliases (up to a small depth to avoid loops), then dispatch.
     const char* current = input;
     char expanded_a[256];
@@ -541,14 +549,14 @@ void handle_shell_command(string input) {
 
         // If empty input (just Enter), do nothing
         if (cmd[0] == '\0') {
-            return;
+            goto cleanup;
         }
 
         // Find and execute built-in commands
         shell_cmd_handler_t handler = find_command(cmd);
         if (handler) {
             safe_command_execution((string)current, handler);
-            return;
+            goto cleanup;
         }
 
         // If not a built-in command, try alias expansion
@@ -560,7 +568,7 @@ void handle_shell_command(string input) {
         }
         if (rc < 0) {
             printf("%cError: alias expansion failed\n", 255, 0, 0);
-            return;
+            goto cleanup;
         }
 
         // No alias; stop expanding
@@ -569,7 +577,7 @@ void handle_shell_command(string input) {
 
     // If not a built-in command or alias, try auto-running a matching .uelf.
     if (try_run_unknown_as_uelf((string)current))
-        return;
+        goto cleanup;
 
     // Command not found
     char cmd2[256];
@@ -580,6 +588,8 @@ void handle_shell_command(string input) {
     }
     cmd2[k] = '\0';
     printf("%cCommand not found: %s\n", 255, 0, 0, cmd2);
+cleanup:
+    command_context_set(prev_ctx);
 }
 
 // Command safety status functions

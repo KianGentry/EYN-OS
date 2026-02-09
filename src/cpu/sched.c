@@ -324,6 +324,22 @@ int sched_det_step(uint32 max_events) {
     return (int)processed;
 }
 
+void scheduler_account(sched_work_t* w, uint32 cost) {
+    if (!w || cost == 0) return;
+    if (w->budget_left > cost) {
+        w->budget_left -= cost;
+    } else {
+        w->budget_left = 0;
+    }
+}
+
+void scheduler_yield_if_needed(sched_work_t* w) {
+    if (!w) return;
+    if (w->budget_ticks != 0 && w->budget_left == 0) {
+        sched_yield();
+    }
+}
+
 uint32 sched_get_tick_count(void) { return g_ticks; }
 uint32 sched_get_tick_hz(void) { return g_tick_hz ? g_tick_hz : 100; }
 uint32 sched_get_idle_hlt_count(void) { return g_idle_hlt_count; }

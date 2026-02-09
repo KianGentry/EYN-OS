@@ -67,6 +67,14 @@ uint32 sched_get_tick_hz(void);
 // Count of idle halts performed inside sched_sleep_us (used to estimate idle time)
 uint32 sched_get_idle_hlt_count(void);
 
+// Scheduler accounting helpers
+#define SCHED_COST_CONSOLE 1u
+#define SCHED_COST_FS      1u
+#define SCHED_COST_ALLOC   1u
+
+void scheduler_account(sched_work_t* w, uint32 cost);
+void scheduler_yield_if_needed(sched_work_t* w);
+
 #endif // SCHED_H
 
 

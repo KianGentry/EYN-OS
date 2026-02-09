@@ -2,6 +2,8 @@
 #include <system.h>
 #include <vga.h>
 #include <string.h>
+#include <context.h>
+#include <sched.h>
 
 // Global serial ports
 serial_port_t g_serial_ports[4] = {
@@ -10,6 +12,17 @@ serial_port_t g_serial_ports[4] = {
     {SERIAL_COM3, 9600, 8, 1, 0, 0, 0},
     {SERIAL_COM4, 9600, 8, 1, 0, 0, 0}
 };
+
+static int serial_ctx_allow(void) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, CAP_DEV_SERIAL)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, SCHED_COST_CONSOLE);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // Get serial port index from base address
 static int get_port_index(uint16 base_port) {
@@ -46,6 +59,7 @@ static int serial_wait_for_data(uint16 port) {
 
 // Initialize serial port
 int serial_init(uint16 port, uint32 baud_rate) {
+    if (!serial_ctx_allow()) return -1;
     int port_index = get_port_index(port);
     if (port_index == -1) return -1;
     
@@ -95,6 +109,7 @@ int serial_init(uint16 port, uint32 baud_rate) {
 
 // Cleanup serial port
 void serial_cleanup(uint16 port) {
+    if (!serial_ctx_allow()) return;
     int port_index = get_port_index(port);
     if (port_index == -1) return;
     
@@ -112,6 +127,7 @@ void serial_cleanup(uint16 port) {
 
 // Write data to serial port
 int serial_write(uint16 port, const char* data, int length) {
+    if (!serial_ctx_allow()) return -1;
     if (!data || length <= 0) return -1;
     
     int port_index = get_port_index(port);
@@ -131,6 +147,7 @@ int serial_write(uint16 port, const char* data, int length) {
 
 // Read data from serial port
 int serial_read(uint16 port, char* buffer, int max_length) {
+    if (!serial_ctx_allow()) return -1;
     if (!buffer || max_length <= 0) return -1;
     
     int port_index = get_port_index(port);
@@ -152,6 +169,7 @@ int serial_read(uint16 port, char* buffer, int max_length) {
 
 // Write single character to serial port
 int serial_write_char(uint16 port, char c) {
+    if (!serial_ctx_allow()) return -1;
     int port_index = get_port_index(port);
     if (port_index == -1 || !g_serial_ports[port_index].initialized) return -1;
     
@@ -166,6 +184,7 @@ int serial_write_char(uint16 port, char c) {
 
 // Read single character from serial port
 int serial_read_char(uint16 port, char* c) {
+    if (!serial_ctx_allow()) return -1;
     if (!c) return -1;
     
     int port_index = get_port_index(port);
@@ -184,6 +203,7 @@ int serial_read_char(uint16 port, char* c) {
 
 // Check if data is ready to be read
 int serial_is_data_ready(uint16 port) {
+    if (!serial_ctx_allow()) return 0;
     int port_index = get_port_index(port);
     if (port_index == -1 || !g_serial_ports[port_index].initialized) return 0;
     
@@ -192,6 +212,7 @@ int serial_is_data_ready(uint16 port) {
 
 // Check if transmitter is empty
 int serial_is_transmit_empty(uint16 port) {
+    if (!serial_ctx_allow()) return 0;
     int port_index = get_port_index(port);
     if (port_index == -1 || !g_serial_ports[port_index].initialized) return 0;
     
