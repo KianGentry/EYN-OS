@@ -4,6 +4,19 @@
 #include <string.h>
 #include <multiboot.h>
 #include <stdint.h>
+#include <context.h>
+#include <misc/sched.h>
+
+static int rei_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // Read REI header from data
 int rei_read_header(const uint8_t* data, size_t size, rei_header_t* header) {
@@ -57,6 +70,10 @@ static int rei_decompress_rle(const uint8_t* in, size_t in_size,
 // Parse complete REI image
 int rei_parse_image(const uint8_t* data, size_t size, rei_image_t* image) {
     if (!data || !image || size < sizeof(rei_header_t)) {
+        return -1;
+    }
+
+    if (!rei_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) {
         return -1;
     }
     

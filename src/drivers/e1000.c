@@ -5,6 +5,8 @@
 #include <string.h>
 #include <misc/types.h>
 #include <irq.h>
+#include <context.h>
+#include <misc/sched.h>
 
 // e1000 register offsets (subset).
 //
@@ -125,6 +127,27 @@ static uint16 bswap16(uint16 x)
     return (uint16)((x >> 8) | (x << 8));
 }
 
+static int e1000_ctx_allow(uint32 caps, uint32 cost)
+{
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void e1000_ctx_account(uint32 cost)
+{
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
 // Forward declarations: used by early bring-up helpers below.
 static inline uint32 e1000_mmio_read32(uint32 reg);
 static inline void e1000_mmio_write32(uint32 reg, uint32 value);
@@ -182,6 +205,7 @@ void e1000_debug_regs_print(void)
 
 int e1000_init(void)
 {
+    if (!e1000_ctx_allow(CAP_DEV_NET | CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     // Single entrypoint to get the NIC into a known-good state.
     // Why:
     // - Lets `e1000 regs` reflect post-init state.
@@ -254,6 +278,7 @@ static int e1000_find_first(uint8* out_bus, uint8* out_dev, uint8* out_fun, uint
     // Minimal device discovery: find the first Intel 82540EM/"e1000" function.
     // We can grow this into a more general NIC registry later.
     for (uint16 bus = 0; bus < 256; bus++) {
+        if ((bus & 0x0Fu) == 0u) e1000_ctx_account(SCHED_COST_FS);
         for (uint8 dev = 0; dev < 32; dev++) {
             uint16 vendor0 = pci_read_config_word((uint8)bus, dev, 0, 0x00);
             if (vendor0 == 0xFFFFu) continue;
@@ -303,6 +328,7 @@ static void e1000_enable_pci_bus_master(uint8 bus, uint8 dev, uint8 fun)
 
 int e1000_probe(e1000_probe_info* out)
 {
+    if (!e1000_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) return -1;
     uint8 bus = 0, dev = 0, fun = 0;
     uint32 bar0 = 0;
 
@@ -371,6 +397,7 @@ int e1000_probe(e1000_probe_info* out)
 
 static int e1000_tx_init_once(void)
 {
+    if (!e1000_ctx_allow(CAP_DEV_NET | CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     if (g_e1000.tx_ready) return 0;
 
     // Ensure we can talk to the device and have its BAR0 + MAC.
@@ -443,6 +470,7 @@ static int e1000_tx_init_once(void)
 
 static int e1000_tx_send_frame(const void* frame, uint32 len)
 {
+    if (!e1000_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) return -1;
     if (!frame || len == 0 || len > E1000_TX_BUF_SIZE) return -1;
     if (e1000_tx_init_once() != 0) return -2;
 
@@ -475,6 +503,7 @@ static int e1000_tx_send_frame(const void* frame, uint32 len)
     // Why polling first:
     // - Interrupts are the next step, but polling is deterministic for bring-up.
     for (uint32 spin = 0; spin < 1000000u; spin++) {
+        if ((spin & 0x3FFu) == 0u) e1000_ctx_account(SCHED_COST_FS);
         if (d->status & E1000_TXD_STAT_DD) return 0;
     }
 
@@ -499,6 +528,7 @@ static void e1000_irq_handler(void)
 
 int e1000_irq_enable_rx(void)
 {
+    if (!e1000_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) return -1;
     if (g_e1000.irq_line == 0xFFu || g_e1000.irq_line > 15) return -1;
 
     register_interrupt_handler((int)g_e1000.irq_line, e1000_irq_handler);
@@ -522,6 +552,7 @@ void e1000_irq_clear_rx_pending(void)
 
 static int e1000_rx_init_once(void)
 {
+    if (!e1000_ctx_allow(CAP_DEV_NET | CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     if (g_e1000.rx_ready) return 0;
 
     // Like TX, do a probe first so BAR0/MMIO and MAC are stable.
@@ -591,12 +622,14 @@ static int e1000_rx_init_once(void)
 // Returns number of packets printed.
 int e1000_rx_poll_and_print(int max_packets, int spin_limit)
 {
+    if (!e1000_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) return -1;
     if (max_packets <= 0) return 0;
     if (spin_limit <= 0) spin_limit = 1000000;
     if (e1000_rx_init_once() != 0) return -1;
 
     int printed = 0;
     for (int spin = 0; spin < spin_limit && printed < max_packets; spin++) {
+        if ((spin & 0x3FF) == 0) e1000_ctx_account(SCHED_COST_FS);
         uint32 idx = g_e1000.rx_cur % E1000_RX_RING_COUNT;
         e1000_rx_desc* d = &g_e1000.rx_ring[idx];
         if (!(d->status & 0x01u)) {
@@ -635,11 +668,13 @@ int e1000_rx_poll_and_print(int max_packets, int spin_limit)
 
 int e1000_rx_poll_frame(uint8* out_buf, uint32 out_buf_cap, uint32* out_len, int spin_limit)
 {
+    if (!e1000_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) return -1;
     if (!out_buf || out_buf_cap == 0 || !out_len) return -1;
     if (spin_limit <= 0) spin_limit = 1000000;
     if (e1000_rx_init_once() != 0) return -2;
 
     for (int spin = 0; spin < spin_limit; spin++) {
+        if ((spin & 0x3FF) == 0) e1000_ctx_account(SCHED_COST_FS);
         uint32 idx = g_e1000.rx_cur % E1000_RX_RING_COUNT;
         e1000_rx_desc* d = &g_e1000.rx_ring[idx];
         if (!(d->status & 0x01u)) continue;

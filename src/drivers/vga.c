@@ -37,6 +37,18 @@ static int g_drawCharAt_mode = 0;
 static uint8 g_vga_system_font_drive = (uint8)VGA_SYSTEM_FONT_DRIVE;
 static char g_vga_system_font_path[128] = VGA_SYSTEM_FONT_PATH;
 
+static int vga_ctx_allow(uint32 caps, uint32 cost)
+{
+	command_context_t* ctx = current_command_context;
+	if (ctx && !cap_check(ctx->caps, caps)) return 0;
+	if (ctx) {
+		scheduler_account(ctx->wo, cost);
+		scheduler_yield_if_needed(ctx->wo);
+		if (sched_det_is_enabled()) ctx->det_seq++;
+	}
+	return 1;
+}
+
 typedef struct {
 	int used;
 	uint8 drive;
@@ -380,6 +392,7 @@ static int vga_font_load_hex_stream(uint8 drive, const char* path, uint8* out_bi
 }
 
 int vga_font_acquire_hex(uint8 drive, const char* path) {
+	if (!vga_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
 	if (!path || !path[0]) return -1;
 	// Reuse already-loaded fonts.
 	for (int i = 0; i < VGA_FONT_MAX; ++i) {
@@ -533,6 +546,7 @@ int shell_log_active = 0;
 // Initialize dynamic log buffer based on available memory
 void init_dynamic_log_buffer() {
     if (shell_log_buf != NULL) return; // Already initialized
+	if (!vga_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
     
     // Detect available memory and set appropriate buffer size
     uint32_t available_memory = 32 * 1024 * 1024; // Default assumption
@@ -586,6 +600,7 @@ void shell_log_enable() { shell_log_active = 1; }
 void shell_log_disable() { shell_log_active = 0; }
 
 void shell_log_flush() {
+	if (!vga_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     // Initialize dynamic buffer if not already done
     init_dynamic_log_buffer();
     

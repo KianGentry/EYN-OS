@@ -4,10 +4,32 @@
 #include <multiboot.h>
 #include <util.h>
 #include <stdlib.h>
+#include <context.h>
+#include <misc/sched.h>
 
 extern multiboot_info_t *g_mbi;
 
+static int kb_ctx_allow(uint32 caps, uint32 cost) {
+        command_context_t* ctx = current_command_context;
+        if (ctx && !cap_check(ctx->caps, caps)) return 0;
+        if (ctx) {
+                scheduler_account(ctx->wo, cost);
+                scheduler_yield_if_needed(ctx->wo);
+                if (sched_det_is_enabled()) ctx->det_seq++;
+        }
+        return 1;
+}
+
+static void kb_ctx_account(uint32 cost) {
+        command_context_t* ctx = current_command_context;
+        if (!ctx) return;
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
 int kb_getchar_nonblocking() {
+        if (!kb_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) return 0;
         uint8 status = inportb(0x64);
         if (!(status & 0x1)) {
                 return 0;
@@ -69,11 +91,16 @@ int kb_getchar_nonblocking() {
 }
 
 string readStr() {
+        if (!kb_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) {
+                static char empty[1] = { '\0' };
+                return empty;
+        }
         // Avoid heap usage: stdin reads can occur while the heap is unhealthy.
         // Single-core kernel: a single static buffer is sufficient here.
         static char buffstr_storage[200];
         string buffstr = buffstr_storage;
         uint32 i = 0;
+        uint32 spin = 0;
     uint8 reading = 1;
     uint8 shift_pressed = 0;  // Track shift key state
     uint8 caps_lock = 0;      // Track caps lock state
@@ -84,6 +111,7 @@ string readStr() {
     
     while(reading)
     {
+                if ((spin++ & 0x3FFu) == 0u) kb_ctx_account(SCHED_COST_CONSOLE);
                 {
                         uint8 status = inportb(0x64);
                         if (!(status & 0x1)) {

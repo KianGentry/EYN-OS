@@ -1,8 +1,31 @@
 #include <drivers/pci.h>
 #include <drivers/system.h>
+#include <context.h>
+#include <misc/sched.h>
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC
+
+static int pci_ctx_allow(uint32 caps, uint32 cost)
+{
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void pci_ctx_account(uint32 cost)
+{
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 static uint32 pci_make_address(uint8 bus, uint8 device, uint8 function, uint8 offset)
 {
@@ -19,12 +42,14 @@ static uint32 pci_make_address(uint8 bus, uint8 device, uint8 function, uint8 of
 
 uint32 pci_read_config_dword(uint8 bus, uint8 device, uint8 function, uint8 offset)
 {
+    if (!pci_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) return 0xFFFFFFFFu;
     outl(PCI_CONFIG_ADDRESS, pci_make_address(bus, device, function, offset));
     return inl(PCI_CONFIG_DATA);
 }
 
 void pci_write_config_dword(uint8 bus, uint8 device, uint8 function, uint8 offset, uint32 value)
 {
+    if (!pci_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) return;
     outl(PCI_CONFIG_ADDRESS, pci_make_address(bus, device, function, offset));
     outl(PCI_CONFIG_DATA, value);
 }
@@ -46,9 +71,11 @@ uint8 pci_read_config_byte(uint8 bus, uint8 device, uint8 function, uint8 offset
 void pci_enumerate(pci_enum_cb cb, void* user)
 {
     if (!cb) return;
+    if (!pci_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) return;
 
     // Intentional brute-force scan, number of buses is likely small enough to not care
     for (uint16 bus = 0; bus < 256; bus++) {
+        if ((bus & 0x0Fu) == 0u) pci_ctx_account(SCHED_COST_FS);
         for (uint8 device = 0; device < 32; device++) {
             uint16 vendor0 = pci_read_config_word((uint8)bus, device, 0, 0x00);
             if (vendor0 == 0xFFFFu) {

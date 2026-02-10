@@ -24,6 +24,14 @@ static int serial_ctx_allow(void) {
     return 1;
 }
 
+static void serial_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
 // Get serial port index from base address
 static int get_port_index(uint16 base_port) {
     switch (base_port) {
@@ -39,6 +47,7 @@ static int get_port_index(uint16 base_port) {
 static int serial_wait_for_ready(uint16 port) {
     int timeout = 100000;
     while (timeout--) {
+        if ((timeout & 0x3FF) == 0) serial_ctx_account(SCHED_COST_CONSOLE);
         if (inportb(SERIAL_LINE_STATUS(port)) & SERIAL_THRE) {
             return 0; // Ready
         }
@@ -50,6 +59,7 @@ static int serial_wait_for_ready(uint16 port) {
 static int serial_wait_for_data(uint16 port) {
     int timeout = 100000;
     while (timeout--) {
+        if ((timeout & 0x3FF) == 0) serial_ctx_account(SCHED_COST_CONSOLE);
         if (inportb(SERIAL_LINE_STATUS(port)) & SERIAL_DR) {
             return 0; // Data available
         }

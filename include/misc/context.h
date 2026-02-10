@@ -20,8 +20,10 @@ typedef struct command_context_t {
 #define CAP_ALLOC_MEMORY  (1u << 3)
 #define CAP_DEV_SERIAL    (1u << 4)
 #define CAP_DEV_DISK      (1u << 5)
+#define CAP_DEV_NET       (1u << 6)
+#define CAP_DEV_INPUT     (1u << 7)
 
-#define CAP_ALL (CAP_WRITE_CONSOLE | CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY | CAP_DEV_SERIAL | CAP_DEV_DISK)
+#define CAP_ALL (CAP_WRITE_CONSOLE | CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY | CAP_DEV_SERIAL | CAP_DEV_DISK | CAP_DEV_NET | CAP_DEV_INPUT)
 
 extern command_context_t* current_command_context;
 

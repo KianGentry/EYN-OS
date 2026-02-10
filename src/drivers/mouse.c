@@ -5,6 +5,8 @@
 #include <irq.h>
 #include <string.h>
 #include <types.h>
+#include <context.h>
+#include <misc/sched.h>
 
 // PS/2 Mouse ports
 #define PS2_DATA_PORT    0x60
@@ -58,10 +60,30 @@ static int mouse_has_5btn = 0;
 static inline int mouse_packet_is_sync(uint8 b0) { return (b0 & 0x08) != 0; }
 static inline int8 sign_extend_8(uint8 v) { return (int8)v; }
 
+static int mouse_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void mouse_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
 // Wait for mouse to be ready
 static int mouse_wait_for_ready(void) {
     int timeout = 100000;
     while (timeout--) {
+        if ((timeout & 0x3FF) == 0) mouse_ctx_account(SCHED_COST_CONSOLE);
         if (!(inportb(PS2_STATUS_PORT) & 0x02)) {
             return 0; // Ready
         }
@@ -73,6 +95,7 @@ static int mouse_wait_for_ready(void) {
 static int mouse_wait_for_data(void) {
     int timeout = 100000;
     while (timeout--) {
+        if ((timeout & 0x3FF) == 0) mouse_ctx_account(SCHED_COST_CONSOLE);
         if (inportb(PS2_STATUS_PORT) & 0x01) {
             return 0; // Data available
         }
@@ -82,6 +105,7 @@ static int mouse_wait_for_data(void) {
 
 // Send command to mouse
 static int mouse_send_command(uint8 command) {
+    if (!mouse_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) return -1;
     if (mouse_wait_for_ready() != 0) return -1;
     
     outportb(PS2_COMMAND_PORT, 0xD4); // Tell controller we're sending to mouse
@@ -98,6 +122,7 @@ static int mouse_send_command(uint8 command) {
 
 // Read byte from mouse
 static int mouse_read_byte(uint8* byte) {
+    if (!mouse_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) return -1;
     if (mouse_wait_for_data() != 0) return -1;
     *byte = inportb(PS2_DATA_PORT);
     return 0;
@@ -105,6 +130,7 @@ static int mouse_read_byte(uint8* byte) {
 
 // Initialize mouse
 int mouse_init(void) {
+    if (!mouse_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) return -1;
     memset(&g_mouse_state, 0, sizeof(mouse_state_t));
     
     // Enable mouse in PS/2 controller
@@ -182,6 +208,7 @@ int mouse_init(void) {
 
 // Cleanup mouse
 void mouse_cleanup(void) {
+    if (!mouse_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) return;
     if (g_mouse_state.initialized) {
         mouse_send_command(MOUSE_CMD_DISABLE);
         g_mouse_state.initialized = 0;
