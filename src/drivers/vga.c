@@ -596,7 +596,10 @@ void init_dynamic_log_buffer() {
     shell_log_current_line_start = 0;
 }
 
-void shell_log_enable() { shell_log_active = 1; }
+void shell_log_enable() {
+	if (!vga_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
+	shell_log_active = 1;
+}
 void shell_log_disable() { shell_log_active = 0; }
 
 void shell_log_flush() {
@@ -1131,6 +1134,9 @@ void printf(const char* format, ...)
 
 	// Logging logic
 	if (shell_log_active) {
+		if (!vga_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) {
+			shell_log_active = 0;
+		} else {
 		va_list ap_log;
 		va_copy(ap_log, ap);
 		char temp[512];
@@ -1176,6 +1182,7 @@ void printf(const char* format, ...)
 		}
 		shell_log_buf[shell_log_pos] = '\0';
 		va_end(ap_log);
+		}
 	}
 
 	// Mirror output to serial as we render to VGA (without color codes)
