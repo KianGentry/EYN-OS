@@ -5,6 +5,19 @@
 #include <system.h>
 #include <shell_command_info.h>
 #include <stdint.h>
+#include <context.h>
+#include <misc/sched.h>
+
+static int history_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 void history_cmd(string arg);
 
@@ -75,6 +88,10 @@ string readStr_with_history(command_history_t* history) {
     
     // Initialize buffer
     buffstr[0] = '\0';
+
+    if (!history_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) {
+        return (string)buffstr;
+    }
     
     while(reading) {
         if(inportb(0x64) & 0x1) {
