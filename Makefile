@@ -39,6 +39,16 @@ TMPDIR ?= tmp_user
 BOOTDIR = $(TMPDIR)/boot
 LDFLAGS = -m elf_i386 -T src/boot/link.ld --gc-sections -Map $(BOOTDIR)/kernel.map -s
 EMULATOR = qemu-system-i386
+
+# QEMU display backend.
+QEMU_DISPLAY ?= gtk,grab-on-hover=on
+
+# QEMU environment prefix.
+# Default forces GTK to use X11/XWayland for reliable mouse grab under Wayland.
+# Override at invocation time if needed, e.g.:
+#   make run QEMU_ENV=
+#   make run QEMU_ENV=GDK_BACKEND=wayland
+QEMU_ENV ?= GDK_BACKEND=x11
 EMULATOR_FLAGS = -kernel
 
 OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/shell.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/linker.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/alias.o obj/alias_cmd.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/capabilities.o obj/segdom.o obj/crashlog.o obj/context.o obj/fs_txn.o obj/linux_syscalls.o
@@ -351,9 +361,10 @@ testimg: eynfs_format
 # Rebuilds and runs the OS
 
 run: build
-	qemu-system-i386 -cdrom EYNOS.iso \
+	$(QEMU_ENV) qemu-system-i386 -cdrom EYNOS.iso \
 	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
+	-display $(QEMU_DISPLAY) \
 	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
 	-device e1000,netdev=net0 \
 	-m 9M
@@ -362,9 +373,10 @@ run: build
 .PHONY: qemu-debug
 qemu-debug: build
 	@mkdir -p tmp
-	qemu-system-i386 -cdrom EYNOS.iso \
+	$(QEMU_ENV) qemu-system-i386 -cdrom EYNOS.iso \
 	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
+	-display $(QEMU_DISPLAY) \
 	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
 	-device e1000,netdev=net0 \
 	-serial stdio \

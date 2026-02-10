@@ -3248,6 +3248,7 @@ void log_cmd(string ch) {
     while (ch[i] && ch[i] != ' ' && j < 7) arg[j++] = ch[i++];
     arg[j] = '\0';
     if (strEql(arg, "on")) {
+        if (!shell_cmd_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
         shell_log_enable();
         printf("%clogging enabled\n", 0, 255, 0);
     } else if (strEql(arg, "off")) {
@@ -3571,11 +3572,13 @@ void init_cmd(string ch) {
 
 // Pipeline system commands
 void jobs_cmd(string ch) {
+    if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     printf("%cBackground Jobs:\n", 255, 255, 255);
     list_background_processes();
 }
 
 void fg_cmd(string ch) {
+    if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     // Parse PID from command
     char* space = strchr(ch, ' ');
     if (!space) {
@@ -3595,6 +3598,7 @@ void fg_cmd(string ch) {
 }
 
 void bg_cmd(string ch) {
+    if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     printf("%cBackground process management:\n", 255, 255, 255);
     printf("%c  Use '&' at the end of commands to run in background\n", 255, 255, 255);
     printf("%c  Example: ls & (runs ls in background)\n", 255, 255, 255);
@@ -3603,6 +3607,7 @@ void bg_cmd(string ch) {
 }
 
 void pipe_cmd(string ch) {
+    if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     printf("%cPipeline System:\n", 255, 255, 255);
     printf("%c  Use '|' to pipe output between commands\n", 255, 255, 255);
     printf("%c  Example: ls | grep .txt\n", 255, 255, 255);

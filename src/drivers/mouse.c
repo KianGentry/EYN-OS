@@ -13,6 +13,10 @@
 #define PS2_STATUS_PORT  0x64
 #define PS2_COMMAND_PORT 0x64
 
+// PIC data ports (for unmasking IRQ12 on the slave PIC)
+#define PIC1_DATA_PORT   0x21
+#define PIC2_DATA_PORT   0xA1
+
 // PS/2 Mouse commands
 #define MOUSE_CMD_RESET          0xFF
 #define MOUSE_CMD_RESEND         0xFE
@@ -59,6 +63,18 @@ static int mouse_has_5btn = 0;
 // Helpers for packet synchronization and sign extension
 static inline int mouse_packet_is_sync(uint8 b0) { return (b0 & 0x08) != 0; }
 static inline int8 sign_extend_8(uint8 v) { return (int8)v; }
+
+static void mouse_enable_irq12(void) {
+    // Unmask cascade IRQ2 on the master PIC so slave PIC IRQs can be delivered
+    uint8 m1 = inportb(PIC1_DATA_PORT);
+    m1 &= (uint8)~(1u << 2);
+    outportb(PIC1_DATA_PORT, m1);
+
+    // Unmask IRQ12 (bit 4) on the slave PIC
+    uint8 m2 = inportb(PIC2_DATA_PORT);
+    m2 &= (uint8)~(1u << 4);
+    outportb(PIC2_DATA_PORT, m2);
+}
 
 static int mouse_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -142,9 +158,13 @@ int mouse_init(void) {
     outportb(PS2_COMMAND_PORT, 0x20); // Read command byte
     if (mouse_wait_for_data() != 0) return -1;
     uint8 status = inportb(PS2_DATA_PORT);
-    
-    status |= 0x02; // Enable mouse interrupt
-    status |= 0x01; // Enable keyboard interrupt
+
+    // Command byte (typical i8042):
+    // bit0: enable IRQ1 (keyboard), bit1: enable IRQ12 (mouse)
+    // bit4: disable keyboard clock, bit5: disable mouse clock (1=disabled)
+    // Some emulators/firmware leave clock-disable bits set; clear them explicitly.
+    status |= 0x03;        // enable IRQ1 + IRQ12
+    status &= (uint8)~0x30; // ensure both ports are enabled (clear clock-disable bits)
     
     if (mouse_wait_for_ready() != 0) return -1;
     outportb(PS2_COMMAND_PORT, 0x60); // Write command byte
@@ -203,6 +223,11 @@ int mouse_init(void) {
     
     // Register mouse interrupt handler
     register_interrupt_handler(12, mouse_interrupt_handler); // IRQ 12 is mouse
+
+    // Ensure IRQ12 can actually fire (irq_init only unmasks IRQ0 by default).
+    // Without this, QEMU can queue mouse bytes faster than our frame-loop polling drains them,
+    // making cursor movement appear to "stop" after a small initial delta.
+    mouse_enable_irq12();
     return 0;
 }
 
@@ -218,70 +243,63 @@ void mouse_cleanup(void) {
 // Mouse interrupt handler
 void mouse_interrupt_handler(void) {
     if (!g_mouse_state.initialized) {
-        pic_send_eoi(12);
         return;
     }
 
-    // Read one byte directly; data is ready because we were interrupted
-    uint8 data = inportb(PS2_DATA_PORT);
+    // Drain a bounded number of AUX bytes. QEMU can enqueue multiple bytes between interrupts;
+    // draining here avoids output-buffer buildup that makes the cursor appear to "freeze".
+    for (int i = 0; i < 256; ++i) {
+        uint8 st = inportb(PS2_STATUS_PORT);
+        if (!(st & 0x01)) break;      // no data
+        if (!(st & 0x20)) break;      // not AUX data
 
-    // Packet synchronization: the first byte must have bit 3 set.
-    if (mouse_packet_index == 0) {
-        if (!mouse_packet_is_sync(data)) {
-            // drop out-of-sync byte and do not advance index
-            pic_send_eoi(12);
-            return;
+        uint8 data = inportb(PS2_DATA_PORT);
+
+        // Packet synchronization: the first byte must have bit 3 set.
+        if (mouse_packet_index == 0) {
+            if (!mouse_packet_is_sync(data)) {
+                continue;
+            }
+        }
+
+        mouse_packet_buffer[mouse_packet_index] = data;
+        mouse_packet_index++;
+
+        if (mouse_packet_index == mouse_packet_len) {
+            uint8 status = mouse_packet_buffer[0];
+            int8 delta_x = sign_extend_8(mouse_packet_buffer[1]);
+            int8 delta_y = sign_extend_8(mouse_packet_buffer[2]);
+            int wheel = 0;
+            if (mouse_has_wheel && mouse_packet_len >= 4) {
+                int8 z = sign_extend_8(mouse_packet_buffer[3]);
+                z = (z & 0x0F);
+                if (z & 0x08) z |= 0xF0;
+                wheel = (int)z;
+            }
+
+            g_mouse_state.prev_buttons = g_mouse_state.buttons;
+            g_mouse_state.buttons = status & 0x07;
+            if (mouse_has_5btn && mouse_packet_len >= 4) {
+                uint8 b4 = mouse_packet_buffer[3];
+                if (b4 & 0x10) g_mouse_state.buttons |= MOUSE_BUTTON_4;
+                if (b4 & 0x20) g_mouse_state.buttons |= MOUSE_BUTTON_5;
+            }
+
+            g_mouse_state.delta_x += delta_x;
+            g_mouse_state.delta_y += delta_y;
+            g_mouse_state.wheel_delta += wheel;
+
+            g_mouse_state.x += delta_x;
+            g_mouse_state.y -= delta_y;
+
+            if (g_mouse_state.x < mouse_min_x) g_mouse_state.x = mouse_min_x;
+            if (g_mouse_state.x > mouse_max_x) g_mouse_state.x = mouse_max_x;
+            if (g_mouse_state.y < mouse_min_y) g_mouse_state.y = mouse_min_y;
+            if (g_mouse_state.y > mouse_max_y) g_mouse_state.y = mouse_max_y;
+
+            mouse_packet_index = 0;
         }
     }
-
-    // Store in packet buffer
-    mouse_packet_buffer[mouse_packet_index] = data;
-    mouse_packet_index++;
-
-    // Process complete packet when index wrapped to 0
-    if (mouse_packet_index == mouse_packet_len) {
-        uint8 status = mouse_packet_buffer[0];
-        int8 delta_x = sign_extend_8(mouse_packet_buffer[1]);
-        int8 delta_y = sign_extend_8(mouse_packet_buffer[2]);
-        int wheel = 0;
-        if (mouse_has_wheel && mouse_packet_len >= 4) {
-            int8 z = sign_extend_8(mouse_packet_buffer[3]);
-            // Only lower 4 bits are valid for Z in standard IntelliMouse (values -8..+7); treat as signed nibble
-            z = (z & 0x0F);
-            if (z & 0x08) z |= 0xF0; // sign extend 4-bit
-            wheel = (int)z;
-        }
-
-        // Update button state
-        g_mouse_state.prev_buttons = g_mouse_state.buttons;
-        g_mouse_state.buttons = status & 0x07;
-        // 5-button mice encode XButton in 4th byte upper bits (bits 4-5). Map to our flags if present.
-        if (mouse_has_5btn && mouse_packet_len >= 4) {
-            uint8 b4 = mouse_packet_buffer[3];
-            if (b4 & 0x10) g_mouse_state.buttons |= MOUSE_BUTTON_4;
-            if (b4 & 0x20) g_mouse_state.buttons |= MOUSE_BUTTON_5;
-        }
-
-        // Update position and deltas
-        g_mouse_state.delta_x += delta_x;
-        g_mouse_state.delta_y += delta_y;
-        g_mouse_state.wheel_delta += wheel;
-
-        g_mouse_state.x += delta_x;
-        g_mouse_state.y -= delta_y; // Invert Y axis
-
-        // Clamp to bounds
-        if (g_mouse_state.x < mouse_min_x) g_mouse_state.x = mouse_min_x;
-        if (g_mouse_state.x > mouse_max_x) g_mouse_state.x = mouse_max_x;
-        if (g_mouse_state.y < mouse_min_y) g_mouse_state.y = mouse_min_y;
-        if (g_mouse_state.y > mouse_max_y) g_mouse_state.y = mouse_max_y;
-
-        // Ready for next packet
-        mouse_packet_index = 0;
-    }
-
-    // Always send End-Of-Interrupt for IRQ12 (slave + cascaded master handled inside)
-    pic_send_eoi(12);
 }
 
 // Read mouse event
@@ -356,7 +374,7 @@ void mouse_set_cursor_image(const rei_image_t* image) {
 int mouse_poll(void) {
     int progressed = 0;
     // Drain a few AUX bytes per call to avoid starving the UI
-    for (int i = 0; i < 32; ++i) {
+    for (int i = 0; i < 256; ++i) {
         uint8 status = inportb(PS2_STATUS_PORT);
         if (!(status & 0x01)) break; // no data waiting
         if (!(status & 0x20)) break;  // data is for keyboard; don't consume here

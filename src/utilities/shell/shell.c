@@ -650,7 +650,11 @@ void launch_shell(int n) {
         // Note shell loop progress for the watchdog
         watchdog_kick("shell-loop");
         if (shell_log_active) {
-            printf("%c[LOG] ", 0, 255, 0);
+            if (!shell_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) {
+                shell_log_active = 0;
+            } else {
+                printf("%c[LOG] ", 0, 255, 0);
+            }
         }
         // Print prompt: <drive>:<path>! 
         // convert physical drive to logical drive for display
@@ -746,6 +750,10 @@ void launch_shell(int n) {
             }
 
             if (is_redirect) {
+                if (!shell_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) {
+                    printf("%cRedirection requires filesystem write capability.\n", 255, 0, 0);
+                    continue;
+                }
                 start_shell_redirect();
                 handle_shell_command(cmd);
                 int res = write_output_to_file(shell_redirect_buf, strlen(shell_redirect_buf), filename, g_current_drive);

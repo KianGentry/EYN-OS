@@ -94,7 +94,14 @@ string readStr_with_history(command_history_t* history) {
     }
     
     while(reading) {
-        if(inportb(0x64) & 0x1) {
+        uint8 status = inportb(0x64);
+        if(status & 0x1) {
+            // If output buffer contains AUX (mouse) data, do NOT consume it here.
+            // Leaving it for the mouse driver avoids packet desync and cursor stalls.
+            if (status & 0x20) {
+                continue;
+            }
+
             uint8 scancode = inportb(0x60);
             
             // Handle modifier keys

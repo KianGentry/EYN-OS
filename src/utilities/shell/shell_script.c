@@ -465,6 +465,9 @@ static void substitute_command_outputs(const char* in, char* out, size_t outsz, 
             }
 
             // Capture output, preserving any prior redirect state
+            if (!script_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) {
+                continue;
+            }
             extern int shell_redirect_active;
             int was_redirecting = shell_redirect_active;
             if (!was_redirecting) start_shell_redirect();
