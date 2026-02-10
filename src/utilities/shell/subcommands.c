@@ -149,7 +149,7 @@ void search_size_cmd(string ch) {
     
     printf("%cSearching for files %s %d bytes...\n", 255, 255, 255, operator, size_value);
 
-    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
+    if (!subcmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -220,7 +220,7 @@ void search_type_cmd(string ch) {
     
     printf("%cSearching for files with extension '%s'...\n", 255, 255, 255, extension);
 
-    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
+    if (!subcmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -287,7 +287,7 @@ void search_empty_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t 
 void search_empty_cmd(string ch) {
     printf("%cSearching for empty files and directories...\n", 255, 255, 255);
 
-    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
+    if (!subcmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;

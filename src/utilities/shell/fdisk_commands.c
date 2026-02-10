@@ -6,9 +6,23 @@
 #include <string.h>
 #include <stdint.h>
 #include <shell_command_info.h>
+#include <context.h>
+#include <misc/sched.h>
+
+static int fdisk_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // fdisk_list implementation
 void fdisk_list() {
+    if (!fdisk_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     uint8 mbr[512];
     if (ata_read_sector(0, 0, mbr) != 0) {
         printf("%cFailed to read MBR from drive 0\n", 255, 0, 0);
@@ -33,6 +47,7 @@ void fdisk_list() {
 
 // fdisk_create_partition implementation
 void fdisk_create_partition(uint32 start_lba, uint32 size, uint8 type) {
+    if (!fdisk_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     uint8 mbr[512];
     if (ata_read_sector(0, 0, mbr) != 0) {
         printf("%cFailed to read MBR from drive 0\n", 255, 0, 0);

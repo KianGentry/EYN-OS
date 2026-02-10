@@ -994,7 +994,7 @@ int write_output_to_file(const char* buf, int len, const char* filename, uint8_t
 
 // Append output to file using EYNFS append mode
 int append_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
-    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
     // Read existing contents if any
     vfs_stat_t st;
     int existing_len = 0;
@@ -1024,7 +1024,7 @@ int append_output_to_file(const char* buf, int len, const char* filename, uint8_
 
 // Filesystem integrity check
 int check_filesystem_integrity(uint8_t disk) {
-    if (!fs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(disk, EYNFS_SUPERBLOCK_LBA, &sb) != 0) {
         printf("Cannot read superblock - filesystem may be corrupted.\n");
@@ -1142,7 +1142,7 @@ void copy_cmd(string ch) {
     while (ch[i] && ch[i] == ' ') i++;
     if (!ch[i]) { printf("%cError: Destination filename required.\n", 255, 0, 0); return; }
     char dest[128] = {0}; j = 0; while (ch[i] && ch[i] != ' ' && j < 127) { dest[j++] = ch[i++]; } dest[j] = '\0';
-    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return;
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     // Resolve to absolute
     char src_path[256], dst_path[256]; resolve_path(source, shell_current_path, src_path, sizeof(src_path)); resolve_path(dest, shell_current_path, dst_path, sizeof(dst_path));
     if (strcmp(src_path, dst_path) == 0) { printf("%cError: Source and destination are the same.\n", 255, 0, 0); return; }
@@ -1175,7 +1175,7 @@ void move_cmd(string ch) {
     while (ch[i] && ch[i] == ' ') i++;
     if (!ch[i]) { printf("%cError: Destination filename required.\n", 255, 0, 0); return; }
     char dest[128] = {0}; j = 0; while (ch[i] && ch[i] != ' ' && j < 127) { dest[j++] = ch[i++]; } dest[j] = '\0';
-    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return;
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     char src_path[256], dst_path[256]; resolve_path(source, shell_current_path, src_path, sizeof(src_path)); resolve_path(dest, shell_current_path, dst_path, sizeof(dst_path));
     if (strcmp(src_path, dst_path) == 0) { printf("%cError: Source and destination are the same.\n", 255, 0, 0); return; }
     uint8 disk = g_current_drive; vfs_stat_t st;

@@ -8,6 +8,7 @@
 #include <eynfs.h>
 #include <string.h>
 #include <shell_command_info.h>
+#include <context.h>
 
 // Simple system stats GUI: shows 3 pie charts (CPU, Memory, Disk) and a sortable table below
 // CPU usage is estimated from scheduler ticks vs. idle hlt count
@@ -53,6 +54,17 @@ typedef struct {
 } stats_state_t;
 
 static stats_state_t g_stats;
+
+static int stats_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // Helpers to format percentages without relying on float printf (which may be unsupported)
 static int clamp_pct_to_int(float pct) {
@@ -167,6 +179,12 @@ static int cpu_has_invariant_tsc(void) {
 }
 
 static void stats_sample_disk(void) {
+    if (!stats_ctx_allow(CAP_READ_FS | CAP_DEV_DISK, SCHED_COST_FS)) {
+        g_stats.disk_total_blocks = 0;
+        g_stats.disk_used_blocks = 0;
+        g_stats.disk_percent = 0.f;
+        return;
+    }
     // Read EYNFS superblock and count free blocks similar to fsstat_cmd
     extern uint8_t g_current_drive; // physical
     eynfs_superblock_t sb;
@@ -397,6 +415,7 @@ static void stats_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdat
 }
 
 static void stats_cmd(string arg) {
+    if (!stats_ctx_allow(CAP_WRITE_CONSOLE | CAP_READ_FS | CAP_DEV_DISK, SCHED_COST_CONSOLE)) return;
     memset(&g_stats, 0, sizeof(g_stats));
     g_stats.sort_col = 0; g_stats.sort_dir = -1;
     g_stats.last_ticks = sched_get_tick_count();

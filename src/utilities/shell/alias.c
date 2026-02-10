@@ -4,6 +4,8 @@
 #include <shell.h>
 #include <string.h>
 #include <util.h>
+#include <context.h>
+#include <misc/sched.h>
 
 // Config path (absolute)
 #define ALIAS_CFG_PATH "/config/aliases.cfg"
@@ -24,6 +26,17 @@ static int g_alias_loaded = 0;
 
 // System config is expected on primary drive.
 extern uint8 g_current_drive;
+
+static int alias_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 static uint8 alias_cfg_drive(void) {
     // Keep this simple: store aliases on the current drive.
@@ -100,6 +113,8 @@ static int contains_meta_chars(const char *s) {
 static void alias_load_if_needed(void) {
     if (g_alias_loaded)
         return;
+    if (!alias_ctx_allow(CAP_READ_FS, SCHED_COST_FS))
+        return;
     g_alias_loaded = 1;
 
     alias_clear_all();
@@ -166,6 +181,8 @@ static void alias_load_if_needed(void) {
 }
 
 static int alias_save(void) {
+    if (!alias_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS))
+        return -1;
     // Ensure /config exists
     vfs_stat_t st;
     if (vfs_stat(alias_cfg_drive(), "/config", &st) != 0 || st.type != VFS_NODE_DIR) {

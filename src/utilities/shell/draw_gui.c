@@ -7,9 +7,22 @@
 #include <util.h>
 #include <string.h>
 #include <fs_commands.h> // resolve_path
+#include <context.h>
+#include <misc/sched.h>
 // current drive helper from shell.c
 extern uint8_t get_current_logical_drive(void);
 extern char shell_current_path[128];
+
+static int draw_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 static const char* get_basename_local(const char* path) {
     const char* last = path;
@@ -189,6 +202,7 @@ static void draw_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdata
                 // Create
                 // Allocate image
                 int size = g_draw.prompt_w * g_draw.prompt_h * REI_DEPTH_RGB;
+                if (!draw_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
                 if (g_draw.img.data) { free(g_draw.img.data); g_draw.img.data = NULL; }
                 g_draw.img.header.magic = REI_MAGIC;
                 g_draw.img.header.width = (uint16)g_draw.prompt_w;
@@ -321,6 +335,7 @@ static void draw_gui_key(int tile_idx, int key, void* userdata) {
         uint8 disk = g_draw.disk;
         // Build a contiguous buffer: header + pixel data
         uint32 total = sizeof(rei_header_t) + (uint32)g_draw.img.data_size;
+        if (!draw_ctx_allow(CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
         uint8* tmp = (uint8*)malloc(total);
         if (tmp) {
             memcpy(tmp, &g_draw.img.header, sizeof(rei_header_t));
@@ -347,6 +362,7 @@ static void draw_gui_key(int tile_idx, int key, void* userdata) {
 }
 
 void draw_cmd(string arg) {
+    if (!draw_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) return;
     // Initialize state
     memset(&g_draw, 0, sizeof(g_draw));
     g_draw.zoom = 2; g_draw.brush = 2; g_draw.r = 255; g_draw.g = 255; g_draw.b = 255;

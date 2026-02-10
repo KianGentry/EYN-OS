@@ -11,6 +11,7 @@
 #include <misc/sched.h>
 #include <serial.h>
 #include <watchdog.h>
+#include <context.h>
 #ifndef EYNFS_SUPERBLOCK_LBA
 #define EYNFS_SUPERBLOCK_LBA 2048
 #endif
@@ -83,6 +84,17 @@ typedef struct {
 } viewer_t;
 
 static viewer_t g_view;
+
+static int viewer_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 static void viewer_free_resources(void) {
     if (g_view.img.data) {
@@ -640,12 +652,17 @@ static void viewer_draw_image() {
             uint32_t need_h = (uint32_t)dst_h;
             uint32_t need_px = need_w * need_h;
             if (!g_view.scaled565 || g_view.scaled_w != need_w || g_view.scaled_h != need_h) {
-                if (g_view.scaled565) { free(g_view.scaled565); g_view.scaled565 = NULL; }
-                // Allocate scaled buffer (RGB565)
-                g_view.scaled565 = (uint16_t*)malloc(need_px * 2u);
-                g_view.scaled_w = need_w;
-                g_view.scaled_h = need_h;
-                g_view.scaled_valid = 0;
+                if (!viewer_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) {
+                    if (g_view.scaled565) { free(g_view.scaled565); g_view.scaled565 = NULL; }
+                    g_view.scaled_valid = 0;
+                } else {
+                    if (g_view.scaled565) { free(g_view.scaled565); g_view.scaled565 = NULL; }
+                    // Allocate scaled buffer (RGB565)
+                    g_view.scaled565 = (uint16_t*)malloc(need_px * 2u);
+                    g_view.scaled_w = need_w;
+                    g_view.scaled_h = need_h;
+                    g_view.scaled_valid = 0;
+                }
             }
             if (g_view.scaled565) {
                 if (!g_view.scaled_valid || g_view.scaled_src_frame_index != g_view.frame_index) {
@@ -862,6 +879,7 @@ static void viewer_gui_mouse(int tile_idx, const mouse_event_t* me, void* ud) {
 }
 
 static int load_reiv_stream(const char* path) {
+    if (!viewer_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
     // Read header and first frame; keep entry info for streaming
     const char* fail = NULL;
     g_view.disk = get_current_logical_drive();
@@ -952,6 +970,7 @@ fail_out:
 }
 
 static void open_viewer_gui(const char* path) {
+    if (!viewer_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY | CAP_WRITE_CONSOLE, SCHED_COST_FS)) return;
     viewer_free_resources();
     memset(&g_view, 0, sizeof(g_view)); g_view.zoom=1; g_view.off_x=4; g_view.off_y=4;
     strncpy(g_view.filepath, path, sizeof(g_view.filepath)-1);
@@ -1011,6 +1030,7 @@ static void open_viewer_gui(const char* path) {
 }
 
 static void open_viewer_window(const char* path) {
+    if (!viewer_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY | CAP_WRITE_CONSOLE, SCHED_COST_FS)) return;
     viewer_free_resources();
     memset(&g_view, 0, sizeof(g_view)); g_view.zoom=1; g_view.off_x=4; g_view.off_y=4;
     strncpy(g_view.filepath, path, sizeof(g_view.filepath)-1);

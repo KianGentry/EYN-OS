@@ -3,6 +3,9 @@
 #include <string.h>
 #include <util.h>
 #include <vga.h>
+#include <types.h>
+#include <context.h>
+#include <misc/sched.h>
 
 void native_run_command(string arg);
 
@@ -28,6 +31,17 @@ static char* parse_filename(string arg) {
     return filename;
 }
 
+static int native_run_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
 void native_run_command(string arg) {
     char* filename = parse_filename(arg);
     
@@ -36,6 +50,8 @@ void native_run_command(string arg) {
         printf("Native execution of EYN programs with kernel API access\n");
         return;
     }
+
+    if (!native_run_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     
     exec_result_t result = native_execute_program(filename);
     

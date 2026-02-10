@@ -33,6 +33,7 @@ REGISTER_SHELL_COMMAND(memory_stats_cmd_info, "memory_stats", memory_stats_cmd, 
 
 // Predictive memory command
 void predict_cmd(string arg) {
+    if (!pred_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
     uint8 i = 0;
     while (arg[i] && arg[i] != ' ') i++;
     while (arg[i] && arg[i] == ' ') i++;
@@ -114,6 +115,7 @@ void mmap_cmd(string arg) {
 
 // Memory unmapping command
 void munmap_cmd(string arg) {
+    if (!pred_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
     uint8 i = 0;
     while (arg[i] && arg[i] != ' ') i++;
     while (arg[i] && arg[i] == ' ') i++;

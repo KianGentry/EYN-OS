@@ -5,6 +5,8 @@
 #include <vga.h>
 #include <fs/vfs.h>
 #include <ui_prefs.h>
+#include <context.h>
+#include <misc/sched.h>
 
 #include <shell_command_info.h>
 #include <string.h>
@@ -46,6 +48,17 @@ typedef struct {
 
 static theme_gui_t g_theme_gui;
 
+static int theme_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
 static int ends_with_hex(const char* name) {
     if (!name) return 0;
     int n = (int)strlen(name);
@@ -69,6 +82,7 @@ static void theme_gui_refresh_fonts(theme_gui_t* st) {
     if (!st) return;
     st->font_count = 0;
     memset(st->fonts, 0, sizeof(st->fonts));
+    if (!theme_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     vfs_listdir(g_current_drive, "/fonts", font_list_cb, st);
 
     // Choose current font if present
@@ -91,6 +105,7 @@ static void theme_gui_apply_font(theme_gui_t* st) {
     if (st->font_count <= 0) return;
     const char* path = st->fonts[st->font_selected];
     if (!path || !path[0]) return;
+    if (!theme_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     if (vga_system_font_set(g_current_drive, path) == 0) {
         ui_prefs_set_font_path(path);
         snprintf(st->status_right, sizeof(st->status_right), "Font: %s", path);
@@ -303,6 +318,13 @@ static void theme_gui_key(int tile_idx, int key, void* ud) {
     }
 
     if (key == 's' || key == 'S') {
+        if (!theme_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) {
+            snprintf(st->status_right, sizeof(st->status_right), "Save blocked");
+            st->status_right[sizeof(st->status_right) - 1] = '\0';
+            wm_set_title_status(st->win_id, "Theme", "^/v: Select | </>: Adjust | Tab: Channel | Enter: Toggle Font | S: Save | R: Reset | Ctrl+X: Close", st->status_right);
+            wm_invalidate_window(st->win_id);
+            return;
+        }
         int r = ui_prefs_save(g_current_drive);
         snprintf(st->status_right, sizeof(st->status_right), (r == 0) ? "Saved" : "Save failed");
         st->status_right[sizeof(st->status_right) - 1] = '\0';
@@ -331,6 +353,13 @@ static void theme_gui_key(int tile_idx, int key, void* ud) {
             return;
         }
         if (st->selected_field == THEME_FIELD_SAVE) {
+            if (!theme_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) {
+                snprintf(st->status_right, sizeof(st->status_right), "Save blocked");
+                st->status_right[sizeof(st->status_right) - 1] = '\0';
+                wm_set_title_status(st->win_id, "Theme", "^/v: Select | </>: Adjust | Tab: Channel | Enter: Toggle Font | S: Save | R: Reset | Ctrl+X: Close", st->status_right);
+                wm_invalidate_window(st->win_id);
+                return;
+            }
             int r = ui_prefs_save(g_current_drive);
             snprintf(st->status_right, sizeof(st->status_right), (r == 0) ? "Saved" : "Save failed");
             wm_set_title_status(st->win_id, "Theme", "^/v: Select | </>: Adjust | Tab: Channel | Enter: Toggle Font | S: Save | R: Reset | Ctrl+X: Close", st->status_right);
@@ -368,6 +397,7 @@ static void theme_gui_mouse(int tile_idx, const mouse_event_t* me, void* ud) {
 
 static void theme_cmd(string arg) {
     (void)arg;
+    if (!theme_ctx_allow(CAP_WRITE_CONSOLE | CAP_READ_FS, SCHED_COST_CONSOLE)) return;
 
     theme_gui_t* st = &g_theme_gui;
     if (st->active && st->win_id >= 0) {

@@ -27,6 +27,8 @@
 #include <drivers/e1000.h>
 #include <network/netstack.h>
 #include <crashlog.h>
+#include <context.h>
+#include <misc/sched.h>
 
 // Forward declarations for command handlers
 void help_cmd(string arg);
@@ -70,6 +72,17 @@ void crashlog_cmd(string arg);
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
 
+static int shell_cmd_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
 // Random number generator command
 void random_cmd(string ch) {
     extern int shell_redirect_active; // from vga.c
@@ -91,80 +104,78 @@ void random_cmd(string ch) {
     }
     
     // Parse first argument (count or min) - using safe parsing like drive_cmd
-    if (ch[i] >= '0' && ch[i] <= '9') {
-        uint32_t arg1 = 0;
-        while (ch[i] >= '0' && ch[i] <= '9') {
-            // Check for integer overflow
-            if (arg1 > UINT32_MAX / 10) {
+    if (ch[i] < '0' || ch[i] > '9') {
+        printf("%cError: Invalid number format\n", 255, 0, 0);
+        return;
+    }
+
+    uint32_t arg1 = 0;
+    while (ch[i] >= '0' && ch[i] <= '9') {
+        if (arg1 > UINT32_MAX / 10) {
+            printf("%cError: Number too large\n", 255, 0, 0);
+            return;
+        }
+        arg1 = arg1 * 10 + (ch[i] - '0');
+        i++;
+    }
+    
+    // Skip spaces
+    while (ch[i] && ch[i] == ' ') i++;
+    
+    // Check if there's a second argument
+    if (ch[i] && ch[i] >= '0' && ch[i] <= '9') {
+        uint32_t arg2 = 0;
+        while (ch[i] && ch[i] >= '0' && ch[i] <= '9') {
+            if (arg2 > UINT32_MAX / 10) {
                 printf("%cError: Number too large\n", 255, 0, 0);
                 return;
             }
-            arg1 = arg1 * 10 + (ch[i] - '0');
+            arg2 = arg2 * 10 + (ch[i] - '0');
             i++;
         }
         
-        // Skip spaces
-        while (ch[i] && ch[i] == ' ') i++;
+        // Two arguments: range [min, max]
+        if (arg1 >= arg2) {
+            printf("%cError: min must be less than max\n", 255, 0, 0);
+            return;
+        }
         
-        // Check if there's a second argument
-        if (ch[i] && ch[i] >= '0' && ch[i] <= '9') {
-            uint32_t arg2 = 0;
-            while (ch[i] && ch[i] >= '0' && ch[i] <= '9') {
-                // Check for integer overflow
-                if (arg2 > UINT32_MAX / 10) {
-                    printf("%cError: Number too large\n", 255, 0, 0);
-                    return;
-                }
-                arg2 = arg2 * 10 + (ch[i] - '0');
-                i++;
-            }
-            
-            // Two arguments: range [min, max]
-            if (arg1 >= arg2) {
-                printf("%cError: min must be less than max\n", 255, 0, 0);
-                return;
-            }
-            
-            // Limit the range to prevent excessive output
-            if (arg2 - arg1 > 1000) {
-                printf("%cError: Range too large (max 1000)\n", 255, 0, 0);
-                return;
-            }
-            
-            uint32_t num = rand_range(arg1, arg2);
-            if (shell_redirect_active) {
-                printf("%d\n", (int)num);
-            } else {
-                printf("%cRandom number in range [%d, %d]: %d\n", 255, 255, 255, (int)arg1, (int)arg2, (int)num);
-            }
+        // Limit the range to prevent excessive output
+        if (arg2 - arg1 > 1000) {
+            printf("%cError: Range too large (max 1000)\n", 255, 0, 0);
+            return;
+        }
+        
+        uint32_t num = rand_range(arg1, arg2);
+        if (shell_redirect_active) {
+            printf("%d\n", (int)num);
         } else {
-            // Limit count to prevent excessive output
-            if (arg1 > 1000) {
-                printf("%cError: Count too large (max 1000)\n", 255, 0, 0);
-                return;
-            }
-            
-            if (shell_redirect_active) {
-                for (uint32_t k = 0; k < arg1; k++) {
-                    uint32_t num = rand_next();
-                    printf("%d", (int)num);
-                    if (k < arg1 - 1) printf(" ");
-                }
-                printf("\n");
-            } else {
-                printf("%cGenerating %d random numbers:\n", 255, 255, 255, (int)arg1);
-                for (uint32_t k = 0; k < arg1; k++) {
-                    uint32_t num = rand_next();
-                    printf("%c%d", 255, 255, 255, (int)num);
-                    if (k < arg1 - 1) printf(", ");
-                    if ((k + 1) % 10 == 0) printf("\n");
-                }
-                printf("\n");
-            }
+            printf("%cRandom number in range [%d, %d]: %d\n", 255, 255, 255, (int)arg1, (int)arg2, (int)num);
         }
     } else {
-        printf("%cError: Invalid number format\n", 255, 0, 0);
-        return;
+        // Limit count to prevent excessive output
+        if (arg1 > 1000) {
+            printf("%cError: Count too large (max 1000)\n", 255, 0, 0);
+            return;
+        }
+        
+        if (shell_redirect_active) {
+            for (uint32_t k = 0; k < arg1; k++) {
+                uint32_t num = rand_next();
+                printf("%d", (int)num);
+                if (k < arg1 - 1) printf(" ");
+            }
+            printf("\n");
+        } else {
+            printf("%cGenerating %d random numbers:\n", 255, 255, 255, (int)arg1);
+            for (uint32_t k = 0; k < arg1; k++) {
+                uint32_t num = rand_next();
+                printf("%c%d", 255, 255, 255, (int)num);
+                if (k < arg1 - 1) printf(", ");
+                if ((k + 1) % 10 == 0) printf("\n");
+            }
+            printf("\n");
+        }
     }
 }
 
@@ -178,6 +189,7 @@ void setbg_cmd(string ch) {
     path[j] = '\0';
     // Resolve path
     char abspath[128]; resolve_path(path, shell_current_path, abspath, sizeof(abspath));
+    if (!shell_cmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     vfs_stat_t st; if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) { printf("%cError: File not found.\n", 255, 0, 0); return; }
     if (st.size > 512*1024) { printf("%cError: File too large (max 512KB).\n", 255, 0, 0); return; }
     uint32_t to_read = st.size; if (to_read == 0) { printf("%cError: Empty file.\n", 255, 0, 0); return; }
@@ -387,6 +399,8 @@ void sort_cmd(string ch) {
         printf("%cNo strings to sort.\n", 255, 0, 0);
         return;
     }
+
+    if (!shell_cmd_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
     
     // Allocate array of string pointers
     char** strings = (char**) malloc(count * sizeof(char*));
@@ -585,6 +599,7 @@ void search_cmd(string ch) {
         extern char* g_pipeline_input_data;
         if (g_pipeline_input_data && strlen(g_pipeline_input_data) > 0) {
             // Split input into lines and search each line
+            if (!shell_cmd_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
             char* input_copy = malloc(strlen(g_pipeline_input_data) + 1);
             strcpy(input_copy, g_pipeline_input_data);
             
@@ -638,6 +653,7 @@ void search_cmd(string ch) {
         
         if (output && strlen(output) > 0) {
             // Search in command output
+            if (!shell_cmd_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
             char* output_copy = malloc(strlen(output) + 1);
             strcpy(output_copy, output);
             
@@ -758,14 +774,15 @@ void ver()
     
     // Try to load and display eynos.rei image only if not redirected
     if (!shell_redirect_active) {
-        vfs_stat_t st;
-        if (vfs_stat(g_current_drive, "/eynos.rei", &st) == 0 && st.size > 0) {
-            void* buffer = malloc(st.size);
-            if (buffer) {
-                uint32 bytes_read = vfs_read_file(g_current_drive, "/eynos.rei", buffer, st.size);
-                if (bytes_read > 0) {
-                    rei_image_t rei_image;
-                    if (rei_parse_image((const uint8_t*)buffer, bytes_read, &rei_image) == 0) {
+        if (shell_cmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) {
+            vfs_stat_t st;
+            if (vfs_stat(g_current_drive, "/eynos.rei", &st) == 0 && st.size > 0) {
+                void* buffer = malloc(st.size);
+                if (buffer) {
+                    uint32 bytes_read = vfs_read_file(g_current_drive, "/eynos.rei", buffer, st.size);
+                    if (bytes_read > 0) {
+                        rei_image_t rei_image;
+                        if (rei_parse_image((const uint8_t*)buffer, bytes_read, &rei_image) == 0) {
                         // Successfully parsed REI image
                         int img_width = rei_image.header.width;
                         int img_height = rei_image.header.height;
@@ -819,9 +836,10 @@ void ver()
                         
                         rei_displayed = 1;
                         rei_free_image(&rei_image);
+                        }
                     }
+                    free(buffer);
                 }
-                free(buffer);
             }
         }
     }
@@ -2716,6 +2734,8 @@ void userrun_cmd(string ch) {
     char abspath[128];
     resolve_path(&ch[i], shell_current_path, abspath, sizeof(abspath));
 
+    if (!shell_cmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
+
     vfs_stat_t st;
     if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) {
         printf("%cError: File not found: %s\n", 255, 0, 0, abspath);
@@ -3060,6 +3080,7 @@ void memory_cmd(string ch) {
             print_memory_stats();
         }
         else if (strcmp(space, "test") == 0) {
+            if (!shell_cmd_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
             printf("%cRunning memory allocation test...\n", 255, 255, 255);
             void* ptr1 = malloc(100);
             void* ptr2 = malloc(200);
@@ -3080,6 +3101,7 @@ void memory_cmd(string ch) {
             print_memory_stats();
         }
         else if (strcmp(space, "stress") == 0) {
+            if (!shell_cmd_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
             printf("%cRunning memory stress test...\n", 255, 255, 255);
             void* ptrs[100];
             int count = 0;
@@ -3248,6 +3270,7 @@ void hexdump_cmd(string ch) {
         printf("Usage: hexdump <file>\n");
         return;
     }
+    if (!shell_cmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(0, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) {
         printf("[hexdump] Failed to read superblock\n");

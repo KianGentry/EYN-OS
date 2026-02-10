@@ -166,6 +166,7 @@ char* simple_strtok(char* str, const char* delims) {
 // Split command string into arguments
 char** split_command(const char* cmd_str, int* argc) {
     if (!cmd_str || !argc) return NULL;
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
     
     char* cmd_copy = malloc(strlen(cmd_str) + 1);
     strcpy(cmd_copy, cmd_str);
@@ -217,6 +218,7 @@ void free_args(char** args, int argc) {
 // Parse redirections from command string
 char* parse_redirections(const char* cmd_str, command_t* cmd) {
     if (!cmd_str || !cmd) return NULL;
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
     
     char* result = malloc(strlen(cmd_str) + 1);
     strcpy(result, cmd_str);
@@ -308,6 +310,7 @@ char* parse_redirections(const char* cmd_str, command_t* cmd) {
 // Parse command from string
 command_t* parse_command(const char* cmd_str) {
     if (!cmd_str) return NULL;
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
     
     command_t* cmd = malloc(sizeof(command_t));
     memset(cmd, 0, sizeof(command_t));
@@ -380,6 +383,7 @@ command_t* parse_command(const char* cmd_str) {
 // Parse pipeline from input string
 pipeline_t* parse_pipeline(const char* input) {
     if (!input) return NULL;
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
     
     pipeline_t* pipeline = malloc(sizeof(pipeline_t));
     memset(pipeline, 0, sizeof(pipeline_t));
@@ -481,7 +485,7 @@ void close_fd(int fd) {
 // Read file content for input redirection
 char* read_file_for_input_redirection(const char* filename) {
     if (!filename) return NULL;
-    if (!pipeline_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return NULL;
+    if (!pipeline_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return NULL;
     
     // Try to read the file using the filesystem
     int fd = open(filename, EYNFS_READ);
@@ -656,6 +660,7 @@ int execute_command(command_t* cmd) {
 // Execute pipeline (improved implementation)
 int execute_pipeline(pipeline_t* pipeline) {
     if (!pipeline || !pipeline->first) return -1;
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     
     if (pipeline->command_count == 1) {
         // Single command, no pipes needed
@@ -779,6 +784,7 @@ int execute_pipeline(pipeline_t* pipeline) {
 // Execute complex pipeline with proper pipe chaining
 int execute_complex_pipeline(pipeline_t* pipeline) {
     if (!pipeline || pipeline->command_count < 3) return -1;
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     
     // Create a chain of pipes for data flow
     char* current_input = NULL;
@@ -874,6 +880,7 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
 
 // Background process management
 int add_background_process(int pid, const char* command) {
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     for (int i = 0; i < MAX_BACKGROUND_PROCESSES; i++) {
         if (!g_background_processes[i].active) {
             g_background_processes[i].pid = pid;

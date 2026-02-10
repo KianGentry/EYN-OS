@@ -134,7 +134,7 @@ void zread_cmd(string arg) {
         return;
     }
 
-    if (!zc_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
+    if (!zc_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     
     // Parse file descriptor
     int fd = 0;

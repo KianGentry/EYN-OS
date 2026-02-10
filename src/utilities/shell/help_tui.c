@@ -6,6 +6,8 @@
 #include <string.h>
 #include <serial.h>
 #include <tile_manager.h>
+#include <context.h>
+#include <misc/sched.h>
 
 extern const shell_command_info_t __start_shellcmds[];
 extern const shell_command_info_t __stop_shellcmds[];
@@ -95,6 +97,17 @@ static int* g_expanded_commands = NULL;
 static shell_command_info_t* g_copied_cmds = NULL;
 static char* g_cmd_string_pool = NULL;
 static volatile int g_help_running = 0;
+
+static int help_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // Forward declarations for GUI callbacks
 void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata);
@@ -597,6 +610,7 @@ void help_gui_draw(int tile_idx, int content_x, int content_y, int content_w, in
 // string pool so help UI does not rely on pointers that could be relocated
 // or otherwise invalidated by other subsystems (e.g., filesystem buffers).
 void help_tui_init_state() {
+    if (!help_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
     if (g_sorted_cmds) return; // already initialized
     help_dbg_ch('B');
     int cmd_count = (int)(__stop_shellcmds - __start_shellcmds);

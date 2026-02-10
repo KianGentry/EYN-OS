@@ -4,6 +4,19 @@
 #include <string.h>
 #include <shell_command_info.h>
 #include <stdlib.h>
+#include <context.h>
+#include <misc/sched.h>
+
+static int win_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 static void test_draw(int tile_idx, int cx, int cy, int cw, int ch, void* ud) {
     (void)tile_idx; (void)ud;
@@ -35,6 +48,7 @@ static void test_mouse(int tile_idx, const mouse_event_t* me, void* ud) {
 
 void win_test_cmd(string ch) {
     (void)ch;
+    if (!win_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) return;
     int w = 300, h = 200, x = 80, y = 60;
     static char status[] = "Ctrl+X: Close";
     int wid = wm_create_window("Window Test", x, y, w, h, status);

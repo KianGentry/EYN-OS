@@ -129,6 +129,7 @@ int get_process_isolation_status() {
 }
 
 void* user_malloc(uint32 size) {
+    if (!run_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
     return malloc(size); // Use standard malloc
 }
 
