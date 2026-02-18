@@ -18,6 +18,14 @@ static int rei_ctx_allow(uint32 caps, uint32 cost) {
     return 1;
 }
 
+static void rei_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
 // Read REI header from data
 int rei_read_header(const uint8_t* data, size_t size, rei_header_t* header) {
     if (!data || !header || size < sizeof(rei_header_t)) {
@@ -230,6 +238,7 @@ uint32_t rei_mono_to_vga(uint8_t mono) {
 // Display REI image at specific position
 int rei_display_image(const rei_image_t* image, int x, int y) {
     if (!image || !image->data) return -1;
+    if (!rei_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return -1;
     
     printf("%c=== REI Image Display ===\n", 255, 255, 255);
     printf("%cSize: %dx%d pixels\n", 255, 255, 255, image->header.width, image->header.height);
@@ -280,6 +289,7 @@ int rei_display_image(const rei_image_t* image, int x, int y) {
 
     // Draw each pixel to the backbuffer (or framebuffer if no backbuffer)
     for (int py = 0; py < image->header.height; py += scale) {
+        if ((py & 0x7) == 0) rei_ctx_account(SCHED_COST_CONSOLE);
         for (int px = 0; px < image->header.width; px += scale) {
             uint32_t color = rei_get_pixel_color(image, px, py);
             

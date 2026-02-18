@@ -370,6 +370,7 @@ int swap_partition_read_page(uint32 page_num, void *buffer) {
     if (!g_swap_partition.active) return -1;
     if (page_num >= g_swap_partition.total_pages) return -1;
     if (!buffer) return -1;
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     
     uint32 lba = g_swap_partition.lba_start + (page_num * 8);
     uint8 *buf = (uint8 *)buffer;
@@ -389,6 +390,7 @@ int swap_partition_write_page(uint32 page_num, const void *buffer) {
     if (!g_swap_partition.active) return -1;
     if (page_num >= g_swap_partition.total_pages) return -1;
     if (!buffer) return -1;
+    if (!part_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
     
     uint32 lba = g_swap_partition.lba_start + (page_num * 8);
     const uint8 *buf = (const uint8 *)buffer;

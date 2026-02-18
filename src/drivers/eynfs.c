@@ -85,6 +85,7 @@ static void eynfs_init_caches() {
 
 // Block cache functions
 int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data) {
+    if (!eynfs_ctx_check(CAP_READ_FS, SCHED_COST_FS)) return -1;
     // Look for block in cache
     for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
         if (block_cache[i].valid && block_cache[i].block_num == block_num) {
@@ -125,6 +126,7 @@ int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data) {
     
     // Write dirty block if needed
     if (block_cache[lru_index].valid && block_cache[lru_index].dirty) {
+        if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
         ata_write_sector(drive, eynfs_block_to_lba(block_cache[lru_index].block_num), block_cache[lru_index].data);
     }
     
@@ -139,6 +141,7 @@ int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data) {
 }
 
 static int eynfs_cache_write_block(uint8 drive, uint32_t block_num, const uint8_t* data) {
+    if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     // Look for block in cache
     for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
         if (block_cache[i].valid && block_cache[i].block_num == block_num) {
@@ -154,6 +157,7 @@ static int eynfs_cache_write_block(uint8 drive, uint32_t block_num, const uint8_
 }
 
 static void eynfs_cache_flush(uint8 drive) {
+    if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return;
     for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
         if (block_cache[i].valid && block_cache[i].dirty) {
             ata_write_sector(drive, eynfs_block_to_lba(block_cache[i].block_num), block_cache[i].data);
@@ -251,17 +255,23 @@ static uint32_t eynfs_bitmap_block_count(const eynfs_superblock_t *sb) {
 }
 
 static int eynfs_read_bitmap_block(uint8 drive, const eynfs_superblock_t *sb, uint32_t bitmap_block_idx, uint8 *bitmap_block) {
+    if (!eynfs_ctx_check(CAP_READ_FS, SCHED_COST_FS)) return -1;
     uint32_t fs_block = sb->free_block_map + bitmap_block_idx;
     return ata_read_sector(drive, eynfs_block_to_lba(fs_block), bitmap_block);
 }
 
 static int eynfs_write_bitmap_block(uint8 drive, const eynfs_superblock_t *sb, uint32_t bitmap_block_idx, const uint8 *bitmap_block) {
+    if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     uint32_t fs_block = sb->free_block_map + bitmap_block_idx;
     return ata_write_sector(drive, eynfs_block_to_lba(fs_block), bitmap_block);
 }
 
 static int eynfs_bitmap_set_used(uint8 drive, const eynfs_superblock_t *sb, uint32_t fs_block_num, uint8 used) {
     if (fs_block_num >= sb->total_blocks) return -1;
+    if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (current_command_context) {
+        fs_txn_touch(drive, FS_TXN_TAG_SUPERBLOCK, 1u);
+    }
 
     uint32_t byte_index = fs_block_num / 8u;
     uint32_t bit_index = fs_block_num % 8u;
@@ -298,6 +308,11 @@ static int eynfs_alloc_block_optimized(uint8 drive, eynfs_superblock_t *sb) {
     uint32_t bitmap_blocks = eynfs_bitmap_block_count(sb);
 
     for (uint32_t b = 0; b < bitmap_blocks && free_block_cache_count < EYNFS_FREE_BLOCK_CACHE_SIZE; ++b) {
+        if (current_command_context && ((b & 0x3Fu) == 0u)) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
         uint8 bitmap[EYNFS_BLOCK_SIZE];
         if (eynfs_read_bitmap_block(drive, sb, b, bitmap) != 0) return -1;
 
@@ -346,6 +361,10 @@ int eynfs_read_superblock(uint8 drive, uint32 lba, eynfs_superblock_t *sb) {
 
 // Write the EYNFS superblock to disk
 int eynfs_write_superblock(uint8 drive, uint32 lba, const eynfs_superblock_t *sb) {
+    if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (current_command_context) {
+        fs_txn_touch(drive, FS_TXN_TAG_SUPERBLOCK, (uint32)sizeof(*sb));
+    }
     uint8 buf[EYNFS_BLOCK_SIZE] = {0};
     memcpy(buf, sb, sizeof(eynfs_superblock_t));
     if (ata_write_sector(drive, lba, buf) != 0) {
@@ -356,10 +375,16 @@ int eynfs_write_superblock(uint8 drive, uint32 lba, const eynfs_superblock_t *sb
 
 // Read a directory table from disk (multi-block chain)
 int eynfs_read_dir_table(uint8 drive, uint32 lba, eynfs_dir_entry_t *entries, size_t max_entries) {
+    if (!eynfs_ctx_check(CAP_READ_FS, SCHED_COST_FS)) return -1;
     size_t total_entries = 0;
     uint32_t current_block = lba;
     uint8 buf[EYNFS_BLOCK_SIZE];
     while (current_block && total_entries < max_entries) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
         if (ata_read_sector(drive, eynfs_block_to_lba(current_block), buf) != 0) return -1;
         uint32_t next_block = *(uint32_t*)buf;
         size_t entry_count = (EYNFS_BLOCK_SIZE - 4) / sizeof(eynfs_dir_entry_t);
@@ -380,6 +405,7 @@ int eynfs_read_dir_table(uint8 drive, uint32 lba, eynfs_dir_entry_t *entries, si
 // Helper: Write a single directory block
 static int eynfs_write_dir_block(uint8 drive, uint32_t block_num, const eynfs_dir_entry_t *entries, 
                                 size_t num_entries, uint32_t next_block) {
+    if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     uint8 buf[EYNFS_BLOCK_SIZE] = {0};
     *(uint32_t*)buf = next_block;
     size_t entries_to_write = (EYNFS_BLOCK_SIZE - 4) / sizeof(eynfs_dir_entry_t);
@@ -390,6 +416,7 @@ static int eynfs_write_dir_block(uint8 drive, uint32_t block_num, const eynfs_di
 
 // Helper: Count directory entries without allocating memory
 int eynfs_count_dir_entries(uint8 drive, uint32_t lba) {
+    if (!eynfs_ctx_check(CAP_READ_FS, SCHED_COST_FS)) return -1;
     int total_entries = 0;
     uint32_t current_block = lba;
     uint8 buf[EYNFS_BLOCK_SIZE];
@@ -399,6 +426,11 @@ int eynfs_count_dir_entries(uint8 drive, uint32_t lba) {
     const int max_blocks = 32; // 32 blocks = ~288 entries max (much more reasonable)
     
     while (current_block && block_count < max_blocks) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
         if (ata_read_sector(drive, eynfs_block_to_lba(current_block), buf) != 0) return -1;
         uint32_t next_block = *(uint32_t*)buf;
         size_t entry_count = (EYNFS_BLOCK_SIZE - 4) / sizeof(eynfs_dir_entry_t);
@@ -417,11 +449,17 @@ int eynfs_count_dir_entries(uint8 drive, uint32_t lba) {
 
 // Helper: Free a chain of directory blocks
 static int eynfs_free_dir_chain(uint8 drive, uint32_t first_block) {
+    if (!eynfs_ctx_check(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) != 0) return -1;
     
     uint32_t block_num = first_block;
     while (block_num != 0) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
         uint8 buf[EYNFS_BLOCK_SIZE];
         if (ata_read_sector(drive, eynfs_block_to_lba(block_num), buf) != 0) break;
         uint32_t next_block = *(uint32_t*)buf;
@@ -435,6 +473,10 @@ static int eynfs_free_dir_chain(uint8 drive, uint32_t first_block) {
 int eynfs_write_dir_table(uint8 drive, uint32 lba, const eynfs_dir_entry_t *entries, size_t num_entries) {
     if (!entries && num_entries > 0) return -1;
     if (num_entries == 0) return 0;
+    if (!eynfs_ctx_check(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (current_command_context) {
+        fs_txn_touch(drive, FS_TXN_TAG_DIR, (uint32)(num_entries * sizeof(*entries)));
+    }
     
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) != 0) return -1;
@@ -445,6 +487,11 @@ int eynfs_write_dir_table(uint8 drive, uint32 lba, const eynfs_dir_entry_t *entr
     uint32_t current_block = lba;
     
     while (current_block && block_count < 32) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
         original_blocks[block_count++] = current_block;
         uint8 buf[EYNFS_BLOCK_SIZE];
         if (ata_read_sector(drive, eynfs_block_to_lba(current_block), buf) != 0) break;
@@ -458,6 +505,11 @@ int eynfs_write_dir_table(uint8 drive, uint32 lba, const eynfs_dir_entry_t *entr
     // Write all entries using the preserved block chain
     uint32_t allocated_next_block = 0; // Store the allocated block for the second loop
     for (int block_idx = 0; block_idx < block_count && written < num_entries; block_idx++) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
         uint32_t current_block = original_blocks[block_idx];
         
         // Calculate how many entries to write in this block
@@ -496,6 +548,11 @@ int eynfs_write_dir_table(uint8 drive, uint32 lba, const eynfs_dir_entry_t *entr
     
     // Continue writing to newly allocated blocks if needed
     while (written < num_entries) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
         // Use the allocated_next_block that was allocated in the previous loop
         uint32_t new_block = allocated_next_block;
         if (new_block == 0) {
@@ -551,6 +608,7 @@ static int eynfs_validate_dir_entry(const eynfs_dir_entry_t *entry) {
 
 // Allocate a free block, mark it as used in the bitmap, and return its block number
 int eynfs_alloc_block(uint8 drive, eynfs_superblock_t *sb) {
+    if (!eynfs_ctx_check(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     // Use optimized allocation with caching
     int block = eynfs_alloc_block_optimized(drive, sb);
     if (block >= 0) {
@@ -568,6 +626,7 @@ int eynfs_alloc_block(uint8 drive, eynfs_superblock_t *sb) {
 
 // Free a block (mark as unused in the bitmap)
 int eynfs_free_block(uint8 drive, eynfs_superblock_t *sb, uint32_t block) {
+    if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     if (block >= sb->total_blocks) return -1;
     if (eynfs_bitmap_set_used(drive, sb, block, 0) != 0) return -1;
 
@@ -613,6 +672,7 @@ int eynfs_find_in_dir(uint8 drive, const eynfs_superblock_t *sb, uint32_t dir_bl
         if (current_command_context) {
             scheduler_account(current_command_context->wo, SCHED_COST_FS);
             scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
         }
         uint8 buf[EYNFS_BLOCK_SIZE];
         if (eynfs_cache_get_block(drive, current_block, buf) != 0) return -1;
@@ -685,6 +745,13 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
     if (!name || !name[0]) return -1;
     if (type != EYNFS_TYPE_FILE && type != EYNFS_TYPE_DIR) return -1;
     if (parent_block == 0) return -1;
+    if (!eynfs_ctx_check(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (current_command_context) {
+        fs_txn_touch(drive, FS_TXN_TAG_DIR, (uint32)sizeof(eynfs_dir_entry_t));
+        if (type == EYNFS_TYPE_FILE) {
+            fs_txn_touch(drive, FS_TXN_TAG_FILE, 0u);
+        }
+    }
 
     // Create without heap allocations: scan the directory-table block chain looking
     // for an empty slot; if none, append a new directory-table block.
@@ -693,6 +760,11 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
     uint32_t last = 0;
 
     while (cur != 0) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
         uint8 buf[EYNFS_BLOCK_SIZE];
         if (eynfs_cache_get_block(drive, cur, buf) != 0) return -1;
 
@@ -815,6 +887,11 @@ int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
 // Delete a file or directory entry by name from the given parent directory
 int eynfs_delete_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_block, const char *name) {
     if (!name || !name[0]) return -1;
+    if (!eynfs_ctx_check(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (current_command_context) {
+        fs_txn_touch(drive, FS_TXN_TAG_DIR, (uint32)sizeof(eynfs_dir_entry_t));
+        fs_txn_touch(drive, FS_TXN_TAG_FILE, 0u);
+    }
     
     // Use stack-local buffer to avoid heap allocations
     enum { DELETE_MAX_ENTRIES = 64 };
@@ -834,6 +911,11 @@ int eynfs_delete_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
             // Free all blocks in the chain
             uint32_t block_num = entries[i].first_block;
             while (block_num != 0) {
+                if (current_command_context) {
+                    scheduler_account(current_command_context->wo, SCHED_COST_FS);
+                    scheduler_yield_if_needed(current_command_context->wo);
+                    if (sched_det_is_enabled()) current_command_context->det_seq++;
+                }
                 uint8 tmp[EYNFS_BLOCK_SIZE];
                 if (ata_read_sector(drive, eynfs_block_to_lba(block_num), tmp) != 0) break;
                 uint32_t next_block = *(uint32_t*)tmp;
@@ -877,6 +959,7 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
         if (current_command_context) {
             scheduler_account(current_command_context->wo, SCHED_COST_FS);
             scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
         }
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
@@ -889,6 +972,7 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
         if (current_command_context) {
             scheduler_account(current_command_context->wo, SCHED_COST_FS);
             scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
         }
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
@@ -906,6 +990,7 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
         if (current_command_context) {
             scheduler_account(current_command_context->wo, SCHED_COST_FS);
             scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
         }
         if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-read");
         if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
@@ -924,6 +1009,10 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
 int eynfs_write_file(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *entry, const void *buf, size_t size, uint32_t parent_block, uint32_t entry_index) {
     if (!entry || entry->type != EYNFS_TYPE_FILE) return -1;
     if (!buf && size > 0) return -1;
+    if (!eynfs_ctx_check(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (current_command_context) {
+        fs_txn_touch(drive, FS_TXN_TAG_FILE, (uint32)size);
+    }
     
     // Free existing blocks if this is a rewrite
     if (entry->first_block != 0) {

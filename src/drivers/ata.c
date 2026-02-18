@@ -380,6 +380,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
 // Get drive information
 drive_info_t* ata_get_drive_info(uint8 drive) {
     if (drive >= 8) return NULL;
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return NULL;
     return &detected_drives[drive];
 }
 
@@ -388,6 +389,7 @@ void ata_identify_drive(uint8 drive, char* model, uint32* sectors) {
     if (sectors) *sectors = 0;
 
     if (drive >= 8) return;
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
 
     if (detected_drives[drive].present) {
         if (model) {
@@ -416,6 +418,7 @@ void ata_identify_drive(uint8 drive, char* model, uint32* sectors) {
 // Check if drive is present
 int ata_drive_present(uint8 drive) {
     if (drive >= 8) return 0;
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return 0;
     return detected_drives[drive].present;
 }
 
@@ -559,6 +562,7 @@ static void init_logical_drive_mapping(void) {
 
 // get physical drive number from logical drive number
 uint8 ata_logical_to_physical(uint8 logical_drive) {
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return 0xFF;
     if (logical_drive >= num_logical_drives) {
         return 0xFF;  // invalid
     }
@@ -567,6 +571,7 @@ uint8 ata_logical_to_physical(uint8 logical_drive) {
 
 // get logical drive number from physical drive number
 uint8 ata_physical_to_logical(uint8 physical_drive) {
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return 0xFF;
     if (physical_drive >= 8) {
         return 0xFF;  // invalid
     }
@@ -575,11 +580,13 @@ uint8 ata_physical_to_logical(uint8 physical_drive) {
 
 // get number of logical drives
 uint8 ata_get_num_logical_drives(void) {
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return 0;
     return num_logical_drives;
 }
 
 // check if logical drive is present
 int ata_logical_drive_present(uint8 logical_drive) {
+    if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return 0;
     if (logical_drive >= num_logical_drives) {
         return 0;
     }

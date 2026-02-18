@@ -207,7 +207,7 @@ int fat32_find_entry(void* disk_img, struct fat32_bpb* bpb, uint32 dir_cluster, 
 
 int fat32_write_file(void* disk_img, struct fat32_bpb* bpb, const char* filename, const char* buf, int bufsize) {
     if (!disk_img || !bpb || !filename || !buf || bufsize <= 0) return -1;
-    if (!fat32_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (!fat32_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 sec_per_clus = bpb->SecPerClus;
     uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
@@ -410,7 +410,7 @@ int fat32_read_file_sector(uint8 drive, uint32 partition_lba_start, struct fat32
 
 int fat32_write_file_sector(uint8 drive, uint32 partition_lba_start, struct fat32_bpb* bpb, const char* filename, const char* buf, int bufsize) {
     if (!bpb || !filename || !buf || bufsize <= 0) return -1;
-    if (!fat32_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (!fat32_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 sec_per_clus = bpb->SecPerClus;
     uint32 rsvd_sec_cnt = bpb->RsvdSecCnt;
@@ -601,7 +601,7 @@ uint32 fat32_get_partition_lba_start(uint8 drive) {
 
 int fat32_format_partition(uint8 drive, uint8 partition_num) {
     if (partition_num < 1 || partition_num > 4) return -1;
-    if (!fat32_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
+    if (!fat32_ctx_allow(CAP_DEV_DISK | CAP_WRITE_FS, SCHED_COST_FS)) return -1;
 
     uint8 mbr[512];
     if (ata_read_sector(drive, 0, mbr) != 0) return -2;
