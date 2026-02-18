@@ -1092,6 +1092,7 @@ uint32 syscall_dispatch(regs_t* regs) {
 
             // stdin: line read (NUL-terminated for convenience)
             if (fd == 0) {
+                if (!syscall_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
                 static int s_stdin_debug_once = 0;
                 if (!s_stdin_debug_once) {
                     s_stdin_debug_once = 1;
@@ -2064,7 +2065,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
         case SYSCALL_GUI_POLL_EVENT:
         case SYSCALL_GUI_WAIT_EVENT: {
-            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE | CAP_DEV_INPUT, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_poll_event(handle, out_event_ptr, out_size)
             // gui_wait_event(handle, out_event_ptr, out_size)
@@ -2366,7 +2367,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
         case SYSCALL_CAP_GUI_POLL_EVENT:
         case SYSCALL_CAP_GUI_WAIT_EVENT: {
-            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE | CAP_DEV_INPUT, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             const void* user_cap_ptr = (const void*)arg1;
             void* user_out = (void*)arg2;
             int out_sz = (int)arg3;
@@ -2421,6 +2422,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_GETKEY: {
+            if (!syscall_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             regs->eax = (uint32)kb_getchar_nonblocking();
             break;
         }
