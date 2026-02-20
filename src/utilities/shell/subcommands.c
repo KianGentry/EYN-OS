@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <utilities/shell/shell_args.h>
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
@@ -90,38 +91,35 @@ void search_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t d
 
 // Main search_size command implementation
 void search_size_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 3) {
         printf("%cUsage: search_size <operator> <size>\n", 255, 255, 255);
         printf("%cOperators: >, <, =, >=, <=, gt, lt, eq, gte, lte\n", 255, 255, 255);
         printf("%cExample: search_size > 1000\n", 255, 255, 255);
         printf("%cExample: search_size <= 50\n", 255, 255, 255);
         return;
     }
-    
+
     // Parse operator
     char operator[8] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 7) {
-        operator[j++] = ch[i++];
-    }
-    operator[j] = '\0';
-    
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    strncpy(operator, args.argv[1], sizeof(operator) - 1);
+
+    // Parse size value
+    const char* size_str = args.argv[2];
+    if (!size_str || !size_str[0]) {
         printf("%cError: Missing size value\n", 255, 0, 0);
         return;
     }
-    
-    // Parse size value
+
     uint32_t size_value = 0;
-    while (ch[i] >= '0' && ch[i] <= '9') {
-        size_value = size_value * 10 + (ch[i] - '0');
-        i++;
+    const char* p = size_str;
+    if (*p < '0' || *p > '9') {
+        printf("%cError: Invalid size value\n", 255, 0, 0);
+        return;
+    }
+    while (*p >= '0' && *p <= '9') {
+        size_value = size_value * 10u + (uint32_t)(*p - '0');
+        p++;
     }
     
     // Set up search criteria
@@ -199,24 +197,17 @@ void search_type_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t d
 
 // Main search_type command implementation
 void search_type_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2) {
         printf("%cUsage: search_type <extension>\n", 255, 255, 255);
         printf("%cExample: search_type .txt\n", 255, 255, 255);
         printf("%cExample: search_type .game\n", 255, 255, 255);
         return;
     }
-    
+
     // Parse extension
     char extension[16] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 15) {
-        extension[j++] = ch[i++];
-    }
-    extension[j] = '\0';
+    strncpy(extension, args.argv[1], sizeof(extension) - 1);
     
     printf("%cSearching for files with extension '%s'...\n", 255, 255, 255, extension);
 
@@ -333,43 +324,31 @@ void search_depth_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t 
 
 // Main search_depth command implementation
 void search_depth_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 3) {
         printf("%cUsage: search_depth <max_depth> <pattern>\n", 255, 255, 255);
         printf("%cExample: search_depth 2 hello\n", 255, 255, 255);
         printf("%cExample: search_depth 3 .txt\n", 255, 255, 255);
         return;
     }
-    
+
     // Parse max depth
-    int max_depth = 0;
-    while (ch[i] >= '0' && ch[i] <= '9') {
-        max_depth = max_depth * 10 + (ch[i] - '0');
-        i++;
-    }
+    int max_depth = str_to_int((string)args.argv[1]);
     
     if (max_depth <= 0 || max_depth > 10) {
         printf("%cError: Invalid depth (1-10)\n", 255, 0, 0);
         return;
     }
     
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    const char* pattern_arg = args.argv[2];
+    if (!pattern_arg || !pattern_arg[0]) {
         printf("%cError: Missing search pattern\n", 255, 0, 0);
         return;
     }
-    
+
     // Parse pattern
     char pattern[64] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 63) {
-        pattern[j++] = ch[i++];
-    }
-    pattern[j] = '\0';
+    strncpy(pattern, pattern_arg, sizeof(pattern) - 1);
     
     printf("%cSearching for '%s' within depth %d...\n", 255, 255, 255, pattern, max_depth);
 
@@ -431,17 +410,11 @@ void ls_tree_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_b
 
 // Main ls_tree command implementation
 void ls_tree_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
     int max_depth = 3; // Default depth
-    if (ch[i]) {
-        max_depth = 0;
-        while (ch[i] >= '0' && ch[i] <= '9') {
-            max_depth = max_depth * 10 + (ch[i] - '0');
-            i++;
-        }
+
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) == 0 && args.argc >= 2 && args.argv[1] && args.argv[1][0]) {
+        max_depth = str_to_int((string)args.argv[1]);
         if (max_depth <= 0) max_depth = 3;
         if (max_depth > 10) max_depth = 10; // Limit depth
     }
@@ -509,17 +482,11 @@ void ls_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_b
 
 // Main ls_size command implementation
 void ls_size_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
     int max_depth = 1; // Default depth
-    if (ch[i]) {
-        max_depth = 0;
-        while (ch[i] >= '0' && ch[i] <= '9') {
-            max_depth = max_depth * 10 + (ch[i] - '0');
-            i++;
-        }
+
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) == 0 && args.argc >= 2 && args.argv[1] && args.argv[1][0]) {
+        max_depth = str_to_int((string)args.argv[1]);
         if (max_depth <= 0) max_depth = 1;
         if (max_depth > 5) max_depth = 5; // Limit depth
     }
@@ -587,17 +554,11 @@ void ls_detail_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir
 
 // Main ls_detail command implementation
 void ls_detail_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
     int max_depth = 1; // Default depth
-    if (ch[i]) {
-        max_depth = 0;
-        while (ch[i] >= '0' && ch[i] <= '9') {
-            max_depth = max_depth * 10 + (ch[i] - '0');
-            i++;
-        }
+
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) == 0 && args.argc >= 2 && args.argv[1] && args.argv[1][0]) {
+        max_depth = str_to_int((string)args.argv[1]);
         if (max_depth <= 0) max_depth = 1;
         if (max_depth > 3) max_depth = 3; // Limit depth for detail view
     }
@@ -787,11 +748,8 @@ void debug_superblock_cmd(string ch) {
 
 // Debug directory structure command
 void debug_directory_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2) {
         printf("%cUsage: debug_directory <path>\n", 255, 255, 255);
         printf("%cExample: debug_directory /\n", 255, 255, 255);
         printf("%cExample: debug_directory /games\n", 255, 255, 255);
@@ -802,11 +760,7 @@ void debug_directory_cmd(string ch) {
     
     // Parse path
     char path[128] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) {
-        path[j++] = ch[i++];
-    }
-    path[j] = '\0';
+    strncpy(path, args.argv[1], sizeof(path) - 1);
     
     printf("%c=== Directory Debug: %s ===\n", 255, 255, 255, path);
     
@@ -860,23 +814,14 @@ void debug_directory_cmd(string ch) {
 
 // read_raw command implementation - dynamic buffer system
 void read_raw_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2) {
         printf("%cUsage: read_raw <filename>\n", 255, 255, 255);
         printf("%cDisplay raw file contents.\n", 255, 255, 255);
         return;
     }
-    
-    // Parse filename
-    char arg[128] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) {
-        arg[j++] = ch[i++];
-    }
-    arg[j] = '\0';
+
+    const char* arg = args.argv[1];
     
     // Resolve path
     char abspath[128];
@@ -951,23 +896,14 @@ void read_raw_cmd(string ch) {
 
 // read_md command implementation - markdown rendering
 void read_md_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2) {
         printf("%cUsage: read_md <filename>\n", 255, 255, 255);
         printf("%cDisplay markdown files with formatting.\n", 255, 255, 255);
         return;
     }
-    
-    // Parse filename
-    char arg[128] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) {
-        arg[j++] = ch[i++];
-    }
-    arg[j] = '\0';
+
+    const char* arg = args.argv[1];
     
     // Check file extension
     int name_len = strlen(arg);
@@ -1042,23 +978,14 @@ void read_md_cmd(string ch) {
 
 // read_image command implementation - REI image rendering
 void read_image_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2) {
         printf("%cUsage: read_image <filename>\n", 255, 255, 255);
         printf("%cDisplay image files (.rei format).\n", 255, 255, 255);
         return;
     }
-    
-    // Parse filename
-    char arg[128] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) {
-        arg[j++] = ch[i++];
-    }
-    arg[j] = '\0';
+
+    const char* arg = args.argv[1];
     
     // Check file extension
     int name_len = strlen(arg);

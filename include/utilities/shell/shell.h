@@ -2,6 +2,9 @@
 #define SHELL_H
 #include <types.h>
 
+struct shell_args;
+typedef struct shell_args shell_args_t;
+
 #define MAX_HISTORY_SIZE 50
 #define MAX_COMMAND_LENGTH 200
 
@@ -23,7 +26,7 @@ void clear_history(command_history_t* history);
 void show_history(command_history_t* history);
 
 // Command lookup function
-typedef void (*shell_cmd_handler_t)(string);
+typedef void (*shell_cmd_handler_t)(const shell_args_t* args);
 shell_cmd_handler_t find_command(const char* name);
 
 // Global history instance

@@ -1,5 +1,6 @@
 #include <shell_commands.h>
 #include <shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 #include <pipeline.h>
 #include <fs_commands.h>
 #include <run_command.h>
@@ -31,43 +32,43 @@
 #include <misc/sched.h>
 
 // Forward declarations for command handlers
-void help_cmd(string arg);
-void echo_cmd(string arg);
-void ver_cmd(string arg);
-void spam_cmd(string arg);
-void calc_cmd(string arg);
-void draw_cmd_handler(string arg);
-void drive_cmd(string arg);
-void memory_cmd(string arg);
-void log_cmd(string arg);
-void lsata_cmd(string arg);
-void handler_exit(string arg);
-void clear_cmd(string arg);
-void catram_cmd(string arg);
-void lsram_cmd(string arg);
-void random_cmd(string arg);
-void sort_cmd(string arg);
-void search_cmd(string arg);
+void help_cmd(const shell_args_t* args);
+void echo_cmd(const shell_args_t* args);
+void ver_cmd(const shell_args_t* args);
+void spam_cmd(const shell_args_t* args);
+void calc_cmd(const shell_args_t* args);
+void draw_cmd_handler(const shell_args_t* args);
+void drive_cmd(const shell_args_t* args);
+void memory_cmd(const shell_args_t* args);
+void log_cmd(const shell_args_t* args);
+void lsata_cmd(const shell_args_t* args);
+void handler_exit(const shell_args_t* args);
+void clear_cmd(const shell_args_t* args);
+void catram_cmd(const shell_args_t* args);
+void lsram_cmd(const shell_args_t* args);
+void random_cmd(const shell_args_t* args);
+void sort_cmd(const shell_args_t* args);
+void search_cmd(const shell_args_t* args);
 // game engine removed
-void error_cmd(string arg);
-void validate_cmd(string arg);
-void portable_cmd(string arg);
-void init_cmd(string arg);
-void pciscan_cmd(string arg);
-void e1000probe_cmd(string arg);
-void e1000_cmd(string arg);
+void error_cmd(const shell_args_t* args);
+void validate_cmd(const shell_args_t* args);
+void portable_cmd(const shell_args_t* args);
+void init_cmd(const shell_args_t* args);
+void pciscan_cmd(const shell_args_t* args);
+void e1000probe_cmd(const shell_args_t* args);
+void e1000_cmd(const shell_args_t* args);
 // Diagnostics/testing commands
-void panic_cmd(string arg);
-void assertfail_cmd(string arg);
-void serialtest_cmd(string arg);
-void pagingguards_cmd(string arg);
-void pf_cmd(string arg);
-void ring3_cmd(string arg);
-void userrun_cmd(string arg);
-void setbg_cmd(string arg);
-void clearbg_cmd(string arg);
-void setfont_cmd(string arg);
-void crashlog_cmd(string arg);
+void panic_cmd(const shell_args_t* args);
+void assertfail_cmd(const shell_args_t* args);
+void serialtest_cmd(const shell_args_t* args);
+void pagingguards_cmd(const shell_args_t* args);
+void pf_cmd(const shell_args_t* args);
+void ring3_cmd(const shell_args_t* args);
+void userrun_cmd(const shell_args_t* args);
+void setbg_cmd(const shell_args_t* args);
+void clearbg_cmd(const shell_args_t* args);
+void setfont_cmd(const shell_args_t* args);
+void crashlog_cmd(const shell_args_t* args);
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
@@ -83,17 +84,23 @@ static int shell_cmd_ctx_allow(uint32 caps, uint32 cost) {
     return 1;
 }
 
+static int parse_u32_dec_strict(const char* s, uint32_t* out) {
+    if (!s || !s[0] || !out) return -1;
+    uint32_t val = 0;
+    for (uint32_t i = 0; s[i]; ++i) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        if (val > UINT32_MAX / 10u) return -1;
+        val = val * 10u + (uint32_t)(s[i] - '0');
+    }
+    *out = val;
+    return 0;
+}
+
 // Random number generator command
-void random_cmd(string ch) {
+void random_cmd(const shell_args_t* args) {
     extern int shell_redirect_active; // from vga.c
-    if (!ch) return; // Prevent null pointer dereference
-    
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
     // If no arguments, generate a single random number
-    if (!ch[i]) {
+    if (!args || args->argc < 2) {
         uint32_t num = rand_next();
         if (shell_redirect_active) {
             printf("%d\n", (int)num);
@@ -102,39 +109,22 @@ void random_cmd(string ch) {
         }
         return;
     }
-    
-    // Parse first argument (count or min) - using safe parsing like drive_cmd
-    if (ch[i] < '0' || ch[i] > '9') {
+
+    // Parse first argument (count or min)
+    uint32_t arg1 = 0;
+    if (parse_u32_dec_strict(args->argv[1], &arg1) != 0) {
         printf("%cError: Invalid number format\n", 255, 0, 0);
         return;
     }
 
-    uint32_t arg1 = 0;
-    while (ch[i] >= '0' && ch[i] <= '9') {
-        if (arg1 > UINT32_MAX / 10) {
-            printf("%cError: Number too large\n", 255, 0, 0);
-            return;
-        }
-        arg1 = arg1 * 10 + (ch[i] - '0');
-        i++;
+    // Optional second argument: range [min, max]
+    uint32_t arg2 = 0;
+    int has_range = 0;
+    if (args->argc >= 3 && parse_u32_dec_strict(args->argv[2], &arg2) == 0) {
+        has_range = 1;
     }
-    
-    // Skip spaces
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    // Check if there's a second argument
-    if (ch[i] && ch[i] >= '0' && ch[i] <= '9') {
-        uint32_t arg2 = 0;
-        while (ch[i] && ch[i] >= '0' && ch[i] <= '9') {
-            if (arg2 > UINT32_MAX / 10) {
-                printf("%cError: Number too large\n", 255, 0, 0);
-                return;
-            }
-            arg2 = arg2 * 10 + (ch[i] - '0');
-            i++;
-        }
-        
-        // Two arguments: range [min, max]
+
+    if (has_range) {
         if (arg1 >= arg2) {
             printf("%cError: min must be less than max\n", 255, 0, 0);
             return;
@@ -180,13 +170,9 @@ void random_cmd(string ch) {
 }
 
 // Set background image for the focused tile: setbg <file.rei>
-void setbg_cmd(string ch) {
-    // Parse first token after command as path
-    uint8 i = 0; while (ch[i] && ch[i] != ' ') i++; while (ch[i] == ' ') i++;
-    if (!ch[i]) { printf("%cUsage: setbg <file.rei>\n", 255, 255, 255); return; }
-    char path[128] = {0}; uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < sizeof(path)-1) { path[j++] = ch[i++]; }
-    path[j] = '\0';
+void setbg_cmd(const shell_args_t* args) {
+    const char* path = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!path || !path[0]) { printf("%cUsage: setbg <file.rei>\n", 255, 255, 255); return; }
     // Resolve path
     char abspath[128]; resolve_path(path, shell_current_path, abspath, sizeof(abspath));
     if (!shell_cmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
@@ -208,27 +194,17 @@ void setbg_cmd(string ch) {
 }
 
 // Clear background on focused tile
-void clearbg_cmd(string ch) { (void)ch; int focused = tile_get_focused(); if (focused < 0) { printf("%cError: Tiling UI not active.\n", 255, 0, 0); return; } tile_clear_background(focused); }
+void clearbg_cmd(const shell_args_t* args) { (void)args; int focused = tile_get_focused(); if (focused < 0) { printf("%cError: Tiling UI not active.\n", 255, 0, 0); return; } tile_clear_background(focused); }
 
 // Switch system font at runtime: setfont <file.hex> | setfont builtin
-void setfont_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] == ' ') i++;
-
-    if (!ch[i]) {
+void setfont_cmd(const shell_args_t* args) {
+    const char* arg = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!arg || !arg[0]) {
         printf("%cUsage: setfont <file.hex>\n", 255, 255, 255);
         printf("%c       setfont builtin\n", 255, 255, 255);
         printf("%cExample: setfont /fonts/unscii-16.hex\n", 255, 255, 255);
         return;
     }
-
-    char arg[128] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < sizeof(arg) - 1) {
-        arg[j++] = ch[i++];
-    }
-    arg[j] = '\0';
 
     if (strcmp(arg, "builtin") == 0) {
         if (vga_system_font_set(g_current_drive, "builtin") != 0) {
@@ -276,24 +252,12 @@ static void crashlog_print_hex(const uint8* data, uint32 len, uint32 max_len) {
     printf("\n");
 }
 
-void crashlog_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] == ' ') i++;
-
-    if (!ch[i]) {
+void crashlog_cmd(const shell_args_t* args) {
+    const char* subcmd = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!subcmd || !subcmd[0]) {
         printf("Usage: crashlog dump | crashlog clear yes\n");
         return;
     }
-
-    char subcmd[16] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < sizeof(subcmd) - 1) {
-        subcmd[j++] = ch[i++];
-    }
-    subcmd[j] = '\0';
-
-    while (ch[i] == ' ') i++;
 
     if (strcmp(subcmd, "dump") == 0) {
         int count = crashlog_get_record_count();
@@ -327,7 +291,8 @@ void crashlog_cmd(string ch) {
     }
 
     if (strcmp(subcmd, "clear") == 0) {
-        if (strcmp(&ch[i], "yes") != 0) {
+        const char* confirm = (args && args->argc >= 3) ? args->argv[2] : NULL;
+        if (!confirm || strcmp(confirm, "yes") != 0) {
             printf("Usage: crashlog clear yes\n");
             return;
         }
@@ -343,57 +308,15 @@ void crashlog_cmd(string ch) {
     printf("Usage: crashlog dump | crashlog clear yes\n");
 }
 
-// history command implementation
-void history_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
-        // Show history
-        show_history(&g_command_history);
-    } else {
-        // Check for clear command
-        char arg[16] = {0};
-        uint8 j = 0;
-        while (ch[i] && ch[i] != ' ' && j < 15) arg[j++] = ch[i++];
-        arg[j] = '\0';
-        
-        if (strcmp(arg, "clear") == 0) {
-            clear_history(&g_command_history);
-            printf("%cCommand history cleared.\n", 0, 255, 0);
-        } else {
-            printf("%cUsage: history [clear]\n", 255, 255, 255);
-            printf("%c  history      - Show command history\n", 255, 255, 255);
-            printf("%c  history clear - Clear command history\n", 255, 255, 255);
-        }
-    }
-}
-
 // sort command implementation
-void sort_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+void sort_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 2) {
         printf("%cUsage: sort <string1> <string2> <string3> ...\n", 255, 255, 255);
         printf("%cExample: sort zebra apple banana\n", 255, 255, 255);
         return;
     }
-    
-    // Count the number of strings
-    int count = 0;
-    int pos = i;
-    while (ch[pos]) {
-        if (ch[pos] == ' ') {
-            count++;
-            while (ch[pos] == ' ') pos++;
-        } else {
-            pos++;
-        }
-    }
-    count++; // Count the last string
+
+    int count = (int)args->argc - 1;
     
     if (count == 0) {
         printf("%cNo strings to sort.\n", 255, 0, 0);
@@ -408,38 +331,9 @@ void sort_cmd(string ch) {
         printf("%cError: Memory allocation failed.\n", 255, 0, 0);
         return;
     }
-    
-    // Parse strings
-    pos = i;
-    int str_idx = 0;
-    while (ch[pos] && str_idx < count) {
-        // Skip leading spaces
-        while (ch[pos] == ' ') pos++;
-        if (!ch[pos]) break;
-        
-        // Find end of current string
-        int start = pos;
-        while (ch[pos] && ch[pos] != ' ') pos++;
-        int len = pos - start;
-        
-        // Allocate and copy string
-        strings[str_idx] = (char*) malloc(len + 1);
-        if (!strings[str_idx]) {
-            printf("%cError: Memory allocation failed.\n", 255, 0, 0);
-            // Clean up
-            for (int j = 0; j < str_idx; j++) {
-                free(strings[j]);
-            }
-            free(strings);
-            return;
-        }
-        
-        // Copy string
-        for (int j = 0; j < len; j++) {
-            strings[str_idx][j] = ch[start + j];
-        }
-        strings[str_idx][len] = '\0';
-        str_idx++;
+
+    for (int idx = 0; idx < count; ++idx) {
+        strings[idx] = (char*)args->argv[idx + 1];
     }
     
     // Sort the strings
@@ -450,7 +344,6 @@ void sort_cmd(string ch) {
     // Print sorted strings
     for (int j = 0; j < count; j++) {
         printf("%c%d: %s\n", 255, 255, 255, j + 1, strings[j]);
-        free(strings[j]);
     }
     
     free(strings);
@@ -538,23 +431,23 @@ void search_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_bl
 }
 
 // search command implementation - universal search
-void search_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
+void search_cmd(const shell_args_t* args) {
     // Check if this is filter mode (from pipeline)
     int is_filter_mode = 0;
-    if (strstr(ch, "--filter") != NULL) {
-        is_filter_mode = 1;
-        // Remove --filter from the command string
-        char* filter_pos = strstr(ch, "--filter");
-        if (filter_pos) {
-            *filter_pos = '\0';
+    const char* pattern_arg = NULL;
+    const char* source_arg = NULL;
+
+    if (args) {
+        for (uint32 idx = 1; idx < args->argc; ++idx) {
+            const char* tok = args->argv[idx];
+            if (!tok) continue;
+            if (strcmp(tok, "--filter") == 0) { is_filter_mode = 1; continue; }
+            if (!pattern_arg) { pattern_arg = tok; continue; }
+            if (!source_arg) { source_arg = tok; continue; }
         }
     }
-    
-    if (!ch[i]) {
+
+    if (!pattern_arg || !pattern_arg[0]) {
         printf("%cUsage: search <pattern> [source]\n", 255, 255, 255);
         printf("%cSources:\n", 255, 255, 255);
         printf("%c  (none)     - Search filesystem (default)\n", 255, 255, 255);
@@ -567,32 +460,19 @@ void search_cmd(string ch) {
         printf("%c  ls | search test.txt     (pipeline mode)\n", 255, 255, 255);
         return;
     }
-    
+
     // Parse search pattern
     char pattern[64] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 63) {
-        pattern[j++] = ch[i++];
-    }
-    pattern[j] = '\0';
+    strncpy(pattern, pattern_arg, sizeof(pattern) - 1);
     
     if (strlen(pattern) == 0) {
         printf("%cError: No search pattern provided.\n", 255, 0, 0);
         return;
     }
     
-    // Skip spaces after pattern
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    // Check for source (command or path)
+    // Optional source (command or path)
     char source[128] = {0};
-    if (ch[i]) {
-        uint8 k = 0;
-        while (ch[i] && ch[i] != ' ' && k < 127) {
-            source[k++] = ch[i++];
-        }
-        source[k] = '\0';
-    }
+    if (source_arg && source_arg[0]) strncpy(source, source_arg, sizeof(source) - 1);
     
     if (is_filter_mode) {
         // Pipeline mode: search in piped input data
@@ -640,7 +520,11 @@ void search_cmd(string ch) {
         // Execute the command
         shell_cmd_handler_t handler = find_command(source);
         if (handler) {
-            handler(source);
+            shell_args_t args;
+            if (shell_args_parse(&args, source) == 0)
+                handler(&args);
+            else
+                printf("Command line too long: %s\n", source);
         } else {
             printf("Command not found: %s\n", source);
             stop_shell_redirect();
@@ -744,14 +628,13 @@ void search_cmd(string ch) {
 // echo implementation
 void echo(string ch)
 {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2) {
         printf("%c\n", 255, 255, 255);
         return;
     }
-    printf("%c%s\n", 255, 255, 255, &ch[i]);
+    const char* rest = shell_args_rest_raw(&args, 1);
+    printf("%c%s\n", 255, 255, 255, rest ? rest : "");
 }
 
 // joke_spam implementation
@@ -922,7 +805,8 @@ void help()
     printf("%c  status   - Check which commands are loaded\n", 255, 255, 255);
 }
 
-void help_cmd(string ch) {
+void help_cmd(const shell_args_t* args) {
+    (void)args;
     // Initialize help state (if not already) and show precomputed GUI when tiling
     extern void help_tui_init_state(void);
     extern void help_tui_show(void);
@@ -961,9 +845,9 @@ REGISTER_SHELL_COMMAND(pciscan_cmd_info, "pciscan", pciscan_cmd, CMD_DIAGNOSTIC,
 REGISTER_SHELL_COMMAND(e1000probe_cmd_info, "e1000probe", e1000probe_cmd, CMD_DIAGNOSTIC, "Probe the Intel e1000 NIC (read-only MMIO sanity check).\nUsage: e1000probe", "e1000probe");
 REGISTER_SHELL_COMMAND(e1000_cmd_info, "e1000", e1000_cmd, CMD_DIAGNOSTIC, "Intel e1000 utilities (probe + bring-up helpers).\nUsage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx] | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-sendcur | e1000 tcp-close", "e1000 init");
 
-static void ping_cmd(string ch);
-static void netstat_cmd(string ch);
-static void netcfg_cmd(string ch);
+static void ping_cmd(const shell_args_t* args);
+static void netstat_cmd(const shell_args_t* args);
+static void netcfg_cmd(const shell_args_t* args);
 REGISTER_SHELL_COMMAND(ping_cmd_info, "ping", ping_cmd, CMD_DIAGNOSTIC, "Send ICMP echo request(s).\nUsage: ping <dst_ip> [count] [local_ip]\nExample: ping 10.0.2.2\nNote: run 'e1000 init' first.", "ping 10.0.2.2");
 REGISTER_SHELL_COMMAND(netstat_cmd_info, "netstat", netstat_cmd, CMD_DIAGNOSTIC, "Network status (netstack + ARP + UDP + ICMP).\nUsage: netstat\nNote: run 'e1000 init' first for full info.", "netstat");
 REGISTER_SHELL_COMMAND(netcfg_cmd_info, "netcfg", netcfg_cmd, CMD_DIAGNOSTIC, "Network configuration (defaults match QEMU user-net).\nUsage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set ip|gw|mask|dns <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]\nDefault path: /config/net.cfg", "netcfg show");
@@ -1004,8 +888,9 @@ static void pciscan_cb(const pci_device_info* info, void* user)
     ctx->shown++;
 }
 
-void pciscan_cmd(string arg)
+void pciscan_cmd(const shell_args_t* args)
 {
+    string arg = (string)(args ? args->raw : "");
     pciscan_ctx ctx;
     ctx.count = 0;
     ctx.shown = 0;
@@ -1025,8 +910,9 @@ void pciscan_cmd(string arg)
     printf("Found %d device functions (%d shown).\n", (int)ctx.count, (int)ctx.shown);
 }
 
-void e1000probe_cmd(string arg)
+void e1000probe_cmd(const shell_args_t* args)
 {
+    string arg = (string)(args ? args->raw : "");
     (void)arg;
     (void)e1000_probe_and_print();
 }
@@ -1288,8 +1174,9 @@ static int netcfg_same_subnet(const uint8 a[4], const uint8 b[4], const uint8 ma
     return ((au & mu) == (bu & mu));
 }
 
-void e1000_cmd(string arg)
+void e1000_cmd(const shell_args_t* args)
 {
+    string arg = (string)(args ? args->raw : "");
     // Command form is: "e1000 <subcmd> [flags...]".
     // shell passes the full input line; skip the command name first.
     const char* s = (const char*)arg;
@@ -2117,38 +2004,28 @@ void e1000_cmd(string arg)
 }
 
 // Diagnostics/testing command implementations
-void panic_cmd(string ch) {
+void panic_cmd(const shell_args_t* args) {
     // Intentionally trigger a kernel panic to test panic/backtrace and serial mirroring
-    // Skip the command name and any following spaces to get the actual argument
-    if (ch) {
-        uint8 i = 0;
-        while (ch[i] && ch[i] != ' ') i++;
-        while (ch[i] && ch[i] == ' ') i++;
-        if (ch[i] && strcmp(&ch[i], "yes") == 0) {
-            PANIC("manual panic via shell");
-            return;
-        }
+    if (args && args->argc >= 2 && args->argv[1] && strcmp(args->argv[1], "yes") == 0) {
+        PANIC("manual panic via shell");
+        return;
     }
     printf("%cThis will trigger a kernel panic and stop the system. To proceed run: panic yes\n", 255, 0, 0);
 }
 
-void assertfail_cmd(string ch) {
+void assertfail_cmd(const shell_args_t* args) {
     // Intentionally trigger an assertion failure
     // Require explicit confirmation to avoid accidental triggering
-    if (ch) {
-        uint8 i = 0;
-        while (ch[i] && ch[i] != ' ') i++;
-        while (ch[i] && ch[i] == ' ') i++;
-        if (ch[i] && strcmp(&ch[i], "yes") == 0) {
-            ASSERT(0 && "manual assert failure via shell");
-            return;
-        }
+    if (args && args->argc >= 2 && args->argv[1] && strcmp(args->argv[1], "yes") == 0) {
+        ASSERT(0 && "manual assert failure via shell");
+        return;
     }
     printf("%cThis will trigger an assertion failure and may halt the system. To proceed, run: assertfail yes\n", 255, 0, 0);
 }
 
-static void ping_cmd(string ch)
+static void ping_cmd(const shell_args_t* args)
 {
+    string ch = (string)(args ? args->raw : "");
     // Usage: ping <dst_ip> [count] [local_ip]
     // Defaults: count=4, local_ip=netcfg local_ip
     unsigned char dst_ip[4];
@@ -2227,8 +2104,9 @@ static void ping_cmd(string ch)
     printf("PING done: %d/%d replies\n", rc, count);
 }
 
-static void netcfg_cmd(string ch)
+static void netcfg_cmd(const shell_args_t* args)
 {
+    string ch = (string)(args ? args->raw : "");
     // Usage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set <key> <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]
     // Keys: ip, gw, mask, dns
     // File format: key=value (ip/gw/mask/dns), '#' comments.
@@ -2445,8 +2323,9 @@ static void netcfg_cmd(string ch)
     printf("Usage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set ip|gw|mask|dns <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]\n");
 }
 
-static void netstat_cmd(string ch)
+static void netstat_cmd(const shell_args_t* args)
 {
+    string ch = (string)(args ? args->raw : "");
     (void)ch;
 
     {
@@ -2534,7 +2413,8 @@ static void netstat_cmd(string ch)
     }
 }
 
-void serialtest_cmd(string ch) {
+void serialtest_cmd(const shell_args_t* args) {
+    string ch = (string)(args ? args->raw : "");
     (void)ch; // unused
     const char *msg = "[serialtest] Hello from EYN-OS shell via COM1!\n";
     int written = serial_write(SERIAL_COM1, msg, (int)strlen(msg));
@@ -2545,7 +2425,8 @@ void serialtest_cmd(string ch) {
     }
 }
 
-void pagingguards_cmd(string ch) {
+void pagingguards_cmd(const shell_args_t* args) {
+    string ch = (string)(args ? args->raw : "");
     (void)ch; // unused
     // Install optional guards; safe no-ops if paging isn't enabled yet
     paging_install_null_guard();
@@ -2553,72 +2434,44 @@ void pagingguards_cmd(string ch) {
     printf("%cRequested paging guards: null-page NX and .text/.rodata RO. If paging is disabled, this has no effect.\n", 255, 255, 255);
 }
 
-void pf_cmd(string ch) {
-    if (!ch) return;
-
-    // Skip command name
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-
+void pf_cmd(const shell_args_t* args) {
     // Require explicit confirmation
-    if (!ch[i]) {
+    if (!args || args->argc < 2 || !args->argv[1] || strcmp(args->argv[1], "yes") != 0) {
         printf("%cTriggers a deliberate page fault. Confirm with: pf yes [addr] [r|w|x]\n", 255, 255, 0);
         printf("%cExamples: pf yes | pf yes 0x0 r | pf yes 0xDEADBEEF w\n", 255, 255, 255);
         return;
     }
 
-    char confirm[8];
-    uint8 ci = 0;
-    while (ch[i] && ch[i] != ' ' && ci < sizeof(confirm) - 1) {
-        confirm[ci++] = ch[i++];
-    }
-    confirm[ci] = '\0';
-
-    if (strcmp(confirm, "yes") != 0) {
-        printf("%cThis will intentionally fault. To proceed: pf yes [addr] [r|w|x]\n", 255, 0, 0);
-        return;
-    }
-
-    while (ch[i] && ch[i] == ' ') i++;
-
     // Optional address (default 0)
     uint32 addr = 0;
-    if (ch[i]) {
+    if (args->argc >= 3 && args->argv[2] && args->argv[2][0]) {
+        const char* s = args->argv[2];
         uint32 base = 10;
-        if (ch[i] == '0' && (ch[i + 1] == 'x' || ch[i + 1] == 'X')) {
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
             base = 16;
-            i += 2;
+            s += 2;
         }
 
         uint32 value = 0;
         int saw_digit = 0;
-        while (ch[i] && ch[i] != ' ') {
-            char c = ch[i];
+        while (*s) {
+            char c = *s;
             uint32 digit;
             if (c >= '0' && c <= '9') digit = (uint32)(c - '0');
             else if (base == 16 && c >= 'a' && c <= 'f') digit = 10u + (uint32)(c - 'a');
             else if (base == 16 && c >= 'A' && c <= 'F') digit = 10u + (uint32)(c - 'A');
             else break;
-
             saw_digit = 1;
             value = value * base + digit;
-            i++;
+            s++;
         }
 
-        if (saw_digit) {
-            addr = value;
-        }
-
-        while (ch[i] && ch[i] != ' ') i++;
-        while (ch[i] && ch[i] == ' ') i++;
+        if (saw_digit) addr = value;
     }
 
     // Optional mode: r (read), w (write), x (exec)
     char mode = 'r';
-    if (ch[i]) {
-        mode = ch[i];
-    }
+    if (args->argc >= 4 && args->argv[3] && args->argv[3][0]) mode = args->argv[3][0];
 
     printf("%c[pf] triggering mode=%c addr=0x%X\n", 255, 255, 0, mode, addr);
 
@@ -2633,16 +2486,9 @@ void pf_cmd(string ch) {
     }
 }
 
-void ring3_cmd(string ch) {
-    if (!ch) return;
-
-    // Skip command name
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-
+void ring3_cmd(const shell_args_t* args) {
     // Require explicit confirmation
-    if (!ch[i] || strcmp(&ch[i], "yes") != 0) {
+    if (!args || args->argc < 2 || !args->argv[1] || strcmp(args->argv[1], "yes") != 0) {
         printf("%cThis will switch the CPU to ring 3 and run a tiny user stub.\n", 255, 255, 0);
         printf("%cTo proceed: ring3 yes\n", 255, 255, 255);
         return;
@@ -2717,22 +2563,16 @@ void ring3_cmd(string ch) {
     enter_user_mode(user_code_va, user_stack_top);
 }
 
-void userrun_cmd(string ch) {
-    if (!ch) return;
-
-    // Skip command name
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-
-    if (!ch[i]) {
+void userrun_cmd(const shell_args_t* args) {
+    const char* path = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!path || !path[0]) {
         printf("%cUsage: userrun <path>\n", 255, 255, 255);
         printf("%cExample: userrun /testdir/user_hello.bin\n", 200, 200, 200);
         return;
     }
 
     char abspath[128];
-    resolve_path(&ch[i], shell_current_path, abspath, sizeof(abspath));
+    resolve_path(path, shell_current_path, abspath, sizeof(abspath));
 
     if (!shell_cmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
 
@@ -2851,52 +2691,23 @@ REGISTER_SHELL_COMMAND(userrun_cmd_info, "userrun", userrun_cmd, CMD_STREAMING, 
 
 
 // draw_cmd_handler implementation
-void draw_cmd_handler(string ch) 
+void draw_cmd_handler(const shell_args_t* args)
 {
-    int x = 10, y = 10, w = 500, h = 200, r = 255, g = 255, b = 255;
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) 
-    {
-    printf("%cUsage: rect <x> <y> <width> <height> <r> <g> <b>\n", 255, 255, 255);
-    printf("%cExample: rect 10 20 100 50 255 0 0\n");
+    int vals[7] = {10, 10, 500, 200, 255, 255, 255};
+    if (!args || args->argc < 2) {
+        printf("%cUsage: rect <x> <y> <width> <height> <r> <g> <b>\n", 255, 255, 255);
+        printf("%cExample: rect 10 20 100 50 255 0 0\n");
         printf("%cIf you provide fewer than 7 parameters, defaults will be used for the rest.\n");
         return;
     }
-    char argstr[128];
-    uint8 j = 0;
-    while (ch[i] && j < 127) 
-    {
-        argstr[j++] = ch[i++];
+
+    uint32 provided = args->argc - 1;
+    if (provided > 7) provided = 7;
+    for (uint32 idx = 0; idx < provided; ++idx) {
+        vals[idx] = str_to_int(args->argv[idx + 1]);
     }
-    argstr[j] = '\0';
-    int vals[7] = {x, y, w, h, r, g, b};
-    int val_idx = 0;
-    char numbuf[16];
-    int ni = 0;
-    for (uint8 k = 0; argstr[k] && val_idx < 7; k++) 
-    {
-        if ((argstr[k] >= '0' && argstr[k] <= '9') || argstr[k] == '-') 
-        {
-            numbuf[ni++] = argstr[k];
-        } else if (argstr[k] == ' ' || argstr[k] == '\t') 
-        {
-            if (ni > 0) 
-            {
-                numbuf[ni] = '\0';
-                vals[val_idx++] = str_to_int(numbuf);
-                ni = 0;
-            }
-        }
-    }
-    if (ni > 0 && val_idx < 7) 
-    {
-        numbuf[ni] = '\0';
-        vals[val_idx++] = str_to_int(numbuf);
-    }
-    x = vals[0]; y = vals[1]; w = vals[2]; h = vals[3]; r = vals[4]; g = vals[5]; b = vals[6];
-    drawRect(x, y, w, h, r, g, b);
+
+    drawRect(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6]);
     printf("%cShape drawn.\n", 255, 255, 255);
 }
 
@@ -3038,15 +2849,20 @@ void drives_cmd(string ch) {
 }
 
 // drive_cmd implementation
-void drive_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (ch[i] >= '0' && ch[i] <= '9') {
+void drive_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 2 || !args->argv[1] || !args->argv[1][0]) {
+        printf("%cUsage: drive <n>\n", 255, 255, 255);
+        printf("%cAvailable drives: 0 to %d\n", 255, 255, 255, ata_get_num_logical_drives() - 1);
+        return;
+    }
+
+    const char* s = args->argv[1];
+    if (s[0] >= '0' && s[0] <= '9') {
         uint32_t logical_drive = 0;
-        while (ch[i] >= '0' && ch[i] <= '9') {
-            logical_drive = logical_drive * 10 + (ch[i] - '0');
-            i++;
+        uint32 k = 0;
+        while (s[k] >= '0' && s[k] <= '9') {
+            logical_drive = logical_drive * 10u + (uint32)(s[k] - '0');
+            k++;
         }
         
         // convert logical drive to physical drive
@@ -3066,20 +2882,20 @@ void drive_cmd(string ch) {
 }
 
 // memory_cmd implementation
-void memory_cmd(string ch) {
+void memory_cmd(const shell_args_t* args) {
     printf("%cMemory Management Commands:\n", 255, 255, 255);
     printf("%c  memory stats    - Show memory statistics\n", 255, 255, 255);
     printf("%c  memory test     - Run memory allocation test\n", 255, 255, 255);
     printf("%c  memory stress   - Run stress test\n", 255, 255, 255);
     printf("%c  memory check    - Check memory integrity\n", 255, 255, 255);
     printf("%c  memory protect  - Show protection status\n", 255, 255, 255);
-    char* space = strchr(ch, ' ');
-    if (space) {
-        space++;
-        if (strcmp(space, "stats") == 0) {
+
+    const char* subcmd = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (subcmd) {
+        if (strcmp(subcmd, "stats") == 0) {
             print_memory_stats();
         }
-        else if (strcmp(space, "test") == 0) {
+        else if (strcmp(subcmd, "test") == 0) {
             if (!shell_cmd_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
             printf("%cRunning memory allocation test...\n", 255, 255, 255);
             void* ptr1 = malloc(100);
@@ -3100,7 +2916,7 @@ void memory_cmd(string ch) {
             }
             print_memory_stats();
         }
-        else if (strcmp(space, "stress") == 0) {
+        else if (strcmp(subcmd, "stress") == 0) {
             if (!shell_cmd_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
             printf("%cRunning memory stress test...\n", 255, 255, 255);
             void* ptrs[100];
@@ -3124,12 +2940,12 @@ void memory_cmd(string ch) {
             printf("%cStress test completed\n", 0, 255, 0);
             print_memory_stats();
         }
-        else if (strcmp(space, "check") == 0) {
+        else if (strcmp(subcmd, "check") == 0) {
             printf("%cPerforming memory integrity check...\n", 255, 255, 255);
             check_stack_overflow();
             printf("%cMemory check completed\n", 0, 255, 0);
         }
-        else if (strcmp(space, "protect") == 0) {
+        else if (strcmp(subcmd, "protect") == 0) {
             printf("%cMemory Protection Status:\n", 255, 255, 255);
             printf("%c  Memory Errors: %d\n", 255, 255, 255, get_memory_error_count());
             printf("%c  Stack Overflow: %s\n", 255, 255, 255, 
@@ -3146,20 +2962,10 @@ void memory_cmd(string ch) {
 }
 
 // size implementation
-void size(string ch) {
+void size(const shell_args_t* args) {
     uint8 disk = g_current_drive;
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) {
-        printf("%cUsage: size <filename>\n", 255, 255, 255);
-        return;
-    }
-    char arg[128];
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) arg[j++] = ch[i++];
-    arg[j] = '\0';
-    if (strlength(arg) < 1) {
+    const char* arg = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!arg || !arg[0]) {
         printf("%cUsage: size <filename>\n", 255, 255, 255);
         return;
     }
@@ -3239,14 +3045,8 @@ void size(string ch) {
     }
 } 
 
-void log_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    char arg[8] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 7) arg[j++] = ch[i++];
-    arg[j] = '\0';
+void log_cmd(const shell_args_t* args) {
+    const char* arg = (args && args->argc >= 2) ? args->argv[1] : "";
     if (strEql(arg, "on")) {
         if (!shell_cmd_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
         shell_log_enable();
@@ -3260,14 +3060,9 @@ void log_cmd(string ch) {
 } 
 
 // Hexdump command: prints the entire file in hex
-void hexdump_cmd(string ch) {
-    char filename[64] = {0};
-    int i = 0, j = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    while (ch[i] && ch[i] != ' ' && j < 63) filename[j++] = ch[i++];
-    filename[j] = '\0';
-    if (!filename[0]) {
+void hexdump_cmd(const shell_args_t* args) {
+    const char* filename = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!filename || !filename[0]) {
         printf("Usage: hexdump <file>\n");
         return;
     }
@@ -3317,12 +3112,9 @@ void hexdump_cmd(string ch) {
 } 
 
 // error command implementation
-void error_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+void error_cmd(const shell_args_t* args) {
+    const char* subcmd = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!subcmd || !subcmd[0]) {
         // Show error statistics
         printf("%cSystem Error Statistics:\n", 255, 255, 255);
         printf("%c  Total errors: %d\n", 255, 255, 255, get_system_error_count());
@@ -3343,12 +3135,6 @@ void error_cmd(string ch) {
             printf("%c  No errors recorded\n", 0, 255, 0);
         }
     } else {
-        // Parse subcommand
-        char subcmd[32];
-        uint8 j = 0;
-        while (ch[i] && ch[i] != ' ' && j < 31) subcmd[j++] = ch[i++];
-        subcmd[j] = 0;
-        
         if (strEql(subcmd, "clear")) {
             // Note: In a real implementation, we'd reset the error counters
             printf("%cError counters cleared\n", 0, 255, 0);
@@ -3370,12 +3156,9 @@ void error_cmd(string ch) {
 } 
 
 // validate command implementation
-void validate_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+void validate_cmd(const shell_args_t* args) {
+    const char* subcmd = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!subcmd || !subcmd[0]) {
         // Show input validation statistics
         printf("%cInput Validation Statistics:\n", 255, 255, 255);
         printf("%c  Validation Errors: %d\n", 255, 255, 255, get_input_validation_errors());
@@ -3386,12 +3169,6 @@ void validate_cmd(string ch) {
             printf("%c  Input validation active\n", 0, 255, 0);
         }
     } else {
-        // Parse subcommand
-        char subcmd[32];
-        uint8 j = 0;
-        while (ch[i] && ch[i] != ' ' && j < 31) subcmd[j++] = ch[i++];
-        subcmd[j] = 0;
-        
         if (strEql(subcmd, "test")) {
             printf("%cTesting input validation...\n", 255, 255, 255);
             
@@ -3441,12 +3218,9 @@ REGISTER_SHELL_COMMAND(hexdump, "hexdump", hexdump_cmd, CMD_STREAMING,
     "hexdump test.eyn");
 
 // process command implementation
-void process_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+void process_cmd(const shell_args_t* args) {
+    const char* subcmd = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!subcmd || !subcmd[0]) {
         // Show process isolation statistics
         printf("%cProcess Isolation Statistics:\n", 255, 255, 255);
         printf("%c  Active Processes: %d\n", 255, 255, 255, get_process_count());
@@ -3459,12 +3233,6 @@ void process_cmd(string ch) {
             printf("%c  No active processes\n", 255, 255, 0);
         }
     } else {
-        // Parse subcommand
-        char subcmd[32];
-        uint8 j = 0;
-        while (ch[i] && ch[i] != ' ' && j < 31) subcmd[j++] = ch[i++];
-        subcmd[j] = 0;
-        
         if (strEql(subcmd, "list")) {
             printf("%cActive Processes:\n", 255, 255, 255);
             int found = 0;
@@ -3497,12 +3265,9 @@ void process_cmd(string ch) {
 }
 
 // portable command implementation
-void portable_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+void portable_cmd(const shell_args_t* args) {
+    const char* subcmd = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!subcmd || !subcmd[0]) {
         // Show portability statistics
         printf("%cPortability Optimizations:\n", 255, 255, 255);
         printf("%c  Target RAM: 128KB minimum\n", 255, 255, 255);
@@ -3519,12 +3284,6 @@ void portable_cmd(string ch) {
         
         printf("%c  Ultra-lightweight optimizations active\n", 0, 255, 0);
     } else {
-        // Parse subcommand
-        char subcmd[32];
-        uint8 j = 0;
-        while (ch[i] && ch[i] != ' ' && j < 31) subcmd[j++] = ch[i++];
-        subcmd[j] = 0;
-        
         if (strEql(subcmd, "stats")) {
             printf("%cMemory Usage Statistics:\n", 255, 255, 255);
             printf("%c  Kernel Heap Size: %d KB (dynamic)\n", 255, 255, 255, get_heap_size() / 1024);
@@ -3553,7 +3312,8 @@ void portable_cmd(string ch) {
 }
 
 // init command implementation
-void init_cmd(string ch) {
+void init_cmd(const shell_args_t* args) {
+    string ch = (string)(args ? args->raw : "");
     printf("%cInitializing full system services...\n", 255, 255, 255);
     
     // Initialize ATA drives
@@ -3571,13 +3331,15 @@ void init_cmd(string ch) {
 }
 
 // Pipeline system commands
-void jobs_cmd(string ch) {
+void jobs_cmd(const shell_args_t* args) {
+    string ch = (string)(args ? args->raw : "");
     if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     printf("%cBackground Jobs:\n", 255, 255, 255);
     list_background_processes();
 }
 
-void fg_cmd(string ch) {
+void fg_cmd(const shell_args_t* args) {
+    string ch = (string)(args ? args->raw : "");
     if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     // Parse PID from command
     char* space = strchr(ch, ' ');
@@ -3597,7 +3359,8 @@ void fg_cmd(string ch) {
     wait_for_background_process(pid);
 }
 
-void bg_cmd(string ch) {
+void bg_cmd(const shell_args_t* args) {
+    string ch = (string)(args ? args->raw : "");
     if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     printf("%cBackground process management:\n", 255, 255, 255);
     printf("%c  Use '&' at the end of commands to run in background\n", 255, 255, 255);
@@ -3606,7 +3369,8 @@ void bg_cmd(string ch) {
     printf("%c  Use 'fg <pid>' to bring process to foreground\n", 255, 255, 255);
 }
 
-void pipe_cmd(string ch) {
+void pipe_cmd(const shell_args_t* args) {
+    string ch = (string)(args ? args->raw : "");
     if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     printf("%cPipeline System:\n", 255, 255, 255);
     printf("%c  Use '|' to pipe output between commands\n", 255, 255, 255);

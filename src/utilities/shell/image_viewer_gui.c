@@ -1088,20 +1088,19 @@ static void open_viewer_window(const char* path) {
 
 // Command entry points
 #include <shell_command_info.h>
-void view_cmd(string ch) {
-    uint8 i=0; while (ch[i] && ch[i] != ' ') i++; while (ch[i] && ch[i]==' ') i++;
-    if (!ch[i]) { printf("%cUsage: view <file.rei>\n", 255,255,255); return; }
-    char arg[128]={0}; uint8 j=0; while (ch[i] && ch[i] != ' ' && j<127) arg[j++]=ch[i++]; arg[j]='\0';
+#include <utilities/shell/shell_args.h>
+void view_cmd(const shell_args_t* args) {
+    const char* arg = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!arg || !arg[0]) { printf("%cUsage: view <file.rei>\n", 255,255,255); return; }
     char abspath[128]; resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     open_viewer_gui(abspath);
 }
 REGISTER_SHELL_COMMAND(view_cmd_info, "view", view_cmd, CMD_STREAMING, "Open a REI image in a GUI viewer.\nUsage: view <file.rei>", "view eynos.rei");
 
 // Window variant: open viewer in a floating window
-void vieww_cmd(string ch) {
-    uint8 i=0; while (ch[i] && ch[i] != ' ') i++; while (ch[i] && ch[i]==' ') i++;
-    if (!ch[i]) { printf("%cUsage: vieww <file.rei>\n", 255,255,255); return; }
-    char arg[128]={0}; uint8 j=0; while (ch[i] && ch[i] != ' ' && j<127) arg[j++]=ch[i++]; arg[j]='\0';
+void vieww_cmd(const shell_args_t* args) {
+    const char* arg = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!arg || !arg[0]) { printf("%cUsage: vieww <file.rei>\n", 255,255,255); return; }
     char abspath[128]; resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     open_viewer_window(abspath);
 }

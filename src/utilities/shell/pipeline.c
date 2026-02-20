@@ -2,6 +2,7 @@
 #include <shell.h>
 #include <shell_commands.h>
 #include <shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 #include <fs_commands.h>
 #include <util.h>
 #include <vga.h>
@@ -557,7 +558,11 @@ int execute_simple_command(command_t* cmd) {
         // Execute command
         shell_cmd_handler_t handler = find_command(cmd->name);
         if (handler) {
-            handler(cmd_str);
+            shell_args_t args;
+            if (shell_args_parse(&args, cmd_str) == 0)
+                handler(&args);
+            else
+                printf("Command line too long: %s\n", cmd->name);
         } else {
             printf("Command not found: %s\n", cmd->name);
         }
@@ -591,7 +596,11 @@ int execute_simple_command(command_t* cmd) {
         // No output redirection, execute normally
         shell_cmd_handler_t handler = find_command(cmd->name);
         if (handler) {
-            handler(cmd_str);
+            shell_args_t args;
+            if (shell_args_parse(&args, cmd_str) == 0)
+                handler(&args);
+            else
+                printf("Command line too long: %s\n", cmd->name);
         } else {
             printf("Command not found: %s\n", cmd->name);
         }
@@ -630,7 +639,11 @@ int execute_background_command(command_t* cmd) {
     // Execute the command (for now, synchronously)
     shell_cmd_handler_t handler = find_command(cmd->name);
     if (handler) {
-        handler(cmd_str);
+        shell_args_t args;
+        if (shell_args_parse(&args, cmd_str) == 0)
+            handler(&args);
+        else
+            printf("Command line too long: %s\n", cmd->name);
     } else {
         printf("Command not found: %s\n", cmd->name);
         return -1;
@@ -686,7 +699,14 @@ int execute_pipeline(pipeline_t* pipeline) {
         
         shell_cmd_handler_t first_handler = find_command(first_cmd->name);
         if (first_handler) {
-            first_handler(first_cmd_str);
+            shell_args_t args;
+            if (shell_args_parse(&args, first_cmd_str) == 0) {
+                first_handler(&args);
+            } else {
+                printf("Pipeline: failed to parse command: %s\n", first_cmd_str);
+                stop_shell_redirect();
+                return -1;
+            }
         } else {
             printf("Command not found: %s\n", first_cmd->name);
             stop_shell_redirect();
@@ -719,7 +739,12 @@ int execute_pipeline(pipeline_t* pipeline) {
             // Execute second command
             shell_cmd_handler_t second_handler = find_command(second_cmd->name);
             if (second_handler) {
-                second_handler(second_cmd_str);
+                shell_args_t args;
+                if (shell_args_parse(&args, second_cmd_str) == 0) {
+                    second_handler(&args);
+                } else {
+                    printf("Pipeline: failed to parse command: %s\n", second_cmd_str);
+                }
             } else {
                 printf("Command not found: %s\n", second_cmd->name);
             }
@@ -757,7 +782,12 @@ int execute_pipeline(pipeline_t* pipeline) {
             // Execute second command
             shell_cmd_handler_t second_handler = find_command(second_cmd->name);
             if (second_handler) {
-                second_handler(second_cmd_str);
+                shell_args_t args;
+                if (shell_args_parse(&args, second_cmd_str) == 0) {
+                    second_handler(&args);
+                } else {
+                    printf("Pipeline: failed to parse command: %s\n", second_cmd_str);
+                }
             } else {
                 printf("Command not found: %s\n", second_cmd->name);
             }
@@ -835,7 +865,11 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
         // Execute the command
         shell_cmd_handler_t handler = find_command(cmd->name);
         if (handler) {
-            handler(cmd_str);
+            shell_args_t args;
+            if (shell_args_parse(&args, cmd_str) == 0)
+                handler(&args);
+            else
+                printf("Command line too long: %s\n", cmd->name);
         } else {
             printf("Command not found: %s\n", cmd->name);
             stop_shell_redirect();

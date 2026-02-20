@@ -1,46 +1,26 @@
 #include <shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 #include <utilities/shell/alias.h>
 #include <string.h>
 #include <vga.h>
 
-static void alias_cmd(string arg) {
-    if (!arg) return;
-
-    // Skip command name
-    int i = 0;
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] == ' ') i++;
-
-    if (!arg[i]) {
+static void alias_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 2) {
         printf("%cUsage: alias <name> <command template>\n", 255, 255, 255);
         printf("%c       alias remove <name>\n", 255, 255, 255);
         printf("%cExample: alias compile chibicc [arg1] -o [arg2]\n", 255, 255, 255);
         return;
     }
 
-    // Read next token (name or 'remove')
-    char tok[32] = {0};
-    int j = 0;
-    while (arg[i] && arg[i] != ' ' && j < (int)sizeof(tok) - 1) {
-        tok[j++] = arg[i++];
-    }
-    tok[j] = '\0';
-    while (arg[i] == ' ') i++;
-
+    const char* tok = args->argv[1];
     if (strcmp(tok, "remove") == 0) {
-        if (!arg[i]) {
+        if (args->argc < 3) {
             printf("%cUsage: alias remove <name>\n", 255, 255, 255);
             return;
         }
 
-        char name[32] = {0};
-        j = 0;
-        while (arg[i] && arg[i] != ' ' && j < (int)sizeof(name) - 1) {
-            name[j++] = arg[i++];
-        }
-        name[j] = '\0';
-
-        int rc = shell_alias_remove(name);
+        const char* name = args->argv[2];
+        int rc = shell_alias_remove((string)name);
         if (rc == 0) {
             printf("%cAlias removed: %s\n", 0, 255, 0, name);
         } else {
@@ -49,12 +29,15 @@ static void alias_cmd(string arg) {
         return;
     }
 
-    // Define alias: tok is name, rest is template
-    const char *name = tok;
-    const char *tmpl = arg + i;
-    while (*tmpl == ' ') tmpl++;
+    // Define alias: tok is name, rest is template (argv[2..])
+    if (args->argc < 3) {
+        printf("%cUsage: alias <name> <command template>\n", 255, 255, 255);
+        return;
+    }
 
-    if (!tmpl[0]) {
+    const char* name = tok;
+    const char* tmpl = shell_args_rest_raw(args, 2);
+    if (!tmpl || !tmpl[0]) {
         printf("%cUsage: alias <name> <command template>\n", 255, 255, 255);
         return;
     }
@@ -64,7 +47,7 @@ static void alias_cmd(string arg) {
         return;
     }
 
-    int rc = shell_alias_define(name, tmpl);
+    int rc = shell_alias_define((string)name, (string)tmpl);
     if (rc == 0) {
         printf("%cAlias set: %s\n", 0, 255, 0, name);
     } else if (rc == -2) {

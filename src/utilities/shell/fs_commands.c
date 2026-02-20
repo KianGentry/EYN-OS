@@ -16,20 +16,21 @@
 #include <terminals.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <utilities/shell/shell_args.h>
 
 // Forward declarations for command handlers
-void ls_cmd(string arg);
-void read_cmd(string arg);
-void del(string arg);
-void write_cmd(string arg);
-void size(string arg);
-void cd(string arg);
-void makedir(string arg);
-void deldir(string arg);
-void fscheck(string arg);
-void copy_cmd(string arg);
-void move_cmd(string arg);
-void fatfix_cmd(string arg);
+void ls_cmd(const shell_args_t* args);
+void read_cmd(const shell_args_t* args);
+void del(const shell_args_t* args);
+void write_cmd(const shell_args_t* args);
+void size(const shell_args_t* args);
+void cd(const shell_args_t* args);
+void makedir(const shell_args_t* args);
+void deldir(const shell_args_t* args);
+void fscheck(const shell_args_t* args);
+void copy_cmd(const shell_args_t* args);
+void move_cmd(const shell_args_t* args);
+void fatfix_cmd(const shell_args_t* args);
 
 // EYNFS integration: assume superblock at LBA 2048 on drive 0
 #define EYNFS_SUPERBLOCK_LBA 2048
@@ -112,18 +113,14 @@ static const char* get_basename(const char* path) {
 }
 
 // cd command
-void cd(string input) {
+void cd(const shell_args_t* args) {
     uint8 disk = g_current_drive;
-    uint8 i = 0;
-    while (input[i] && input[i] != ' ') i++;
-    while (input[i] && input[i] == ' ') i++;
-    if (!input[i]) {
+    if (!args || args->argc < 2 || !args->argv[1] || !args->argv[1][0]) {
         printf("%cUsage: cd <directory>\n", 255, 255, 255);
         return;
     }
-    char arg[128]; uint8 j = 0;
-    while (input[i] && input[i] != ' ' && j < 127) arg[j++] = input[i++];
-    arg[j] = '\0';
+
+    const char* arg = args->argv[1];
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     if (!fs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
@@ -485,24 +482,16 @@ void ls(string input) {
 }
 
 // Main read command implementation with smart detection
-void read_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) {
+void read_cmd(const shell_args_t* args) {
+    const char* filename = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!filename || !filename[0]) {
         printf("%cUsage: read <filename>\n", 255, 255, 255);
         printf("%cDisplay text files (.txt) or render markdown (.md).\n", 255, 255, 255);
         printf("%cFor images, use: view <file.rei> or vieww <file.rei>\n", 255, 255, 255);
         return;
     }
-    
-    // Parse filename
-    char filename[128] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) {
-        filename[j++] = ch[i++];
-    }
-    filename[j] = '\0';
+
+    string ch = (string)(args ? args->raw : "");
 
     if (!fs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
@@ -527,19 +516,14 @@ void read_cmd(string ch) {
 }
 
 // del implementation
-void del(string ch) {
+void del(const shell_args_t* args) {
     uint8 disk = g_current_drive;
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) {
+    const char* arg = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!arg || !arg[0]) {
         printf("%cUsage: del <filename>\n", 255, 255, 255);
         printf("%cDeletes the specified file from the filesystem.\n", 255, 255, 255);
         return;
     }
-    char arg[128]; uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) arg[j++] = ch[i++];
-    arg[j] = '\0';
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     if (!fs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
@@ -556,19 +540,14 @@ void del(string ch) {
 }
 
 // write implementation
-void write_cmd(string ch) {
+void write_cmd(const shell_args_t* args) {
     uint8 disk = g_current_drive;
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) {
+    const char* arg = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!arg || !arg[0]) {
         printf("%cUsage: write <filename>\n", 255, 255, 255);
         printf("%cOpens a text editor for the specified file.\n", 255, 255, 255);
         return;
     }
-    char arg[128]; uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) arg[j++] = ch[i++];
-    arg[j] = '\0';
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return;
@@ -621,37 +600,29 @@ void writefat(string ch)
         printf("%cFailed to read FAT32 BPB from drive 0\n", 255, 0, 0);
         return;
     }
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 3 || !args.argv[1] || !args.argv[2]) {
         printf("%cUsage: writefat <filename> <data>\n", 255, 255, 255);
         return;
     }
-    char arg[64];
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 63) {
-        arg[j++] = ch[i++];
-    }
-    arg[j] = '\0';
-    if (strlength(arg) < 1) {
-        printf("%cUsage: writefat <filename> <data>\n", 255, 255, 255);
-        return;
-    }
+
+    const char* filename = args.argv[1];
     char fatname[12];
-    to_fat32_83(arg, fatname);
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) {
+    to_fat32_83(filename, fatname);
+
+    const char* data_str = shell_args_rest_raw(&args, 2);
+    if (!data_str || !data_str[0]) {
         printf("%cUsage: writefat <filename> <data>\n", 255, 255, 255);
         return;
     }
+
     char data[512];
-    j = 0;
-    while (ch[i] && j < 511) {
-        data[j++] = ch[i++];
-    }
-    data[j] = '\0';
-    int res = fat32_write_file_sector(0, partition_lba_start, &bpb, fatname, data, j);
+    uint32 data_len = (uint32)strlen(data_str);
+    if (data_len > 511) data_len = 511;
+    memcpy(data, data_str, data_len);
+    data[data_len] = '\0';
+
+    int res = fat32_write_file_sector(0, partition_lba_start, &bpb, fatname, data, (int)data_len);
     if (res < 0) {
         printf("%cFailed to write file to disk. Error %d\n", 255, 0, 0, res);
     } else {
@@ -734,15 +705,13 @@ static int fatfix_dir(uint8 drive, const char* dirpath) {
     return fixes;
 }
 
-void fatfix_cmd(string ch) {
+void fatfix_cmd(const shell_args_t* args) {
     uint8 disk = g_current_drive;
     if (!fs_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
-    // Parse optional path arg
-    uint8 i = 0; while (ch[i] && ch[i] != ' ') i++; while (ch[i] && ch[i] == ' ') i++;
-    char arg[128] = {0}; uint8 j = 0; if (ch[i]) { while (ch[i] && ch[i] != ' ' && j < 127) arg[j++] = ch[i++]; arg[j]='\0'; }
+
+    const char* arg = (args && args->argc >= 2) ? args->argv[1] : "";
     char abspath[256];
-    if (arg[0]) resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
-    else resolve_path("", shell_current_path, abspath, sizeof(abspath));
+    resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     // Ensure working on FAT32
     eynfs_superblock_t sb; if (eynfs_read_superblock(disk, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         printf("%cThis command only applies to FAT32 drives.\n", 255, 165, 0);
@@ -767,27 +736,13 @@ void catram(string ch) {
         return;
     }
     
-    // Parse filename
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2 || !args.argv[1] || !args.argv[1][0]) {
         printf("%cUsage: catram <filename>\n", 255, 255, 255);
         return;
     }
-    
-    char filename[64];
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 63) {
-        filename[j++] = ch[i++];
-    }
-    filename[j] = '\0';
-    
-    if (strlength(filename) < 1) {
-        printf("%cUsage: catram <filename>\n", 255, 255, 255);
-        return;
-    }
+
+    const char* filename = args.argv[1];
     
     // Convert to FAT32 8.3 format
     char fatname[12];
@@ -943,37 +898,29 @@ void writeram(string ch)
         printf("%cFailed to read FAT32 BPB\n", 255, 0, 0);
         return;
     }
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 3 || !args.argv[1] || !args.argv[2]) {
         printf("%cUsage: writefat <filename> <data>\n", 255, 255, 255);
         return;
     }
-    char arg[64];
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 63) {
-        arg[j++] = ch[i++];
-    }
-    arg[j] = '\0';
-    if (strlength(arg) < 1) {
-        printf("%cUsage: writefat <filename> <data>\n", 255, 255, 255);
-        return;
-    }
+
+    const char* filename = args.argv[1];
     char fatname[12];
-    to_fat32_83(arg, fatname);
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) {
+    to_fat32_83(filename, fatname);
+
+    const char* data_str = shell_args_rest_raw(&args, 2);
+    if (!data_str || !data_str[0]) {
         printf("%cUsage: writefat <filename> <data>\n", 255, 255, 255);
         return;
     }
+
     char data[512];
-    j = 0;
-    while (ch[i] && j < 511) {
-        data[j++] = ch[i++];
-    }
-    data[j] = '\0';
-    int res = fat32_write_file(fat32_disk_img, &bpb, fatname, data, j);
+    uint32 data_len = (uint32)strlen(data_str);
+    if (data_len > 511) data_len = 511;
+    memcpy(data, data_str, data_len);
+    data[data_len] = '\0';
+
+    int res = fat32_write_file(fat32_disk_img, &bpb, fatname, data, (int)data_len);
     if (res < 0) {
         printf("%cFailed to write file.\n", 255, 0, 0);
     } else {
@@ -1070,19 +1017,14 @@ int check_filesystem_integrity(uint8_t disk) {
 }
 
 // makedir implementation
-void makedir(string ch) {
+void makedir(const shell_args_t* args) {
     uint8 disk = g_current_drive;
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) {
+    const char* arg = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!arg || !arg[0]) {
         printf("%cUsage: makedir <directory>\n", 255, 255, 255);
         printf("%cCreates a new directory at the specified path.\n", 255, 255, 255);
         return;
     }
-    char arg[128]; uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) arg[j++] = ch[i++];
-    arg[j] = '\0';
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     if (!fs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
@@ -1094,19 +1036,14 @@ void makedir(string ch) {
 }
 
 // deldir implementation
-void deldir(string ch) {
+void deldir(const shell_args_t* args) {
     uint8 disk = g_current_drive;
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) {
+    const char* arg = (args && args->argc >= 2) ? args->argv[1] : NULL;
+    if (!arg || !arg[0]) {
         printf("%cUsage: deldir <directory>\n", 255, 255, 255);
         printf("%cRemoves the specified directory (must be empty).\n", 255, 255, 255);
         return;
     }
-    char arg[128]; uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) arg[j++] = ch[i++];
-    arg[j] = '\0';
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
     if (!fs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
@@ -1118,7 +1055,8 @@ void deldir(string ch) {
 }
 
 // fscheck command implementation
-void fscheck(string ch) {
+void fscheck(const shell_args_t* args) {
+    string ch = (string)(args ? args->raw : "");
     uint8 disk = g_current_drive;
     if (!fs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     printf("Checking filesystem integrity on drive %d...\n", disk);
@@ -1132,16 +1070,18 @@ void fscheck(string ch) {
 }
 
 // Copy command implementation - rewritten from scratch
-void copy_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) { printf("%cUsage: copy <source> <destination>\n", 255, 255, 255); printf("%cExample: copy file1.txt file2.txt\n", 255, 255, 255); return; }
-    // Parse source and dest
-    char source[128] = {0}; uint8 j = 0; while (ch[i] && ch[i] != ' ' && j < 127) { source[j++] = ch[i++]; } source[j] = '\0';
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) { printf("%cError: Destination filename required.\n", 255, 0, 0); return; }
-    char dest[128] = {0}; j = 0; while (ch[i] && ch[i] != ' ' && j < 127) { dest[j++] = ch[i++]; } dest[j] = '\0';
+void copy_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 2 || !args->argv[1] || !args->argv[1][0]) {
+        printf("%cUsage: copy <source> <destination>\n", 255, 255, 255);
+        printf("%cExample: copy file1.txt file2.txt\n", 255, 255, 255);
+        return;
+    }
+    if (args->argc < 3 || !args->argv[2] || !args->argv[2][0]) {
+        printf("%cError: Destination filename required.\n", 255, 0, 0);
+        return;
+    }
+    const char* source = args->argv[1];
+    const char* dest = args->argv[2];
     if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     // Resolve to absolute
     char src_path[256], dst_path[256]; resolve_path(source, shell_current_path, src_path, sizeof(src_path)); resolve_path(dest, shell_current_path, dst_path, sizeof(dst_path));
@@ -1168,13 +1108,18 @@ void copy_cmd(string ch) {
 }
 
 // Move command implementation - rewritten from scratch
-void move_cmd(string ch) {
-    uint8 i = 0; while (ch[i] && ch[i] != ' ') i++; while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) { printf("%cUsage: move <source> <destination>\n", 255, 255, 255); printf("%cExample: move file1.txt /backup/file1.txt\n", 255, 255, 255); return; }
-    char source[128] = {0}; uint8 j = 0; while (ch[i] && ch[i] != ' ' && j < 127) { source[j++] = ch[i++]; } source[j] = '\0';
-    while (ch[i] && ch[i] == ' ') i++;
-    if (!ch[i]) { printf("%cError: Destination filename required.\n", 255, 0, 0); return; }
-    char dest[128] = {0}; j = 0; while (ch[i] && ch[i] != ' ' && j < 127) { dest[j++] = ch[i++]; } dest[j] = '\0';
+void move_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 2 || !args->argv[1] || !args->argv[1][0]) {
+        printf("%cUsage: move <source> <destination>\n", 255, 255, 255);
+        printf("%cExample: move file1.txt /backup/file1.txt\n", 255, 255, 255);
+        return;
+    }
+    if (args->argc < 3 || !args->argv[2] || !args->argv[2][0]) {
+        printf("%cError: Destination filename required.\n", 255, 0, 0);
+        return;
+    }
+    const char* source = args->argv[1];
+    const char* dest = args->argv[2];
     if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     char src_path[256], dst_path[256]; resolve_path(source, shell_current_path, src_path, sizeof(src_path)); resolve_path(dest, shell_current_path, dst_path, sizeof(dst_path));
     if (strcmp(src_path, dst_path) == 0) { printf("%cError: Source and destination are the same.\n", 255, 0, 0); return; }

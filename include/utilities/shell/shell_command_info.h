@@ -3,6 +3,8 @@
 
 #include <types.h>
 
+typedef struct shell_args shell_args_t;
+
 // Command types
 typedef enum {
     CMD_ESSENTIAL = 0,    // Always in RAM
@@ -12,7 +14,7 @@ typedef enum {
 } command_type_t;
 
 // Command handler function type
-typedef void (*shell_cmd_handler_t)(string arg);
+typedef void (*shell_cmd_handler_t)(const shell_args_t* args);
 
 // Enhanced command information structure
 typedef struct {

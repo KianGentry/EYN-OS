@@ -11,6 +11,7 @@
 #include <string.h>
 #include <partition.h>
 #include <shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 #include <eynfs.h>
 #include <ata.h>
 #include <context.h>
@@ -318,31 +319,25 @@ static void diskmgr_init_swap(const char *args) {
     }
 }
 
-void diskmgr_cmd_handler(string ch) {
-    /* Skip command name */
-    int i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+void diskmgr_cmd_handler(const shell_args_t* args) {
+    if (!args || args->argc < 2 || !args->argv[1] || !args->argv[1][0]) {
         diskmgr_show_all();
         return;
     }
-    
-    /* Parse subcommand */
-    char subcmd[16] = {0};
-    int si = 0;
-    while (ch[i] && ch[i] != ' ' && si < 15) {
-        subcmd[si++] = ch[i++];
-    }
-    
-    while (ch[i] == ' ') i++;
-    
+
+    const char* subcmd = args->argv[1];
+    const char* rest = shell_args_rest_raw(args, 2);
+    if (!rest) rest = "";
+
     if (strEql(subcmd, "help")) {
         diskmgr_show_help();
     } else if (strEql(subcmd, "info")) {
         if (!diskmgr_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
-        uint8 drive = (uint8)(ch[i] - '0');
+        if (args->argc < 3 || !args->argv[2] || !args->argv[2][0]) {
+            printf("%cUsage: diskmgr info <drive>\n", 255, 255, 255);
+            return;
+        }
+        uint8 drive = (uint8)str_to_uint(args->argv[2]);
         disk_info_t disk;
         if (partition_read_table(drive, &disk) == 0) {
             disk_print_info(&disk);
@@ -350,17 +345,17 @@ void diskmgr_cmd_handler(string ch) {
             printf("%cFailed to read disk %d\n", 255, 0, 0, drive);
         }
     } else if (strEql(subcmd, "create")) {
-        diskmgr_create_partition(ch + i);
+        diskmgr_create_partition(rest);
     } else if (strEql(subcmd, "delete")) {
-        diskmgr_delete_partition(ch + i);
+        diskmgr_delete_partition(rest);
     } else if (strEql(subcmd, "format")) {
-        diskmgr_format_partition(ch + i);
+        diskmgr_format_partition(rest);
     } else if (strEql(subcmd, "mount")) {
-        diskmgr_mount_partition(ch + i);
+        diskmgr_mount_partition(rest);
     } else if (strEql(subcmd, "unmount")) {
-        diskmgr_unmount(ch + i);
+        diskmgr_unmount(rest);
     } else if (strEql(subcmd, "swap")) {
-        diskmgr_init_swap(ch + i);
+        diskmgr_init_swap(rest);
     } else {
         printf("%cUnknown subcommand: %s\n", 255, 0, 0, subcmd);
         diskmgr_show_help();

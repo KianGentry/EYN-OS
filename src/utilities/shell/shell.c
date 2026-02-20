@@ -7,6 +7,7 @@
 #include <math.h>
 #include <multiboot.h>
 #include <utilities/shell/shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 #include <utilities/shell/alias.h>
 #include <utilities/shell/pipeline.h>
 #include <utilities/shell/fs_commands.h>
@@ -55,45 +56,14 @@ static volatile char last_failed_command[64] = {0};
 // Command types are now defined in shell_command_info.h
 
 #include <watchdog.h>
-// Forward declarations for command functions
-void init_cmd(string arg);
-void memory_cmd(string arg);
-void portable_cmd(string arg);
-void load_cmd(string arg);
-void unload_cmd(string arg);
-void status_cmd(string arg);
-void search_cmd(string arg);
-void process_cmd(string arg);
-void error_cmd(string arg);
-void validate_cmd(string arg);
-void drive_cmd(string arg);
-void read_cmd(string arg);
-void write_cmd(string arg);
-void handler_exit(string arg);
-void handler_assemble(string arg);
-void joke_spam();
-void spam_cmd(string arg);
-void help_cmd(string arg);
-void echo_cmd(string arg);
-void ver_cmd(string arg);
-void calc_cmd(string arg);
-void draw_cmd_handler(string arg);
-void log_cmd(string arg);
-void lsata_cmd(string arg);
-void clear_cmd(string arg);
-void catram_cmd(string arg);
-void lsram_cmd(string arg);
-void sort_cmd(string arg);
-void game_cmd(string arg);
-void ls_cmd(string arg);
-void cd(string arg);
-void makedir(string arg);
-void copy_cmd(string arg);
-void move_cmd(string arg);
-void format_cmd_handler(string arg);
-void history_cmd(string arg);
-void run_cmd(string arg);
-void handler_cmd(string arg);
+// Forward declarations for command functions (registered via linker section)
+void load_cmd(const shell_args_t* args);
+void unload_cmd(const shell_args_t* args);
+void status_cmd(const shell_args_t* args);
+
+void handler_cmd(const shell_args_t* args);
+void handler_exit(const shell_args_t* args);
+void handler_assemble(const shell_args_t* args);
 
 // Auto-run support: if a command isn't recognized, search for a matching .uelf and run it.
 static int has_slash(const char* s) {
@@ -193,37 +163,18 @@ static int find_uelf_recursive(uint8 drive, const char* dir, const char* target_
     return 0;
 }
 
-static int try_run_unknown_as_uelf(const char* input) {
-    if (!input) return 0;
+static int try_run_unknown_as_uelf(const shell_args_t* args) {
+    if (!args || args->argc == 0) return 0;
 
-    // Tokenize: cmd + args
-    char cmd[64];
-    int i = 0;
-    while (input[i] && input[i] != ' ' && i < (int)sizeof(cmd) - 1) {
-        cmd[i] = input[i];
-        i++;
-    }
-    cmd[i] = 0;
-    if (!cmd[0]) return 0;
+    const char* cmd = args->argv[0];
+    if (!cmd || !cmd[0]) return 0;
 
     if (!shell_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return 0;
 
-    // Parse args
-    const int MAX_ARGS = 16;
-    char arg_buf[MAX_ARGS][64];
-    const char* argv[MAX_ARGS];
     int argc = 0;
-
-    while (input[i] && input[i] == ' ') i++;
-    while (input[i] && argc < MAX_ARGS) {
-        int k = 0;
-        while (input[i] && input[i] != ' ' && k < 63) {
-            arg_buf[argc][k++] = input[i++];
-        }
-        arg_buf[argc][k] = 0;
-        argv[argc] = arg_buf[argc];
-        argc++;
-        while (input[i] && input[i] == ' ') i++;
+    const char* argv[SHELL_ARGS_MAX];
+    for (uint32 i = 1; i < args->argc && argc < (int)SHELL_ARGS_MAX; i++) {
+        argv[argc++] = args->argv[i];
     }
 
     // Determine target filename (.uelf).
@@ -297,13 +248,13 @@ void read_md_cmd(string arg);
 void read_image_cmd(string arg);
 
 // Wrapper functions to match existing function names
-void ls_cmd(string arg) { ls(arg); }
-void clear_cmd(string arg) { clearScreen(); }
+void ls_cmd(const shell_args_t* args) { ls((string)(args ? args->raw : "")); }
+void clear_cmd(const shell_args_t* args) { (void)args; clearScreen(); }
 void echo_cmd(string arg) { echo(arg); }
 void ver_cmd(string arg) { ver(); }
 void calc_cmd(string arg) { calc(arg); }
 void lsata_cmd(string arg) { lsata(); }
-void run_cmd(string arg) { run_command(arg); }
+void run_cmd(const shell_args_t* args) { run_command((string)(args ? args->raw : "")); }
 
 // RAM disk command wrappers
 void catram_cmd(string arg) { catram(arg); }
@@ -464,59 +415,40 @@ static int validate_command_arguments(const char* cmd) {
     return 1;
 }
 
-static void safe_command_execution(string input, shell_cmd_handler_t handler) {
+static void safe_command_execution(const shell_args_t* args, shell_cmd_handler_t handler) {
+    if (!args || !handler) return;
+
     // Validate command before execution
-    if (!validate_command_arguments((const char*)input)) {
+    if (!validate_command_arguments(args->raw)) {
         printf("%c[SAFETY] Invalid command arguments\n", 255, 0, 0);
         command_execution_errors++;
         return;
     }
-    
-    // Execute the command with full input string
-    handler(input);
+
+    handler(args);
 }
 
 // Handler wrappers for commands needing extra context
-void handler_cmd(string arg) {
+void handler_cmd(const shell_args_t* args) {
     printf("%c\nNew recursive shell opened.\n", 0, 255, 0);
     launch_shell(1); // Always launches a new shell at depth 1
 }
-void handler_exit(string arg) {
+void handler_exit(const shell_args_t* args) {
     printf("%cGoodbye!\n", 255, 140, 0); // Orange
     // For now, just exit the shell
     asm("hlt");
 }
 
-void handler_assemble(string arg) {
-    // Parse arguments for assemble command
-    char input_file[256] = {0};
-    char output_file[256] = {0};
-    
-    // Skip command name
-    int i = 0;
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    // Optional -v flag
+void handler_assemble(const shell_args_t* args) {
     int verbose = 0;
-    if (arg[i] == '-' && arg[i+1] == 'v') { verbose = 1; i += 2; while (arg[i] == ' ') i++; }
+    uint32 a = 1;
+    if (args && args->argc > 1 && strcmp(args->argv[1], "-v") == 0) {
+        verbose = 1;
+        a = 2;
+    }
 
-    // Get input file
-    int j = 0;
-    while (arg[i] && arg[i] != ' ' && j < 255) {
-        input_file[j++] = arg[i++];
-    }
-    input_file[j] = '\0';
-    
-    // Skip spaces
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    // Get output file
-    j = 0;
-    while (arg[i] && arg[i] != ' ' && j < 255) {
-        output_file[j++] = arg[i++];
-    }
-    output_file[j] = '\0';
+    const char* input_file = (args && args->argc > a) ? args->argv[a] : "";
+    const char* output_file = (args && args->argc > (a + 1)) ? args->argv[a + 1] : "";
     
     if (!input_file[0] || !output_file[0]) {
         printf("%cUsage: assemble <input.asm> <output.eyn>\n", 255, 255, 255);
@@ -552,24 +484,22 @@ void handle_shell_command(string input) {
     char* out = expanded_a;
 
     for (int depth = 0; depth < 4; depth++) {
-        // Parse the command name
-        char cmd[256];
-        int i = 0;
-        while (current[i] && current[i] != ' ' && i < 255) {
-            cmd[i] = current[i];
-            i++;
+        shell_args_t args;
+        int prc = shell_args_parse(&args, current);
+        if (prc < 0) {
+            printf("%cError: too many arguments or command line too long\n", 255, 0, 0);
+            goto cleanup;
         }
-        cmd[i] = '\0';
 
         // If empty input (just Enter), do nothing
-        if (cmd[0] == '\0') {
+        if (args.argc == 0 || !args.argv[0] || args.argv[0][0] == '\0') {
             goto cleanup;
         }
 
         // Find and execute built-in commands
-        shell_cmd_handler_t handler = find_command(cmd);
+        shell_cmd_handler_t handler = find_command(args.argv[0]);
         if (handler) {
-            safe_command_execution((string)current, handler);
+            safe_command_execution(&args, handler);
             goto cleanup;
         }
 
@@ -590,18 +520,15 @@ void handle_shell_command(string input) {
     }
 
     // If not a built-in command or alias, try auto-running a matching .uelf.
-    if (try_run_unknown_as_uelf((string)current))
+    shell_args_t unknown_args;
+    if (shell_args_parse(&unknown_args, current) == 0 && try_run_unknown_as_uelf(&unknown_args))
         goto cleanup;
 
     // Command not found
-    char cmd2[256];
-    int k = 0;
-    while (current[k] && current[k] != ' ' && k < 255) {
-        cmd2[k] = current[k];
-        k++;
-    }
-    cmd2[k] = '\0';
-    printf("%cCommand not found: %s\n", 255, 0, 0, cmd2);
+    if (unknown_args.argc > 0 && unknown_args.argv[0])
+        printf("%cCommand not found: %s\n", 255, 0, 0, unknown_args.argv[0]);
+    else
+        printf("%cCommand not found\n", 255, 0, 0);
 cleanup:
     command_context_set(prev_ctx);
 }
@@ -624,17 +551,17 @@ string get_last_failed_command() {
 }
 
 // Streaming command management
-void load_cmd(string arg) {
+void load_cmd(const shell_args_t* args) {
     printf("%cLoading streaming commands...\n", 255, 255, 255);
     load_streaming_commands();
 }
 
-void unload_cmd(string arg) {
+void unload_cmd(const shell_args_t* args) {
     printf("%cUnloading streaming commands...\n", 255, 255, 255);
     unload_streaming_commands();
 }
 
-void status_cmd(string arg) {
+void status_cmd(const shell_args_t* args) {
     printf("%cCommand System Status:\n", 255, 255, 255);
     printf("%c  System: Unified Command Registration\n", 255, 255, 255);
     printf("%c  Total Commands: %d\n", 255, 255, 255, (int)(__stop_shellcmds - __start_shellcmds));
