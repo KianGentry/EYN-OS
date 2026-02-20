@@ -374,12 +374,12 @@ char *strpbrk(const char *s, const char *accept) {
 }
 
 // Additional utility functions for EYN-OS
-uint8 strEql(string ch1, string ch2) {
+uint8 strEql(const char* ch1, const char* ch2) {
     if (!ch1 || !ch2) return 0;
     return strcmp(ch1, ch2) == 0;
 }
 
-uint8 cmdEql(string ch1, string ch2) {
+uint8 cmdEql(const char* ch1, const char* ch2) {
     if (!ch1 || !ch2) return 0;
     return strcmp(ch1, ch2) == 0;
 }

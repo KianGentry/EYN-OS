@@ -415,7 +415,10 @@ printf("Rate: %d packets/sec\n", packets * HZ / elapsed);
 **Debug**:
 1. Enable heap guards and checksums
 2. Use `memory stats` frequently
-3. Valgrind-like tools (TODO: port to EYN-OS)
+3. Valgrind-like techniques (EYN-OS-friendly)
+    - Use heap guard/check features already present in the kernel allocator (see memory management docs).
+    - Prefer “small reproducer” programs under `testdir/` and bisect with `make eynfsimg`.
+    - Add targeted assertions around invariants to catch the first bad write.
 4. Binary search: disable features until crash stops
 
 ### Slow Performance
@@ -480,5 +483,13 @@ printf("Rate: %d packets/sec\n", packets * HZ / elapsed);
 - [stop-codes.md](../stop-codes.md) - Panic code reference
 - [general/watchdog.md](../general/watchdog.md) - Watchdog configuration
 - [general/panic.md](../general/panic.md) - Panic system architecture
-- Network debugging (TODO)
-- GDB cheat sheet (TODO)
+- Network debugging
+    - Prefer `make qemu-debug` so you can correlate NIC logs with kernel state.
+    - Use built-in shell commands (when available): `e1000 regs`, `e1000 udp-stats`, `e1000 init`.
+    - If the stack is polling, add a periodic `watchdog_kick("net-poll")` inside long poll loops.
+    - On the host, validate port forwards from `make run` and use host-side tools (e.g. `tcpdump`) to see traffic.
+- GDB cheat sheet
+    - Connect: `target remote :1234`
+    - Break/step: `b <symbol>`, `si`, `ni`, `c`
+    - Inspect: `bt`, `info reg`, `x/32wx $esp`, `x/i $eip`
+    - Handy: `set disassembly-flavor intel`, `layout asm` (TUI)

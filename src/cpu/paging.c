@@ -1,3 +1,15 @@
+/*
+ * Legacy paging implementation (pre-VMM).
+ *
+ * The kernel paging subsystem has been replaced by the VMM in `src/mm/vmm.c`,
+ * with legacy entry points provided by `src/mm/paging_compat.c` and
+ * `<utilities/paging.h>`.
+ *
+ * This file is kept for historical reference only and is intentionally not
+ * part of the build.
+ */
+#if 0
+
 #include <paging.h>
 #include <util.h>
 #include <vga.h>
@@ -371,3 +383,5 @@ void paging_protect_kernel_text_ro(void) {
     asm volatile("mov %%cr3, %0" : "=r"(cr3));
     asm volatile("mov %0, %%cr3" :: "r"(cr3));
 }
+
+#endif /* 0 */

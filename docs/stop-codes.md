@@ -358,10 +358,10 @@ while (1) {
 
 | Stop Code | Category | Description | Location | Fix |
 |-----------|----------|-------------|----------|-----|
-| `EYNOS_????????` | ASSERT | Heap corruption detected | `mm/heap.c:XXX` | Check for buffer overflows, double free |
+| `EYNOS_????????` | ASSERT | Heap corruption detected | `mm/heap.c` | Check for buffer overflows, double free |
 | `EYNOS_????????` | PAGING | Null pointer dereference | Various | Add null checks |
-| `EYNOS_????????` | WATCHDOG | Network poll timeout | `network/netstack.c:XXX` | Add watchdog kicks in loop |
-| `EYNOS_????????` | IRQ | Unhandled interrupt | `cpu/isr.c:XXX` | Add handler or mask IRQ |
+| `EYNOS_????????` | WATCHDOG | Network poll timeout | `network/netstack.c` | Add watchdog kicks in loop |
+| `EYNOS_????????` | IRQ | Unhandled interrupt | `cpu/isr.c` | Add handler or mask IRQ |
 
 *Note: Actual hashes depend on source and will be populated as issues are encountered*
 
@@ -445,8 +445,15 @@ ASSERT(descriptor_index < RING_SIZE);
 
 - [general/panic.md](general/panic.md) - Panic system architecture
 - [general/watchdog.md](general/watchdog.md) - Watchdog configuration and tuning
-- Serial debugging tips (TODO)
-- GDB debugging guide (TODO)
+- Serial debugging tips
+    - Prefer `make qemu-debug` so serial logs are captured to `tmp/qemu-debug.log`.
+    - When chasing hangs, add a small periodic heartbeat on serial (or a `watchdog_kick("...")`) inside long loops.
+    - If VGA output is unreliable during early boot, treat serial as the source of truth.
+- GDB debugging guide
+    - Use `make qemu-gdb` (QEMU starts halted and listens on `:1234`).
+    - In a separate terminal: `gdb tmp/boot/kernel.bin`, then `target remote :1234`.
+    - Useful commands: `continue`, `info registers`, `x/16wx $esp`, `bt`, `disassemble /m <symbol>`.
+    - If you hit a triple fault/reset, set breakpoints earlier (entry + IDT setup) and step forward.
 
 ## Quick Reference Card
 

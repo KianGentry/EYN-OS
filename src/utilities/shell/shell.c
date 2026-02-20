@@ -13,13 +13,13 @@
 #include <utilities/shell/fs_commands.h>
 #include <utilities/shell/run_command.h>
 #include <utilities/shell/shell_commands.h>
-#include <utilities/assemble.h>
 #include <fs/vfs.h>
 #include <cpu/user_elf.h>
 #include <vga.h>
 #include <fat32.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <stdint.h>
 #define COMMAND_HASH_SIZE 256
 typedef struct {
     const char* name;                 // command name key
@@ -29,7 +29,16 @@ static command_hash_entry_t g_command_hash_table[COMMAND_HASH_SIZE];
 static int g_command_hash_initialized = 0;
 static int g_command_hash_disabled = 0; // Fallback to linear search when table would be full
 
-void __stack_chk_fail_local() {
+static size_t shell_command_count(void) {
+    uintptr_t start = (uintptr_t)__start_shellcmds;
+    uintptr_t stop = (uintptr_t)__stop_shellcmds;
+    if (stop < start) return 0;
+    return (size_t)((stop - start) / (uintptr_t)sizeof(shell_command_info_t));
+}
+
+void __stack_chk_fail_local(void);
+
+void __stack_chk_fail_local(void) {
     return;
 }
 
@@ -56,14 +65,8 @@ static volatile char last_failed_command[64] = {0};
 // Command types are now defined in shell_command_info.h
 
 #include <watchdog.h>
-// Forward declarations for command functions (registered via linker section)
-void load_cmd(const shell_args_t* args);
-void unload_cmd(const shell_args_t* args);
-void status_cmd(const shell_args_t* args);
-
 void handler_cmd(const shell_args_t* args);
 void handler_exit(const shell_args_t* args);
-void handler_assemble(const shell_args_t* args);
 
 // Auto-run support: if a command isn't recognized, search for a matching .uelf and run it.
 static int has_slash(const char* s) {
@@ -222,43 +225,37 @@ static int try_run_unknown_as_uelf(const shell_args_t* args) {
 }
 
 // Wrapper function for joke_spam to match expected signature
-void spam_cmd(string arg) {
+void spam_cmd(const shell_args_t* args);
+void echo_cmd(const shell_args_t* args);
+void ver_cmd(const shell_args_t* args);
+void calc_cmd(const shell_args_t* args);
+void lsata_cmd(const shell_args_t* args);
+void catram_cmd(const shell_args_t* args);
+void lsram_cmd(const shell_args_t* args);
+
+void spam_cmd(const shell_args_t* args) {
+    (void)args;
     joke_spam();
 }
-
-// Filesystem commands
-// Subcommands
-void search_size_cmd(string arg);
-void search_type_cmd(string arg);
-void search_empty_cmd(string arg);
-void search_depth_cmd(string arg);
-// ...existing code...
-void ls_size_cmd(string arg);
-void ls_detail_cmd(string arg);
-void fsstat_cmd(string arg);
-void cache_stats_cmd(string arg);
-void cache_clear_cmd(string arg);
-void cache_reset_cmd(string arg);
-void blockmap_cmd(string arg);
-void debug_superblock_cmd(string arg);
-void debug_directory_cmd(string arg);
-void help_write_cmd(string arg);
-void read_raw_cmd(string arg);
-void read_md_cmd(string arg);
-void read_image_cmd(string arg);
 
 // Wrapper functions to match existing function names
 void ls_cmd(const shell_args_t* args) { ls((string)(args ? args->raw : "")); }
 void clear_cmd(const shell_args_t* args) { (void)args; clearScreen(); }
-void echo_cmd(string arg) { echo(arg); }
-void ver_cmd(string arg) { ver(); }
-void calc_cmd(string arg) { calc(arg); }
-void lsata_cmd(string arg) { lsata(); }
+void echo_cmd(const shell_args_t* args) {
+    const char* rest = shell_args_rest_raw(args, 1);
+    echo((string)(rest ? rest : ""));
+}
+void ver_cmd(const shell_args_t* args) { (void)args; ver(); }
+void calc_cmd(const shell_args_t* args) {
+    const char* rest = shell_args_rest_raw(args, 1);
+    calc((string)(rest ? rest : ""));
+}
+void lsata_cmd(const shell_args_t* args) { (void)args; lsata(); }
 void run_cmd(const shell_args_t* args) { run_command((string)(args ? args->raw : "")); }
 
 // RAM disk command wrappers
-void catram_cmd(string arg) { catram(arg); }
-void lsram_cmd(string arg) { lsram(arg); }
+void catram_cmd(const shell_args_t* args) { catram((string)(args ? args->raw : "")); }
+void lsram_cmd(const shell_args_t* args) { lsram((string)(args ? args->raw : "")); }
 
 // Command registration is now handled by the linker section .shellcmds
 // All command information is stored in shell_command_info_t structures
@@ -302,7 +299,7 @@ static void init_command_hash_table() {
     }
     
     // Build hash table from all registered commands
-    size_t num_commands = (__stop_shellcmds - __start_shellcmds);
+    size_t num_commands = shell_command_count();
     // If the number of commands would fill the table completely, disable hashing and fallback to linear search
     if (num_commands >= COMMAND_HASH_SIZE - 1) {
         g_command_hash_disabled = 1;
@@ -332,7 +329,7 @@ shell_cmd_handler_t find_command(const char* name) {
     
     // If hashing is disabled due to table saturation, use linear search
     if (g_command_hash_disabled) {
-        size_t num_commands = (__stop_shellcmds - __start_shellcmds);
+        size_t num_commands = shell_command_count();
         for (size_t i = 0; i < num_commands; i++) {
             const shell_command_info_t* cmd = &__start_shellcmds[i];
             if (strcmp(cmd->name, name) == 0) {
@@ -358,7 +355,7 @@ shell_cmd_handler_t find_command(const char* name) {
     // Not found after probing entire table
     
     // Fallback to linear search if hash lookup fails
-    size_t num_commands = (__stop_shellcmds - __start_shellcmds);
+    size_t num_commands = shell_command_count();
     for (size_t i = 0; i < num_commands; i++) {
         const shell_command_info_t* cmd = &__start_shellcmds[i];
         if (strcmp(cmd->name, name) == 0) {
@@ -437,35 +434,6 @@ void handler_exit(const shell_args_t* args) {
     printf("%cGoodbye!\n", 255, 140, 0); // Orange
     // For now, just exit the shell
     asm("hlt");
-}
-
-void handler_assemble(const shell_args_t* args) {
-    int verbose = 0;
-    uint32 a = 1;
-    if (args && args->argc > 1 && strcmp(args->argv[1], "-v") == 0) {
-        verbose = 1;
-        a = 2;
-    }
-
-    const char* input_file = (args && args->argc > a) ? args->argv[a] : "";
-    const char* output_file = (args && args->argc > (a + 1)) ? args->argv[a + 1] : "";
-    
-    if (!input_file[0] || !output_file[0]) {
-        printf("%cUsage: assemble <input.asm> <output.eyn>\n", 255, 255, 255);
-        printf("%cExample: assemble test.asm test.eyn\n");
-        return;
-    }
-    
-    // Set verbosity
-    g_asm_verbose = verbose;
-
-    // Call the actual assembler
-    int result = assemble(input_file, output_file);
-    if (result == 0) {
-        printf("%cAssembly successful: %s -> %s\n", 0, 255, 0, input_file, output_file);
-    } else {
-        printf("%cAssembly failed with error code %d\n", 255, 0, 0, result);
-    }
 }
 
 // Enhanced command handling with unified registration
@@ -564,7 +532,7 @@ void unload_cmd(const shell_args_t* args) {
 void status_cmd(const shell_args_t* args) {
     printf("%cCommand System Status:\n", 255, 255, 255);
     printf("%c  System: Unified Command Registration\n", 255, 255, 255);
-    printf("%c  Total Commands: %d\n", 255, 255, 255, (int)(__stop_shellcmds - __start_shellcmds));
+    printf("%c  Total Commands: %d\n", 255, 255, 255, (int)shell_command_count());
     printf("%c  Memory Mode: All commands always available\n", 255, 255, 255);
     printf("%c  Registration: Linker-based automatic\n", 255, 255, 255);
 }

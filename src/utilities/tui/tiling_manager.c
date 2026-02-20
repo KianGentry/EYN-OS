@@ -406,28 +406,55 @@ typedef struct {
 } tile_bg_t;
 static tile_bg_t g_tile_bg[MAX_TILES];
 
+// GCC -fanalyzer can miss that some allocations intentionally escape via
+// struct fields. Keep a volatile escape sink so the analyzer treats these
+// transfers as non-leaking without affecting runtime behavior.
+static volatile const void* g_analyzer_escape_sink;
+
 // Convert RGBA image to RGB in-place for background use (alpha<128 becomes black)
-static void bg_convert_rgba_to_rgb(rei_image_t* im) {
-    if (!im || !im->data) return;
-    if (im->header.depth != REI_DEPTH_RGBA) return;
-    if (!tm_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
+static uint8_t* bg_convert_rgba_to_rgb_alloc(const rei_image_t* im, size_t* out_sz) {
+    if (out_sz) *out_sz = 0;
+    if (!im || !im->data) return NULL;
+    if (im->header.depth != REI_DEPTH_RGBA) return NULL;
+
     int w = im->header.width, h = im->header.height;
-    size_t out_sz = (size_t)w * (size_t)h * (size_t)REI_DEPTH_RGB;
-    uint8_t* rgb = (uint8_t*)malloc(out_sz);
-    if (!rgb) return;
+    size_t rgb_sz = (size_t)w * (size_t)h * (size_t)REI_DEPTH_RGB;
+    uint8_t* rgb = (uint8_t*)malloc(rgb_sz);
+    if (!rgb) return NULL;
+
     const uint8_t* src = im->data;
-    size_t si = 0, di = 0; size_t total = (size_t)w * (size_t)h;
+    size_t si = 0, di = 0;
+    size_t total = (size_t)w * (size_t)h;
     for (size_t i = 0; i < total; ++i) {
         if ((i & 0x3FF) == 0) tm_ctx_account(SCHED_COST_ALLOC);
         uint8_t r8 = src[si + 0], g8 = src[si + 1], b8 = src[si + 2], a = src[si + 3];
         if (a < 128) { r8 = g8 = b8 = 0; }
-        rgb[di + 0] = r8; rgb[di + 1] = g8; rgb[di + 2] = b8;
-        si += 4; di += 3;
+        rgb[di + 0] = r8;
+        rgb[di + 1] = g8;
+        rgb[di + 2] = b8;
+        si += 4;
+        di += 3;
     }
-    free(im->data);
+
+    if (out_sz) *out_sz = rgb_sz;
+    return rgb;
+}
+
+static void bg_convert_rgba_to_rgb(rei_image_t* im) {
+    if (!im || !im->data) return;
+    if (im->header.depth != REI_DEPTH_RGBA) return;
+    if (!tm_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
+
+    size_t out_sz = 0;
+    uint8_t* rgb = bg_convert_rgba_to_rgb_alloc(im, &out_sz);
+    if (!rgb) return;
+    g_analyzer_escape_sink = rgb;
+
+    uint8_t* old = im->data;
     im->data = rgb;
-    im->data_size = (int)out_sz;
+    im->data_size = out_sz;
     im->header.depth = REI_DEPTH_RGB;
+    free(old);
 }
 
 static inline void apply_darken(uint8_t* pr, uint8_t* pg, uint8_t* pb, uint8_t factor) {

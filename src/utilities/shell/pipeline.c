@@ -108,6 +108,8 @@ int count_pipeline_commands(const char* input) {
 // Trim whitespace from string
 char* trim_whitespace(char* str) {
     if (!str) return NULL;
+
+    if (!*str) return str;
     
     // Trim leading whitespace
     while (*str && is_whitespace(*str)) str++;
@@ -120,6 +122,22 @@ char* trim_whitespace(char* str) {
     }
     
     return str;
+}
+
+static void trim_whitespace_inplace(char* str) {
+    if (!str) return;
+
+    char* start = str;
+    while (*start && is_whitespace(*start)) start++;
+
+    char* end = start + strlen(start);
+    while (end > start && is_whitespace(end[-1])) end--;
+
+    size_t len = (size_t)(end - start);
+    if (start != str) {
+        memmove(str, start, len);
+    }
+    str[len] = '\0';
 }
 
 // Check if character is whitespace
@@ -170,6 +188,7 @@ char** split_command(const char* cmd_str, int* argc) {
     if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
     
     char* cmd_copy = malloc(strlen(cmd_str) + 1);
+    if (!cmd_copy) return NULL;
     strcpy(cmd_copy, cmd_str);
     
     // Count arguments
@@ -187,6 +206,10 @@ char** split_command(const char* cmd_str, int* argc) {
     
     // Allocate argument array
     char** args = malloc((*argc + 1) * sizeof(char*));
+    if (!args) {
+        free(cmd_copy);
+        return NULL;
+    }
     
     // Reset string and fill arguments
     strcpy(cmd_copy, cmd_str);
@@ -194,6 +217,11 @@ char** split_command(const char* cmd_str, int* argc) {
     int i = 0;
     while (token && i < *argc) {
         args[i] = malloc(strlen(token) + 1);
+        if (!args[i]) {
+            free_args(args, i);
+            free(cmd_copy);
+            return NULL;
+        }
         strcpy(args[i], token);
         i++;
         token = simple_strtok(NULL, " \t\n\r");
@@ -220,19 +248,23 @@ void free_args(char** args, int argc) {
 char* parse_redirections(const char* cmd_str, command_t* cmd) {
     if (!cmd_str || !cmd) return NULL;
     if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
-    
+
     char* result = malloc(strlen(cmd_str) + 1);
+    if (!result) return NULL;
     strcpy(result, cmd_str);
-    
+
     // Initialize file descriptors array
     cmd->fd_count = 0;
     cmd->fds = malloc(4 * sizeof(file_descriptor_t)); // Support up to 4 redirections
+    if (cmd->fds) {
+        memset(cmd->fds, 0, 4 * sizeof(file_descriptor_t));
+    }
     
     // Look for input redirection <
     char* input_redir = strstr(result, " < ");
     if (!input_redir) input_redir = strstr(result, "<");
     
-    if (input_redir) {
+    if (input_redir && cmd->fds && cmd->fd_count < 4) {
         // Find the filename after <
         char* filename_start = input_redir + 1;
         while (*filename_start == ' ' || *filename_start == '\t') filename_start++;
@@ -247,21 +279,40 @@ char* parse_redirections(const char* cmd_str, command_t* cmd) {
         // Extract filename
         int filename_len = filename_end - filename_start;
         if (filename_len > 0) {
-            cmd->fds[cmd->fd_count].filename = malloc(filename_len + 1);
-            strncpy(cmd->fds[cmd->fd_count].filename, filename_start, filename_len);
-            cmd->fds[cmd->fd_count].filename[filename_len] = '\0';
-            cmd->fds[cmd->fd_count].type = REDIR_INPUT;
-            cmd->fds[cmd->fd_count].fd = 0; // stdin
-            cmd->fds[cmd->fd_count].is_open = 0;
-            cmd->fd_count++;
-            
-            // Remove redirection from command string
-            *input_redir = '\0';
-            char* new_result = malloc(strlen(result) + 1);
-            strcpy(new_result, result);
-            strcat(new_result, trim_whitespace(filename_end));
-            free(result);
-            result = new_result;
+            char* filename = malloc(filename_len + 1);
+            if (filename) {
+                strncpy(filename, filename_start, filename_len);
+                filename[filename_len] = '\0';
+
+                const char* remainder = filename_end;
+                while (*remainder && is_whitespace(*remainder)) remainder++;
+
+                size_t prefix_len = (size_t)(input_redir - result);
+                size_t remainder_len = strlen(remainder);
+                size_t new_cap = prefix_len + remainder_len + 2; // optional space + NUL
+                char* new_result = malloc(new_cap);
+                if (new_result) {
+                    memcpy(new_result, result, prefix_len);
+                    new_result[prefix_len] = '\0';
+                    if (remainder_len > 0) {
+                        size_t cur_len = strlen(new_result);
+                        if (cur_len > 0 && !is_whitespace(new_result[cur_len - 1])) {
+                            strcat(new_result, " ");
+                        }
+                        strcat(new_result, remainder);
+                    }
+                    free(result);
+                    result = new_result;
+
+                    cmd->fds[cmd->fd_count].filename = filename;
+                    cmd->fds[cmd->fd_count].type = REDIR_INPUT;
+                    cmd->fds[cmd->fd_count].fd = 0; // stdin
+                    cmd->fds[cmd->fd_count].is_open = 0;
+                    cmd->fd_count++;
+                } else {
+                    free(filename);
+                }
+            }
         }
     }
     
@@ -269,7 +320,7 @@ char* parse_redirections(const char* cmd_str, command_t* cmd) {
     char* output_redir = strstr(result, " > ");
     if (!output_redir) output_redir = strstr(result, ">");
     
-    if (output_redir) {
+    if (output_redir && cmd->fds && cmd->fd_count < 4) {
         // Check for append redirection >>
         int is_append = (output_redir[1] == '>');
         
@@ -287,37 +338,62 @@ char* parse_redirections(const char* cmd_str, command_t* cmd) {
         // Extract filename
         int filename_len = filename_end - filename_start;
         if (filename_len > 0) {
-            cmd->fds[cmd->fd_count].filename = malloc(filename_len + 1);
-            strncpy(cmd->fds[cmd->fd_count].filename, filename_start, filename_len);
-            cmd->fds[cmd->fd_count].filename[filename_len] = '\0';
-            cmd->fds[cmd->fd_count].type = is_append ? REDIR_APPEND : REDIR_OUTPUT;
-            cmd->fds[cmd->fd_count].fd = 1; // stdout
-            cmd->fds[cmd->fd_count].is_open = 0;
-            cmd->fd_count++;
-            
-            // Remove redirection from command string
-            *output_redir = '\0';
-            char* new_result = malloc(strlen(result) + 1);
-            strcpy(new_result, result);
-            strcat(new_result, trim_whitespace(filename_end));
-            free(result);
-            result = new_result;
+            char* filename = malloc(filename_len + 1);
+            if (filename) {
+                strncpy(filename, filename_start, filename_len);
+                filename[filename_len] = '\0';
+
+                const char* remainder = filename_end;
+                while (*remainder && is_whitespace(*remainder)) remainder++;
+
+                size_t prefix_len = (size_t)(output_redir - result);
+                size_t remainder_len = strlen(remainder);
+                size_t new_cap = prefix_len + remainder_len + 2; // optional space + NUL
+                char* new_result = malloc(new_cap);
+                if (new_result) {
+                    memcpy(new_result, result, prefix_len);
+                    new_result[prefix_len] = '\0';
+                    if (remainder_len > 0) {
+                        size_t cur_len = strlen(new_result);
+                        if (cur_len > 0 && !is_whitespace(new_result[cur_len - 1])) {
+                            strcat(new_result, " ");
+                        }
+                        strcat(new_result, remainder);
+                    }
+                    free(result);
+                    result = new_result;
+
+                    cmd->fds[cmd->fd_count].filename = filename;
+                    cmd->fds[cmd->fd_count].type = is_append ? REDIR_APPEND : REDIR_OUTPUT;
+                    cmd->fds[cmd->fd_count].fd = 1; // stdout
+                    cmd->fds[cmd->fd_count].is_open = 0;
+                    cmd->fd_count++;
+                } else {
+                    free(filename);
+                }
+            }
         }
     }
-    
-    return trim_whitespace(result);
+
+    trim_whitespace_inplace(result);
+    return result;
 }
 
 // Parse command from string
 command_t* parse_command(const char* cmd_str) {
     if (!cmd_str) return NULL;
     if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
-    
+
     command_t* cmd = malloc(sizeof(command_t));
+    if (!cmd) return NULL;
     memset(cmd, 0, sizeof(command_t));
     
     // Check for background execution
     char* input_copy = malloc(strlen(cmd_str) + 1);
+    if (!input_copy) {
+        free(cmd);
+        return NULL;
+    }
     strcpy(input_copy, cmd_str);
     
     // Remove trailing & for background execution
@@ -330,10 +406,23 @@ command_t* parse_command(const char* cmd_str) {
     
     // Parse redirections and split into arguments
     char* clean_cmd = parse_redirections(trimmed, cmd);
+    if (!clean_cmd) {
+        if (cmd->fds) free(cmd->fds);
+        free(cmd);
+        free(input_copy);
+        return NULL;
+    }
     
     // Split into arguments
     cmd->args = split_command(clean_cmd, &cmd->argc);
+    free(clean_cmd);
     if (!cmd->args || cmd->argc == 0) {
+        if (cmd->fds) {
+            for (int x = 0; x < cmd->fd_count; x++) {
+                if (cmd->fds[x].filename) free(cmd->fds[x].filename);
+            }
+            free(cmd->fds);
+        }
         free(cmd);
         free(input_copy);
         return NULL;
@@ -385,8 +474,9 @@ command_t* parse_command(const char* cmd_str) {
 pipeline_t* parse_pipeline(const char* input) {
     if (!input) return NULL;
     if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
-    
+
     pipeline_t* pipeline = malloc(sizeof(pipeline_t));
+    if (!pipeline) return NULL;
     memset(pipeline, 0, sizeof(pipeline_t));
     
     // Count commands
@@ -394,6 +484,10 @@ pipeline_t* parse_pipeline(const char* input) {
     
     // Split by pipe character
     char* input_copy = malloc(strlen(input) + 1);
+    if (!input_copy) {
+        free(pipeline);
+        return NULL;
+    }
     strcpy(input_copy, input);
     
     char* token = simple_strtok(input_copy, "|");
@@ -433,6 +527,10 @@ void free_command(command_t* cmd) {
         if (cmd->fds[i].filename) {
             free(cmd->fds[i].filename);
         }
+    }
+
+    if (cmd->fds) {
+        free(cmd->fds);
     }
     
     free(cmd);
@@ -765,6 +863,10 @@ int execute_pipeline(pipeline_t* pipeline) {
             // Add the output from first command as additional arguments
             // Split output by whitespace and add each word as an argument
             char* output_copy = malloc(strlen(output) + 1);
+            if (!output_copy) {
+                printf("Pipeline: out of memory while passing output to %s\n", second_cmd->name);
+                return -1;
+            }
             strcpy(output_copy, output);
             
             char* word = simple_strtok(output_copy, " \t\n\r");
@@ -889,6 +991,10 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
         // If this is not the last command, store output for next command
         if (cmd->next) {
             current_input = malloc(strlen(output) + 1);
+            if (!current_input) {
+                printf("Pipeline: out of memory while chaining command output\n");
+                return -1;
+            }
             strcpy(current_input, output);
         } else {
             // Last command - output goes to terminal (already handled by shell_redirect)
@@ -919,6 +1025,9 @@ int add_background_process(int pid, const char* command) {
         if (!g_background_processes[i].active) {
             g_background_processes[i].pid = pid;
             g_background_processes[i].command = malloc(strlen(command) + 1);
+            if (!g_background_processes[i].command) {
+                return -1;
+            }
             strcpy(g_background_processes[i].command, command);
             g_background_processes[i].status = 0;
             g_background_processes[i].active = 1;

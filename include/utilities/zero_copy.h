@@ -28,6 +28,13 @@ typedef struct {
     uint32_t block_count;          // Number of blocks mapped
     uint32_t access_count;         // Access counter for statistics
     uint8_t dirty;                 // Modified flag for write-back
+
+    // Filesystem metadata needed for safe write-back.
+    // These are captured at open() time (from eynfs_traverse_path) and are
+    // required to update the directory entry atomically on write-back.
+    uint32_t parent_block;
+    uint32_t entry_index;
+    eynfs_dir_entry_t entry;
 } zero_copy_file_t;
 
 // Zero-copy buffer structure for efficient I/O

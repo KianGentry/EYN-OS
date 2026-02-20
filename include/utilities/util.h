@@ -55,4 +55,8 @@ uint32 get_heap_used(void);
 uint32 get_total_ram(void);
 void putchar(char c);
 
+// Hint for static analyzers: treat `p` as escaping the current function.
+// Runtime behavior is a no-op.
+void util_escape_ptr(const void* p);
+
 #endif

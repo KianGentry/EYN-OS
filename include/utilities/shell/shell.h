@@ -29,6 +29,10 @@ void show_history(command_history_t* history);
 typedef void (*shell_cmd_handler_t)(const shell_args_t* args);
 shell_cmd_handler_t find_command(const char* name);
 
+// Drive context helpers used by shell GUIs and filesystem code
+uint8 get_current_physical_drive(void);
+uint8 get_current_logical_drive(void);
+
 // Global history instance
 extern command_history_t g_command_history;
 

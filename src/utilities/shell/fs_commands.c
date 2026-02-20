@@ -73,7 +73,14 @@ static void fs_ctx_account(uint32 cost) {
 // Helper: resolve relative/absolute path to absolute
 void resolve_path(const char* input, const char* cwd, char* out, size_t outsz) {
     if (!input || !input[0]) {
-        strncpy(out, cwd, outsz-1); out[outsz-1] = '\0';
+        if (!out || outsz == 0) return;
+        if (!cwd) { out[0] = '\0'; return; }
+        size_t i = 0;
+        while (i + 1 < outsz && cwd[i]) {
+            out[i] = cwd[i];
+            i++;
+        }
+        out[i] = '\0';
         return;
     }
     if (input[0] == '/') {
@@ -635,7 +642,10 @@ static int fatfix_dir(uint8 drive, const char* dirpath) {
     uint32 part_lba = fat32_get_partition_lba_start(drive);
     struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -1;
     // Resolve directory cluster
-    struct fat32_dir_entry dent; uint32 dclus;
+    struct fat32_dir_entry dent;
+    uint32 dclus = bpb.RootClus;
+    memset(&dent, 0, sizeof(dent));
+    dent.Attr = 0x10;
     if (strcmp(dirpath, "/") == 0) { dclus = bpb.RootClus; memset(&dent,0,sizeof(dent)); dent.Attr = 0x10; }
     else {
         // Local FAT32 absolute path traversal (8.3)

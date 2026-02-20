@@ -445,4 +445,4 @@ checkfs: fsck_eynfs
 .PHONY: analyze
 analyze:
 	@echo "Running GCC static analyzer over src/**/*.c ..."
-	@find src -name "*.c" -print0 | xargs -0 -n1 -I{} sh -c 'echo Analyzing {}; $(COMPILER) $(KERNEL_CFLAGS) -fanalyzer -c {} -o /dev/null' || true
+	@find src -name "*.c" -print0 | xargs -0 -I{} sh -c 'echo Analyzing {}; $(COMPILER) $(KERNEL_CFLAGS) -fanalyzer -c {} -o /dev/null' || true

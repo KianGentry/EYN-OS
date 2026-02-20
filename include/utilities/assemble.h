@@ -97,6 +97,7 @@ typedef struct SymbolTableEntry {
     char name[64];
     SectionType section;
     int address;
+    uint8_t used;
     struct SymbolTableEntry* next;
 } SymbolTableEntry;
 

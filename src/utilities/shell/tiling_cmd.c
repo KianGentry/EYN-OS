@@ -3,6 +3,7 @@
 #include <tile_manager.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <utilities/shell/shell_args.h>
 
 static int tiling_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -15,8 +16,8 @@ static int tiling_ctx_allow(uint32 caps, uint32 cost) {
     return 1;
 }
 
-void tiling_cmd(string arg) {
-    (void)arg;
+static void tiling_cmd(const shell_args_t* args) {
+    (void)args;
     if (!tiling_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     start_tiling_manager();
 }

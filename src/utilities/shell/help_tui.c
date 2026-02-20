@@ -8,9 +8,7 @@
 #include <tile_manager.h>
 #include <context.h>
 #include <misc/sched.h>
-
-extern const shell_command_info_t __start_shellcmds[];
-extern const shell_command_info_t __stop_shellcmds[];
+#include <stdint.h>
 
 #define HELP_TUI_WIDTH 80
 #define CMD_LIST_WIDTH 22
@@ -164,8 +162,6 @@ void help_tui() {
     // Defensive: ensure no shell redirection/capture is active before switching to GUI mode.
     // Some commands (like ls/read) run with redirect active in terminals; if a GUI opens mid-state,
     // guarantee a clean slate so GUI drawing is never captured or influenced by shell IO modes.
-    extern int g_shell_capture_mode; // from vga.c
-    extern int shell_redirect_active; // from vga.c
     if (shell_redirect_active) stop_shell_redirect();
     g_shell_capture_mode = 0;
     
@@ -613,7 +609,10 @@ void help_tui_init_state() {
     if (!help_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
     if (g_sorted_cmds) return; // already initialized
     help_dbg_ch('B');
-    int cmd_count = (int)(__stop_shellcmds - __start_shellcmds);
+    uintptr_t start = (uintptr_t)__start_shellcmds;
+    uintptr_t stop = (uintptr_t)__stop_shellcmds;
+    if (stop <= start) return;
+    int cmd_count = (int)((stop - start) / sizeof(shell_command_info_t));
     if (cmd_count <= 0) return;
     if (cmd_count > 256) {
         // Something is very wrong; refuse to allocate huge tables.
@@ -623,7 +622,8 @@ void help_tui_init_state() {
 
     // Compute total string pool size (bounded, and only for sane kernel pointers)
     size_t pool_size = 0;
-    for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
+    for (uintptr_t p = start; p < stop; p += sizeof(shell_command_info_t)) {
+        const shell_command_info_t* cmd = (const shell_command_info_t*)p;
         size_t ln = help_strnlen_kernel(cmd->name, 64);
         size_t ld = help_strnlen_kernel(cmd->description, 256);
         size_t le = help_strnlen_kernel(cmd->example, 256);
@@ -646,7 +646,8 @@ void help_tui_init_state() {
     char* cur = g_cmd_string_pool;
     char* end = g_cmd_string_pool + (pool_size ? pool_size : 1);
     int i = 0;
-    for (const shell_command_info_t* cmd = __start_shellcmds; cmd < __stop_shellcmds; ++cmd) {
+    for (uintptr_t p = start; p < stop; p += sizeof(shell_command_info_t)) {
+        const shell_command_info_t* cmd = (const shell_command_info_t*)p;
         // copy handler and type
         g_copied_cmds[i].handler = cmd->handler;
         g_copied_cmds[i].type = cmd->type;

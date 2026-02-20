@@ -3,6 +3,7 @@
 #include <vga.h>
 #include <string.h>
 #include <shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 #include <stdlib.h>
 #include <context.h>
 #include <misc/sched.h>
@@ -46,8 +47,8 @@ static void test_mouse(int tile_idx, const mouse_event_t* me, void* ud) {
     (void)tile_idx; (void)ud; (void)me;
 }
 
-void win_test_cmd(string ch) {
-    (void)ch;
+static void win_test_cmd(const shell_args_t* args) {
+    (void)args;
     if (!win_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) return;
     int w = 300, h = 200, x = 80, y = 60;
     static char status[] = "Ctrl+X: Close";

@@ -9,6 +9,7 @@
 #include <misc/sched.h>
 
 #include <shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 #include <string.h>
 
 
@@ -395,8 +396,8 @@ static void theme_gui_mouse(int tile_idx, const mouse_event_t* me, void* ud) {
     (void)me;
 }
 
-static void theme_cmd(string arg) {
-    (void)arg;
+static void theme_cmd(const shell_args_t* args) {
+    (void)args;
     if (!theme_ctx_allow(CAP_WRITE_CONSOLE | CAP_READ_FS, SCHED_COST_CONSOLE)) return;
 
     theme_gui_t* st = &g_theme_gui;

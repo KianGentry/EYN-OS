@@ -32,28 +32,15 @@
 #include <misc/sched.h>
 
 // Forward declarations for command handlers
-void help_cmd(const shell_args_t* args);
 void echo_cmd(const shell_args_t* args);
 void ver_cmd(const shell_args_t* args);
 void spam_cmd(const shell_args_t* args);
 void calc_cmd(const shell_args_t* args);
-void draw_cmd_handler(const shell_args_t* args);
-void drive_cmd(const shell_args_t* args);
-void memory_cmd(const shell_args_t* args);
-void log_cmd(const shell_args_t* args);
 void lsata_cmd(const shell_args_t* args);
 void handler_exit(const shell_args_t* args);
-void clear_cmd(const shell_args_t* args);
 void catram_cmd(const shell_args_t* args);
 void lsram_cmd(const shell_args_t* args);
-void random_cmd(const shell_args_t* args);
-void sort_cmd(const shell_args_t* args);
-void search_cmd(const shell_args_t* args);
 // game engine removed
-void error_cmd(const shell_args_t* args);
-void validate_cmd(const shell_args_t* args);
-void portable_cmd(const shell_args_t* args);
-void init_cmd(const shell_args_t* args);
 void pciscan_cmd(const shell_args_t* args);
 void e1000probe_cmd(const shell_args_t* args);
 void e1000_cmd(const shell_args_t* args);
@@ -72,6 +59,7 @@ void crashlog_cmd(const shell_args_t* args);
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
+extern uint32 stack_space;
 
 static int shell_cmd_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -98,7 +86,6 @@ static int parse_u32_dec_strict(const char* s, uint32_t* out) {
 
 // Random number generator command
 void random_cmd(const shell_args_t* args) {
-    extern int shell_redirect_active; // from vga.c
     // If no arguments, generate a single random number
     if (!args || args->argc < 2) {
         uint32_t num = rand_next();
@@ -356,7 +343,7 @@ REGISTER_SHELL_COMMAND(clearbg_cmd_info, "clearbg", clearbg_cmd, CMD_STREAMING, 
 REGISTER_SHELL_COMMAND(setfont_cmd_info, "setfont", setfont_cmd, CMD_STREAMING, "Set the system font at runtime (loads .hex from disk into RAM).\nUsage: setfont <file.hex> | setfont builtin", "setfont /fonts/unscii-16.hex");
 
 // Ultra-lightweight search with streaming (no large allocations)
-void search_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void search_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                      const char* pattern, int search_filenames, int search_contents, 
                      int* found_count, char* current_path, int path_len) {
     
@@ -476,7 +463,6 @@ void search_cmd(const shell_args_t* args) {
     
     if (is_filter_mode) {
         // Pipeline mode: search in piped input data
-        extern char* g_pipeline_input_data;
         if (g_pipeline_input_data && strlen(g_pipeline_input_data) > 0) {
             // Split input into lines and search each line
             if (!shell_cmd_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return;
@@ -520,9 +506,9 @@ void search_cmd(const shell_args_t* args) {
         // Execute the command
         shell_cmd_handler_t handler = find_command(source);
         if (handler) {
-            shell_args_t args;
-            if (shell_args_parse(&args, source) == 0)
-                handler(&args);
+            shell_args_t nested_args;
+            if (shell_args_parse(&nested_args, source) == 0)
+                handler(&nested_args);
             else
                 printf("Command line too long: %s\n", source);
         } else {
@@ -653,7 +639,6 @@ void ver()
     int rei_displayed = 0;
     
     // Check if shell output is being redirected (e.g., running inside a tiled vterm)
-    extern int shell_redirect_active;
     
     // Try to load and display eynos.rei image only if not redirected
     if (!shell_redirect_active) {
@@ -1012,6 +997,7 @@ static int netcfg_apply_text(char* buf)
         if (next) { *next = '\0'; next++; }
 
         char* s2 = netcfg_trim_left_ws(line);
+        if (!s2) { line = next; continue; }
         netcfg_trim_right_ws(s2);
         if (!s2[0] || s2[0] == '#') { line = next; continue; }
 
@@ -2558,7 +2544,6 @@ void ring3_cmd(const shell_args_t* args) {
     invalidate_tlb_entry(user_stack_page);
 
     printf("%c[ring3] entering user mode...\n", 0, 255, 0);
-    extern uint32 stack_space;
     tss_set_kernel_stack((uint32)&stack_space);
     enter_user_mode(user_code_va, user_stack_top);
 }
@@ -2675,7 +2660,6 @@ void userrun_cmd(const shell_args_t* args) {
     free(buf);
 
     printf("%c[userrun] entering user mode: %s (%d bytes)\n", 0, 255, 0, abspath, (int)size);
-    extern uint32 stack_space;
     tss_set_kernel_stack((uint32)&stack_space);
     enter_user_mode(user_code_va, user_stack_top);
 }
@@ -2909,10 +2893,16 @@ void memory_cmd(const shell_args_t* args) {
                 if (new_ptr) {
                     printf("%cRealloc test: PASSED\n", 0, 255, 0);
                     free(new_ptr);
+                } else {
+                    // realloc failed; original ptr1 is still valid.
+                    free(ptr1);
                 }
                 free(ptr3);
             } else {
                 printf("%cBasic allocation test: FAILED\n", 255, 0, 0);
+                if (ptr1) free(ptr1);
+                if (ptr2) free(ptr2);
+                if (ptr3) free(ptr3);
             }
             print_memory_stats();
         }
@@ -3318,7 +3308,6 @@ void init_cmd(const shell_args_t* args) {
     
     // Initialize ATA drives
     printf("%c  Initializing ATA drives...\n", 255, 255, 255);
-    extern void ata_init_drives(void);
     ata_init_drives();
 
     // Best-effort load of persisted network config (does not require e1000 init).
@@ -3331,14 +3320,14 @@ void init_cmd(const shell_args_t* args) {
 }
 
 // Pipeline system commands
-void jobs_cmd(const shell_args_t* args) {
+static void jobs_cmd(const shell_args_t* args) {
     string ch = (string)(args ? args->raw : "");
     if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     printf("%cBackground Jobs:\n", 255, 255, 255);
     list_background_processes();
 }
 
-void fg_cmd(const shell_args_t* args) {
+static void fg_cmd(const shell_args_t* args) {
     string ch = (string)(args ? args->raw : "");
     if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     // Parse PID from command
@@ -3359,7 +3348,7 @@ void fg_cmd(const shell_args_t* args) {
     wait_for_background_process(pid);
 }
 
-void bg_cmd(const shell_args_t* args) {
+static void bg_cmd(const shell_args_t* args) {
     string ch = (string)(args ? args->raw : "");
     if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     printf("%cBackground process management:\n", 255, 255, 255);
@@ -3369,7 +3358,7 @@ void bg_cmd(const shell_args_t* args) {
     printf("%c  Use 'fg <pid>' to bring process to foreground\n", 255, 255, 255);
 }
 
-void pipe_cmd(const shell_args_t* args) {
+static void pipe_cmd(const shell_args_t* args) {
     string ch = (string)(args ? args->raw : "");
     if (!shell_cmd_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     printf("%cPipeline System:\n", 255, 255, 255);

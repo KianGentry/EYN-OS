@@ -8,6 +8,7 @@
 #include <eynfs.h>
 #include <string.h>
 #include <shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 #include <context.h>
 
 // Simple system stats GUI: shows 3 pie charts (CPU, Memory, Disk) and a sortable table below
@@ -161,7 +162,10 @@ static int cpu_has_cpuid(void) {
 static void cpuid_eax(uint32 leaf, uint32* a, uint32* b, uint32* c, uint32* d) {
     uint32 ra=0, rb=0, rc=0, rd=0;
     __asm__ __volatile__("cpuid" : "=a"(ra), "=b"(rb), "=c"(rc), "=d"(rd) : "a"(leaf), "c"(0));
-    if (a) *a = ra; if (b) *b = rb; if (c) *c = rc; if (d) *d = rd;
+    if (a) *a = ra;
+    if (b) *b = rb;
+    if (c) *c = rc;
+    if (d) *d = rd;
 }
 
 static int cpu_has_tsc(void) {
@@ -218,9 +222,6 @@ static void stats_sample_disk(void) {
 }
 
 static void stats_sample_memory(void) {
-    extern uint32 get_heap_size(void);
-    extern uint32 get_heap_used(void);
-    extern uint32 get_total_ram(void);
     g_stats.heap_total = get_heap_size();
     g_stats.heap_used = get_heap_used();
     g_stats.total_ram_bytes = get_total_ram();
@@ -414,7 +415,8 @@ static void stats_gui_mouse(int tile_idx, const mouse_event_t* me, void* userdat
     }
 }
 
-static void stats_cmd(string arg) {
+static void stats_cmd(const shell_args_t* args) {
+    (void)args;
     if (!stats_ctx_allow(CAP_WRITE_CONSOLE | CAP_READ_FS | CAP_DEV_DISK, SCHED_COST_CONSOLE)) return;
     memset(&g_stats, 0, sizeof(g_stats));
     g_stats.sort_col = 0; g_stats.sort_dir = -1;

@@ -481,10 +481,10 @@ int link_write_uelf(const LinkConfig *cfg, const char *output_path) {
 }
 
 // Shell command handler for link command
-void handler_link(string arg);
+void handler_link(const shell_args_t* args);
 
-void handler_link(string arg) {
-    (void)arg;
+void handler_link(const shell_args_t* args) {
+    (void)args;
     printf("EYN-OS Linker\n");
     printf("Usage: link <input.o> <output.uelf>\n");
     printf("Note: Currently designed to be called from the assembler.\n");

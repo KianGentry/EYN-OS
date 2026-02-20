@@ -14,6 +14,53 @@ static uint8_t g_zero_copy_fd_count = 0;
 static uint32_t g_zero_copy_stats = 0;
 static uint32_t g_zero_copy_operations = 0;
 
+#define ZERO_COPY_MAX_ANON_MAPS 32
+typedef struct {
+    void* addr;
+    size_t length;
+} zero_copy_anon_map_t;
+
+static zero_copy_anon_map_t g_zero_copy_anon_maps[ZERO_COPY_MAX_ANON_MAPS];
+static uint8_t g_zero_copy_anon_count = 0;
+
+static void zero_copy_anon_reset(void) {
+    memset(g_zero_copy_anon_maps, 0, sizeof(g_zero_copy_anon_maps));
+    g_zero_copy_anon_count = 0;
+}
+
+static int zero_copy_writeback(zero_copy_file_t* file) {
+    if (!file || !file->dirty) return 0;
+    if (!(file->flags & ZERO_COPY_WRITE_ONLY) && !(file->flags & ZERO_COPY_READ_WRITE)) return 0;
+    if (!file->mapped_address && file->file_size != 0) return -1;
+
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(file->drive, 2048, &sb) != 0) {
+        printf("%c[ZERO-COPY] Error: Cannot read filesystem for write-back\n", 255, 0, 0);
+        return -1;
+    }
+
+    // Ensure on-disk metadata matches our current buffer size.
+    file->entry.size = file->file_size;
+
+    int n = eynfs_write_file(
+        file->drive,
+        &sb,
+        &file->entry,
+        file->mapped_address,
+        file->file_size,
+        file->parent_block,
+        file->entry_index);
+
+    if (n < 0) {
+        printf("%c[ZERO-COPY] Error: Write-back failed\n", 255, 0, 0);
+        return -1;
+    }
+
+    file->block_start = file->entry.first_block;
+    file->dirty = 0;
+    return 0;
+}
+
 static int zero_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
     if (ctx && !cap_check(ctx->caps, caps)) return 0;
@@ -95,6 +142,7 @@ void zero_copy_init(void) {
     g_zero_copy_fd_count = 0;
     g_zero_copy_stats = 0;
     g_zero_copy_operations = 0;
+    zero_copy_anon_reset();
 }
 
 // Open file with zero-copy operations
@@ -170,8 +218,12 @@ int zero_copy_open(const char* path, uint8_t flags) {
     g_zero_copy_files[g_zero_copy_fd_count].drive = drive;
     g_zero_copy_files[g_zero_copy_fd_count].flags = flags;
     g_zero_copy_files[g_zero_copy_fd_count].block_start = entry.first_block;
+    g_zero_copy_files[g_zero_copy_fd_count].block_count = 0;
     g_zero_copy_files[g_zero_copy_fd_count].access_count = 0;
     g_zero_copy_files[g_zero_copy_fd_count].dirty = 0;
+    g_zero_copy_files[g_zero_copy_fd_count].parent_block = parent_block;
+    g_zero_copy_files[g_zero_copy_fd_count].entry_index = entry_index;
+    g_zero_copy_files[g_zero_copy_fd_count].entry = entry;
     
     int fd = g_zero_copy_fd_count;
     g_zero_copy_fd_count++;
@@ -188,10 +240,18 @@ int zero_copy_close(int fd) {
     }
     
     zero_copy_file_t* file = &g_zero_copy_files[fd];
-    
-    // If file was modified, write back to disk (TODO)
-    if (file->dirty && (file->flags & ZERO_COPY_WRITE_ONLY || file->flags & ZERO_COPY_READ_WRITE)) {
-        // TODO: Implement write-back to filesystem
+
+    // If file was modified, write back to disk.
+    if (file->dirty) {
+        if (zero_copy_writeback(file) != 0) {
+            // Continue cleanup, but report failure.
+            if (file->mapped_address) {
+                free(file->mapped_address);
+                file->mapped_address = NULL;
+            }
+            memset(file, 0, sizeof(zero_copy_file_t));
+            return -1;
+        }
     }
     
     // Free mapped memory
@@ -252,10 +312,32 @@ size_t zero_copy_write(int fd, const void* buf, size_t count) {
         return -1;
     }
     
-    if (file->current_offset + count > file->file_size) {
-        // TODO: Implement file extension safely
-        printf("%cError: Cannot extend file size in zero-copy mode\n", 255, 0, 0);
-        return -1;
+    uint32_t end_off;
+    if (count > 0xFFFFFFFFu) return (size_t)-1;
+    if (file->current_offset > 0xFFFFFFFFu - (uint32_t)count) {
+        printf("%cError: Write size overflow\n", 255, 0, 0);
+        return (size_t)-1;
+    }
+    end_off = file->current_offset + (uint32_t)count;
+
+    if (end_off > file->file_size) {
+        // Extend file mapping by reallocating and zero-filling new space.
+        if (!zero_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return (size_t)-1;
+        uint8_t* new_buf = (uint8_t*)malloc((int)end_off);
+        if (!new_buf) {
+            printf("%cError: Out of memory for file extension\n", 255, 0, 0);
+            return (size_t)-1;
+        }
+        if (file->mapped_address && file->file_size > 0) {
+            memcpy(new_buf, file->mapped_address, file->file_size);
+        }
+        if (end_off > file->file_size) {
+            memset(new_buf + file->file_size, 0, end_off - file->file_size);
+        }
+        if (file->mapped_address) free(file->mapped_address);
+        file->mapped_address = new_buf;
+        file->file_size = end_off;
+        file->entry.size = end_off;
     }
     
     uint8_t* dest = (uint8_t*)file->mapped_address + file->current_offset;
@@ -313,14 +395,50 @@ void* zero_copy_mmap(void* addr, size_t length, uint8_t flags, int fd, int32_t o
             return NULL;
         }
         memset(mapped_addr, 0, length);
+
+        if (g_zero_copy_anon_count < ZERO_COPY_MAX_ANON_MAPS) {
+            g_zero_copy_anon_maps[g_zero_copy_anon_count].addr = mapped_addr;
+            g_zero_copy_anon_maps[g_zero_copy_anon_count].length = length;
+            g_zero_copy_anon_count++;
+        } else {
+            // Still return the mapping, but warn that munmap may not be able to free it.
+            printf("%cWarning: Anonymous mapping table full; munmap may leak\n", 255, 165, 0);
+        }
         return mapped_addr;
     }
 }
 
 // Unmap zero-copy memory
 int zero_copy_munmap(void* addr, size_t length) {
-    // TODO: Track anonymous mappings to free them explicitly.
-    return 0;
+    if (!addr) return -1;
+
+    // First, free tracked anonymous mappings.
+    for (int i = 0; i < g_zero_copy_anon_count; i++) {
+        if (g_zero_copy_anon_maps[i].addr == addr) {
+            free(addr);
+            // Compact table
+            for (int j = i; j < g_zero_copy_anon_count - 1; j++) {
+                g_zero_copy_anon_maps[j] = g_zero_copy_anon_maps[j + 1];
+            }
+            g_zero_copy_anon_count--;
+            return 0;
+        }
+    }
+
+    // If it points into a file mapping, we currently don't support partial unmap.
+    for (int i = 0; i < g_zero_copy_fd_count; i++) {
+        zero_copy_file_t* file = &g_zero_copy_files[i];
+        if (file->mapped_address) {
+            uint8_t* base = (uint8_t*)file->mapped_address;
+            uint8_t* a = (uint8_t*)addr;
+            if (a >= base && a < base + file->file_size) {
+                (void)length;
+                return 0;
+            }
+        }
+    }
+
+    return -1;
 }
 
 // Synchronize zero-copy memory to disk
@@ -331,14 +449,17 @@ int zero_copy_msync(void* addr, size_t length, uint8_t flags) {
             zero_ctx_account(SCHED_COST_FS);
         }
         zero_copy_file_t* file = &g_zero_copy_files[i];
-        if (file->mapped_address && 
-            addr >= file->mapped_address && 
-            addr < (uint8_t*)file->mapped_address + file->file_size) {
-            if (file->dirty) {
-                // TODO: Implement actual write-back to filesystem
-                file->dirty = 0;
+        if (file->mapped_address) {
+            uint8_t* base = (uint8_t*)file->mapped_address;
+            uint8_t* a = (uint8_t*)addr;
+            if (a >= base && a < base + file->file_size) {
+                if (file->dirty) {
+                    (void)length;
+                    (void)flags;
+                    if (zero_copy_writeback(file) != 0) return -1;
+                }
+                return 0;
             }
-            return 0;
         }
     }
     printf("%cError: Address not mapped\n", 255, 0, 0);
@@ -405,3 +526,179 @@ void print_zero_copy_stats(void) {
         }
     }
 } 
+
+int zero_copy_truncate(int fd, size_t length) {
+    if (!zero_ctx_allow(CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
+    if (fd < 0 || fd >= g_zero_copy_fd_count) return -1;
+    zero_copy_file_t* file = &g_zero_copy_files[fd];
+
+    if (!(file->flags & ZERO_COPY_WRITE_ONLY) && !(file->flags & ZERO_COPY_READ_WRITE)) {
+        printf("%cError: File not opened for truncation\n", 255, 0, 0);
+        return -1;
+    }
+
+    if (length > 0xFFFFFFFFu) return -1;
+    uint32_t new_len = (uint32_t)length;
+
+    if (new_len == file->file_size) return 0;
+
+    if (new_len == 0) {
+        if (file->mapped_address) {
+            free(file->mapped_address);
+            file->mapped_address = NULL;
+        }
+        file->file_size = 0;
+        file->current_offset = 0;
+        file->entry.size = 0;
+        file->dirty = 1;
+        return 0;
+    }
+
+    uint8_t* new_buf = (uint8_t*)malloc((int)new_len);
+    if (!new_buf) return -1;
+
+    if (file->mapped_address) {
+        uint32_t to_copy = (new_len < file->file_size) ? new_len : file->file_size;
+        if (to_copy) memcpy(new_buf, file->mapped_address, to_copy);
+        if (new_len > to_copy) memset(new_buf + to_copy, 0, new_len - to_copy);
+        free(file->mapped_address);
+    } else {
+        memset(new_buf, 0, new_len);
+    }
+
+    file->mapped_address = new_buf;
+    file->file_size = new_len;
+    if (file->current_offset > new_len) file->current_offset = new_len;
+    file->entry.size = new_len;
+    file->dirty = 1;
+    return 0;
+}
+
+int zero_copy_vmsplice(int fd, const void* buf, size_t count, uint8_t flags) {
+    (void)flags;
+    size_t n = zero_copy_write(fd, buf, count);
+    if (n == (size_t)-1) return -1;
+    return (int)n;
+}
+
+zero_copy_buffer_t* create_zero_copy_buffer(uint32_t size) {
+    if (!zero_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
+    zero_copy_buffer_t* b = (zero_copy_buffer_t*)malloc(sizeof(zero_copy_buffer_t));
+    if (!b) return NULL;
+    memset(b, 0, sizeof(*b));
+
+    b->buffer = malloc((int)size);
+    if (!b->buffer) {
+        free(b);
+        return NULL;
+    }
+    memset(b->buffer, 0, size);
+    b->size = size;
+    b->offset = 0;
+    b->drive = 0;
+    b->block_start = 0;
+    b->dirty = 0;
+    return b;
+}
+
+void destroy_zero_copy_buffer(zero_copy_buffer_t* buffer) {
+    if (!buffer) return;
+    if (buffer->buffer) free(buffer->buffer);
+    free(buffer);
+}
+
+int zero_copy_buffer_read(zero_copy_buffer_t* buffer, void* data, uint32_t offset, uint32_t size) {
+    if (!buffer || !buffer->buffer || !data) return -1;
+    if (offset > buffer->size) return -1;
+    if (size > buffer->size - offset) return -1;
+    memcpy(data, (uint8_t*)buffer->buffer + offset, size);
+    return 0;
+}
+
+int zero_copy_buffer_write(zero_copy_buffer_t* buffer, const void* data, uint32_t offset, uint32_t size) {
+    if (!buffer || !buffer->buffer || (!data && size)) return -1;
+    if (offset > buffer->size) return -1;
+    if (size > buffer->size - offset) return -1;
+    if (size) memcpy((uint8_t*)buffer->buffer + offset, data, size);
+    buffer->dirty = 1;
+    return 0;
+}
+
+int eynfs_zero_copy_read(uint8_t drive, const eynfs_dir_entry_t* entry,
+                        void** addr, size_t* size, uint32_t offset) {
+    if (!addr || !size || !entry || entry->type != EYNFS_TYPE_FILE) return -1;
+    if (offset >= entry->size) {
+        *addr = NULL;
+        *size = 0;
+        return 0;
+    }
+    if (!zero_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
+
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(drive, 2048, &sb) != 0) return -1;
+
+    size_t to_read = entry->size - offset;
+    void* buf = malloc((int)to_read);
+    if (!buf) return -1;
+    int n = eynfs_read_file(drive, &sb, entry, buf, to_read, offset);
+    if (n < 0 || (size_t)n != to_read) {
+        free(buf);
+        return -1;
+    }
+    *addr = buf;
+    *size = to_read;
+    return 0;
+}
+
+// In-place write within an existing file's allocated block chain.
+// Does not allocate/free blocks and therefore cannot extend the file.
+int eynfs_zero_copy_write(uint8_t drive, eynfs_dir_entry_t* entry,
+                        const void* data, size_t size, uint32_t offset) {
+    if (!entry || entry->type != EYNFS_TYPE_FILE) return -1;
+    if (!data && size) return -1;
+    if (offset > entry->size) return -1;
+    if (size > (size_t)(entry->size - offset)) return -1;
+    if (!zero_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+
+    uint32_t block_num = entry->first_block;
+    size_t skip = offset;
+    size_t bytes_left = size;
+    size_t total_written = 0;
+    uint8 block[EYNFS_BLOCK_SIZE];
+
+    // Skip blocks and bytes up to offset
+    while (block_num && skip >= (EYNFS_BLOCK_SIZE - 4)) {
+        if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
+        uint32_t next_block = *(uint32_t*)block;
+        block_num = next_block;
+        skip -= (EYNFS_BLOCK_SIZE - 4);
+    }
+
+    // Write first partial block
+    if (block_num && bytes_left > 0) {
+        if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
+        uint32_t next_block = *(uint32_t*)block;
+        size_t block_offset = skip;
+        size_t chunk = (EYNFS_BLOCK_SIZE - 4) - block_offset;
+        if (chunk > bytes_left) chunk = bytes_left;
+        if (chunk) memcpy(block + 4 + block_offset, (const uint8_t*)data, chunk);
+        if (eynfs_cache_write_block(drive, block_num, block) != 0) return -1;
+        total_written += chunk;
+        bytes_left -= chunk;
+        block_num = next_block;
+    }
+
+    // Write remaining full blocks
+    while (block_num && bytes_left > 0) {
+        if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
+        uint32_t next_block = *(uint32_t*)block;
+        size_t chunk = (EYNFS_BLOCK_SIZE - 4) < bytes_left ? (EYNFS_BLOCK_SIZE - 4) : bytes_left;
+        if (chunk) memcpy(block + 4, (const uint8_t*)data + total_written, chunk);
+        if (eynfs_cache_write_block(drive, block_num, block) != 0) return -1;
+        total_written += chunk;
+        bytes_left -= chunk;
+        block_num = next_block;
+    }
+
+    return (int)total_written;
+}

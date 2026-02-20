@@ -10,11 +10,12 @@
 #include <cpu/user_elf.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <utilities/shell/shell_args.h>
 
 extern uint8 g_current_drive;
 
 // Function declarations
-void run_cmd(string arg);
+void run_cmd(const shell_args_t* args);
 
 static int run_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;

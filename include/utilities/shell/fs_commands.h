@@ -17,7 +17,6 @@ void writeram(string ch);
 int write_output_to_file(const char* buf, int len, const char* filename, uint8_t disk);
 int append_output_to_file(const char* buf, int len, const char* filename, uint8_t disk);
 int check_filesystem_integrity(uint8_t disk);
-void to_fat32_83(const char* input, char* output);
 void copy_cmd(const shell_args_t* args);
 void move_cmd(const shell_args_t* args);
 extern void* fat32_disk_img;

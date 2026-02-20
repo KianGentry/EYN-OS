@@ -1,5 +1,4 @@
 #include <string.h>
-#include <stdlib.h>
 #include <util.h>
 #include <vga.h>
 #include <fs_commands.h>
@@ -12,6 +11,7 @@
 #include <misc/sched.h>
 int g_asm_verbose = 0;
 #include <shell_command_info.h>
+#include <shell_args.h>
 
 // NOTE: The kernel shell environment may not have a usable heap (malloc/free).
 // Keep the assembler heapless by using fixed static work buffers.
@@ -111,7 +111,7 @@ static int parse_hex(const char* str) {
     return result;
 }
 
-void handler_assemble(string arg);
+void handler_assemble(const shell_args_t* args);
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
 
@@ -137,8 +137,37 @@ static void asm_ctx_account(uint32 cost) {
     if (sched_det_is_enabled()) ctx->det_seq++;
 }
 
+void handler_assemble(const shell_args_t* args) {
+    if (!asm_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
+
+    int verbose = 0;
+    uint32 a = 1;
+    if (args && args->argc > 1 && strcmp(args->argv[1], "-v") == 0) {
+        verbose = 1;
+        a = 2;
+    }
+
+    const char* input_file = (args && args->argc > a) ? args->argv[a] : "";
+    const char* output_file = (args && args->argc > (a + 1)) ? args->argv[a + 1] : "";
+
+    if (!input_file[0] || !output_file[0]) {
+        printf("%cUsage: assemble [-v] <input.asm> <output.eyn>\n", 255, 255, 255);
+        printf("%cExample: assemble test.asm test.eyn\n", 255, 255, 255);
+        return;
+    }
+
+    g_asm_verbose = verbose;
+
+    int result = assemble(input_file, output_file);
+    if (result == 0) {
+        printf("%cAssembly successful: %s -> %s\n", 0, 255, 0, input_file, output_file);
+    } else {
+        printf("%cAssembly failed with error code %d\n", 255, 0, 0, result);
+    }
+}
+
 // Colored error/warning printing ---
-void print_error(const char* file, int line, const char* msg, const char* line_text) {
+static void print_error(const char* file, int line, const char* msg, const char* line_text) {
     if (!asm_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     g_asm_error_count++;
     // Bright red: 255,0,0
@@ -152,7 +181,7 @@ void print_error(const char* file, int line, const char* msg, const char* line_t
     }
 }
 
-void print_warning(const char* file, int line, const char* msg, const char* line_text) {
+static void print_warning(const char* file, int line, const char* msg, const char* line_text) {
     if (!asm_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return;
     g_asm_warning_count++;
     // Pink: 255,105,180
@@ -887,6 +916,7 @@ static void add_symbol(SymbolTable* table, const char* name, SectionType section
     e->name[sizeof(e->name)-1] = 0;
     e->section = section;
     e->address = address;
+    e->used = 0;
     e->next = table->head;
     table->head = e;
 }
@@ -1468,6 +1498,10 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
         actual_code_size = code_pos;
     }
 
+    if (!last_was_ret && g_asm_verbose) {
+        print_warning(input_path, 0, "Final instruction is not 'ret' (no automatic termination is added).", NULL);
+    }
+
     // Do not auto-append RET: callers/user programs must control their own termination.
     
     // Emit data
@@ -1578,9 +1612,9 @@ int generate_code(AST *ast, SymbolTable *table, uint8_t **code, size_t *code_siz
 }
 
 // File I/O helpers ---
-// Reads the entire file at 'filename' from the current drive into a buffer allocated with my_malloc.
+// Reads the entire file at 'filename' from the current drive into a static buffer.
 // Returns pointer and sets out_size, or NULL on error.
-char* read_file_to_buffer(const char* filename, uint32_t* out_size) {
+static char* read_file_to_buffer(const char* filename, uint32_t* out_size) {
     if (!asm_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return 0;
     printf("[assemble] read_file_to_buffer: filename='%s'\n", filename);
     printf("[assemble] g_current_drive = %d\n", g_current_drive);
@@ -1606,7 +1640,8 @@ char* read_file_to_buffer(const char* filename, uint32_t* out_size) {
     
     // Memory safety: limit file size to prevent excessive buffering
     if (size > ASM_MAX_SRC_SIZE) {
-        printf("[assemble] Warning: Source file too large (%d bytes), limiting to 32KB\n", size);
+        printf("[assemble] Warning: Source file too large (%d bytes), limiting to %u bytes\n",
+               (int)size, (unsigned)ASM_MAX_SRC_SIZE);
         size = ASM_MAX_SRC_SIZE;
     }
 
@@ -1892,6 +1927,7 @@ int lookup_label(SymbolTable* table, const char* name, SectionType section) {
     SymbolTableEntry* cur = table->head;
     while (cur) {
         if (cur->section == section && strcmp(cur->name, name) == 0) {
+            cur->used = 1;
             return cur->address;
         }
         cur = cur->next;
@@ -1899,9 +1935,14 @@ int lookup_label(SymbolTable* table, const char* name, SectionType section) {
     return -1;
 }
 
-// Helper to check if a label is used (stub: always returns 0 for now)
-int label_is_used(const char* name, SymbolTable* table) {
-    // TODO: Implement real usage tracking
+// Helper to check if a label is used (best-effort; marked on lookup during codegen)
+static __attribute__((unused)) int label_is_used(const char* name, SymbolTable* table) {
+    if (!name || !table) return 0;
+    SymbolTableEntry* cur = table->head;
+    while (cur) {
+        if (strcmp(cur->name, name) == 0) return cur->used ? 1 : 0;
+        cur = cur->next;
+    }
     return 0;
 }
 

@@ -4,6 +4,7 @@
 #include <types.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <eynfs.h>
 
 // Predictive memory management system
 // Works alongside existing my_malloc/my_free system
@@ -43,6 +44,13 @@ typedef struct {
     uint8_t drive;                 // Drive number
     uint8_t read_only;             // Read-only flag
     uint32_t access_count;         // Access counter
+
+    // Captured at mmap() time to support write-back and targeted invalidation.
+    // Path is stored as an absolute, normalized path.
+    char path[128];
+    uint32_t parent_block;
+    uint32_t entry_index;
+    eynfs_dir_entry_t entry;
 } file_mapping_t;
 
 // Function prototypes for predictive memory management

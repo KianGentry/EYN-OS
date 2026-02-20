@@ -12,8 +12,6 @@
 
 // EYNFS constants
 #define EYNFS_SUPERBLOCK_LBA 2048
-// Global capture mode is defined in vga.c; declare extern here
-extern int g_shell_capture_mode;
 
 // Shell script execution context
 typedef struct {
@@ -72,7 +70,7 @@ exec_result_t execute_shell_script(const char* filename) {
     // Silent by default: don't print a prologue; scripts should behave like typing commands directly
     
     // Ensure we begin with a clean redirect/capture state
-    extern int shell_redirect_active; if (shell_redirect_active) { stop_shell_redirect(); }
+    if (shell_redirect_active) { stop_shell_redirect(); }
     g_shell_capture_mode = 0;
 
     // parse and execute the shell file
@@ -238,7 +236,7 @@ static int parse_shell_file(const char* filename, shell_script_context_t* ctx) {
                 // Normal command line; expand variables if not skipping
                 if (!skipping) {
                     // Safety guard: ensure we're not unintentionally still in redirect mode
-                    extern int shell_redirect_active; if (shell_redirect_active) { stop_shell_redirect(); }
+                    if (shell_redirect_active) { stop_shell_redirect(); }
                     char expanded[512]; expand_vars(ctx->current_line, expanded, sizeof(expanded), ctx);
                     char substituted[512]; substitute_command_outputs(expanded, substituted, sizeof(substituted), ctx);
                     // silent script execution: don't echo each expanded line
@@ -278,7 +276,7 @@ static int parse_shell_file(const char* filename, shell_script_context_t* ctx) {
                 strcmp(ctx->current_line, "endloop") == 0) {
                 // Reuse same control handling by pretending last line loop. Simpler: just ignore here; it was handled above via in-loop path
             } else if (!skipping) {
-                extern int shell_redirect_active; if (shell_redirect_active) { stop_shell_redirect(); }
+                if (shell_redirect_active) { stop_shell_redirect(); }
                 char expanded[512]; expand_vars(ctx->current_line, expanded, sizeof(expanded), ctx);
                 char substituted[512]; substitute_command_outputs(expanded, substituted, sizeof(substituted), ctx);
                 // silent script execution: don't echo each expanded line
@@ -302,8 +300,8 @@ static int execute_shell_line(const char* line, shell_script_context_t* ctx) {
         return 0; // empty line is success
     }
     // Ensure no redirection/capture flags are active before running a normal command
-    extern int shell_redirect_active; if (shell_redirect_active) { stop_shell_redirect(); }
-    extern int g_shell_capture_mode; g_shell_capture_mode = 0;
+    if (shell_redirect_active) { stop_shell_redirect(); }
+    g_shell_capture_mode = 0;
     // As a belt-and-suspenders guard, force flags to known state
     shell_redirect_active = 0;
     g_shell_capture_mode = 0;
@@ -468,15 +466,13 @@ static void substitute_command_outputs(const char* in, char* out, size_t outsz, 
             if (!script_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) {
                 continue;
             }
-            extern int shell_redirect_active;
             int was_redirecting = shell_redirect_active;
             if (!was_redirecting) start_shell_redirect();
             // Force capture mode to guarantee interception
-            extern int g_shell_capture_mode; g_shell_capture_mode = 1;
+            g_shell_capture_mode = 1;
             handle_shell_command(expanded_cmd);
             g_shell_capture_mode = 0;
             // Read captured buffer BEFORE stopping/clearing redirect
-            extern char shell_redirect_buf[];
             char captured[200]; safe_strcpy(captured, shell_redirect_buf, sizeof(captured));
             if (!was_redirecting) {
                 stop_shell_redirect();

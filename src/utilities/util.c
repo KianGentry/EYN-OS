@@ -198,6 +198,10 @@ void *memset(void *s, int c, size_t n) {
     return s;
 }
 
+void util_escape_ptr(const void* p) {
+    __asm__ __volatile__(/*! escape */ "" : : "g"(p) : "memory");
+}
+
 // EYN-OS specific memory functions
 // Provide POSIX-like names for allocators to standardize usage
 

@@ -361,25 +361,18 @@ static void draw_gui_key(int tile_idx, int key, void* userdata) {
     if (changed) tile_invalidate_gui(tile_idx);
 }
 
-void draw_cmd(string arg) {
+void draw_cmd(const shell_args_t* args) {
     if (!draw_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_CONSOLE)) return;
     // Initialize state
     memset(&g_draw, 0, sizeof(g_draw));
     g_draw.zoom = 2; g_draw.brush = 2; g_draw.r = 255; g_draw.g = 255; g_draw.b = 255;
     g_draw.modified = 0;
 
-    // Parse filename from arg; accept either "test.rei" or "draw test.rei"
-    char tok1[128]={0}, tok2[128]={0};
-    int i = 0; while (arg[i] == ' ') i++;
-    int j = 0; while (arg[i] && arg[i] != ' ' && j < (int)sizeof(tok1)-1) tok1[j++] = arg[i++]; tok1[j] = '\0';
-    while (arg[i] == ' ') i++;
-    j = 0; while (arg[i] && arg[i] != ' ' && j < (int)sizeof(tok2)-1) tok2[j++] = arg[i++]; tok2[j] = '\0';
-    const char* filename_arg = NULL;
-    if (tok2[0] && (strcmp(tok1, "draw") == 0)) filename_arg = tok2; else if (tok1[0]) filename_arg = tok1;
-    if (!filename_arg || !filename_arg[0]) {
+    if (!args || args->argc < 2 || !args->argv[1] || !args->argv[1][0]) {
         printf("Usage: draw <filename.rei>\n");
         return;
     }
+    const char* filename_arg = args->argv[1];
     // Resolve absolute path and disk
     char abspath[128];
     resolve_path(filename_arg, shell_current_path, abspath, sizeof(abspath));
@@ -407,4 +400,5 @@ void draw_cmd(string arg) {
 
 // Register shell command
 #include <shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 REGISTER_SHELL_COMMAND(draw_cmd_info, "draw", draw_cmd, CMD_STREAMING, "Create or edit a REI image with a GUI. Usage: draw <filename.rei>", "draw test.rei");

@@ -47,7 +47,7 @@ typedef struct {
 } search_size_criteria_t;
 
 // Recursive size search function
-void search_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void search_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
     char* current_path, int depth, int max_depth, search_size_criteria_t* criteria) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -160,7 +160,7 @@ void search_size_cmd(string ch) {
 }
 
 // Recursive type search function
-void search_type_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void search_type_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                           char* current_path, int depth, int max_depth, const char* extension) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -224,7 +224,7 @@ void search_type_cmd(string ch) {
 }
 
 // Recursive empty search function
-void search_empty_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void search_empty_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                            char* current_path, int depth, int max_depth) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -291,7 +291,7 @@ void search_empty_cmd(string ch) {
 }
 
 // Recursive depth-limited search function
-void search_depth_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void search_depth_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                            char* current_path, int depth, int max_depth, const char* pattern) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -367,7 +367,7 @@ void search_depth_cmd(string ch) {
 // LS SUB-COMMANDS
 
 // Tree view for ls
-void ls_tree_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void ls_tree_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                        char* current_path, int depth, int max_depth, int indent) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -435,7 +435,7 @@ void ls_tree_cmd(string ch) {
 }
 
 // Size-based ls with file sizes
-void ls_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void ls_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                        char* current_path, int depth, int max_depth) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -506,7 +506,7 @@ void ls_size_cmd(string ch) {
 }
 
 // Detailed ls with more information
-void ls_detail_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void ls_detail_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                          char* current_path, int depth, int max_depth) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -602,7 +602,7 @@ void fsstat_cmd(string ch) {
     
     // Calculate free blocks
     int free_blocks = 0;
-    for (int i = 0; i < sb.total_blocks; i++) {
+    for (uint32_t i = 0; i < sb.total_blocks; i++) {
         if ((i & 0xFF) == 0) subcmd_ctx_account(SCHED_COST_FS);
         uint8_t bitmap_byte = 0;
         ata_read_sector(g_current_drive, EYNFS_SUPERBLOCK_LBA + 1 + (i / 8), &bitmap_byte);
@@ -682,7 +682,7 @@ void blockmap_cmd(string ch) {
     
     // Display block map in a grid format
     int blocks_per_line = 64;
-    for (int i = 0; i < sb.total_blocks; i++) {
+    for (uint32_t i = 0; i < sb.total_blocks; i++) {
         if ((i & 0xFF) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (i % blocks_per_line == 0 && i > 0) {
             printf("\n%c", 255, 255, 255);
@@ -860,7 +860,7 @@ void read_raw_cmd(string ch) {
                         printf("\n"); // Add newline after content
                         
                         // If we couldn't read the entire file, show a message
-                        if (bytes_read < entry.size) {
+                        if ((uint32_t)bytes_read < entry.size) {
                             printf("%c[File truncated - showing first %d bytes of %d total]\n", 255, 165, 0, bytes_read, entry.size);
                         }
                     } else {
@@ -953,7 +953,7 @@ void read_md_cmd(string ch) {
                         printf("\n"); // Add newline after rendering
                         
                         // If we couldn't read the entire file, show a message
-                        if (bytes_read < entry.size) {
+                        if ((uint32_t)bytes_read < entry.size) {
                             printf("%c[File truncated - showing first %d bytes of %d total]\n", 255, 165, 0, bytes_read, entry.size);
                         }
                     } else {

@@ -283,9 +283,6 @@ void vterm_write_char(int idx, char ch) {
     t->buf[row][t->cur_x] = ch;
     t->buf[row][t->cur_x + 1] = '\0';
     /* set per-char color from current redirect color if available (non-zero), else default */
-    extern int shell_redirect_color_r;
-    extern int shell_redirect_color_g;
-    extern int shell_redirect_color_b;
     int use_r = (shell_redirect_color_r > 0) ? shell_redirect_color_r : 200;
     int use_g = (shell_redirect_color_g > 0) ? shell_redirect_color_g : 200;
     int use_b = (shell_redirect_color_b > 0) ? shell_redirect_color_b : 200;
@@ -350,48 +347,6 @@ void vterm_feed_input(int idx, int key) {
     else if (key == '\n' || key == 10) vterm_write_char(idx, '\n');
 }
 
-// Helper to append a line to a vterm (used when executing commands)
-static void vterm_append_line(int idx, const char* line) {
-    if (!line) return;
-    vterm_t* t = &vterms[idx];
-    // Break line into TERM_COLS chunks
-    int len = strlen(line);
-    int p = 0;
-    while (p < len) {
-        int copy = TERM_COLS;
-        if (p + copy > len) copy = len - p;
-        int row = vterm_row_slot(t->cur_y);
-        strncpy(t->buf[row], line + p, copy);
-        t->buf[row][copy] = '\0';
-        /* Use the current shell redirect color if available; fall back to default */
-        extern int shell_redirect_color_r;
-        extern int shell_redirect_color_g;
-        extern int shell_redirect_color_b;
-        int rr = shell_redirect_color_r ? shell_redirect_color_r : 200;
-        int gg = shell_redirect_color_g ? shell_redirect_color_g : 200;
-        int bb = shell_redirect_color_b ? shell_redirect_color_b : 200;
-        t->line_r[row] = rr;
-        t->line_g[row] = gg;
-        t->line_b[row] = bb;
-        for (int c = 0; c < copy; ++c) {
-            t->char_r[row][c] = rr;
-            t->char_g[row][c] = gg;
-            t->char_b[row][c] = bb;
-        }
-        for (int c = copy; c < TERM_COLS; ++c) {
-            t->char_r[row][c] = 200;
-            t->char_g[row][c] = 200;
-            t->char_b[row][c] = 200;
-        }
-        t->cur_x = copy;
-        t->cur_y++;
-        if (t->cur_y - t->head_row >= VTERM_HISTORY_ROWS) {
-            t->head_row = t->cur_y - (VTERM_HISTORY_ROWS - 1);
-        }
-        p += copy;
-    }
-    t->version++;
-}
 
 const char* vterm_get_line_icon_key(int idx, int row, int* out_indent_px, int* out_anchor_col) {
     if (idx < 0 || idx >= 4) return NULL;
@@ -558,7 +513,8 @@ void vterm_handle_key(int idx, int key) {
         // If selection active, delete selected region first
         if (t->sel_active) {
             int a = t->sel_start_col, b = t->sel_end_col; if (a > b) { int tmp = a; a = b; b = tmp; }
-            if (a < 0) a = 0; if (b > len) b = len;
+            if (a < 0) a = 0;
+            if (b > len) b = len;
             int tail = len - b;
             memmove(&t->input_buf[a], &t->input_buf[b], tail);
             t->input_buf[a + tail] = '\0';
@@ -580,7 +536,8 @@ void vterm_handle_key(int idx, int key) {
         int len = strlen(t->input_buf);
         if (t->sel_active) {
             int a = t->sel_start_col, b = t->sel_end_col; if (a > b) { int tmp = a; a = b; b = tmp; }
-            if (a < 0) a = 0; if (b > len) b = len;
+            if (a < 0) a = 0;
+            if (b > len) b = len;
             int tail = len - b;
             memmove(&t->input_buf[a], &t->input_buf[b], tail);
             t->input_buf[a + tail] = '\0';
@@ -603,17 +560,7 @@ void vterm_handle_key(int idx, int key) {
         // handle command: use existing handle_shell_command, but capture output via shell redirect
         if (strlen(t->input_buf) > 0) {
             // temporarily redirect shell output to vterm buffer by using start_shell_redirect / shell_redirect_buf
-            extern void start_shell_redirect(void);
-            extern void stop_shell_redirect(void);
-            extern char shell_redirect_buf[];
-            extern int shell_redirect_pos;
-            extern unsigned char shell_redirect_r[];
-            extern unsigned char shell_redirect_g[];
-            extern unsigned char shell_redirect_b[];
-            extern shell_redirect_icon_t shell_redirect_icons[];
-            extern int shell_redirect_icon_count;
             // Swap global shell_current_path into this vterm's cwd so commands (like cd) operate per-vterm
-            extern char shell_current_path[]; // global
             char saved_global_cwd[128];
             strncpy(saved_global_cwd, shell_current_path, sizeof(saved_global_cwd)-1);
             saved_global_cwd[sizeof(saved_global_cwd)-1] = '\0';
@@ -793,7 +740,9 @@ const char* vterm_get_tail_line(int idx, int visible_index, int visible_count) {
 }
 
 void vterm_get_tail_line_color(int idx, int visible_index, int visible_count, int* r, int* g, int* b) {
-    if (r) *r = 200; if (g) *g = 200; if (b) *b = 200;
+    if (r) *r = 200;
+    if (g) *g = 200;
+    if (b) *b = 200;
     if (idx < 0 || idx >= 4) return;
     vterm_t* t = &vterms[idx];
     int end = t->cur_y;
@@ -810,7 +759,9 @@ void vterm_get_tail_line_color(int idx, int visible_index, int visible_count, in
 
 // Return color for a specific character in the tail view
 void vterm_get_tail_char_color(int idx, int visible_index, int visible_count, int char_col, int* r, int* g, int* b) {
-    if (r) *r = 200; if (g) *g = 200; if (b) *b = 200;
+    if (r) *r = 200;
+    if (g) *g = 200;
+    if (b) *b = 200;
     if (idx < 0 || idx >= 4) return;
     if (char_col < 0 || char_col >= TERM_COLS) return;
     vterm_t* t = &vterms[idx];
@@ -842,7 +793,9 @@ int vterm_get_cursor_row(int idx) {
 }
 
 void vterm_get_char_color_abs(int idx, int row, int col, int* r, int* g, int* b) {
-    if (r) *r = 200; if (g) *g = 200; if (b) *b = 200;
+    if (r) *r = 200;
+    if (g) *g = 200;
+    if (b) *b = 200;
     if (idx < 0 || idx >= 4) return;
     if (col < 0 || col >= TERM_COLS) return;
     vterm_t* t = &vterms[idx];
@@ -859,7 +812,9 @@ int vterm_get_cursor_col(int idx) {
 }
 
 void vterm_clear_selection(int idx) {
-    if (idx < 0 || idx >= 4) return; vterms[idx].sel_active = 0; }
+    if (idx < 0 || idx >= 4) return;
+    vterms[idx].sel_active = 0;
+}
 
 int vterm_is_selected(int idx, int row, int col) {
     if (idx < 0 || idx >= 4) return 0;

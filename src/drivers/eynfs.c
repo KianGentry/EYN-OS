@@ -15,6 +15,40 @@
 #define EYNFS_BLOCK_SIZE 512 // For now, fixed block size
 #define EYNFS_SUPERBLOCK_LBA 2048 // Standard superblock location
 
+// Optional integration point: when the interactive shell is linked in, it
+// exposes the current physical drive. Keep this weak so the driver can still
+// link in non-shell contexts.
+__attribute__((weak)) uint8_t get_current_physical_drive(void);
+
+static uint8_t eynfs_default_drive(void) {
+    // If the weak symbol is not provided by the final link, its address is 0.
+    if (&get_current_physical_drive) return get_current_physical_drive();
+    return 0;
+}
+
+// Accept an optional drive prefix of the form "N:/path" (N is decimal).
+// On success, returns 1 and updates *path_inout to point past the prefix.
+static int eynfs_parse_drive_prefix(const char** path_inout, uint8_t* out_drive) {
+    const char* p = path_inout ? *path_inout : NULL;
+    if (!p || !out_drive) return 0;
+
+    // Parse decimal digits.
+    uint32_t drive = 0;
+    int ndigits = 0;
+    while (*p >= '0' && *p <= '9') {
+        drive = drive * 10u + (uint32_t)(*p - '0');
+        ndigits++;
+        if (drive > 255u) return 0;
+        p++;
+    }
+    if (ndigits == 0) return 0;
+    if (p[0] != ':' || p[1] != '/') return 0;
+
+    *out_drive = (uint8_t)drive;
+    *path_inout = p + 1; // Keep leading '/', skip ':'
+    return 1;
+}
+
 // EYNFS uses filesystem-relative block numbers on disk:
 //   block 0 => superblock at absolute LBA EYNFS_SUPERBLOCK_LBA
 //   block 1 => bitmap, etc.
@@ -140,7 +174,7 @@ int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data) {
     return 0;
 }
 
-static int eynfs_cache_write_block(uint8 drive, uint32_t block_num, const uint8_t* data) {
+int eynfs_cache_write_block(uint8 drive, uint32_t block_num, const uint8_t* data) {
     if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     // Look for block in cache
     for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
@@ -1156,11 +1190,14 @@ int eynfs_open(const char* path, int mode) {
     
     // Initialize file descriptor
     eynfs_files[fd].used = 1;
-    eynfs_files[fd].drive = 0; // TODO: support multiple drives
+    const char* resolved_path = path;
+    uint8 drive = eynfs_default_drive();
+    (void)eynfs_parse_drive_prefix(&resolved_path, &drive);
+    eynfs_files[fd].drive = drive;
     eynfs_files[fd].offset = 0;
     eynfs_files[fd].mode = mode;
-    
-    uint8_t disk = 0;
+
+    uint8_t disk = drive;
     if (eynfs_read_superblock(disk, EYNFS_SUPERBLOCK_LBA, &eynfs_files[fd].sb) != 0 || 
         eynfs_files[fd].sb.magic != EYNFS_MAGIC) {
         eynfs_files[fd].used = 0;
@@ -1168,7 +1205,7 @@ int eynfs_open(const char* path, int mode) {
     }
     
     // Handle root directory specially
-    if (strcmp(path, "/") == 0) {
+    if (strcmp(resolved_path, "/") == 0) {
         if (mode != 0) return -1; // Root can only be read
         memset(&eynfs_files[fd].entry, 0, sizeof(eynfs_dir_entry_t));
         eynfs_files[fd].entry.type = EYNFS_TYPE_DIR;
@@ -1180,17 +1217,17 @@ int eynfs_open(const char* path, int mode) {
     
     // Traverse path to find file/directory
     uint32_t parent_block, entry_idx;
-    if (eynfs_traverse_path(disk, &eynfs_files[fd].sb, path, &eynfs_files[fd].entry, &parent_block, &entry_idx) != 0) {
+    if (eynfs_traverse_path(disk, &eynfs_files[fd].sb, resolved_path, &eynfs_files[fd].entry, &parent_block, &entry_idx) != 0) {
         // File doesn't exist
         if (mode == 1 || mode == 2) { // Write or append mode
             // Create the file
-            const char* filename = strrchr(path, '/');
-            if (!filename) filename = path;
+            const char* filename = strrchr(resolved_path, '/');
+            if (!filename) filename = resolved_path;
             else filename++; // Skip the '/'
             
             // Get parent directory path
             char parent_path[256];
-            strncpy(parent_path, path, sizeof(parent_path)-1);
+            strncpy(parent_path, resolved_path, sizeof(parent_path)-1);
             parent_path[sizeof(parent_path)-1] = '\0';
             char* last_slash = strrchr(parent_path, '/');
             if (last_slash && last_slash != parent_path) {

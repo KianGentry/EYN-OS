@@ -84,6 +84,10 @@ void stop_shell_redirect(void);
 // commands are executed from the IRQ-driven input pump.
 void vga_set_shell_redirect_stream_vterm(int vterm_idx);
 void vga_clear_shell_redirect_stream_vterm(void);
+// True while shell output is being redirected into shell_redirect_buf.
+extern int shell_redirect_active;
+// When set, printf also captures output into the redirect buffer even if redirect is not active.
+extern int g_shell_capture_mode;
 extern char shell_redirect_buf[SHELL_REDIRECT_BUF_SIZE];
 // Current write position in shell_redirect_buf while redirect is active.
 extern int shell_redirect_pos;

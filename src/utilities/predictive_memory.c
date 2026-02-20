@@ -363,9 +363,16 @@ int eynfs_mmap(const char* path, void** addr, size_t* size, uint8_t read_only) {
     g_file_mappings[g_mapping_count].mapped_address = mapped_addr;
     g_file_mappings[g_mapping_count].file_size = entry.size;
     g_file_mappings[g_mapping_count].block_start = entry.first_block;
+    g_file_mappings[g_mapping_count].block_count = 0;
     g_file_mappings[g_mapping_count].drive = drive;
     g_file_mappings[g_mapping_count].read_only = read_only;
     g_file_mappings[g_mapping_count].access_count = 0;
+
+    strncpy(g_file_mappings[g_mapping_count].path, abspath, sizeof(g_file_mappings[g_mapping_count].path) - 1);
+    g_file_mappings[g_mapping_count].path[sizeof(g_file_mappings[g_mapping_count].path) - 1] = '\0';
+    g_file_mappings[g_mapping_count].parent_block = parent_block;
+    g_file_mappings[g_mapping_count].entry_index = entry_index;
+    g_file_mappings[g_mapping_count].entry = entry;
     
     *addr = mapped_addr;
     *size = entry.size;
@@ -413,8 +420,39 @@ int eynfs_msync(void* addr, size_t size) {
                 printf("%cWarning: Cannot sync read-only mapping\n", 255, 165, 0);
                 return 0;
             }
-            
-            // TODO: Implement actual file writing back to disk
+
+            // Write back the full mapping to disk.
+            // Note: This is intentionally simple (rewrite) to keep semantics predictable.
+            eynfs_superblock_t sb;
+            if (eynfs_read_superblock(g_file_mappings[i].drive, 2048, &sb) != 0) {
+                printf("%cError: Cannot read filesystem for msync\n", 255, 0, 0);
+                return -1;
+            }
+
+            if (size > 0 && size != g_file_mappings[i].file_size) {
+                // Caller-provided size mismatch; prefer the mapping's authoritative size.
+                (void)size;
+            }
+
+            // Keep entry size consistent with the mapped size.
+            g_file_mappings[i].entry.size = g_file_mappings[i].file_size;
+
+            int n = eynfs_write_file(
+                g_file_mappings[i].drive,
+                &sb,
+                &g_file_mappings[i].entry,
+                g_file_mappings[i].mapped_address,
+                g_file_mappings[i].file_size,
+                g_file_mappings[i].parent_block,
+                g_file_mappings[i].entry_index);
+
+            if (n < 0) {
+                printf("%cError: Failed to write back mapping\n", 255, 0, 0);
+                return -1;
+            }
+
+            // Update cached metadata after rewrite.
+            g_file_mappings[i].block_start = g_file_mappings[i].entry.first_block;
             printf("%cFile synchronized to disk\n", 0, 255, 0);
             return 0;
         }
@@ -422,6 +460,26 @@ int eynfs_msync(void* addr, size_t size) {
     
     printf("%cError: Address not mapped\n", 255, 0, 0);
     return -1;
+}
+
+void invalidate_mapped_file(const char* path) {
+    if (!path || !path[0]) return;
+
+    // Resolve path relative to current working directory
+    extern char shell_current_path[128];
+    extern void resolve_path(const char* input, const char* cwd, char* out, size_t outsz);
+    char abspath[128];
+    resolve_path(path, shell_current_path, abspath, sizeof(abspath));
+
+    for (int i = 0; i < g_mapping_count; i++) {
+        if ((i & 0x7) == 0) {
+            pred_ctx_account(SCHED_COST_ALLOC);
+        }
+        if (strcmp(g_file_mappings[i].path, abspath) == 0) {
+            (void)eynfs_munmap(g_file_mappings[i].mapped_address, g_file_mappings[i].file_size);
+            return;
+        }
+    }
 }
 
 // Read-only memory mapping

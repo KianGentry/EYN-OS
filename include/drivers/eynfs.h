@@ -97,6 +97,7 @@ void eynfs_reset_cache_stats();
 void eynfs_cache_clear();
 int eynfs_alloc_block_fast(uint8 drive, eynfs_superblock_t *sb);
 int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data);
+int eynfs_cache_write_block(uint8 drive, uint32_t block_num, const uint8_t* data);
 
 // Streaming writer for low-memory environments
 typedef struct {
