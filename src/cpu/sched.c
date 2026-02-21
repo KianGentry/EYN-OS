@@ -5,7 +5,15 @@
 #include <stddef.h>
 
 #define SCHED_WORK_MAX 64
-#define SCHED_WORK_PRIOS 8
+/*
+ * 386-OPT: 32 priority levels packed into a single ready bitmap.
+ * Highest priority selection becomes O(1) via BSR instead of a descending loop.
+ */
+#define SCHED_WORK_PRIOS 32
+
+#ifndef CONFIG_SCHED_USE_BSR_ASM
+#define CONFIG_SCHED_USE_BSR_ASM 1
+#endif
 
 typedef struct sched_queue {
     int head;
@@ -15,6 +23,7 @@ typedef struct sched_queue {
 static sched_work_t g_work[SCHED_WORK_MAX];
 static sched_queue_t g_runq[SCHED_WORK_PRIOS];
 static int g_sched_work_inflight = 0;
+static uint32 g_ready_bitmap = 0;
 
 static volatile uint32 g_ticks = 0;
 static uint32 g_tick_hz = 100;
@@ -125,12 +134,33 @@ static void sched_tick_det(void) {
     }
 }
 
+static inline uint32 sched_prio_index(uint32 priority) {
+    /* Avoid modulo/division in the scheduler path. */
+    if (priority >= (uint32)SCHED_WORK_PRIOS) return (uint32)(SCHED_WORK_PRIOS - 1);
+    return priority;
+}
+
+static inline int sched_bsr32(uint32 v) {
+    if (v == 0) return -1;
+#if CONFIG_SCHED_USE_BSR_ASM
+    int idx;
+    __asm__ __volatile__("bsr %1, %0" : "=r"(idx) : "r"(v));
+    return idx;
+#else
+    for (int i = 31; i >= 0; --i) {
+        if (v & (1u << (uint32)i)) return i;
+    }
+    return -1;
+#endif
+}
+
 static void sched_work_enqueue(int idx) {
     if (idx < 0 || idx >= SCHED_WORK_MAX) return;
     sched_work_t* w = &g_work[idx];
     if (w->in_queue) return;
-    uint32 prio = w->priority % SCHED_WORK_PRIOS;
+    uint32 prio = sched_prio_index(w->priority);
     sched_queue_t* q = &g_runq[prio];
+    int was_empty = (q->head < 0);
     w->next = -1;
     if (q->tail >= 0) {
         g_work[q->tail].next = idx;
@@ -140,6 +170,10 @@ static void sched_work_enqueue(int idx) {
         q->tail = idx;
     }
     w->in_queue = 1;
+
+    if (was_empty) {
+        g_ready_bitmap |= (1u << prio);
+    }
 }
 
 static int sched_work_dequeue_prio(uint32 prio) {
@@ -151,6 +185,7 @@ static int sched_work_dequeue_prio(uint32 prio) {
     q->head = w->next;
     if (q->head < 0) {
         q->tail = -1;
+        g_ready_bitmap &= ~(1u << prio);
     }
     w->next = -1;
     w->in_queue = 0;
@@ -182,6 +217,7 @@ void sched_work_init(void) {
         g_runq[p].head = -1;
         g_runq[p].tail = -1;
     }
+    g_ready_bitmap = 0;
     g_sched_work_inflight = 0;
 }
 
@@ -240,9 +276,17 @@ int sched_work_on_timeslice_end(void) {
     g_sched_work_inflight = 1;
 
     int ran = 0;
-    for (int prio = SCHED_WORK_PRIOS - 1; prio >= 0; --prio) {
+    uint32 ready = g_ready_bitmap;
+    while (ready) {
+        int prio = sched_bsr32(ready);
+        if (prio < 0) break;
         int idx = sched_work_dequeue_prio((uint32)prio);
-        if (idx < 0) continue;
+        if (idx < 0) {
+            /* Defensive: bitmap/queue got out of sync; clear and continue. */
+            ready &= ~(1u << (uint32)prio);
+            g_ready_bitmap &= ~(1u << (uint32)prio);
+            continue;
+        }
         sched_work_t* w = &g_work[idx];
         if (!w->run || w->budget_left == 0) continue;
         if ((w->affinity_mask & 1u) == 0) {
@@ -280,7 +324,8 @@ int sched_det_queue_irq(int irq) {
     if (!g_det_enabled) return -1;
 
     sched_cli();
-    uint16 next = (uint16)((g_det_tail + 1u) % DET_QUEUE_CAP);
+    /* DET_QUEUE_CAP is a power-of-two, so wrap with a mask (no division/modulo). */
+    uint16 next = (uint16)((g_det_tail + 1u) & (DET_QUEUE_CAP - 1u));
     if (next == g_det_head) {
         sched_sti();
         return -1;
@@ -307,7 +352,7 @@ int sched_det_step(uint32 max_events) {
             break;
         }
         det_event_t ev = g_det_queue[g_det_head];
-        g_det_head = (uint16)((g_det_head + 1u) % DET_QUEUE_CAP);
+        g_det_head = (uint16)((g_det_head + 1u) & (DET_QUEUE_CAP - 1u));
         sched_sti();
 
         if (ev.type == DET_EVENT_IRQ) {
