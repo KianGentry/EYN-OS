@@ -8,8 +8,11 @@ GRUB_MKRESCUE := $(shell command -v grub2-mkrescue 2>/dev/null || command -v gru
 
 # Kernel (freestanding) compiler flags
 # Note: keep frame pointers for stack traces; avoid stack protector & fortify in freestanding kernel
-KERNEL_CFLAGS = -m32 -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-common \
+CPU_HAS_INVLPG ?= 0
+
+KERNEL_CFLAGS = -m32 -march=i386 -mtune=i386 -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-common \
 		 -Os -fno-strict-overflow -fwrapv \
+		 -DCONFIG_CPU_HAS_INVLPG=$(CPU_HAS_INVLPG) \
 		 -fdata-sections -ffunction-sections \
 		 -I include/ -I include/cpu -I include/drivers -I include/misc -I include/graphics -I include/network -I include/utilities -I include/utilities/shell \
 		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \

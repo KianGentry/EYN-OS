@@ -85,7 +85,7 @@ void page_fault_handler(regs_t* r) {
 /* Legacy guard: ensure page 0 is unmapped. */
 void paging_install_null_guard(void) {
     vmm_unmap_page(&vmm_kernel_as, 0x0);
-    invalidate_tlb_entry(0x0);
+    vm_invalidate_page((void*)0x0);
 }
 
 /* Legacy guard: mark kernel .text (and .rodata) read-only. */
@@ -105,6 +105,8 @@ void paging_protect_kernel_text_ro(void) {
         }
     }
 
+    vm_invalidate_range((void*)start, (size_t)(end - start));
+
     start = ((uint32)&__kernel_rodata_start) & ~(PAGE_SIZE - 1);
     end   = ((uint32)&__kernel_rodata_end);
 
@@ -115,5 +117,5 @@ void paging_protect_kernel_text_ro(void) {
         }
     }
 
-    invalidate_tlb_all();
+    vm_invalidate_range((void*)start, (size_t)(end - start));
 }

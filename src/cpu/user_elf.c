@@ -306,7 +306,6 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
             free(file);
             return -1;
         }
-        invalidate_tlb_entry(va);
     }
 
     // Map user stack (initial N pages; can grow further on page faults).
@@ -329,7 +328,6 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
             free(file);
             return -1;
         }
-        invalidate_tlb_entry(va);
     }
 
     // Enable VMM stack growth for the current address space.

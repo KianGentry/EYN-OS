@@ -9,6 +9,17 @@
 #define VMM_H
 
 #include <types.h>
+#include <stddef.h>
+
+/*
+ * TLB invalidation notes (80386 compatibility):
+ * - INVLPG is a 486+ instruction. A strict 80386 build must not emit it.
+ * - When INVLPG is unavailable, the only architecturally-correct invalidation
+ *   mechanism is a full TLB flush via CR3 reload.
+ */
+#ifndef CONFIG_CPU_HAS_INVLPG
+#define CONFIG_CPU_HAS_INVLPG 0
+#endif
 
 /*
  * i386 PAGING MODEL - BIT DEFINITIONS
@@ -247,6 +258,19 @@ int vmm_unmap_page(address_space_t* as, uint32 va);
 pte_t* vmm_walk_page_tables(address_space_t* as, uint32 va, int create);
 void invalidate_tlb_entry(uint32 va);
 void invalidate_tlb_all(void);
+
+/* Preferred invalidation API (used by the 386/486+ compat layer). */
+void vm_invalidate_page(void* addr);
+void vm_invalidate_range(void* start, size_t len);
+
+/*
+ * Strict-80386 performance helper:
+ * When INVLPG is unavailable, vm_invalidate_* falls back to a full CR3 reload.
+ * Some teardown paths unmap many pages in a loop; deferring lets us collapse
+ * those into a single CR3 reload at the end of the batch.
+ */
+void vm_tlb_defer_begin(void);
+void vm_tlb_defer_end(void);
 
 /* Address space management */
 address_space_t* create_address_space(void);

@@ -39,6 +39,8 @@ void user_task_cleanup_mappings(void) {
     uint32 stack_page = g_user_stack_page;
     uint32 stack_bottom = vmm_kernel_as.stack_bottom;
 
+    vm_tlb_defer_begin();
+
     if (base && pages) {
         for (uint32 i = 0; i < pages; ++i) {
             (void)vmm_unmap_page(&vmm_kernel_as, base + i * PAGE_SIZE);
@@ -65,6 +67,8 @@ void user_task_cleanup_mappings(void) {
 
     // Reset stack metadata for the kernel address space.
     vmm_kernel_as.stack_bottom = USER_STACK_TOP - PAGE_SIZE;
+
+    vm_tlb_defer_end();
 
     syscall_reset_user_fds();
 }

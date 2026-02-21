@@ -2540,9 +2540,6 @@ void ring3_cmd(const shell_args_t* args) {
     *msg_ptr = user_code_va + msg_off;
     *len_ptr = msg_len;
 
-    invalidate_tlb_entry(user_code_va);
-    invalidate_tlb_entry(user_stack_page);
-
     printf("%c[ring3] entering user mode...\n", 0, 255, 0);
     tss_set_kernel_stack((uint32)&stack_space);
     enter_user_mode(user_code_va, user_stack_top);
@@ -2622,7 +2619,6 @@ void userrun_cmd(const shell_args_t* args) {
             user_task_cleanup_mappings();
             return;
         }
-        invalidate_tlb_entry(user_code_va + pi * PAGE_SIZE);
     }
 
     // Allocate and map user stack (initial N pages)
@@ -2642,7 +2638,6 @@ void userrun_cmd(const shell_args_t* args) {
             user_task_cleanup_mappings();
             return;
         }
-        invalidate_tlb_entry(va);
     }
 
     // Record mappings for cleanup on exit/abort

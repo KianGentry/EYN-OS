@@ -66,12 +66,91 @@ static inline void write_cr3(uint32 val) {
 
 // TLB MANAGEMENT
 
+/*
+ * 80386 performance: when INVLPG is unavailable, per-page invalidation
+ * degenerates into CR3 reloads. Some operations (e.g. user-task teardown)
+ * can unmap many pages at once, so allow callers to explicitly defer flushes
+ * and pay a single CR3 reload at the end.
+ */
+static uint32 g_tlb_defer_depth = 0;
+static uint32 g_tlb_flush_pending = 0;
+
+void vm_tlb_defer_begin(void) {
+    g_tlb_defer_depth++;
+}
+
+void vm_tlb_defer_end(void) {
+    if (g_tlb_defer_depth == 0) {
+        return;
+    }
+
+    g_tlb_defer_depth--;
+    if (g_tlb_defer_depth == 0 && g_tlb_flush_pending) {
+        g_tlb_flush_pending = 0;
+        invalidate_tlb_all();
+    }
+}
+
+void vm_invalidate_page(void* addr) {
+    if (!addr) return;
+#if CONFIG_CPU_HAS_INVLPG
+    /* 486+: invalidate one page without flushing the full TLB. */
+    asm volatile("invlpg (%0)" :: "r"(addr) : "memory");
+#else
+    /*
+     * 80386 fallback: INVLPG is unavailable, so we must flush the entire TLB.
+     * CR3 reload is the only architecturally-correct single-CPU mechanism.
+     */
+    (void)addr;
+    if (g_tlb_defer_depth) {
+        g_tlb_flush_pending = 1;
+        return;
+    }
+    invalidate_tlb_all();
+#endif
+}
+
+void vm_invalidate_range(void* start, size_t len) {
+    if (!start || len == 0) return;
+
+    uint32 s = ((uint32)start) & PAGE_MASK;
+    uint32 end_addr = (uint32)start + (uint32)len - 1u;
+    if (end_addr < (uint32)start) {
+        /* overflow -> conservatively flush all */
+        if (!CONFIG_CPU_HAS_INVLPG && g_tlb_defer_depth) {
+            g_tlb_flush_pending = 1;
+        } else {
+            invalidate_tlb_all();
+        }
+        return;
+    }
+    uint32 e = end_addr & PAGE_MASK;
+
+#if CONFIG_CPU_HAS_INVLPG
+    for (uint32 va = s; va <= e; va += PAGE_SIZE) {
+        vm_invalidate_page((void*)va);
+    }
+#else
+    /* 80386: range invalidation collapses to a single full flush. */
+    (void)s;
+    (void)e;
+    if (g_tlb_defer_depth) {
+        g_tlb_flush_pending = 1;
+        return;
+    }
+    invalidate_tlb_all();
+#endif
+}
+
 void invalidate_tlb_entry(uint32 va) {
-    asm volatile("invlpg (%0)" :: "r"(va) : "memory");
+    vm_invalidate_page((void*)va);
 }
 
 void invalidate_tlb_all(void) {
-    /* Reloading CR3 flushes all non-global TLB entries */
+    /*
+     * CR3 reload flushes the entire TLB.
+     * Keep this for legacy callers, but prefer vm_invalidate_page/range.
+     */
     write_cr3(read_cr3());
 }
 
@@ -366,11 +445,7 @@ int vmm_map_page(address_space_t* as, uint32 va, uint32 pa, uint32 flags) {
         *pde |= PTE_USER;
     }
     
-    /* If page already mapped, unmap first (avoids frame leak) */
-    if (*pte & PTE_PRESENT) {
-        /* Could be replacing mapping - don't free the old frame 
-         * if caller is remapping same address */
-    }
+    uint32 was_present = (*pte & PTE_PRESENT);
     
     *pte = (pa & PTE_FRAME_MASK) | flags | PTE_PRESENT;
     
@@ -379,7 +454,15 @@ int vmm_map_page(address_space_t* as, uint32 va, uint32 pa, uint32 flags) {
         clock_add_page(pa, pte, va, as);
     }
     
-    invalidate_tlb_entry(va);
+    /*
+     * 386-OPT: Only invalidate when this VA could already be cached.
+     * - Mapping a previously-nonpresent VA does not require invalidation.
+     * - Updating a present mapping or permissions does.
+     * Also avoid touching the TLB for inactive address spaces.
+     */
+    if (as == vmm_current_as && was_present) {
+        vm_invalidate_page((void*)va);
+    }
     return 0;
 }
 
@@ -400,7 +483,9 @@ int vmm_unmap_page(address_space_t* as, uint32 va) {
     }
     
     *pte = 0;
-    invalidate_tlb_entry(va);
+    if (as == vmm_current_as) {
+        vm_invalidate_page((void*)va);
+    }
     
     return 0;
 }
@@ -502,6 +587,7 @@ address_space_t* clone_address_space(address_space_t* src) {
     dst->stack_bottom = src->stack_bottom;
     
     /* Mark all user pages as COW in both source and destination */
+    int need_src_tlb_flush = 0;
     for (int pdi = 0; pdi < 768; pdi++) {
         pde_t src_pde = src->pd->entries[pdi];
         if (!(src_pde & PTE_PRESENT)) {
@@ -533,14 +619,23 @@ address_space_t* clone_address_space(address_space_t* src) {
                 /* Writable page: mark as COW and read-only in both */
                 pte = (pte & ~PTE_RW) | PTE_COW;
                 src_pt->entries[pti] = pte;
+                if (src == vmm_current_as) {
+#if CONFIG_CPU_HAS_INVLPG
+                    vm_invalidate_page((void*)VA_FROM_INDICES((uint32)pdi, (uint32)pti));
+#else
+                    need_src_tlb_flush = 1;
+#endif
+                }
             }
             
             dst_pt->entries[pti] = pte;
         }
     }
-    
-    /* Flush TLB since we modified source's PTEs */
-    invalidate_tlb_all();
+
+    /* Flush once on strict-386 fallback if we changed src permissions. */
+    if (need_src_tlb_flush && src == vmm_current_as) {
+        invalidate_tlb_all();
+    }
     
     return dst;
 }
@@ -551,6 +646,7 @@ void switch_address_space(address_space_t* as) {
     }
     
     vmm_current_as = as;
+    /* CR3 reload is required on a full address space switch (TLB flush). */
     write_cr3(as->pd_phys);
 }
 
@@ -711,13 +807,24 @@ int vmm_handle_cow_fault(address_space_t* as, uint32 va, pte_t* pte) {
 }
 
 void vmm_mark_region_cow(address_space_t* as, uint32 start, uint32 end) {
+    int need_flush = 0;
     for (uint32 va = start & PAGE_MASK; va < end; va += PAGE_SIZE) {
         pte_t* pte = vmm_walk_page_tables(as, va, 0);
         if (pte && (*pte & PTE_PRESENT) && (*pte & PTE_RW)) {
             *pte = (*pte & ~PTE_RW) | PTE_COW;
+            if (as == vmm_current_as) {
+#if CONFIG_CPU_HAS_INVLPG
+                vm_invalidate_page((void*)va);
+#else
+                need_flush = 1;
+#endif
+            }
         }
     }
-    invalidate_tlb_all();
+
+    if (need_flush && as == vmm_current_as) {
+        invalidate_tlb_all();
+    }
 }
 
 /*
