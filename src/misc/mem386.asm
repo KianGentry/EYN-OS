@@ -15,6 +15,7 @@ GLOBAL bzero
 memcpy:
     push ebp
     mov  ebp, esp
+    push ebx
     push esi
     push edi
 
@@ -56,6 +57,7 @@ memcpy:
 .mc_done:
     pop  edi
     pop  esi
+    pop  ebx
     pop  ebp
     ret
 
@@ -63,6 +65,8 @@ memcpy:
 memset:
     push ebp
     mov  ebp, esp
+    push ebx
+    push esi
     push edi
 
     cld
@@ -113,6 +117,8 @@ memset:
 .ms_done:
     mov  eax, edx         ; return s
     pop  edi
+    pop  esi
+    pop  ebx
     pop  ebp
     ret
 
@@ -121,6 +127,8 @@ memset:
 bzero:
     push ebp
     mov  ebp, esp
+    push ebx
+    push esi
     push edi
 
     cld
@@ -158,6 +166,8 @@ bzero:
 
 .bz_done:
     pop  edi
+    pop  esi
+    pop  ebx
     pop  ebp
     ret
 

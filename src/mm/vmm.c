@@ -1272,38 +1272,73 @@ void vmm_init(uint32 total_ram_bytes) {
     }
     
     /*
-     * Map framebuffer region (MMIO) if available
-     * The framebuffer is typically at a high address (e.g., 0xFD000000)
-     * We identity-map the region containing it.
+     * Map framebuffer region (MMIO) if available.
+     * The framebuffer is typically at a high physical address (e.g., 0xFD000000).
+     * VGA/UI code writes to g_mbi->framebuffer_addr directly; once paging is on,
+     * that linear address must be mapped or we'll take a kernel-mode #PF.
+     *
+     * Note: Some bootloaders/configs may populate the framebuffer fields but not
+     * set MULTIBOOT_INFO_FRAMEBUFFER_INFO. Prefer mapping when the address looks
+     * usable so paging-on doesn't regress graphics.
      */
-    if (g_mbi && (g_mbi->flags & MULTIBOOT_INFO_FRAMEBUFFER_INFO)) {
+    if (g_mbi) {
         uint32 fb_addr = (uint32)g_mbi->framebuffer_addr;
-        uint32 fb_size = g_mbi->framebuffer_pitch * g_mbi->framebuffer_height;
-        if (fb_size == 0) fb_size = 4 * 1024 * 1024;  /* Default 4MB if unknown */
-        
-        /* Round fb_addr down to 4MB boundary for simpler mapping */
-        uint32 fb_start = fb_addr & ~0x3FFFFF;  /* Align to 4MB */
-        uint32 fb_end = (fb_addr + fb_size + 0x3FFFFF) & ~0x3FFFFF;
-        
-        /* Map each 4MB region (create page table for each PDE) */
-        for (uint32 addr = fb_start; addr < fb_end; addr += 4 * 1024 * 1024) {
-            uint32 pdi = addr >> 22;  /* PDE index */
-            
-            /* Skip if already mapped (shouldn't happen for high addresses) */
-            if (kernel_pd->entries[pdi] & PTE_PRESENT) continue;
-            
-            /* Allocate page table for this region */
-            page_table_t* pt = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
-            memset(pt, 0, sizeof(page_table_t));
-            
-            /* Fill page table: identity map */
-            for (uint32 pti = 0; pti < ENTRIES_PER_TABLE; pti++) {
-                uint32 pa = (pdi * ENTRIES_PER_TABLE + pti) * PAGE_SIZE;
-                /* Mark as present, RW, and uncacheable for MMIO */
-                pt->entries[pti] = pa | PTE_PRESENT | PTE_RW | PTE_PCD | PTE_PWT;
+        uint32 fb_size = 0;
+        int fb_flag = (g_mbi->flags & MULTIBOOT_INFO_FRAMEBUFFER_INFO) != 0;
+
+        if (fb_flag) {
+            fb_size = g_mbi->framebuffer_pitch * g_mbi->framebuffer_height;
+        }
+
+        /* If the flag isn't set but the address is non-zero, still map conservatively. */
+        if (fb_addr != 0 && fb_size == 0) {
+            uint32 fb_pitch = g_mbi->framebuffer_pitch;
+            uint32 fb_height = g_mbi->framebuffer_height;
+            if (fb_pitch != 0 && fb_height != 0) {
+                fb_size = fb_pitch * fb_height;
             }
-            
-            kernel_pd->entries[pdi] = (uint32)pt | PTE_PRESENT | PTE_RW;
+        }
+
+        if (fb_addr != 0) {
+            if (fb_size == 0) {
+                fb_size = 4 * 1024 * 1024; /* Default 4MB if unknown */
+            }
+
+            /* Round fb_addr down to 4MB boundary for simpler mapping */
+            uint32 fb_start = fb_addr & ~0x3FFFFF; /* Align to 4MB */
+            uint32 fb_end = (fb_addr + fb_size + 0x3FFFFF) & ~0x3FFFFF;
+
+                 printf("VMM: Framebuffer map: flags=0x%X fb=0x%X size=%u bytes\n",
+                     g_mbi->flags, fb_addr, (unsigned)fb_size);
+
+            /* Map each 4MB region (create page table for each PDE) */
+            for (uint32 addr = fb_start; addr < fb_end; addr += 4 * 1024 * 1024) {
+                uint32 pdi = addr >> 22; /* PDE index */
+
+                /* Don't clobber the recursive mapping slot. */
+                if (pdi == RECURSIVE_PD_INDEX) {
+                    printf("%cVMM warning: framebuffer overlaps recursive PDE\n", 255, 165, 0);
+                    continue;
+                }
+
+                /* Skip if already mapped (expected for low identity map) */
+                if (kernel_pd->entries[pdi] & PTE_PRESENT) {
+                    continue;
+                }
+
+                /* Allocate page table for this region */
+                page_table_t* pt = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
+                memset(pt, 0, sizeof(page_table_t));
+
+                /* Fill page table: identity map */
+                for (uint32 pti = 0; pti < ENTRIES_PER_TABLE; pti++) {
+                    uint32 pa = (pdi * ENTRIES_PER_TABLE + pti) * PAGE_SIZE;
+                    /* Mark as present, RW, and uncacheable for MMIO */
+                    pt->entries[pti] = pa | PTE_PRESENT | PTE_RW | PTE_PCD | PTE_PWT;
+                }
+
+                kernel_pd->entries[pdi] = (uint32)pt | PTE_PRESENT | PTE_RW;
+            }
         }
     }
     
