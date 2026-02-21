@@ -51,7 +51,7 @@ QEMU_DISPLAY ?= gtk,grab-on-hover=on
 QEMU_ENV ?= GDK_BACKEND=x11
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/slab.o obj/shell.o obj/shell_args.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/linker.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/alias.o obj/alias_cmd.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/capabilities.o obj/segdom.o obj/crashlog.o obj/context.o obj/fs_txn.o obj/linux_syscalls.o
+OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/mem386.o obj/slab.o obj/shell.o obj/shell_args.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/linker.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/alias.o obj/alias_cmd.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/capabilities.o obj/segdom.o obj/crashlog.o obj/context.o obj/fs_txn.o obj/linux_syscalls.o
 
 OBJS += obj/tiling_manager.o obj/tiling_cmd.o obj/theme_cmd.o obj/ui_prefs.o
 OBJS += obj/terminals.o
@@ -86,6 +86,10 @@ obj/isr_stubs.o:src/cpu/isr.asm
 obj/irq_stubs.o:src/cpu/irq.asm
 	mkdir obj/ -p
 	$(ASSEMBLER) $(ASFLAGS) -o obj/irq_stubs.o src/cpu/irq.asm
+
+obj/mem386.o:src/misc/mem386.asm
+	mkdir obj/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o obj/mem386.o src/misc/mem386.asm
 	
 obj/kc.o:src/entry/kernel.c
 	$(COMPILER) $(CFLAGS) src/entry/kernel.c -o obj/kc.o 
