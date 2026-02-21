@@ -1,7 +1,7 @@
 #ifndef SEGDOM_H
 #define SEGDOM_H
 
-#include <types.h>
+#include <misc/types.h>
 
 #define SEGDOM_LDT_ENTRIES 3
 

@@ -1,7 +1,7 @@
 #ifndef PREDICTIVE_MEMORY_H
 #define PREDICTIVE_MEMORY_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <eynfs.h>

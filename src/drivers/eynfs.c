@@ -1,5 +1,5 @@
 #include <eynfs.h>
-#include <types.h>
+#include <misc/types.h>
 #include <string.h>
 #include <vga.h>
 #include <util.h>

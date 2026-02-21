@@ -1,7 +1,7 @@
 #ifndef ATA_H
 #define ATA_H
 
-#include <types.h>
+#include <misc/types.h>
 
 /*
  * Legacy ATA/IDE (PIO) driver interface.

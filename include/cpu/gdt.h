@@ -1,7 +1,7 @@
 #ifndef GDT_H
 #define GDT_H
 
-#include <types.h>
+#include <misc/types.h>
 
 /* GDT selector constants for our installed GDT */
 #define GDT_KERNEL_CS 0x08

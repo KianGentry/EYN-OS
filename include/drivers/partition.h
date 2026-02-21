@@ -1,7 +1,7 @@
 #ifndef PARTITION_H
 #define PARTITION_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // PARTITION TABLE DEFINITIONS
 

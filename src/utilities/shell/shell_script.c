@@ -5,7 +5,7 @@
 #include <vga.h>
 #include <shell.h>
 #include <shell_command_info.h>
-#include <types.h>
+#include <misc/types.h>
 #include <math.h>
 #include <context.h>
 #include <misc/sched.h>

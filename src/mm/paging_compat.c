@@ -8,6 +8,7 @@
 #include <mm/user_access.h>
 #include <serial.h>
 #include <system.h>
+#include <panic.h>
 
 static void serial_putc_raw(char c) {
     uint16 port = SERIAL_COM1;
@@ -47,6 +48,25 @@ void page_fault_handler(regs_t* r) {
     serial_puts_unsafe(" err=");
     serial_put_hex32(r ? r->err_code : 0);
     serial_puts_unsafe("\n");
+
+    /*
+     * SECURITY-INVARIANT: A page fault taken in CPL0 is a kernel bug.
+     *
+     * Why: Retrying a faulting kernel instruction can re-enter #PF paths and
+     * drive secondary faults (e.g. during swap/IO/accounting), leaving the
+     * system in an increasingly corrupted state.
+     *
+     * Invariant: Kernel-mode #PF triggers an immediate panic with a minimal
+     * diagnostic payload. User-mode faults continue through the VMM handler.
+     */
+    if (r && ((r->cs & 3u) != 3u)) {
+        PANICF("PAGE FAULT (kernel): addr=0x%08X eip=0x%08X err=0x%08X cs=0x%08X esp=0x%08X",
+               (unsigned)fault_addr,
+               (unsigned)r->eip,
+               (unsigned)r->err_code,
+               (unsigned)r->cs,
+               (unsigned)r->esp);
+    }
 
     // Extra diagnostics for ring3 faults (helps debug syscall/iret issues).
     if (r && ((r->cs & 3) == 3)) {

@@ -1,6 +1,6 @@
 #ifndef FS_COMMANDS_H
 #define FS_COMMANDS_H
-#include <types.h>
+#include <misc/types.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <utilities/shell/shell_args.h>

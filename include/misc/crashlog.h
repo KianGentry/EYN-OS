@@ -1,7 +1,7 @@
 #ifndef CRASHLOG_H
 #define CRASHLOG_H
 
-#include <types.h>
+#include <misc/types.h>
 
 #define CRASHLOG_OBJ_UI_PREFS 1
 

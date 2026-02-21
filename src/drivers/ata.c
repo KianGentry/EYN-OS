@@ -1,4 +1,4 @@
-#include <types.h>
+#include <misc/types.h>
 #include <system.h>
 #include <vga.h>
 #include <string.h>

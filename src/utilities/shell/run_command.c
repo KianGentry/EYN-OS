@@ -2,7 +2,7 @@
 #include <native_exec.h>
 #include <shell_script.h>
 #include <util.h>
-#include <types.h>
+#include <misc/types.h>
 #include <vga.h>
 #include <shell_command_info.h>
 #include <string.h>

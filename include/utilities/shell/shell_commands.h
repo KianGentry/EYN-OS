@@ -1,6 +1,6 @@
 #ifndef SHELL_COMMANDS_H
 #define SHELL_COMMANDS_H
-#include <types.h>
+#include <misc/types.h>
 #include <utilities/shell/shell_args.h>
 
 void echo(string ch);

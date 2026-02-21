@@ -1,7 +1,7 @@
 #ifndef CAPABILITIES_H
 #define CAPABILITIES_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // Capability object types
 enum {

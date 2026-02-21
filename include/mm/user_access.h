@@ -1,7 +1,7 @@
 #ifndef USER_ACCESS_H
 #define USER_ACCESS_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <stddef.h>
 
 // Validate that a user pointer range is accessible.

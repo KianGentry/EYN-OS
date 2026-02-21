@@ -1,7 +1,7 @@
 #ifndef CONTEXT_H
 #define CONTEXT_H
 
-#include <types.h>
+#include <misc/types.h>
 
 typedef struct sched_work sched_work_t;
 
@@ -30,6 +30,9 @@ extern command_context_t* current_command_context;
 void command_context_set(command_context_t* ctx);
 void command_context_clear(void);
 command_context_t* command_context_get(void);
+
+int command_context_push(const command_context_t* ctx);
+void command_context_pop(void);
 
 static inline int cap_check(uint32 caps, uint32 cap) {
     return ((caps & cap) == cap) ? 1 : 0;

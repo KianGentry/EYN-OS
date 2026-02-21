@@ -4,7 +4,7 @@
 #include <isr.h>
 #include <irq.h>
 #include <string.h>
-#include <types.h>
+#include <misc/types.h>
 #include <context.h>
 #include <misc/sched.h>
 

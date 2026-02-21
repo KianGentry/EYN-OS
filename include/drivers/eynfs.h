@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include <types.h>
+#include <misc/types.h>
 
 // EYNFS magic number ('EYNF')
 #define EYNFS_MAGIC 0x45594E46

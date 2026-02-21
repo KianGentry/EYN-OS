@@ -2,7 +2,7 @@
 #ifndef VFS_H
 #define VFS_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <stddef.h>
 
 // Filesystem types known to the VFS

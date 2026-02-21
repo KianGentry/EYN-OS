@@ -2,7 +2,7 @@
 #define SLAB_H
 
 #include <stddef.h>
-#include <types.h>
+#include <misc/types.h>
 
 /*
  * 386-optimized slab allocator (page-backed, power-of-two size classes).

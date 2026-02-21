@@ -1,6 +1,6 @@
 #ifndef SHELL_H
 #define SHELL_H
-#include <types.h>
+#include <misc/types.h>
 
 struct shell_args;
 typedef struct shell_args shell_args_t;

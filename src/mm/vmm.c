@@ -1,5 +1,5 @@
 #include <mm/vmm.h>
-#include <types.h>
+#include <misc/types.h>
 #include <string.h>
 #include <vga.h>
 #include <panic.h>
@@ -658,15 +658,27 @@ void switch_address_space(address_space_t* as) {
  */
 
 void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
-    address_space_t* as = vmm_current_as;
-    
-    /* Update fault statistics for working-set tracking */
-    as->fault_count++;
-    /* as->last_fault_tick = get_ticks(); */
-    
     int is_present = error_code & PF_ERR_PRESENT;
     int is_write = error_code & PF_ERR_WRITE;
     int is_user = error_code & PF_ERR_USER;
+
+    /*
+     * SECURITY-INVARIANT: Supervisor-mode (#PF with U/S=0) indicates a kernel bug.
+     *
+     * Why: Recovery logic below is designed for user address spaces (demand pages,
+     * swap-in, stack/heap growth, COW). Retrying a faulting CPL0 instruction can
+     * re-enter paging/IO paths and trigger cascading corruption.
+     */
+    if (!is_user) {
+        PANICF("PAGE FAULT (kernel): addr=0x%08X eip=0x%08X err=0x%08X",
+               (unsigned)fault_addr, (unsigned)eip, (unsigned)error_code);
+    }
+
+    address_space_t* as = vmm_current_as;
+
+    /* Update fault statistics for working-set tracking */
+    as->fault_count++;
+    /* as->last_fault_tick = get_ticks(); */
     
     pte_t* pte = vmm_walk_page_tables(as, fault_addr, 0);
     
@@ -888,6 +900,35 @@ static int swap_read_page(uint32 slot, void* page_data) {
     return 0;
 }
 
+/*
+ * Eviction helper: swap out a present PTE but keep the physical frame allocated.
+ *
+ * Why: `frame_alloc()` may call `clock_evict_page()` when `free_frames == 0`.
+ * In that case we want to *reclaim* a frame for immediate reuse, not free it
+ * into the general free list (which would allow double-allocation).
+ */
+static int swap_out_page_reclaim_frame(pte_t* pte, uint32 va) {
+    if (!pte || !(*pte & PTE_PRESENT)) {
+        return -1;
+    }
+
+    uint32 frame = *pte & PTE_FRAME_MASK;
+    uint32 slot = swap_alloc_slot();
+    if (slot == SWAP_SLOT_NONE) {
+        return -1;
+    }
+
+    if (swap_write_page(slot, (void*)(KERNEL_BASE + frame)) != 0) {
+        swap_free_slot(slot);
+        return -1;
+    }
+
+    /* Not-present, store swap slot in the frame bits. Preserve user/rw flags. */
+    *pte = (slot << 12) | PTE_SWAPPED | (*pte & (PTE_USER | PTE_RW));
+    invalidate_tlb_entry(va);
+    return 0;
+}
+
 uint32 swap_out_page(pte_t* pte, uint32 va, address_space_t* as) {
     (void)as;
     
@@ -1031,23 +1072,38 @@ uint32 clock_evict_page(void) {
             continue;
         }
         
-        /* Victim found! Swap out if dirty, then reclaim frame */
+        /* Victim found! Swap out (even if clean), then reclaim frame */
         uint32 frame = entry->frame;
-        
-        if (*pte & PTE_DIRTY) {
-            /* Page was modified - must write to swap */
-            swap_out_page(pte, entry->va, entry->as);
-        } else {
-            /* Clean page - just invalidate */
-            *pte = 0;
-            invalidate_tlb_entry(entry->va);
+
+        /*
+         * SECURITY-INVARIANT: Evicted user pages must remain logically intact.
+         *
+         * EYN-OS currently does not have a file-backed pager to
+         * reconstruct executable/text pages on demand. A page being "clean" only
+         * means the CPU hasn't written through that *user* PTE; kernel writes via
+         * the KERNEL_BASE alias do not set this PTE's dirty bit.
+         *
+         * Therefore, to avoid silent corruption, we must preserve *all* evicted
+         * user pages by swapping them out.
+         */
+        if (swap_out_page_reclaim_frame(pte, entry->va) != 0) {
+            /* Swap is full or I/O failed; try another victim. */
+            continue;
         }
-        
+
         /* Clear clock entry */
         entry->frame = 0;
         entry->pte_ptr = 0;
-        g_clock.count--;
-        
+        entry->va = 0;
+        entry->as = 0;
+        if (g_clock.count) {
+            g_clock.count--;
+        }
+
+        /*
+         * IMPORTANT: Do NOT call frame_free(frame) here.
+         * The returned frame is reclaimed for immediate reuse by the caller.
+         */
         return frame;
     }
     

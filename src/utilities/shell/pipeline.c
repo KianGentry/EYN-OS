@@ -8,7 +8,7 @@
 #include <vga.h>
 #include <string.h>
 #include <eynfs.h>
-#include <types.h>
+#include <misc/types.h>
 #include <utilities/shell/alias.h>
 #include <context.h>
 #include <misc/sched.h>

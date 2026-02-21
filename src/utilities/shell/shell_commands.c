@@ -4,7 +4,7 @@
 #include <pipeline.h>
 #include <fs_commands.h>
 #include <run_command.h>
-#include <types.h>
+#include <misc/types.h>
 #include <vga.h>
 #include <util.h>
 #include <misc/math.h>

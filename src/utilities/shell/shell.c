@@ -1,4 +1,4 @@
-#include <types.h>
+#include <misc/types.h>
 #include <string.h>
 #include <system.h>
 #include <shell.h>
@@ -439,11 +439,10 @@ void handler_exit(const shell_args_t* args) {
 // Enhanced command handling with unified registration
 void handle_shell_command(string input) {
     command_context_t ctx;
-    command_context_t* prev_ctx = command_context_get();
     memset(&ctx, 0, sizeof(ctx));
     ctx.caps = CAP_ALL;
     ctx.drive = g_current_drive;
-    command_context_set(&ctx);
+    int ctx_pushed = command_context_push(&ctx);
 
     // Expand aliases (up to a small depth to avoid loops), then dispatch.
     const char* current = input;
@@ -498,7 +497,9 @@ void handle_shell_command(string input) {
     else
         printf("%cCommand not found\n", 255, 0, 0);
 cleanup:
-    command_context_set(prev_ctx);
+    if (ctx_pushed) {
+        command_context_pop();
+    }
 }
 
 // Command safety status functions

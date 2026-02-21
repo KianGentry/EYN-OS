@@ -1,6 +1,6 @@
 #ifndef WRITE_EDITOR_H
 #define WRITE_EDITOR_H
-#include <types.h>
+#include <misc/types.h>
 
 void write_editor(const char* filename, uint8 disk);
 int load_file_to_write_editor(const char* filename, uint8 disk);

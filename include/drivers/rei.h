@@ -1,7 +1,7 @@
 #ifndef REI_H
 #define REI_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <stdint.h>
 #include <stddef.h>
 

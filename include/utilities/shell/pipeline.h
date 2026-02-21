@@ -1,7 +1,7 @@
 #ifndef PIPELINE_H
 #define PIPELINE_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // Pipeline and redirection system for EYN-OS
 

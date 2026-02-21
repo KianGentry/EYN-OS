@@ -1,6 +1,6 @@
 #ifndef FDISK_COMMANDS_H
 #define FDISK_COMMANDS_H
-#include <types.h>
+#include <misc/types.h>
 #include <utilities/shell/shell_args.h>
 
 void fdisk_list();

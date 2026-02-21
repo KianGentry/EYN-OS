@@ -3,7 +3,7 @@
 #include <string.h>
 #include <util.h>
 #include <vga.h>
-#include <types.h>
+#include <misc/types.h>
 #include <context.h>
 #include <misc/sched.h>
 #include <utilities/shell/shell_args.h>

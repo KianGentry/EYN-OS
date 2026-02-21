@@ -1,7 +1,7 @@
 #ifndef IRQ_H
 #define IRQ_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // initialize PIC, remap IRQs to 0x20-0x2F, and install IDT gates
 void irq_init(void);

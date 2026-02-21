@@ -1,4 +1,4 @@
-#include <types.h>
+#include <misc/types.h>
 #include <util.h>
 #include <string.h>
 #include <vga.h>
@@ -75,6 +75,7 @@ void user_task_cleanup_mappings(void) {
 
 void ui_return_from_user_task(void) {
     // Best-effort cleanup and clear state before re-entering the UI.
+    command_context_clear();
     user_task_cleanup_mappings();
     g_abort_to_shell = 0;
     g_user_task_active = 0;

@@ -1,5 +1,5 @@
 #include <shell.h>
-#include <types.h>
+#include <misc/types.h>
 #include <tile_manager.h>
 #include <context.h>
 #include <misc/sched.h>

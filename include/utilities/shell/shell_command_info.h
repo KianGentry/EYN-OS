@@ -1,7 +1,7 @@
 #ifndef SHELL_COMMAND_INFO_H
 #define SHELL_COMMAND_INFO_H
 
-#include <types.h>
+#include <misc/types.h>
 
 typedef struct shell_args shell_args_t;
 

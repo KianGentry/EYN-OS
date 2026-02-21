@@ -5,7 +5,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <string.h>
-#include <types.h>
+#include <misc/types.h>
 #include <shell.h>
 #include <system.h>
 #include <serial.h>

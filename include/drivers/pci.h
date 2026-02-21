@@ -1,7 +1,7 @@
 #ifndef PCI_H
 #define PCI_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // PCI configuration-space (not finished)
 

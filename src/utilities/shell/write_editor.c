@@ -1,5 +1,5 @@
 #include <write_editor.h>
-#include <types.h>
+#include <misc/types.h>
 #include <eynfs.h>
 #include <fat32.h>
 #include <vga.h>
