@@ -1,257 +1,118 @@
-# EYN-OS - A public domain x86 Operating System
+# EYN-OS - a public domain x86 operating system
 
-EYN-OS is a complete operating system built from scratch with the philosophy of "reinventing the wheel" - understanding and implementing every component of the system. It features a custom filesystem, built-in development tools, games, and a comprehensive user interface with advanced stability and portability features.
+EYN-OS is a small, educational operating system for 32‑bit x86 built entirely from scratch. It aims to be clear, portable, and approachable, favoring simple designs that are easy to learn from and extend.
 
-## Features
+## What it provides
 
-### Core System
-- **Freestanding x86 Kernel**: Complete operating system without external dependencies
-- **Custom EYNFS Filesystem**: Native filesystem designed for EYN-OS
-- **FAT32 Support**: Compatibility with existing filesystems
-- **Advanced Memory Management**: Dynamic heap sizing with corruption detection
-- **Intelligent Exception Handling**: Recovery mechanisms instead of system halts
+- A freestanding 32‑bit kernel with a straightforward boot path (Multiboot‑compatible via GRUB)
+- Hardware drivers: VGA display, PS/2 keyboard, ATA/IDE storage, Intel e1000 NIC, serial output
+- Networking: UDP/IPv4 stack with ARP support for basic network communication
+- Ring‑3 userspace: proper privilege separation with syscall interface (int 0x80)
+- Native EYNFS filesystem with MBR partitioning support, plus FAT32 compatibility
+- Text‑based shell and TUI framework with customizable tiling window manager
+- Bitmap font loading (`.hex` format, 8×8 or 8×16) with runtime system-font switching
+- Built‑in C compiler (chibicc) for native development and userland ELF programs (`.uelf`)
+- Developer tools: assembler, linker, program loader, debugger facilities
+- Robustness features: watchdog timer, panic recovery, memory protection
+- REIV video format support for playing MP4/GIF animations in the viewer
+- Alias system for custom shell commands with parameter substitution
+- Strong emphasis on portability and low‑memory operation (runs on 9MB RAM)
 
-### Stability & Security
-- **Exception Recovery**: Intelligent ISR handlers that attempt recovery
-- **Memory Protection**: Heap corruption detection and stack overflow protection
-- **Command Safety**: Input validation, argument sanitization, injection prevention
-- **Process Isolation**: Memory separation between kernel and user programs
-- **Error Logging**: Comprehensive error tracking and reporting system
+Rather than relying on external libraries, EYN-OS includes minimal, well‑documented implementations of core facilities such as memory management, interrupts/exceptions, device I/O, networking, and graphics/text rendering.
 
-### Portability & Performance
-- **Dynamic Memory Detection**: Automatic RAM detection using multiboot info
-- **Adaptive Heap Sizing**: Conservative memory allocation for low-end systems
-- **Streaming Command System**: On-demand command loading to reduce memory footprint
-- **Optimized File I/O**: Dynamic buffering with up to 64KB support
-- **Target Systems**: 3MB RAM minimum (with GRUB), 1MB RAM (with direct boot), optimized for 128KB+ systems
+## Architecture and philosophy
 
-### User Interface
-- **Text User Interface (TUI)**: Consistent interface across all applications
-- **Command History**: Navigate previous commands with arrow keys
-- **Interactive Help**: Professional TUI help system with dual-pane layout
-- **Text Editor**: Built-in write editor for file editing
-- **File Rendering**: REI image display and Markdown formatting
+EYN-OS follows a “learnable core” approach:
+- From‑scratch components with small, readable implementations (no libc)
+- Clear layering: CPU/interrupts → drivers → kernel utilities → UI/tools
+- Conservative memory footprint suitable for very low‑RAM targets
+- Deterministic behavior prioritized over feature breadth
 
-### Development Tools
-- **Built-in Assembler**: NASM-compatible assembler for x86 code
-- **Custom Executable Format**: EYN format for user programs
-- **Program Loader**: Safe execution of user programs with process isolation
-- **Shell Scripts**: Execute `.shell` files with EYN-OS commands for automation
-- **Calculator**: Basic mathematical operations
-- **Hex Dump**: Binary file inspection tool
+### What makes it different
+- Education first: code explains the “why,” not just the “what”
+- Minimal dependencies: predictable builds and easy portability
+- Tight scope: only the primitives needed to understand an OS stack
+- Practical docs: APIs and internals documented alongside the code
 
-### Games and Applications
-- **Game Engine**: Framework for built-in games
-- **Snake Game**: Complete implementation with TUI interface
-- **Game Data Files**: Games stored as `.txt` files for easy distribution
-- **Drawing Tool**: Rectangle drawing with color support
+## Architecture at a glance
 
-### Utilities
-- **Random Number Generator**: Linear Congruential Generator
-- **Sorting Algorithms**: Quicksort and bubble sort implementations
-- **Search Function**: Boyer-Moore string search algorithm
-- **File Operations**: Complete filesystem management
-- **Memory Management**: Advanced heap management and testing tools
+- **Target:** 32‑bit x86, Multiboot‑compatible boot (via GRUB)
+- **Memory:** Flat memory model with paging support, compact heap with corruption detection
+- **Drivers:** VGA display, PS/2 keyboard/mouse, ATA/IDE storage, Intel e1000 NIC, serial debug
+- **Networking:** UDP/IPv4 stack with ARP, basic socket-like interface for userland
+- **Filesystems:** Native EYNFS with MBR partitioning, FAT32 read/write support
+- **Userspace:** Ring-3 privilege separation with syscall API (int 0x80), ELF32-based UELF format
+- **Compiler:** Integrated chibicc C compiler for on-system development
+- **UI:** Shell with command streaming, customizable tiling manager, bitmap font rendering (8×8, 8×16)
+- **Robustness:** Watchdog timer for hang detection, panic recovery, memory integrity checks
 
-### Shell Commands
+The codebase is organized by domain (CPU, drivers, misc, utilities, network) with public headers under `include/` and implementation in `src/`.
 
-#### Essential Commands (Always Available)
-- **System**: `init`, `exit`, `clear`, `help`
-- **Filesystem**: `ls`
-- **Memory Management**: `memory`, `portable`, `load`, `unload`, `status`
+## Getting started
 
-#### Streaming Commands (Loaded on Demand)
-- **Filesystem**: `format`, `fdisk`, `fscheck`, `copy`, `move`, `del`, `cd`, `makedir`, `deldir`
-- **File Operations**: `read`, `write`, `read_raw`, `read_md`, `read_image`
-- **Basic Commands**: `echo`, `ver`, `calc`, `search`, `drive`, `run` (supports .eyn and .shell files)
-- **Advanced**: `random`, `history`, `sort`, `game`, `draw`, `spam`
-- **Development**: `assemble`, `hexdump`, `log`
-- **Error & Debug**: `error`, `validate`, `process`
+Build from a Linux host with standard toolchain components (GCC, NASM, GRUB):
 
-## Quick Start
-
-### Building EYN-OS
 ```bash
-cd EYN-OS
-make clean
-make
+make build      # build ISO and disk images
+make run        # build and run in QEMU
+make qemu-gdb   # launch with GDB support (halted at startup, attach to :1234)
 ```
 
-### Running in QEMU
-
-#### Standard Boot (3MB+ RAM)
+Inside EYN-OS, try these commands:
 ```bash
-make run
+init            # initialize ATA drives
+ls              # list files
+help            # interactive help system
+e1000 init      # initialize network (if e1000 NIC present)
+chibicc --help  # C compiler help (chibicc.uelf needs to be in root)
+run hello.uelf  # run a userland program
 ```
 
-### Running on Real Hardware
-Flash the `EYNOS.iso` to a USB drive and boot from it. Tested on Intel x86 hardware.
+To try it on real hardware, write `EYNOS.iso` to a USB drive or CD and boot on a 32‑bit compatible machine.
 
-### Generating Documentation
-```bash
-make docs  # Generates command reference documentation
-```
+## System requirements
 
-## Example Usage
-
-### Basic Navigation
-```
-0:/! ls
-0:/! cd games
-0:/games! ls
-0:/games! game snake
-```
-
-## Contributing
-
-EYN-OS welcomes contributions! Whether you want to add new commands, improve existing features, or fix bugs, we have resources to help you get started:
-
-- **[Contributing Guide](CONTRIBUTING.md)**: Complete guide for new contributors
-- **[Command Reference](docs/command-reference.md)**: Auto-generated documentation of all commands
-- **[Development Tools](devtools/)**: Scripts and utilities for development
-
-### Quick Contribution Tips
-- Use the unified command registration system: `REGISTER_SHELL_COMMAND`
-- Follow the simplified include system: `#include <header.h>`
-- Test your changes with `make clean && make && make run`
-- Generate updated documentation with `make docs`
-
-### Memory Management
-```
-0:/! load              # Load all streaming commands
-0:/! status            # Check loaded commands
-0:/! memory stats      # View memory statistics
-0:/! unload            # Free memory when done
-```
-
-### Development
-```
-0:/! write hello.asm
-0:/! assemble hello.asm hello.eyn
-0:/! run hello.eyn
-```
-
-### File Management
-```
-0:/! makedir projects
-0:/! cd projects
-0:/projects! write test.txt
-0:/projects! read test.txt
-0:/projects! copy test.txt backup.txt
-0:/projects! move backup.txt /backup/
-```
-
-### File Format Support
-```
-0:/! read doc.md       # Smart file display
-0:/! read_md doc.md    # Markdown with formatting
-0:/! read_image logo.rei # REI image display
-0:/! read_raw data.bin # Raw binary display
-```
-
-## System Requirements
-
-- **Architecture**: Intel x86 (32-bit)
-- **Memory**: 3MB+ RAM
-- **Storage**: Any block device (hard disk, USB, etc.)
-- **Display**: VGA "graphical" mode (80x25, 640x480)
-- **ISO Size**: 2.8MB
-
-## Architecture
-
-### Boot Process
-1. **GRUB**: Multiboot 1.0 compliant bootloader
-2. **Memory Detection**: Dynamic RAM detection using multiboot info
-3. **Kernel**: Assembly entry point → C kernel initialization with adaptive sizing
-4. **Drivers**: VGA, keyboard, ATA disk controller
-5. **Filesystem**: EYNFS or FAT32 detection and mounting
-6. **Shell**: Command-line interface with streaming commands ready for user input
-
-### Memory Layout
-- **0x00000000-0x000FFFFF**: Real mode and BIOS
-- **0x00100000-0x001FFFFF**: Kernel code and data
-- **0x00200000-0x007FFFFF**: Available memory (adaptive heap)
-- **0x00800000+**: High memory (if available)
-
-### Streaming Command Architecture
-- **Essential Commands**: Always available in RAM for core functionality
-- **Streaming Commands**: Loaded on-demand to conserve memory
-- **Dynamic Loading**: Use `load`/`unload` to manage memory usage
-- **Status Tracking**: Use `status` to see loaded commands
-
-### Filesystem Structure
-```
-/
-├── games/
-│   └── snake.dat
-├── projects/
-│   ├── hello.asm
-│   └── hello.eyn
-└── documents/
-    └── readme.txt
-```
-
-## Development Philosophy
-
-### Why "Reinvent the Wheel"?
-- **Learning**: Understanding how everything works
-- **Control**: Full control over system behavior
-- **Simplicity**: No unnecessary complexity
-- **Customization**: Tailored to specific needs
-
-### Code Style
-- **Clear Comments**: Extensive documentation in code. Avoid explaining what a function does, and try explaining why it does it.
-- **Simple Functions**: One function, one purpose
-- **Consistent Naming**: Descriptive function and variable names
-- **Error Handling**: Graceful error recovery where possible
-- **Professional Output**: Clean, informative user messages
+- 32‑bit x86 CPU (i386 or higher)
+- ~9 MB RAM minimum (QEMU default configuration)
+- VGA‑compatible display
+- PS/2 keyboard (mouse optional but supported)
+- ATA/IDE storage device
+- VGA capable graphics processor
+- (Optional) Intel e1000-compatible NIC for networking
 
 ## Documentation
 
-Comprehensive documentation is available in the `docs/` directory:
+The `docs/` directory contains comprehensive project documentation:
 
-- **[System Overview](docs/system-overview.md)**: High-level architecture and latest release features
-- **[EYNFS Specification](docs/filesystems/eynfs.md)**: Native filesystem details
-- **[Shell System](docs/ui/shell.md)**: Command-line interface with streaming architecture
-- **[Quick Reference](docs/quick-reference.md)**: Command cheat sheet with latest release updates
-- **[API Reference](docs/api/headers.md)**: Complete header documentation
+- **[docs/README.md](docs/README.md)** - Documentation index and navigation
+- **[docs/system-overview.md](docs/system-overview.md)** - Architecture and design philosophy
+- **[docs/QUICK-DEBUG.md](docs/QUICK-DEBUG.md)** - One-page debugging reference (keep this open!)
+- **[docs/command-reference.md](docs/command-reference.md)** - Complete shell command reference (auto-generated)
+- **[docs/quick-reference.md](docs/quick-reference.md)** - Quick command cheat sheet
+- **[docs/stop-codes.md](docs/stop-codes.md)** - Panic stop code reference
+
+Key topics:
+- **Debugging:** Quick debug card, stop codes, GDB integration, serial logging
+- **UI & Shell:** Tiling manager, TUI system, shell scripting, help system
+- **Filesystems:** EYNFS specification, FAT32 support, partitioning
+- **Development:** Assembler, chibicc compiler, UELF format, syscalls
+- **Networking:** e1000 driver, UDP/IPv4 stack (docs/network/)
+- **Memory:** Paging, virtual memory, heap management
+- **Hardware:** Watchdog timer, PCI enumeration, device drivers
+
+Start here: **[docs/README.md](docs/README.md)**
 
 ## Contributing
 
-EYN-OS is designed to be educational and extensible. When adding features:
+Contributions are welcome. This project values clarity and simplicity:
 
-1. **Follow the Style**: Match existing code style and patterns
-2. **Document Everything**: Update relevant documentation
-3. **Test Thoroughly**: Ensure features work correctly
-4. **Keep it Simple**: Prefer simple, understandable implementations
-5. **Consider Memory**: Optimize for low-end systems
+- Keep implementations small and readable
+- Prefer clear comments that explain the “why”
+- Favor portable approaches and conservative memory use
+- Update docs alongside code changes
 
-## Future Development
-
-### Planned Features
-- **Protected Mode**: Full 32-bit protected mode with paging
-- **Multitasking**: Basic process scheduling
-- **Network Support**: TCP/IP stack
-- **GUI System**: Graphical user interface
-- **More Games**: Tetris, Pong, Space Invaders
-- **File Browser**: Visual file management
-- **Raycaster**: 3D graphics demo
-
-### Extensibility
-- **Module System**: Loadable kernel modules
-- **Plugin Architecture**: Extensible application framework
-- **API Stability**: Stable programming interfaces
-
-## Screenshots
-
-![EYN-OS Shell](image.png)
-*The EYN-OS shell showing the ls command and version information*
+See `CONTRIBUTING.md` for guidelines.
 
 ## License
 
-EYN-OS is public domain software. See the UNLICENSE file for details.
-
----
-
-*By Kian Gentry*
-*musinks@proton.me*
+EYN-OS is dedicated to the public domain. See `UNLICENSE` for details.

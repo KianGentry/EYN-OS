@@ -17,7 +17,7 @@ typedef struct {
     uint16_t width;        // Image width in pixels
     uint16_t height;       // Image height in pixels
     uint8_t depth;         // Color depth (1, 3, or 4 bytes per pixel)
-    uint8_t reserved1;     // Reserved for future use
+    uint8_t reserved1;     // Flags (low nibble: compression; 0=none, 1=RLE)
     uint16_t reserved2;    // Reserved for future use
 } rei_header_t;
 ```
@@ -40,6 +40,10 @@ typedef struct {
 #define REI_DEPTH_MONO 1            // Monochrome (1 byte per pixel)
 #define REI_DEPTH_RGB 3             // RGB (3 bytes per pixel)
 #define REI_DEPTH_RGBA 4            // RGBA (4 bytes per pixel)
+// Compression flags (low nibble of reserved1)
+#define REI_COMP_NONE 0x0
+#define REI_COMP_RLE  0x1
+#define REI_COMP_MASK 0x0F
 ```
 
 ## Core Functions
@@ -49,7 +53,7 @@ typedef struct {
 int rei_parse_image(const uint8_t* data, size_t size, rei_image_t* image);
 ```
 
-Parses a complete REI image from raw data.
+Parses a complete REI image from raw or compressed data. If RLE compression is indicated by the header flags, the pixel data is decompressed into memory.
 
 **Parameters:**
 - `data`: Pointer to REI file data
@@ -250,7 +254,7 @@ if (rei_parse_image(data, size, &image) == 0) {
 ## Performance Notes
 
 - **Direct framebuffer access**: Uses `drawPixel()` for optimal rendering
-- **No compression**: Raw pixel data for simplicity
+- **Lightweight compression**: Optional PackBits-style RLE supported; decompressed into RAM for fast rendering
 - **Memory efficient**: Only loads necessary data
 - **Fast parsing**: Minimal header validation
 

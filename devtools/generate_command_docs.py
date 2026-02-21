@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-EYN-OS Command Documentation Generator
-
-This script parses the EYN-OS source code for REGISTER_SHELL_COMMAND macros
-and generates comprehensive command documentation in Markdown format.
-"""
-
 import os
 import re
 import sys
@@ -22,7 +14,6 @@ class CommandInfo:
         self.file = file
 
 def parse_register_macro(line: str) -> Tuple[str, str, str, str, str, str]:
-    """Parse a REGISTER_SHELL_COMMAND macro line."""
     # Pattern to match the macro
     pattern = r'REGISTER_SHELL_COMMAND\s*\(\s*(\w+)\s*,\s*"([^"]+)"\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)'
     match = re.search(pattern, line)
@@ -39,7 +30,6 @@ def parse_register_macro(line: str) -> Tuple[str, str, str, str, str, str]:
     return None
 
 def find_commands_in_file(file_path: str) -> List[CommandInfo]:
-    """Find all REGISTER_SHELL_COMMAND macros in a file."""
     commands = []
     
     try:
@@ -64,7 +54,7 @@ def find_commands_in_file(file_path: str) -> List[CommandInfo]:
     return commands
 
 def scan_source_directory(src_dir: str) -> List[CommandInfo]:
-    """Scan the source directory for all command registrations."""
+    # Scan the source directory for all command registrations
     all_commands = []
     
     for root, dirs, files in os.walk(src_dir):
@@ -77,7 +67,7 @@ def scan_source_directory(src_dir: str) -> List[CommandInfo]:
     return all_commands
 
 def categorize_commands(commands: List[CommandInfo]) -> Dict[str, List[CommandInfo]]:
-    """Categorize commands by type."""
+    # Categorize commands by type
     categories = {
         'Essential Commands': [],
         'Streaming Commands': [],
@@ -111,7 +101,7 @@ def categorize_commands(commands: List[CommandInfo]) -> Dict[str, List[CommandIn
     return {k: v for k, v in categories.items() if v}
 
 def generate_markdown(commands: List[CommandInfo], output_file: str):
-    """Generate Markdown documentation."""
+    # Generate Markdown documentation
     categorized = categorize_commands(commands)
     
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -155,7 +145,7 @@ def generate_markdown(commands: List[CommandInfo], output_file: str):
         f.write("\n")
 
 def generate_help_text(commands: List[CommandInfo], output_file: str):
-    """Generate a simple help text format for the OS."""
+    # Generate a simple help text format for the OS
     categorized = categorize_commands(commands)
     
     with open(output_file, 'w', encoding='utf-8') as f:

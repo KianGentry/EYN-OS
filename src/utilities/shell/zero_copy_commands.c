@@ -1,18 +1,32 @@
 #include <zero_copy.h>
 #include <shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 #include <vga.h>
 #include <util.h>
 #include <string.h>
+#include <context.h>
+#include <misc/sched.h>
 
 // Command handlers for zero-copy operations
-void zopen_cmd(string arg);
-void zclose_cmd(string arg);
-void zread_cmd(string arg);
-void zwrite_cmd(string arg);
-void zseek_cmd(string arg);
-void zsplice_cmd(string arg);
-void ztee_cmd(string arg);
-void zstats_cmd(string arg);
+void zopen_cmd(const shell_args_t* args);
+void zclose_cmd(const shell_args_t* args);
+void zread_cmd(const shell_args_t* args);
+void zwrite_cmd(const shell_args_t* args);
+void zseek_cmd(const shell_args_t* args);
+void zsplice_cmd(const shell_args_t* args);
+void ztee_cmd(const shell_args_t* args);
+void zstats_cmd(const shell_args_t* args);
+
+static int zc_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
 
 // Register commands with the shell system
 REGISTER_SHELL_COMMAND(zopen_cmd_info, "zopen", zopen_cmd, CMD_STREAMING,
@@ -30,6 +44,7 @@ REGISTER_SHELL_COMMAND(zwrite_cmd_info, "zwrite", zwrite_cmd, CMD_STREAMING,
 REGISTER_SHELL_COMMAND(zseek_cmd_info, "zseek", zseek_cmd, CMD_STREAMING,
                        "Seek in zero-copy file", "zseek <fd> <offset> [set|cur|end]");
 
+
 REGISTER_SHELL_COMMAND(zsplice_cmd_info, "zsplice", zsplice_cmd, CMD_STREAMING,
                        "Splice data between files", "zsplice <fd_in> <fd_out> <count>");
 
@@ -40,35 +55,31 @@ REGISTER_SHELL_COMMAND(zstats_cmd_info, "zstats", zstats_cmd, CMD_STREAMING,
                        "Show zero-copy statistics", "zstats");
 
 // Zero-copy open command
-void zopen_cmd(string arg) {
-    uint8 i = 0;
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
+void zopen_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 2) {
         printf("%cUsage: zopen <filename> [r|w|rw]\n", 255, 255, 255);
         printf("%cExample: zopen test.txt r\n", 255, 255, 255);
         printf("%cExample: zopen data.bin rw\n", 255, 255, 255);
         return;
     }
-    
-    char filename[128];
-    uint8 j = 0;
-    while (arg[i] && arg[i] != ' ' && j < 127) {
-        filename[j++] = arg[i++];
-    }
-    filename[j] = '\0';
+
+    const char* filename = args->argv[1];
     
     // Parse flags
     uint8_t flags = ZERO_COPY_READ_ONLY;  // Default to read-only
-    while (arg[i] && arg[i] == ' ') i++;
-    if (arg[i]) {
-        if (strncmp(&arg[i], "w", 1) == 0) {
-            flags = ZERO_COPY_WRITE_ONLY;
-        } else if (strncmp(&arg[i], "rw", 2) == 0) {
+    if (args->argc >= 3) {
+        const char* mode = args->argv[2];
+        if (mode && strncmp(mode, "rw", 2) == 0) {
             flags = ZERO_COPY_READ_WRITE;
+        } else if (mode && strncmp(mode, "w", 1) == 0) {
+            flags = ZERO_COPY_WRITE_ONLY;
         }
     }
+
+    uint32 caps = CAP_READ_FS;
+    if (flags == ZERO_COPY_WRITE_ONLY) caps = CAP_WRITE_FS;
+    if (flags == ZERO_COPY_READ_WRITE) caps = CAP_READ_FS | CAP_WRITE_FS;
+    if (!zc_ctx_allow(caps, SCHED_COST_FS)) return;
     
     int fd = zero_copy_open(filename, flags);
     if (fd >= 0) {
@@ -79,22 +90,14 @@ void zopen_cmd(string arg) {
 }
 
 // Zero-copy close command
-void zclose_cmd(string arg) {
-    uint8 i = 0;
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
+void zclose_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 2) {
         printf("%cUsage: zclose <fd>\n", 255, 255, 255);
         printf("%cExample: zclose 0\n", 255, 255, 255);
         return;
     }
-    
-    int fd = 0;
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        fd = fd * 10 + (arg[i] - '0');
-        i++;
-    }
+
+    int fd = atoi(args->argv[1]);
     
     if (zero_copy_close(fd) == 0) {
         printf("%cZero-copy file closed: fd %d\n", 0, 255, 0, fd);
@@ -104,37 +107,17 @@ void zclose_cmd(string arg) {
 }
 
 // Zero-copy read command
-void zread_cmd(string arg) {
-    uint8 i = 0;
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
+void zread_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 3) {
         printf("%cUsage: zread <fd> <count>\n", 255, 255, 255);
         printf("%cExample: zread 0 100\n", 255, 255, 255);
         return;
     }
+
+    if (!zc_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     
-    // Parse file descriptor
-    int fd = 0;
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        fd = fd * 10 + (arg[i] - '0');
-        i++;
-    }
-    
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
-        printf("%cError: Missing count parameter\n", 255, 0, 0);
-        return;
-    }
-    
-    // Parse count
-    size_t count = 0;
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        count = count * 10 + (arg[i] - '0');
-        i++;
-    }
+    int fd = atoi(args->argv[1]);
+    size_t count = (size_t)atoi(args->argv[2]);
     
     // Allocate buffer and read
     char* buffer = (char*)malloc(count + 1);
@@ -156,39 +139,21 @@ void zread_cmd(string arg) {
 }
 
 // Zero-copy write command
-void zwrite_cmd(string arg) {
-    uint8 i = 0;
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
+void zwrite_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 3) {
         printf("%cUsage: zwrite <fd> <data>\n", 255, 255, 255);
         printf("%cExample: zwrite 0 Hello World\n", 255, 255, 255);
         return;
     }
+
+    if (!zc_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
     
-    // Parse file descriptor
-    int fd = 0;
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        fd = fd * 10 + (arg[i] - '0');
-        i++;
-    }
-    
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
+    int fd = atoi(args->argv[1]);
+    const char* data = shell_args_rest_raw(args, 2);
+    if (!data || !data[0]) {
         printf("%cError: Missing data parameter\n", 255, 0, 0);
         return;
     }
-    
-    // Get data to write
-    char data[256];
-    uint8 j = 0;
-    while (arg[i] && j < 255) {
-        data[j++] = arg[i++];
-    }
-    data[j] = '\0';
-    
     size_t bytes_written = zero_copy_write(fd, data, strlen(data));
     if (bytes_written > 0) {
         printf("%cWrote %d bytes to fd %d\n", 0, 255, 0, (int)bytes_written, fd);
@@ -198,53 +163,22 @@ void zwrite_cmd(string arg) {
 }
 
 // Zero-copy seek command
-void zseek_cmd(string arg) {
-    uint8 i = 0;
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
+void zseek_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 3) {
         printf("%cUsage: zseek <fd> <offset> [set|cur|end]\n", 255, 255, 255);
         printf("%cExample: zseek 0 100 set\n", 255, 255, 255);
         return;
     }
+
+    if (!zc_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
-    // Parse file descriptor
-    int fd = 0;
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        fd = fd * 10 + (arg[i] - '0');
-        i++;
-    }
-    
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
-        printf("%cError: Missing offset parameter\n", 255, 0, 0);
-        return;
-    }
-    
-    // Parse offset
-    int32_t offset = 0;
-    int negative = 0;
-    if (arg[i] == '-') {
-        negative = 1;
-        i++;
-    }
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        offset = offset * 10 + (arg[i] - '0');
-        i++;
-    }
-    if (negative) offset = -offset;
-    
-    // Parse whence
-    int whence = 0;  // Default to SEEK_SET
-    while (arg[i] && arg[i] == ' ') i++;
-    if (arg[i]) {
-        if (strncmp(&arg[i], "cur", 3) == 0) {
-            whence = 1;  // SEEK_CUR
-        } else if (strncmp(&arg[i], "end", 3) == 0) {
-            whence = 2;  // SEEK_END
-        }
+    int fd = atoi(args->argv[1]);
+    int32_t offset = (int32_t)atoi(args->argv[2]);
+    int whence = 0;
+    if (args->argc >= 4) {
+        const char* w = args->argv[3];
+        if (w && strcmp(w, "cur") == 0) whence = 1;
+        else if (w && strcmp(w, "end") == 0) whence = 2;
     }
     
     if (zero_copy_seek(fd, offset, whence) == 0) {
@@ -255,51 +189,18 @@ void zseek_cmd(string arg) {
 }
 
 // Zero-copy splice command
-void zsplice_cmd(string arg) {
-    uint8 i = 0;
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
+void zsplice_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 4) {
         printf("%cUsage: zsplice <fd_in> <fd_out> <count>\n", 255, 255, 255);
         printf("%cExample: zsplice 0 1 100\n", 255, 255, 255);
         return;
     }
+
+    if (!zc_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return;
     
-    // Parse input file descriptor
-    int fd_in = 0;
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        fd_in = fd_in * 10 + (arg[i] - '0');
-        i++;
-    }
-    
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
-        printf("%cError: Missing output fd parameter\n", 255, 0, 0);
-        return;
-    }
-    
-    // Parse output file descriptor
-    int fd_out = 0;
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        fd_out = fd_out * 10 + (arg[i] - '0');
-        i++;
-    }
-    
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
-        printf("%cError: Missing count parameter\n", 255, 0, 0);
-        return;
-    }
-    
-    // Parse count
-    size_t count = 0;
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        count = count * 10 + (arg[i] - '0');
-        i++;
-    }
+    int fd_in = atoi(args->argv[1]);
+    int fd_out = atoi(args->argv[2]);
+    size_t count = (size_t)atoi(args->argv[3]);
     
     int bytes_spliced = zero_copy_splice(fd_in, fd_out, count);
     if (bytes_spliced > 0) {
@@ -310,51 +211,18 @@ void zsplice_cmd(string arg) {
 }
 
 // Zero-copy tee command
-void ztee_cmd(string arg) {
-    uint8 i = 0;
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
+void ztee_cmd(const shell_args_t* args) {
+    if (!args || args->argc < 4) {
         printf("%cUsage: ztee <fd_in> <fd_out> <count>\n", 255, 255, 255);
         printf("%cExample: ztee 0 1 100\n", 255, 255, 255);
         return;
     }
+
+    if (!zc_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) return;
     
-    // Parse input file descriptor
-    int fd_in = 0;
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        fd_in = fd_in * 10 + (arg[i] - '0');
-        i++;
-    }
-    
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
-        printf("%cError: Missing output fd parameter\n", 255, 0, 0);
-        return;
-    }
-    
-    // Parse output file descriptor
-    int fd_out = 0;
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        fd_out = fd_out * 10 + (arg[i] - '0');
-        i++;
-    }
-    
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
-        printf("%cError: Missing count parameter\n", 255, 0, 0);
-        return;
-    }
-    
-    // Parse count
-    size_t count = 0;
-    while (arg[i] >= '0' && arg[i] <= '9') {
-        count = count * 10 + (arg[i] - '0');
-        i++;
-    }
+    int fd_in = atoi(args->argv[1]);
+    int fd_out = atoi(args->argv[2]);
+    size_t count = (size_t)atoi(args->argv[3]);
     
     int bytes_teed = zero_copy_tee(fd_in, fd_out, count);
     if (bytes_teed > 0) {
@@ -365,6 +233,7 @@ void ztee_cmd(string arg) {
 }
 
 // Zero-copy statistics command
-void zstats_cmd(string arg) {
+void zstats_cmd(const shell_args_t* args) {
+    (void)args;
     print_zero_copy_stats();
 } 

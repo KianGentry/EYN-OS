@@ -4,9 +4,23 @@
 #include <string.h>
 #include <system.h>
 #include <shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 #include <stdint.h>
+#include <context.h>
+#include <misc/sched.h>
 
-void history_cmd(string arg);
+static int history_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+void history_cmd(const shell_args_t* args);
 
 // Global command history instance
 command_history_t g_command_history = {0};
@@ -36,7 +50,8 @@ void add_to_history(command_history_t* history, const char* command) {
     // Add new command
     strcpy(history->commands[history->count], command);
     history->count++;
-    history->current = history->count; // Reset current position
+    // Set current to the index of the most-recently-added command
+    history->current = history->count - 1;
 }
 
 // Clear the history
@@ -47,7 +62,7 @@ void clear_history(command_history_t* history) {
         history->commands[i][0] = '\0';
     }
     history->count = 0;
-    history->current = 0;
+    history->current = -1;
 }
 
 // Show history (for debugging)
@@ -74,9 +89,20 @@ string readStr_with_history(command_history_t* history) {
     
     // Initialize buffer
     buffstr[0] = '\0';
+
+    if (!history_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) {
+        return (string)buffstr;
+    }
     
     while(reading) {
-        if(inportb(0x64) & 0x1) {
+        uint8 status = inportb(0x64);
+        if(status & 0x1) {
+            // If output buffer contains AUX (mouse) data, do NOT consume it here.
+            // Leaving it for the mouse driver avoids packet desync and cursor stalls.
+            if (status & 0x20) {
+                continue;
+            }
+
             uint8 scancode = inportb(0x60);
             
             // Handle modifier keys
@@ -266,6 +292,25 @@ string readStr_with_history(command_history_t* history) {
     buffstr[i] = '\0';
     // Return a pointer to the static buffer
     return (string)buffstr;
+}
+
+void history_cmd(const shell_args_t* args) {
+    if (!args) return;
+
+    if (args->argc < 2) {
+        show_history(&g_command_history);
+        return;
+    }
+
+    if (strcmp(args->argv[1], "clear") == 0) {
+        clear_history(&g_command_history);
+        printf("%cCommand history cleared.\n", 0, 255, 0);
+        return;
+    }
+
+    printf("%cUsage: history [clear]\n", 255, 255, 255);
+    printf("%c  history       - Show command history\n", 255, 255, 255);
+    printf("%c  history clear - Clear command history\n", 255, 255, 255);
 }
 
 REGISTER_SHELL_COMMAND(history, "history", history_cmd, CMD_STREAMING, "Show or clear command history.\nUsage: history [clear]\nExample: history | history clear", "history");

@@ -50,10 +50,10 @@ status          # Check which commands are loaded
 | `del` | Delete file | `del test.txt` |
 | `deldir` | Delete directory | `deldir old_dir` |
 | `makedir` | Create directory | `makedir new_dir` |
-| `read` | Smart file display | `read config.txt` |
+| `read` | Display text or markdown | `read config.txt` |
 | `read_raw` | Raw file display | `read_raw data.bin` |
 | `read_md` | Markdown display | `read_md doc.md` |
-| `read_image` | Image display | `read_image logo.rei` |
+| `view`/`vieww` | REI image viewer | `view logo.rei` / `vieww logo.rei` |
 | `write` | Edit file | `write document.txt` |
 | `copy` | Copy file | `copy source.txt dest.txt` |
 | `move` | Move file | `move file.txt /backup/` |
@@ -67,9 +67,11 @@ status          # Check which commands are loaded
 |---------|-------------|---------|
 | `drive` | Switch disk drive | `drive 1` |
 | `lsata` | List ATA drives | `lsata` |
-| `ver` | Show version | `ver` |
+| `pciscan` | PCI device scan | `pciscan net` |
+| `ver` | Show version (with REI logo if available) | `ver` |
 | `help` | Show help | `help` |
 | `history` | Show command history | `history` |
+| `alias` | Create command alias | `alias ll ls -la` |
 | `exit` | Exit EYN-OS | `exit` |
 
 ## Development Tools
@@ -77,7 +79,9 @@ status          # Check which commands are loaded
 | Command | Description | Example |
 |---------|-------------|---------|
 | `assemble` | Assemble code | `assemble test.asm test.eyn` |
-| `run` | Execute program | `run program.eyn` |
+| `run` | Execute program | `run program.eyn` or `run program.uelf` |
+| `ring3` | Test ring-3 stub | `ring3 yes` |
+| `chibicc` | C compiler | `chibicc hello.c -o hello.uelf` |
 | `calc` | Calculator | `calc 2+2` |
 | `hexdump` | Hex dump | `hexdump file.bin` |
 
@@ -88,6 +92,9 @@ status          # Check which commands are loaded
 | `game` | Launch game | `game snake` |
 | `write` | Text editor | `write file.txt` |
 | `draw` | Draw rectangle | `draw 10 20 100 50 255 0 0` |
+| `run` | Second Reality demo (WIP) | `run /testdir/demo.uelf` |
+
+Second Reality demo controls: `Q` quits, Space pauses, Left/Right arrows switch scenes.
 
 ## Utility Commands
 
@@ -99,9 +106,93 @@ status          # Check which commands are loaded
 | `search` | Universal search (filesystem/command/pipeline) | `search test.txt` |
 | `spam` | Spam EYN-OS | `spam` |
 
-## Pipeline and Redirection (In Development)
+## Networking Commands
 
-**Note**: These features are currently in development. Only basic functionality is available.
+| Command | Description | Example |
+|---------|-------------|---------|
+| `e1000` | E1000 NIC control | `e1000 init` |
+| `e1000probe` | Probe e1000 NIC | `e1000probe` |
+| `pciscan` | PCI device scan | `pciscan net` |
+| `ping` | ICMP echo request | `ping 10.0.2.2` |
+| `netstat` | Network status | `netstat` |
+| `netcfg` | Network configuration | `netcfg show` |
+
+### Network Examples
+```bash
+# Initialize network
+e1000 init
+
+# Show network config (defaults match QEMU user-net)
+netcfg show
+
+# Show whether a destination routes via gateway
+netcfg route 8.8.8.8
+
+# Persist network config to /config/net.cfg
+netcfg save
+
+# Validate configuration
+netcfg verify
+
+# Set and persist in one step
+netcfg set ip 10.0.2.15 --save
+
+# Ping the QEMU gateway/host
+ping 10.0.2.2
+
+# Listen for UDP packets on port 9999
+e1000 udp-listen 9999
+
+# Send UDP packet
+e1000 udp-send 10.0.2.2 5000 Hello from EYN-OS
+
+# Send TCP packet (connect, send, close)
+e1000 tcp-send 10.0.2.2 9999 Hello
+
+# Listen for TCP connection
+e1000 tcp-listen 9999
+
+# Receive TCP payload (non-blocking)
+e1000 tcp-recv
+
+# Send reply on current TCP connection
+e1000 tcp-sendcur Hello
+
+# Check UDP statistics
+e1000 udp-stats
+
+# Clear receive queue
+e1000 udp-drain
+```
+
+## UI & Tiling Manager Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `tile` | Tiling manager control | `tile focus 1` |
+| `theme` | Customize UI theme | `theme color fg 255 255 255` |
+| `setfont` | Change system font | `setfont /fonts/unscii-16.hex` |
+| `setbg` | Set background image | `setbg image.rei` |
+| `clearbg` | Clear background | `clearbg` |
+
+### Tiling Manager Examples
+```bash
+# Focus different tiles
+tile focus 1
+tile focus 2
+
+# Resize windows
+tile resize 400 300
+
+# Set custom theme colors
+theme color fg 255 255 255
+theme color bg 0 0 0
+theme color accent 0 150 255
+```
+
+## Pipeline and Redirection
+
+**Note**: Basic functionality is available.
 
 | Operator | Description | Example |
 |----------|-------------|---------|
@@ -134,11 +225,16 @@ write newfile.txt    # Create and edit file
 
 ### Reading Files
 ```bash
-read filename.txt    # Smart file display
+read filename.txt    # Display text or markdown
 read_raw data.bin   # Raw file display
 read_md doc.md      # Markdown with formatting
-read_image logo.rei # REI image display
+view logo.rei        # REI image (tile viewer)
+vieww logo.rei       # REI image (window viewer)
 ```
+
+![Reading text file.](image.png)
+
+![Viewer showing eynos.rei](image-1.png)
 
 ### Copying Files
 ```bash
@@ -161,23 +257,26 @@ deldir directory     # Delete directory
 ## Image Handling
 
 ### REI Image Format
-EYN-OS supports the custom REI (Raw EYN Image) format for pixel-perfect image display.
+EYN-OS supports the custom REI (Raw EYN Image) format and REIV (REI Video) for animations.
 
 ```bash
-read image.rei              # Display REI image
-read_image image.rei        # Direct image subcommand
+view image.rei              # Display REI image in a tile
+vieww image.rei             # Display REI image in a window
+view animation.reiv         # Play REIV video/animation
 ```
 
 ### Supported Formats
-- **REI** (`.rei`) - Native EYN-OS format with pixel-perfect rendering
-- **PNG** (`.png`) - Placeholder support (conversion recommended)
-- **JPEG** (`.jpg`, `.jpeg`) - Placeholder support (conversion recommended)
+- **REI** (`.rei`) - Native EYN-OS image format with pixel-perfect rendering
+- **REIV** (`.reiv`) - Native video/animation format (converted from MP4/GIF)
 
-### Converting Images
-Use the conversion tool to create REI files:
+### Converting Images & Videos
 ```bash
+# Convert PNG to REI
 python3 devtools/png_to_rei.py image.png -o image.rei
-python3 devtools/png_to_rei.py --test -o test.rei
+
+# Convert video to REIV
+python3 devtools/png_to_rei.py video.mp4 -o video.reiv
+python3 devtools/png_to_rei.py animation.gif -o animation.reiv
 ```
 
 ## Memory Management
@@ -199,11 +298,19 @@ portable optimize # Optimize for current system
 
 ### Setting Up Development
 ```bash
-makedir projects     # Create projects directory
-cd projects          # Navigate to projects
-write hello.asm      # Create assembly file
-assemble hello.asm hello.eyn  # Assemble code
-run hello.eyn        # Execute program
+makedir projects                  # Create projects directory
+cd projects                       # Navigate to projects
+write hello.c                     # Create C source file
+chibicc hello.c -o hello.uelf    # Compile to UELF
+run hello.uelf                    # Execute program
+
+# Or assembly:
+write hello.asm                   # Create assembly file
+assemble hello.asm hello.eyn     # Assemble code
+run hello.eyn                     # Execute program
+
+# Test ring-3 userspace
+ring3 yes                         # Run test stub
 ```
 
 ### File Management
@@ -299,10 +406,9 @@ status              # Check command loading status
 - **High Memory**: 0x00800000+ (if available)
 
 ### Memory Requirements
-- **Minimum**: 3MB RAM (with GRUB bootloader), 1MB RAM (with direct boot)
-- **Recommended**: 8MB+ RAM (for comfortable usage with all features)
-- **Optimal**: 16MB+ RAM (for full performance and multitasking)
-- **Note**: GRUB bootloader requires additional memory for its internal scripting system
+- **Minimum**: 9MB RAM (QEMU default configuration)
+- **Debug**: 64MB RAM (`make qemu-gdb` configuration)
+- **Note**: System uses streaming commands and fixed buffers to operate efficiently on minimal RAM
 
 ### Filesystem
 - **EYNFS**: Native filesystem
@@ -311,10 +417,13 @@ status              # Check command loading status
 - **Superblock**: LBA 2048
 
 ### Hardware Support
-- **VGA**: 80x25 text mode
-- **PS/2 Keyboard**: Full keyboard support
-- **ATA/IDE**: Hard disk access
-- **Serial**: Basic serial communication
+- **VGA**: 80x25 text mode with bitmap fonts (8x8, 8x16)
+- **PS/2 Keyboard**: Full keyboard support with history
+- **PS/2 Mouse**: Mouse support for GUI/tiling manager
+- **ATA/IDE**: Hard disk access with DMA
+- **Intel e1000**: Network interface card
+- **Serial**: Debug output and logging (COM1)
+- **PCI**: Device enumeration
 
 ## Advanced Features
 
@@ -336,7 +445,7 @@ status              # Check command loading status
 - **Dual-Pane Layout**: Interactive help system
 
 ### File Format Support
-- **Smart File Display**: `read` detects file type automatically
+- **File Display**: `read` shows text/markdown. Use `view`/`vieww` for images
 - **REI Images**: Native image format with pixel-perfect rendering
 - **Markdown**: Formatted text display with bold/italic support
 - **Raw Data**: Binary file display with hex dump support

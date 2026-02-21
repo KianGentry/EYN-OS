@@ -28,11 +28,15 @@ global start
 extern kmain ; kernel.c
 
 global Shutdown  ; Export Shutdown function
+global stack_space
+global stack_bottom
 
 start:
         cli ; clears interrupts 
 
         mov esp, stack_space
+        and esp, 0xFFFFFFF0
+        sub esp, 8
         push ebx
         push eax
 
@@ -41,7 +45,10 @@ start:
         hlt
 
 section .bss
-resb 8192
+; Kernel stack. This stack is also used as the ring0 stack (TSS.esp0) for
+; syscalls/interrupts while running ring3 tasks, so keep it reasonably sized.
+stack_bottom:
+resb 32768
 stack_space:
 
 Shutdown: ; actually a reboot but i dont dare rename it

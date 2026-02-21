@@ -4,16 +4,37 @@
 #include <string.h>
 #include <util.h>
 #include <vga.h>
+#include <fs/vfs.h>
 #include <system.h>
 #include <fs_commands.h>
 #include <stdint.h>
+#include <context.h>
+#include <misc/sched.h>
+#include <utilities/shell/shell_args.h>
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 extern uint8_t g_current_drive;
 
-// ============================================================================
+static int subcmd_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void subcmd_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
 // SEARCH SUB-COMMANDS
-// ============================================================================
 
 // Search criteria structure
 typedef struct {
@@ -26,7 +47,7 @@ typedef struct {
 } search_size_criteria_t;
 
 // Recursive size search function
-void search_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void search_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
     char* current_path, int depth, int max_depth, search_size_criteria_t* criteria) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -35,6 +56,7 @@ void search_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t d
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Check if file matches size criteria
@@ -69,38 +91,35 @@ void search_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t d
 
 // Main search_size command implementation
 void search_size_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 3) {
         printf("%cUsage: search_size <operator> <size>\n", 255, 255, 255);
         printf("%cOperators: >, <, =, >=, <=, gt, lt, eq, gte, lte\n", 255, 255, 255);
         printf("%cExample: search_size > 1000\n", 255, 255, 255);
         printf("%cExample: search_size <= 50\n", 255, 255, 255);
         return;
     }
-    
+
     // Parse operator
     char operator[8] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 7) {
-        operator[j++] = ch[i++];
-    }
-    operator[j] = '\0';
-    
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    strncpy(operator, args.argv[1], sizeof(operator) - 1);
+
+    // Parse size value
+    const char* size_str = args.argv[2];
+    if (!size_str || !size_str[0]) {
         printf("%cError: Missing size value\n", 255, 0, 0);
         return;
     }
-    
-    // Parse size value
+
     uint32_t size_value = 0;
-    while (ch[i] >= '0' && ch[i] <= '9') {
-        size_value = size_value * 10 + (ch[i] - '0');
-        i++;
+    const char* p = size_str;
+    if (*p < '0' || *p > '9') {
+        printf("%cError: Invalid size value\n", 255, 0, 0);
+        return;
+    }
+    while (*p >= '0' && *p <= '9') {
+        size_value = size_value * 10u + (uint32_t)(*p - '0');
+        p++;
     }
     
     // Set up search criteria
@@ -127,6 +146,8 @@ void search_size_cmd(string ch) {
     }
     
     printf("%cSearching for files %s %d bytes...\n", 255, 255, 255, operator, size_value);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -139,7 +160,7 @@ void search_size_cmd(string ch) {
 }
 
 // Recursive type search function
-void search_type_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void search_type_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                           char* current_path, int depth, int max_depth, const char* extension) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -148,6 +169,7 @@ void search_type_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t d
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Check if file has the specified extension
@@ -175,26 +197,21 @@ void search_type_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t d
 
 // Main search_type command implementation
 void search_type_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2) {
         printf("%cUsage: search_type <extension>\n", 255, 255, 255);
         printf("%cExample: search_type .txt\n", 255, 255, 255);
         printf("%cExample: search_type .game\n", 255, 255, 255);
         return;
     }
-    
+
     // Parse extension
     char extension[16] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 15) {
-        extension[j++] = ch[i++];
-    }
-    extension[j] = '\0';
+    strncpy(extension, args.argv[1], sizeof(extension) - 1);
     
     printf("%cSearching for files with extension '%s'...\n", 255, 255, 255, extension);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -207,7 +224,7 @@ void search_type_cmd(string ch) {
 }
 
 // Recursive empty search function
-void search_empty_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void search_empty_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                            char* current_path, int depth, int max_depth) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -216,6 +233,7 @@ void search_empty_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t 
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         if (entries[i].type == EYNFS_TYPE_FILE) {
@@ -259,6 +277,8 @@ void search_empty_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t 
 // Main search_empty command implementation
 void search_empty_cmd(string ch) {
     printf("%cSearching for empty files and directories...\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -271,7 +291,7 @@ void search_empty_cmd(string ch) {
 }
 
 // Recursive depth-limited search function
-void search_depth_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void search_depth_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                            char* current_path, int depth, int max_depth, const char* pattern) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -280,6 +300,7 @@ void search_depth_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t 
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Check if name matches pattern
@@ -303,45 +324,35 @@ void search_depth_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t 
 
 // Main search_depth command implementation
 void search_depth_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 3) {
         printf("%cUsage: search_depth <max_depth> <pattern>\n", 255, 255, 255);
         printf("%cExample: search_depth 2 hello\n", 255, 255, 255);
         printf("%cExample: search_depth 3 .txt\n", 255, 255, 255);
         return;
     }
-    
+
     // Parse max depth
-    int max_depth = 0;
-    while (ch[i] >= '0' && ch[i] <= '9') {
-        max_depth = max_depth * 10 + (ch[i] - '0');
-        i++;
-    }
+    int max_depth = str_to_int((string)args.argv[1]);
     
     if (max_depth <= 0 || max_depth > 10) {
         printf("%cError: Invalid depth (1-10)\n", 255, 0, 0);
         return;
     }
     
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    const char* pattern_arg = args.argv[2];
+    if (!pattern_arg || !pattern_arg[0]) {
         printf("%cError: Missing search pattern\n", 255, 0, 0);
         return;
     }
-    
+
     // Parse pattern
     char pattern[64] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 63) {
-        pattern[j++] = ch[i++];
-    }
-    pattern[j] = '\0';
+    strncpy(pattern, pattern_arg, sizeof(pattern) - 1);
     
     printf("%cSearching for '%s' within depth %d...\n", 255, 255, 255, pattern, max_depth);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -353,12 +364,10 @@ void search_depth_cmd(string ch) {
     search_depth_recursive(g_current_drive, &sb, sb.root_dir_block, "/", 0, max_depth, pattern);
 } 
 
-// ============================================================================
 // LS SUB-COMMANDS
-// ============================================================================
 
 // Tree view for ls
-void ls_tree_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void ls_tree_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                        char* current_path, int depth, int max_depth, int indent) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -367,6 +376,7 @@ void ls_tree_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_b
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Print indentation
@@ -400,23 +410,19 @@ void ls_tree_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_b
 
 // Main ls_tree command implementation
 void ls_tree_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
     int max_depth = 3; // Default depth
-    if (ch[i]) {
-        max_depth = 0;
-        while (ch[i] >= '0' && ch[i] <= '9') {
-            max_depth = max_depth * 10 + (ch[i] - '0');
-            i++;
-        }
+
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) == 0 && args.argc >= 2 && args.argv[1] && args.argv[1][0]) {
+        max_depth = str_to_int((string)args.argv[1]);
         if (max_depth <= 0) max_depth = 3;
         if (max_depth > 10) max_depth = 10; // Limit depth
     }
     
     printf("%cDirectory tree (max depth: %d):\n", 255, 255, 255, max_depth);
     printf("%c/\n", 120, 120, 255);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -429,7 +435,7 @@ void ls_tree_cmd(string ch) {
 }
 
 // Size-based ls with file sizes
-void ls_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void ls_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                        char* current_path, int depth, int max_depth) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -438,6 +444,7 @@ void ls_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_b
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Print indentation
@@ -475,22 +482,18 @@ void ls_size_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_b
 
 // Main ls_size command implementation
 void ls_size_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
     int max_depth = 1; // Default depth
-    if (ch[i]) {
-        max_depth = 0;
-        while (ch[i] >= '0' && ch[i] <= '9') {
-            max_depth = max_depth * 10 + (ch[i] - '0');
-            i++;
-        }
+
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) == 0 && args.argc >= 2 && args.argv[1] && args.argv[1][0]) {
+        max_depth = str_to_int((string)args.argv[1]);
         if (max_depth <= 0) max_depth = 1;
         if (max_depth > 5) max_depth = 5; // Limit depth
     }
     
     printf("%cDirectory listing with sizes (depth: %d):\n", 255, 255, 255, max_depth);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -503,7 +506,7 @@ void ls_size_cmd(string ch) {
 }
 
 // Detailed ls with more information
-void ls_detail_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
+static void ls_detail_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir_block, 
                          char* current_path, int depth, int max_depth) {
     
     eynfs_dir_entry_t entries[EYNFS_BLOCK_SIZE / sizeof(eynfs_dir_entry_t)];
@@ -512,6 +515,7 @@ void ls_detail_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir
     if (count < 0 || depth > max_depth) return;
     
     for (int i = 0; i < count; ++i) {
+        if ((i & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[i].name[0] == '\0') continue;
         
         // Print indentation
@@ -550,23 +554,19 @@ void ls_detail_recursive(uint8 drive, const eynfs_superblock_t* sb, uint32_t dir
 
 // Main ls_detail command implementation
 void ls_detail_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
     int max_depth = 1; // Default depth
-    if (ch[i]) {
-        max_depth = 0;
-        while (ch[i] >= '0' && ch[i] <= '9') {
-            max_depth = max_depth * 10 + (ch[i] - '0');
-            i++;
-        }
+
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) == 0 && args.argc >= 2 && args.argv[1] && args.argv[1][0]) {
+        max_depth = str_to_int((string)args.argv[1]);
         if (max_depth <= 0) max_depth = 1;
         if (max_depth > 3) max_depth = 3; // Limit depth for detail view
     }
     
     printf("%cDetailed directory listing (depth: %d):\n", 255, 255, 255, max_depth);
     printf("%cFormat: [TYPE] name (size, block)\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -578,13 +578,13 @@ void ls_detail_cmd(string ch) {
     ls_detail_recursive(g_current_drive, &sb, sb.root_dir_block, "/", 0, max_depth);
 }
 
-// ============================================================================
 // FILESYSTEM UTILITY SUB-COMMANDS
-// ============================================================================
 
 // Filesystem status command
 void fsstat_cmd(string ch) {
     printf("%c=== Filesystem Status ===\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -602,7 +602,8 @@ void fsstat_cmd(string ch) {
     
     // Calculate free blocks
     int free_blocks = 0;
-    for (int i = 0; i < sb.total_blocks; i++) {
+    for (uint32_t i = 0; i < sb.total_blocks; i++) {
+        if ((i & 0xFF) == 0) subcmd_ctx_account(SCHED_COST_FS);
         uint8_t bitmap_byte = 0;
         ata_read_sector(g_current_drive, EYNFS_SUPERBLOCK_LBA + 1 + (i / 8), &bitmap_byte);
         if (!(bitmap_byte & (1 << (i % 8)))) {
@@ -621,6 +622,8 @@ void fsstat_cmd(string ch) {
 // Cache statistics command
 void cache_stats_cmd(string ch) {
     printf("%c=== Cache Statistics ===\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Get cache statistics from EYNFS
     uint32_t cache_hits, cache_misses;
@@ -642,6 +645,8 @@ void cache_stats_cmd(string ch) {
 // Clear cache command
 void cache_clear_cmd(string ch) {
     printf("%cClearing all caches...\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
     
     eynfs_cache_clear();
     
@@ -651,6 +656,8 @@ void cache_clear_cmd(string ch) {
 // Reset cache statistics command
 void cache_reset_cmd(string ch) {
     printf("%cResetting cache statistics...\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return;
     
     eynfs_reset_cache_stats();
     
@@ -660,6 +667,8 @@ void cache_reset_cmd(string ch) {
 // Block usage visualization command
 void blockmap_cmd(string ch) {
     printf("%c=== Block Usage Map ===\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -673,7 +682,8 @@ void blockmap_cmd(string ch) {
     
     // Display block map in a grid format
     int blocks_per_line = 64;
-    for (int i = 0; i < sb.total_blocks; i++) {
+    for (uint32_t i = 0; i < sb.total_blocks; i++) {
+        if ((i & 0xFF) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (i % blocks_per_line == 0 && i > 0) {
             printf("\n%c", 255, 255, 255);
         }
@@ -701,6 +711,8 @@ void blockmap_cmd(string ch) {
 // Debug superblock command
 void debug_superblock_cmd(string ch) {
     printf("%c=== Superblock Debug Info ===\n", 255, 255, 255);
+
+    if (!subcmd_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
     
     // Get filesystem info
     eynfs_superblock_t sb;
@@ -723,6 +735,7 @@ void debug_superblock_cmd(string ch) {
     printf("%c", 255, 255, 255);
     
     for (int i = 0; i < 32; i++) {
+        if ((i & 0xF) == 0) subcmd_ctx_account(SCHED_COST_FS);
         uint8_t bitmap_byte = 0;
         ata_read_sector(g_current_drive, EYNFS_SUPERBLOCK_LBA + 1 + i, &bitmap_byte);
         printf("%02X ", bitmap_byte);
@@ -735,24 +748,19 @@ void debug_superblock_cmd(string ch) {
 
 // Debug directory structure command
 void debug_directory_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2) {
         printf("%cUsage: debug_directory <path>\n", 255, 255, 255);
         printf("%cExample: debug_directory /\n", 255, 255, 255);
         printf("%cExample: debug_directory /games\n", 255, 255, 255);
         return;
     }
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Parse path
     char path[128] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) {
-        path[j++] = ch[i++];
-    }
-    path[j] = '\0';
+    strncpy(path, args.argv[1], sizeof(path) - 1);
     
     printf("%c=== Directory Debug: %s ===\n", 255, 255, 255, path);
     
@@ -791,6 +799,7 @@ void debug_directory_cmd(string ch) {
     
     printf("%cDirectory entries (%d total):\n", 255, 255, 255, count);
     for (int k = 0; k < count; k++) {
+        if ((k & 0x3F) == 0) subcmd_ctx_account(SCHED_COST_FS);
         if (entries[k].name[0] == '\0') {
             printf("%c  [%d] <empty>\n", 120, 120, 255, k);
         } else {
@@ -801,35 +810,27 @@ void debug_directory_cmd(string ch) {
     }
 }
 
-// ============================================================================
 // READ SUB-COMMANDS
-// ============================================================================
 
 // read_raw command implementation - dynamic buffer system
 void read_raw_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2) {
         printf("%cUsage: read_raw <filename>\n", 255, 255, 255);
         printf("%cDisplay raw file contents.\n", 255, 255, 255);
         return;
     }
-    
-    // Parse filename
-    char arg[128] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) {
-        arg[j++] = ch[i++];
-    }
-    arg[j] = '\0';
+
+    const char* arg = args.argv[1];
     
     // Resolve path
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
-    // Try EYNFS first
+    // Always print raw content to the terminal, regardless of tiling/window state
+    // Try EYNFS first (direct display path)
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(g_current_drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t entry;
@@ -859,7 +860,7 @@ void read_raw_cmd(string ch) {
                         printf("\n"); // Add newline after content
                         
                         // If we couldn't read the entire file, show a message
-                        if (bytes_read < entry.size) {
+                        if ((uint32_t)bytes_read < entry.size) {
                             printf("%c[File truncated - showing first %d bytes of %d total]\n", 255, 165, 0, bytes_read, entry.size);
                         }
                     } else {
@@ -877,30 +878,32 @@ void read_raw_cmd(string ch) {
             printf("%cError: File not found.\n", 255, 0, 0);
         }
     } else {
-        // FAT32 fallback
+        // Try FAT32 via VFS
+        char* buffer = (char*)malloc(65536);
+        if (!buffer) { printf("%cError: Memory allocation failed.\n", 255, 0, 0); return; }
+        int bytes = vfs_read_file(g_current_drive, abspath, buffer, 65535);
+        if (bytes > 0) {
+            buffer[bytes] = '\0';
+            printf("%s", buffer);
+            printf("\n");
+            free(buffer);
+            return;
+        }
+        free(buffer);
         printf("%cError: No supported filesystem found.\n", 255, 0, 0);
     }
 }
 
 // read_md command implementation - markdown rendering
 void read_md_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2) {
         printf("%cUsage: read_md <filename>\n", 255, 255, 255);
         printf("%cDisplay markdown files with formatting.\n", 255, 255, 255);
         return;
     }
-    
-    // Parse filename
-    char arg[128] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) {
-        arg[j++] = ch[i++];
-    }
-    arg[j] = '\0';
+
+    const char* arg = args.argv[1];
     
     // Check file extension
     int name_len = strlen(arg);
@@ -914,6 +917,8 @@ void read_md_cmd(string ch) {
     // Resolve path
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
     // Try EYNFS first
     eynfs_superblock_t sb;
@@ -948,7 +953,7 @@ void read_md_cmd(string ch) {
                         printf("\n"); // Add newline after rendering
                         
                         // If we couldn't read the entire file, show a message
-                        if (bytes_read < entry.size) {
+                        if ((uint32_t)bytes_read < entry.size) {
                             printf("%c[File truncated - showing first %d bytes of %d total]\n", 255, 165, 0, bytes_read, entry.size);
                         }
                     } else {
@@ -973,23 +978,14 @@ void read_md_cmd(string ch) {
 
 // read_image command implementation - REI image rendering
 void read_image_cmd(string ch) {
-    uint8 i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] && ch[i] == ' ') i++;
-    
-    if (!ch[i]) {
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 2) {
         printf("%cUsage: read_image <filename>\n", 255, 255, 255);
         printf("%cDisplay image files (.rei format).\n", 255, 255, 255);
         return;
     }
-    
-    // Parse filename
-    char arg[128] = {0};
-    uint8 j = 0;
-    while (ch[i] && ch[i] != ' ' && j < 127) {
-        arg[j++] = ch[i++];
-    }
-    arg[j] = '\0';
+
+    const char* arg = args.argv[1];
     
     // Check file extension
     int name_len = strlen(arg);
@@ -1003,62 +999,35 @@ void read_image_cmd(string ch) {
     // Resolve path
     char abspath[128];
     resolve_path(arg, shell_current_path, abspath, sizeof(abspath));
+
+    if (!subcmd_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return;
     
-    // Try EYNFS first
-    eynfs_superblock_t sb;
-    if (eynfs_read_superblock(g_current_drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
-        eynfs_dir_entry_t entry;
-        uint32_t parent_block, entry_idx;
-        if (eynfs_traverse_path(g_current_drive, &sb, abspath, &entry, &parent_block, &entry_idx) == 0) {
-            if (entry.type == EYNFS_TYPE_FILE) {
-                // Dynamic buffer sizing based on file size
-                uint32_t buffer_size;
-                if (entry.size <= 16384) { // 16KB or smaller
-                    buffer_size = entry.size;
-                } else if (entry.size <= 65536) { // 64KB or smaller
-                    buffer_size = entry.size;
-                } else {
-                    // For very large files, limit to 64KB
-                    buffer_size = 65536; // 64KB limit for images
-                }
-                
-                uint8_t* buffer = (uint8_t*)malloc(buffer_size);
-                if (buffer) {
-                    // Read the file (up to buffer size)
-                    int bytes_to_read = (entry.size < buffer_size) ? entry.size : buffer_size;
-                    int bytes_read = eynfs_read_file(g_current_drive, &sb, &entry, buffer, bytes_to_read, 0);
-                    
-                    if (bytes_read > 0) {
-                        // Parse and display the REI image
-                        rei_image_t rei_image;
-                        if (rei_parse_image(buffer, bytes_read, &rei_image) == 0) {
-                            printf("%cDisplaying REI image: %dx%d pixels\n", 0, 255, 0, rei_image.header.width, rei_image.header.height);
-                            rei_display_image_centered(&rei_image);
-                            rei_free_image(&rei_image);
-                        } else {
-                            printf("%cError: Invalid REI file format.\n", 255, 0, 0);
-                        }
-                        
-                        // If we couldn't read the entire file, show a message
-                        if (bytes_read < entry.size) {
-                            printf("%c[File truncated - showing first %d bytes of %d total]\n", 255, 165, 0, bytes_read, entry.size);
-                        }
-                    } else {
-                        printf("%cError: Failed to read image file.\n", 255, 0, 0);
-                    }
-                    
-                    free(buffer);
-                } else {
-                    printf("%cError: Memory allocation failed for buffer (%d bytes).\n", 255, 0, 0, buffer_size);
-                }
-            } else {
-                printf("%cError: Path is not a file.\n", 255, 0, 0);
-            }
-        } else {
-            printf("%cError: File not found.\n", 255, 0, 0);
+    // Use VFS so images load from either filesystem
+    vfs_stat_t st;
+    if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) {
+        printf("%cError: File not found.\n", 255, 0, 0);
+        return;
+    }
+    // Limit read to a reasonable maximum (64KB) to keep viewer responsive
+    uint32_t buffer_size = st.size <= 65536 ? st.size : 65536;
+    uint8_t* buffer = (uint8_t*)malloc(buffer_size);
+    if (!buffer) { printf("%cError: Memory allocation failed for buffer (%d bytes).\n", 255, 0, 0, buffer_size); return; }
+    int bytes_read = vfs_read_file(g_current_drive, abspath, (char*)buffer, (int)buffer_size);
+    if (bytes_read <= 0) {
+        printf("%cError: Failed to read image file.\n", 255, 0, 0);
+        free(buffer);
+        return;
+    }
+    rei_image_t rei_image;
+    if (rei_parse_image(buffer, bytes_read, &rei_image) == 0) {
+        printf("Displaying REI image: %dx%d pixels\n", rei_image.header.width, rei_image.header.height);
+        rei_display_image_centered(&rei_image);
+        rei_free_image(&rei_image);
+        if ((uint32)bytes_read < st.size) {
+            printf("[File truncated - showing first %d bytes of %d total]\n", bytes_read, st.size);
         }
     } else {
-        // FAT32 fallback
-        printf("%cError: No supported filesystem found.\n", 255, 0, 0);
+        printf("Error: Invalid REI file format.\n");
     }
+    free(buffer);
 } 

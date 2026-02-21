@@ -1,13 +1,64 @@
 #include <string.h>
 #include <types.h>
+#include <serial.h>
 #include <vga.h>
 
 // Standard C library string functions
 size_t strlen(const char *s) {
     if (!s) return 0;
-    size_t len = 0;
-    while (s[len]) len++;
-    return len;
+
+    // Guard against obvious bad pointers (e.g. COM1 port 0x3F8 mistakenly passed
+    // as a string pointer via varargs or memory corruption). This avoids taking
+    // a page fault inside strlen and helps identify the caller.
+    if ((uint32)s < 0x1000) {
+        static int g_strlen_reporting = 0;
+        if (!g_strlen_reporting) {
+            g_strlen_reporting = 1;
+
+            const char *prefix = "[strlen] bad ptr=0x";
+            for (const char *p = prefix; *p; ++p) (void)serial_write_char(SERIAL_COM1, *p);
+
+            uint32 ptrv = (uint32)s;
+            for (int i = 7; i >= 0; --i) {
+                uint8 nib = (ptrv >> (i * 4)) & 0xF;
+                char ch = (nib < 10) ? (char)('0' + nib) : (char)('A' + (nib - 10));
+                (void)serial_write_char(SERIAL_COM1, ch);
+            }
+
+            const char *mid = " ra=0x";
+            for (const char *p = mid; *p; ++p) (void)serial_write_char(SERIAL_COM1, *p);
+
+            uint32 rav = (uint32)__builtin_return_address(0);
+            for (int i = 7; i >= 0; --i) {
+                uint8 nib = (rav >> (i * 4)) & 0xF;
+                char ch = (nib < 10) ? (char)('0' + nib) : (char)('A' + (nib - 10));
+                (void)serial_write_char(SERIAL_COM1, ch);
+            }
+
+            (void)serial_write_char(SERIAL_COM1, '\n');
+
+            g_strlen_reporting = 0;
+        }
+        return 0;
+    }
+
+        // Bound scanning to avoid hard hangs if a corrupted pointer references memory
+        // without a terminating NUL in reasonable range.
+        const uint32 kMaxScan = 16384;
+        const char *p = s;
+        for (uint32 i = 0; i < kMaxScan; ++i) {
+            if (*p == '\0') return (size_t)(p - s);
+            ++p;
+        }
+
+        // If we hit the limit, emit a breadcrumb and return the capped length.
+        {
+            uint32 ra = (uint32)__builtin_return_address(0);
+            char buf[96];
+            int n = snprintf(buf, sizeof(buf), "[strlen] no-nul ptr=0x%08X ra=0x%08X\n", (uint32)s, ra);
+            for (int i = 0; i < n; ++i) serial_write_char(SERIAL_COM1, buf[i]);
+        }
+        return (size_t)kMaxScan;
 }
 
 char *strcpy(char *dest, const char *src) {
@@ -238,7 +289,7 @@ uint16 strlength(string ch) {
 static int input_validation_errors = 0;
 
 // Validate string bounds and content
-int validate_string(const char* str, int max_length) {
+static int validate_string(const char* str, int max_length) {
     if (!str) return 0;
     
     // Check for null bytes and excessive length
@@ -298,55 +349,6 @@ int parse_redirection(const char* input, char* cmd, char* filename) {
     return 1;
 }
 
-// Copies the argument after 'echo' to outbuf
-void echo_to_buf(string ch, char* outbuf, int outbufsize) {
-    int i = 0;
-    while (ch[i] && ch[i] != ' ') i++;
-    while (ch[i] == ' ') i++;
-    int j = 0;
-    while (ch[i] && j < outbufsize - 1) outbuf[j++] = ch[i++];
-    outbuf[j] = '\0';
-}
-
-// Evaluates a simple integer expression after 'calc' and writes result to outbuf
-void calc_to_buf(string str, char* outbuf, int outbufsize) {
-    int i = 0;
-    while (str[i] && str[i] != ' ') i++;
-    while (str[i] == ' ') i++;
-    // Only support: calc <int> <op> <int>
-    int a = 0, b = 0;
-    char op = 0;
-    int sign = 1;
-    if (str[i] == '-') { sign = -1; i++; }
-    while (str[i] >= '0' && str[i] <= '9') { a = a * 10 + (str[i++] - '0'); }
-    a *= sign;
-    while (str[i] == ' ') i++;
-    op = str[i++];
-    while (str[i] == ' ') i++;
-    sign = 1;
-    if (str[i] == '-') { sign = -1; i++; }
-    while (str[i] >= '0' && str[i] <= '9') { b = b * 10 + (str[i++] - '0'); }
-    b *= sign;
-    int res = 0;
-    switch (op) {
-        case '+': res = a + b; break;
-        case '-': res = a - b; break;
-        case '*': res = a * b; break;
-        case '/': res = (b != 0) ? a / b : 0; break;
-        default: {
-            const char* msg = "Invalid op";
-            int j = 0;
-            while (msg[j] && j < outbufsize - 1) { outbuf[j] = msg[j]; j++; }
-            outbuf[j] = '\0';
-            return;
-        }
-    }
-    string tmp = int_to_string(res);
-    int j = 0;
-    while (tmp[j] && j < outbufsize - 1) { outbuf[j] = tmp[j]; j++; }
-    outbuf[j] = '\0';
-}
-
 // Helper functions for strtok_r
 size_t strspn(const char *s, const char *accept) {
     const char *p;
@@ -371,89 +373,13 @@ char *strpbrk(const char *s, const char *accept) {
     return NULL;
 }
 
-uint8 cmdLength(string ch) {
-        if (!ch) return 0;
-        
-        uint8 i = 0;
-        uint8 size = 0;
-        uint8 realSize = strlen(ch);
-        uint8 hasSpace = 0;
-
-        // If the string is empty, return 0
-        if (realSize == 0) return 0;
-
-        // If there's no space, return the full length
-        for (i = 0; i < realSize; i++) {
-            if (ch[i] == ' ') {
-                hasSpace = 1;
-                break;
-            }
-            size++;
-        }
-        
-        // Use hasSpace to determine return value
-        return hasSpace ? size : realSize;
-}
-
-uint8 isStringEmpty(string ch1) {
-        if (ch1[0] == '1') {return 0;}
-        else if (ch1[0] == '2') {return 0;}
-        else if (ch1[0] == '3') {return 0;}
-        else if (ch1[0] == '4') {return 0;}
-        else if (ch1[0] == '5') {return 0;}
-        else if (ch1[0] == '6') {return 0;}
-        else if (ch1[0] == '7') {return 0;}
-        else if (ch1[0] == '8') {return 0;}
-        else if (ch1[0] == '9') {return 0;}
-        else if (ch1[0] == '0') {return 0;}
-        else if (ch1[0] == '-') {return 0;}
-        else if (ch1[0] == '=') {return 0;}
-        else if (ch1[0] == 'q') {return 0;}
-        else if (ch1[0] == 'w') {return 0;}
-        else if (ch1[0] == 'e') {return 0;}
-        else if (ch1[0] == 'r') {return 0;}
-        else if (ch1[0] == 't') {return 0;}
-        else if (ch1[0] == 'y') {return 0;}
-        else if (ch1[0] == 'u') {return 0;}
-        else if (ch1[0] == 'i') {return 0;}
-        else if (ch1[0] == 'o') {return 0;}
-        else if (ch1[0] == 'p') {return 0;}
-        else if (ch1[0] == '[') {return 0;}
-        else if (ch1[0] == ']') {return 0;}
-        else if (ch1[0] == '\\') {return 0;}
-        else if (ch1[0] == 'a') {return 0;}
-        else if (ch1[0] == 's') {return 0;}
-        else if (ch1[0] == 'd') {return 0;}
-        else if (ch1[0] == 'f') {return 0;}
-        else if (ch1[0] == 'g') {return 0;}
-        else if (ch1[0] == 'h') {return 0;}
-        else if (ch1[0] == 'j') {return 0;}
-        else if (ch1[0] == 'k') {return 0;}
-        else if (ch1[0] == 'l') {return 0;}
-        else if (ch1[0] == ';') {return 0;}
-        else if (ch1[0] == '\'') {return 0;}
-        else if (ch1[0] == 'z') {return 0;}
-        else if (ch1[0] == 'x') {return 0;}
-        else if (ch1[0] == 'c') {return 0;}
-        else if (ch1[0] == 'v') {return 0;}
-        else if (ch1[0] == 'b') {return 0;}
-        else if (ch1[0] == 'n') {return 0;}
-        else if (ch1[0] == 'm') {return 0;}
-        else if (ch1[0] == ',') {return 0;}
-        else if (ch1[0] == '.') {return 0;}
-        else if (ch1[0] == '/') {return 0;}
-        else {
-                return 1;
-        }
-}
-
 // Additional utility functions for EYN-OS
-uint8 strEql(string ch1, string ch2) {
+uint8 strEql(const char* ch1, const char* ch2) {
     if (!ch1 || !ch2) return 0;
     return strcmp(ch1, ch2) == 0;
 }
 
-uint8 cmdEql(string ch1, string ch2) {
+uint8 cmdEql(const char* ch1, const char* ch2) {
     if (!ch1 || !ch2) return 0;
     return strcmp(ch1, ch2) == 0;
 }
@@ -473,4 +399,17 @@ uint32 str_to_uint(const char* s) {
 int atoi(const char* s) {
     if (!s) return 0;
     return str_to_int(s);
+}
+
+// Simple freestanding implementation of case-insensitive strcmp for small paths
+int strcasecmp(const char* astr, const char* bstr) {
+    while (*astr && *bstr) {
+        char ca = *astr;
+        char cb = *bstr;
+        if (ca >= 'A' && ca <= 'Z') ca = ca - 'A' + 'a';
+        if (cb >= 'A' && cb <= 'Z') cb = cb - 'A' + 'a';
+        if (ca != cb) return (int)((unsigned char)ca) - (int)((unsigned char)cb);
+        astr++; bstr++;
+    }
+    return (int)((unsigned char)*astr) - (int)((unsigned char)*bstr);
 }

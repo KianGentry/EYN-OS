@@ -65,28 +65,39 @@ char* strtok(char* str, const char* delim);
 ## Hardware Driver Headers
 
 ### `vga.h`
-VGA text mode display functions.
+Framebuffer drawing, text rendering, and bitmap font management.
 
-#### Display Functions
+#### Drawing and text
 ```c
-void clearScreen();
-void setCursorPosition(int x, int y);
-void setTextColor(uint8_t color);
-void putchar(char c);
-void printf(const char* format, ...);
-int snprintf(char* str, size_t size, const char* format, ...);
+void drawRect(int x, int y, int w, int h, int r, int g, int b);
+void drawTextAt(int x, int y, const char* text, int r, int g, int b);
+void drawCharAt(int x, int y, int charnum, int r, int g, int b);
+void drawCharAt_font(int font_handle, int x, int y, int charnum, int r, int g, int b);
+void clearScreen(void);
 ```
 
-#### Color Constants
+#### Font acquisition and lifetime
+Fonts are loaded from `.hex` files via the VFS and stored as a 256-glyph bitmap table in RAM.
+
 ```c
-#define VGA_BLACK 0
-#define VGA_WHITE 15
-#define VGA_RED 4
-#define VGA_GREEN 2
-#define VGA_BLUE 1
-#define VGA_MAGENTA 5
-#define VGA_CYAN 3
-#define VGA_YELLOW 14
+int vga_font_acquire_hex(uint8 drive, const char* path);
+void vga_font_release(int font_handle);
+
+int vga_system_font_acquire(void);
+int vga_system_font_set(uint8 drive, const char* path);
+```
+
+Notes:
+- `vga_system_font_set()` accepts `path = "builtin"` (or NULL/empty) to revert to the built-in fallback font.
+- The text pipeline currently treats the character value as a **glyph index 0–255**.
+
+#### Font metrics
+Use these helpers for layout; the active system font can be 8×8 or 8×16.
+
+```c
+int vga_text_cell_w(void);
+int vga_text_cell_h(void);
+int vga_font_glyph_h(int font_handle);
 ```
 
 ### `kb.h`
@@ -498,6 +509,41 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags);
 
 ### `isr.h`
 Interrupt Service Routines.
+
+## Diagnostics and Reliability Headers
+
+### `panic.h`
+Panic and assertion diagnostics with a graphical report and serial backtrace.
+
+#### Functions
+```c
+void panic(const char* msg, const char* file, int line);
+void panicf(const char* file, int line, const char* fmt, ...);
+void assert_fail(const char* expr, const char* file, int line);
+void backtrace(void);
+int  panic_is_in_progress(void);
+```
+
+#### Macros
+```c
+#define PANIC(msg) panic((msg), __FILE__, __LINE__)
+#define PANICF(fmt, ...) panicf(__FILE__, __LINE__, (fmt), __VA_ARGS__)
+#define ASSERT(x) do { if (!(x)) assert_fail(#x, __FILE__, __LINE__); } while (0)
+```
+
+### `watchdog.h`
+System watchdog to detect stalls and trigger a panic with last progress source.
+
+#### Functions
+```c
+void watchdog_init(uint32 timeout_ticks);
+void watchdog_kick(const char* source);
+void watchdog_on_tick(void);
+void watchdog_set_timeout(uint32 timeout_ticks);
+uint32 watchdog_get_timeout(void);
+uint32 watchdog_get_ticks_since_kick(void);
+const char* watchdog_get_last_source(void);
+```
 
 #### ISR Functions
 ```c

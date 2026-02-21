@@ -3,14 +3,46 @@
 BITS 32
 
 extern irq_dispatch_c
+extern g_abort_to_shell
+extern stack_space
+extern stack_bottom
+extern ui_return_from_user_task
 
 %macro IRQ_STUB 1
 global irq%1
 irq%1:
     pushad
+
+    ; Stack overflow tripwire: if the kernel stack underflowed, bail out
+    ; to the shell immediately on a known-good stack.
+    cmp esp, stack_bottom
+    jae .stack_ok_%1
+    mov dword [g_abort_to_shell], 1
+    jmp .do_abort_%1
+.stack_ok_%1:
+
     push dword %1
     call irq_dispatch_c
     add esp, 4
+
+    ; If requested, abandon return-to-user and jump back into the shell.
+    cmp dword [g_abort_to_shell], 0
+    je .no_abort_%1
+.do_abort_%1:
+    mov dword [g_abort_to_shell], 0
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, stack_space
+    sti
+    call ui_return_from_user_task
+.halt_%1:
+    hlt
+    jmp .halt_%1
+.no_abort_%1:
     popad
     iretd
 %endmacro

@@ -1,6 +1,13 @@
-#include <irq.h>
+#include <cpu/irq.h>
 #include <idt.h>
 #include <system.h>
+#include <util.h>
+#include <vga.h>
+#include <tile_manager.h>
+#include <watchdog.h>
+#include <misc/sched.h>
+
+extern void poll_keyboard_for_ctrl_c();
 
 // PIC ports
 #define PIC1            0x20
@@ -95,9 +102,9 @@ void irq_init(void) {
     mask1 &= ~(1 << 0);
     outportb(PIC1_DATA, mask1);
 
-    pit_init(100); // 100 Hz ticks
+    pit_init(50); // 50 Hz ticks (reduced to lower system interrupt overhead)
     extern void sched_set_tick_hz(uint32);
-    sched_set_tick_hz(100);
+    sched_set_tick_hz(50);
 }
 
 void register_interrupt_handler(int irq, irq_handler_t handler) {
@@ -112,16 +119,79 @@ void pic_send_eoi(int irq) {
     outportb(PIC1_COMMAND, PIC_EOI);
 }
 
-// common C-level IRQ dispatcher called from assembly stubs
-void irq_dispatch_c(int irq_number) {
+static void irq_dispatch_core(int irq_number, int send_eoi) {
     if (irq_number < 0 || irq_number >= 16) {
         return;
     }
+
+    if (irq_number == 0 && g_user_task_active) {
+        // Ring3 tasks can run for long periods without calling into the kernel.
+        // While they run, IRQ0 still pumps input/render; count that as forward
+        // progress so the watchdog doesn't fire.
+        watchdog_kick("user-task");
+        // While a ring3 task runs, the main tiler loop is blocked. We do a tiny
+        // input+render pump here. Critical: do not consume scancodes from two
+        // different readers (it corrupts input and can make UI appear frozen).
+        if (tile_is_tiling_active()) {
+            int any_key = 0;
+            for (int i = 0; i < 4; ++i) {
+                if (!tile_pump_input_once()) break;
+                any_key = 1;
+            }
+            if (any_key) g_user_task_ui_dirty = 1;
+        } else {
+            // Non-tiling mode: we don't have the TUI key pump, so use the minimal poll.
+            poll_keyboard_for_ctrl_c();
+        }
+
+        if (g_user_interrupt) {
+            g_user_interrupt = 0;
+            g_user_task_active = 0;
+            g_user_task_term = -1;
+            g_user_task_ui_dirty = 0;
+            g_abort_to_shell = 1;
+            printf("^C\n");
+            if (send_eoi) {
+                pic_send_eoi(irq_number);
+            }
+            return;
+        }
+
+        // Throttle renders (PIT is 50Hz). Only render when something changed.
+        if (tile_is_tiling_active()) {
+            static uint32 ui_div = 0;
+            if (++ui_div >= 3) { // ~16 FPS max while user task active
+                ui_div = 0;
+                if (g_user_task_ui_dirty) {
+                    g_user_task_ui_dirty = 0;
+                    tile_render_once();
+                }
+            }
+        }
+    }
+
     irq_handler_t h = g_irq_handlers[irq_number];
     if (h) {
         h();
     }
-    pic_send_eoi(irq_number);
+    if (send_eoi) {
+        pic_send_eoi(irq_number);
+    }
+}
+
+// common C-level IRQ dispatcher called from assembly stubs
+void irq_dispatch_c(int irq_number) {
+    if (sched_det_is_enabled()) {
+        if (sched_det_queue_irq(irq_number) == 0) {
+            pic_send_eoi(irq_number);
+            return;
+        }
+    }
+    irq_dispatch_core(irq_number, 1);
+}
+
+void irq_dispatch_deferred(int irq_number) {
+    irq_dispatch_core(irq_number, 0);
 }
 
 

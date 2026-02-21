@@ -2,12 +2,16 @@
 #include <shell.h>
 #include <shell_commands.h>
 #include <shell_command_info.h>
+#include <utilities/shell/shell_args.h>
 #include <fs_commands.h>
 #include <util.h>
 #include <vga.h>
 #include <string.h>
 #include <eynfs.h>
 #include <types.h>
+#include <utilities/shell/alias.h>
+#include <context.h>
+#include <misc/sched.h>
 
 // Global variables
 file_descriptor_t g_file_descriptors[MAX_FDS];
@@ -15,6 +19,25 @@ background_process_t g_background_processes[MAX_BACKGROUND_PROCESSES];
 int g_next_fd = 3;  // Start after stdin, stdout, stderr
 int g_next_bg_pid = 1;
 char* g_pipeline_input_data = NULL;  // Pipeline input data for filter commands
+
+static int pipeline_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void pipeline_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 // Initialize pipeline system
 void init_pipeline_system(void) {
@@ -85,6 +108,8 @@ int count_pipeline_commands(const char* input) {
 // Trim whitespace from string
 char* trim_whitespace(char* str) {
     if (!str) return NULL;
+
+    if (!*str) return str;
     
     // Trim leading whitespace
     while (*str && is_whitespace(*str)) str++;
@@ -97,6 +122,22 @@ char* trim_whitespace(char* str) {
     }
     
     return str;
+}
+
+static void trim_whitespace_inplace(char* str) {
+    if (!str) return;
+
+    char* start = str;
+    while (*start && is_whitespace(*start)) start++;
+
+    char* end = start + strlen(start);
+    while (end > start && is_whitespace(end[-1])) end--;
+
+    size_t len = (size_t)(end - start);
+    if (start != str) {
+        memmove(str, start, len);
+    }
+    str[len] = '\0';
 }
 
 // Check if character is whitespace
@@ -144,8 +185,10 @@ char* simple_strtok(char* str, const char* delims) {
 // Split command string into arguments
 char** split_command(const char* cmd_str, int* argc) {
     if (!cmd_str || !argc) return NULL;
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
     
     char* cmd_copy = malloc(strlen(cmd_str) + 1);
+    if (!cmd_copy) return NULL;
     strcpy(cmd_copy, cmd_str);
     
     // Count arguments
@@ -163,6 +206,10 @@ char** split_command(const char* cmd_str, int* argc) {
     
     // Allocate argument array
     char** args = malloc((*argc + 1) * sizeof(char*));
+    if (!args) {
+        free(cmd_copy);
+        return NULL;
+    }
     
     // Reset string and fill arguments
     strcpy(cmd_copy, cmd_str);
@@ -170,6 +217,11 @@ char** split_command(const char* cmd_str, int* argc) {
     int i = 0;
     while (token && i < *argc) {
         args[i] = malloc(strlen(token) + 1);
+        if (!args[i]) {
+            free_args(args, i);
+            free(cmd_copy);
+            return NULL;
+        }
         strcpy(args[i], token);
         i++;
         token = simple_strtok(NULL, " \t\n\r");
@@ -195,19 +247,24 @@ void free_args(char** args, int argc) {
 // Parse redirections from command string
 char* parse_redirections(const char* cmd_str, command_t* cmd) {
     if (!cmd_str || !cmd) return NULL;
-    
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
+
     char* result = malloc(strlen(cmd_str) + 1);
+    if (!result) return NULL;
     strcpy(result, cmd_str);
-    
+
     // Initialize file descriptors array
     cmd->fd_count = 0;
     cmd->fds = malloc(4 * sizeof(file_descriptor_t)); // Support up to 4 redirections
+    if (cmd->fds) {
+        memset(cmd->fds, 0, 4 * sizeof(file_descriptor_t));
+    }
     
     // Look for input redirection <
     char* input_redir = strstr(result, " < ");
     if (!input_redir) input_redir = strstr(result, "<");
     
-    if (input_redir) {
+    if (input_redir && cmd->fds && cmd->fd_count < 4) {
         // Find the filename after <
         char* filename_start = input_redir + 1;
         while (*filename_start == ' ' || *filename_start == '\t') filename_start++;
@@ -222,21 +279,40 @@ char* parse_redirections(const char* cmd_str, command_t* cmd) {
         // Extract filename
         int filename_len = filename_end - filename_start;
         if (filename_len > 0) {
-            cmd->fds[cmd->fd_count].filename = malloc(filename_len + 1);
-            strncpy(cmd->fds[cmd->fd_count].filename, filename_start, filename_len);
-            cmd->fds[cmd->fd_count].filename[filename_len] = '\0';
-            cmd->fds[cmd->fd_count].type = REDIR_INPUT;
-            cmd->fds[cmd->fd_count].fd = 0; // stdin
-            cmd->fds[cmd->fd_count].is_open = 0;
-            cmd->fd_count++;
-            
-            // Remove redirection from command string
-            *input_redir = '\0';
-            char* new_result = malloc(strlen(result) + 1);
-            strcpy(new_result, result);
-            strcat(new_result, trim_whitespace(filename_end));
-            free(result);
-            result = new_result;
+            char* filename = malloc(filename_len + 1);
+            if (filename) {
+                strncpy(filename, filename_start, filename_len);
+                filename[filename_len] = '\0';
+
+                const char* remainder = filename_end;
+                while (*remainder && is_whitespace(*remainder)) remainder++;
+
+                size_t prefix_len = (size_t)(input_redir - result);
+                size_t remainder_len = strlen(remainder);
+                size_t new_cap = prefix_len + remainder_len + 2; // optional space + NUL
+                char* new_result = malloc(new_cap);
+                if (new_result) {
+                    memcpy(new_result, result, prefix_len);
+                    new_result[prefix_len] = '\0';
+                    if (remainder_len > 0) {
+                        size_t cur_len = strlen(new_result);
+                        if (cur_len > 0 && !is_whitespace(new_result[cur_len - 1])) {
+                            strcat(new_result, " ");
+                        }
+                        strcat(new_result, remainder);
+                    }
+                    free(result);
+                    result = new_result;
+
+                    cmd->fds[cmd->fd_count].filename = filename;
+                    cmd->fds[cmd->fd_count].type = REDIR_INPUT;
+                    cmd->fds[cmd->fd_count].fd = 0; // stdin
+                    cmd->fds[cmd->fd_count].is_open = 0;
+                    cmd->fd_count++;
+                } else {
+                    free(filename);
+                }
+            }
         }
     }
     
@@ -244,7 +320,7 @@ char* parse_redirections(const char* cmd_str, command_t* cmd) {
     char* output_redir = strstr(result, " > ");
     if (!output_redir) output_redir = strstr(result, ">");
     
-    if (output_redir) {
+    if (output_redir && cmd->fds && cmd->fd_count < 4) {
         // Check for append redirection >>
         int is_append = (output_redir[1] == '>');
         
@@ -262,36 +338,62 @@ char* parse_redirections(const char* cmd_str, command_t* cmd) {
         // Extract filename
         int filename_len = filename_end - filename_start;
         if (filename_len > 0) {
-            cmd->fds[cmd->fd_count].filename = malloc(filename_len + 1);
-            strncpy(cmd->fds[cmd->fd_count].filename, filename_start, filename_len);
-            cmd->fds[cmd->fd_count].filename[filename_len] = '\0';
-            cmd->fds[cmd->fd_count].type = is_append ? REDIR_APPEND : REDIR_OUTPUT;
-            cmd->fds[cmd->fd_count].fd = 1; // stdout
-            cmd->fds[cmd->fd_count].is_open = 0;
-            cmd->fd_count++;
-            
-            // Remove redirection from command string
-            *output_redir = '\0';
-            char* new_result = malloc(strlen(result) + 1);
-            strcpy(new_result, result);
-            strcat(new_result, trim_whitespace(filename_end));
-            free(result);
-            result = new_result;
+            char* filename = malloc(filename_len + 1);
+            if (filename) {
+                strncpy(filename, filename_start, filename_len);
+                filename[filename_len] = '\0';
+
+                const char* remainder = filename_end;
+                while (*remainder && is_whitespace(*remainder)) remainder++;
+
+                size_t prefix_len = (size_t)(output_redir - result);
+                size_t remainder_len = strlen(remainder);
+                size_t new_cap = prefix_len + remainder_len + 2; // optional space + NUL
+                char* new_result = malloc(new_cap);
+                if (new_result) {
+                    memcpy(new_result, result, prefix_len);
+                    new_result[prefix_len] = '\0';
+                    if (remainder_len > 0) {
+                        size_t cur_len = strlen(new_result);
+                        if (cur_len > 0 && !is_whitespace(new_result[cur_len - 1])) {
+                            strcat(new_result, " ");
+                        }
+                        strcat(new_result, remainder);
+                    }
+                    free(result);
+                    result = new_result;
+
+                    cmd->fds[cmd->fd_count].filename = filename;
+                    cmd->fds[cmd->fd_count].type = is_append ? REDIR_APPEND : REDIR_OUTPUT;
+                    cmd->fds[cmd->fd_count].fd = 1; // stdout
+                    cmd->fds[cmd->fd_count].is_open = 0;
+                    cmd->fd_count++;
+                } else {
+                    free(filename);
+                }
+            }
         }
     }
-    
-    return trim_whitespace(result);
+
+    trim_whitespace_inplace(result);
+    return result;
 }
 
 // Parse command from string
 command_t* parse_command(const char* cmd_str) {
     if (!cmd_str) return NULL;
-    
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
+
     command_t* cmd = malloc(sizeof(command_t));
+    if (!cmd) return NULL;
     memset(cmd, 0, sizeof(command_t));
     
     // Check for background execution
     char* input_copy = malloc(strlen(cmd_str) + 1);
+    if (!input_copy) {
+        free(cmd);
+        return NULL;
+    }
     strcpy(input_copy, cmd_str);
     
     // Remove trailing & for background execution
@@ -304,16 +406,64 @@ command_t* parse_command(const char* cmd_str) {
     
     // Parse redirections and split into arguments
     char* clean_cmd = parse_redirections(trimmed, cmd);
-    
-    // Split into arguments
-    cmd->args = split_command(clean_cmd, &cmd->argc);
-    if (!cmd->args || cmd->argc == 0) {
+    if (!clean_cmd) {
+        if (cmd->fds) free(cmd->fds);
         free(cmd);
         free(input_copy);
         return NULL;
     }
     
+    // Split into arguments
+    cmd->args = split_command(clean_cmd, &cmd->argc);
+    free(clean_cmd);
+    if (!cmd->args || cmd->argc == 0) {
+        if (cmd->fds) {
+            for (int x = 0; x < cmd->fd_count; x++) {
+                if (cmd->fds[x].filename) free(cmd->fds[x].filename);
+            }
+            free(cmd->fds);
+        }
+        free(cmd);
+        free(input_copy);
+        return NULL;
+    }
+
     cmd->name = cmd->args[0];
+
+    // Alias expansion for pipeline segments (simple commands only).
+    // Do not override built-in commands.
+    if (find_command(cmd->name) == NULL) {
+        char linebuf[256];
+        linebuf[0] = '\0';
+        for (int a = 0; a < cmd->argc && cmd->args[a]; a++) {
+            if (a != 0)
+                strcat(linebuf, " ");
+            strcat(linebuf, cmd->args[a]);
+        }
+
+        char expanded[256];
+        int rc = shell_alias_expand_line(linebuf, expanded, (int)sizeof(expanded));
+        if (rc == 1) {
+            // Reject expansions that would require re-parsing pipeline/redirection.
+            for (int x = 0; expanded[x]; x++) {
+                if (expanded[x] == '|' || expanded[x] == '<' || expanded[x] == '>' || expanded[x] == '&') {
+                    free_args(cmd->args, cmd->argc);
+                    free(cmd);
+                    free(input_copy);
+                    return NULL;
+                }
+            }
+
+            free_args(cmd->args, cmd->argc);
+            cmd->args = split_command(expanded, &cmd->argc);
+            if (!cmd->args || cmd->argc == 0) {
+                free(cmd);
+                free(input_copy);
+                return NULL;
+            }
+            cmd->name = cmd->args[0];
+        }
+    }
     cmd->type = PIPELINE_CMD_SIMPLE;
     
     free(input_copy);
@@ -323,8 +473,10 @@ command_t* parse_command(const char* cmd_str) {
 // Parse pipeline from input string
 pipeline_t* parse_pipeline(const char* input) {
     if (!input) return NULL;
-    
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
+
     pipeline_t* pipeline = malloc(sizeof(pipeline_t));
+    if (!pipeline) return NULL;
     memset(pipeline, 0, sizeof(pipeline_t));
     
     // Count commands
@@ -332,6 +484,10 @@ pipeline_t* parse_pipeline(const char* input) {
     
     // Split by pipe character
     char* input_copy = malloc(strlen(input) + 1);
+    if (!input_copy) {
+        free(pipeline);
+        return NULL;
+    }
     strcpy(input_copy, input);
     
     char* token = simple_strtok(input_copy, "|");
@@ -371,6 +527,10 @@ void free_command(command_t* cmd) {
         if (cmd->fds[i].filename) {
             free(cmd->fds[i].filename);
         }
+    }
+
+    if (cmd->fds) {
+        free(cmd->fds);
     }
     
     free(cmd);
@@ -424,9 +584,10 @@ void close_fd(int fd) {
 // Read file content for input redirection
 char* read_file_for_input_redirection(const char* filename) {
     if (!filename) return NULL;
+    if (!pipeline_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return NULL;
     
     // Try to read the file using the filesystem
-    int fd = eynfs_open(filename, EYNFS_READ);
+    int fd = open(filename, EYNFS_READ);
     if (fd == -1) {
         printf("Error: Cannot open file '%s' for input redirection.\n", filename);
         return NULL;
@@ -460,11 +621,11 @@ int execute_simple_command(command_t* cmd) {
     char* input_data = NULL;
     for (int i = 0; i < cmd->fd_count; i++) {
         if (cmd->fds[i].type == REDIR_INPUT && cmd->fds[i].filename) {
+            if (!pipeline_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
             // Read file content for input redirection
             input_data = read_file_for_input_redirection(cmd->fds[i].filename);
             if (input_data) {
                 // Store input data for command to use
-                extern char* g_pipeline_input_data;
                 g_pipeline_input_data = input_data;
             }
             break;
@@ -488,13 +649,18 @@ int execute_simple_command(command_t* cmd) {
     }
     
     if (has_output_redirect) {
+        if (!pipeline_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
         // Use existing shell redirection mechanism
         start_shell_redirect();
         
         // Execute command
         shell_cmd_handler_t handler = find_command(cmd->name);
         if (handler) {
-            handler(cmd_str);
+            shell_args_t args;
+            if (shell_args_parse(&args, cmd_str) == 0)
+                handler(&args);
+            else
+                printf("Command line too long: %s\n", cmd->name);
         } else {
             printf("Command not found: %s\n", cmd->name);
         }
@@ -528,7 +694,11 @@ int execute_simple_command(command_t* cmd) {
         // No output redirection, execute normally
         shell_cmd_handler_t handler = find_command(cmd->name);
         if (handler) {
-            handler(cmd_str);
+            shell_args_t args;
+            if (shell_args_parse(&args, cmd_str) == 0)
+                handler(&args);
+            else
+                printf("Command line too long: %s\n", cmd->name);
         } else {
             printf("Command not found: %s\n", cmd->name);
         }
@@ -537,7 +707,6 @@ int execute_simple_command(command_t* cmd) {
     // Clean up input data
     if (input_data) {
         free(input_data);
-        extern char* g_pipeline_input_data;
         g_pipeline_input_data = NULL;
     }
     
@@ -568,7 +737,11 @@ int execute_background_command(command_t* cmd) {
     // Execute the command (for now, synchronously)
     shell_cmd_handler_t handler = find_command(cmd->name);
     if (handler) {
-        handler(cmd_str);
+        shell_args_t args;
+        if (shell_args_parse(&args, cmd_str) == 0)
+            handler(&args);
+        else
+            printf("Command line too long: %s\n", cmd->name);
     } else {
         printf("Command not found: %s\n", cmd->name);
         return -1;
@@ -598,6 +771,7 @@ int execute_command(command_t* cmd) {
 // Execute pipeline (improved implementation)
 int execute_pipeline(pipeline_t* pipeline) {
     if (!pipeline || !pipeline->first) return -1;
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     
     if (pipeline->command_count == 1) {
         // Single command, no pipes needed
@@ -623,7 +797,14 @@ int execute_pipeline(pipeline_t* pipeline) {
         
         shell_cmd_handler_t first_handler = find_command(first_cmd->name);
         if (first_handler) {
-            first_handler(first_cmd_str);
+            shell_args_t args;
+            if (shell_args_parse(&args, first_cmd_str) == 0) {
+                first_handler(&args);
+            } else {
+                printf("Pipeline: failed to parse command: %s\n", first_cmd_str);
+                stop_shell_redirect();
+                return -1;
+            }
         } else {
             printf("Command not found: %s\n", first_cmd->name);
             stop_shell_redirect();
@@ -651,13 +832,17 @@ int execute_pipeline(pipeline_t* pipeline) {
             strcat(second_cmd_str, " --filter");
             
             // Store the input data for the search command to use
-            extern char* g_pipeline_input_data;
             g_pipeline_input_data = output;
             
             // Execute second command
             shell_cmd_handler_t second_handler = find_command(second_cmd->name);
             if (second_handler) {
-                second_handler(second_cmd_str);
+                shell_args_t args;
+                if (shell_args_parse(&args, second_cmd_str) == 0) {
+                    second_handler(&args);
+                } else {
+                    printf("Pipeline: failed to parse command: %s\n", second_cmd_str);
+                }
             } else {
                 printf("Command not found: %s\n", second_cmd->name);
             }
@@ -678,6 +863,10 @@ int execute_pipeline(pipeline_t* pipeline) {
             // Add the output from first command as additional arguments
             // Split output by whitespace and add each word as an argument
             char* output_copy = malloc(strlen(output) + 1);
+            if (!output_copy) {
+                printf("Pipeline: out of memory while passing output to %s\n", second_cmd->name);
+                return -1;
+            }
             strcpy(output_copy, output);
             
             char* word = simple_strtok(output_copy, " \t\n\r");
@@ -695,7 +884,12 @@ int execute_pipeline(pipeline_t* pipeline) {
             // Execute second command
             shell_cmd_handler_t second_handler = find_command(second_cmd->name);
             if (second_handler) {
-                second_handler(second_cmd_str);
+                shell_args_t args;
+                if (shell_args_parse(&args, second_cmd_str) == 0) {
+                    second_handler(&args);
+                } else {
+                    printf("Pipeline: failed to parse command: %s\n", second_cmd_str);
+                }
             } else {
                 printf("Command not found: %s\n", second_cmd->name);
             }
@@ -722,6 +916,7 @@ int execute_pipeline(pipeline_t* pipeline) {
 // Execute complex pipeline with proper pipe chaining
 int execute_complex_pipeline(pipeline_t* pipeline) {
     if (!pipeline || pipeline->command_count < 3) return -1;
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     
     // Create a chain of pipes for data flow
     char* current_input = NULL;
@@ -729,6 +924,7 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
     int cmd_index = 0;
     
     while (cmd) {
+        if ((cmd_index & 0x3) == 0) pipeline_ctx_account(SCHED_COST_FS);
         // Start shell redirection to capture output
         start_shell_redirect();
         
@@ -748,7 +944,6 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
             if (strcmp(cmd->name, "search") == 0) {
                 strcat(cmd_str, " --filter");
                 // Store input data for the command to use
-                extern char* g_pipeline_input_data;
                 g_pipeline_input_data = current_input;
             } else {
                 // For other commands, append input as arguments
@@ -772,7 +967,11 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
         // Execute the command
         shell_cmd_handler_t handler = find_command(cmd->name);
         if (handler) {
-            handler(cmd_str);
+            shell_args_t args;
+            if (shell_args_parse(&args, cmd_str) == 0)
+                handler(&args);
+            else
+                printf("Command line too long: %s\n", cmd->name);
         } else {
             printf("Command not found: %s\n", cmd->name);
             stop_shell_redirect();
@@ -792,6 +991,10 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
         // If this is not the last command, store output for next command
         if (cmd->next) {
             current_input = malloc(strlen(output) + 1);
+            if (!current_input) {
+                printf("Pipeline: out of memory while chaining command output\n");
+                return -1;
+            }
             strcpy(current_input, output);
         } else {
             // Last command - output goes to terminal (already handled by shell_redirect)
@@ -799,7 +1002,6 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
         }
         
         // Clear pipeline input data if it was set
-        extern char* g_pipeline_input_data;
         if (g_pipeline_input_data) {
             g_pipeline_input_data = NULL;
         }
@@ -818,10 +1020,14 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
 
 // Background process management
 int add_background_process(int pid, const char* command) {
+    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     for (int i = 0; i < MAX_BACKGROUND_PROCESSES; i++) {
         if (!g_background_processes[i].active) {
             g_background_processes[i].pid = pid;
             g_background_processes[i].command = malloc(strlen(command) + 1);
+            if (!g_background_processes[i].command) {
+                return -1;
+            }
             strcpy(g_background_processes[i].command, command);
             g_background_processes[i].status = 0;
             g_background_processes[i].active = 1;

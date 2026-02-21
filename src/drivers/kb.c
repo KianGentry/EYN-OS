@@ -4,12 +4,103 @@
 #include <multiboot.h>
 #include <util.h>
 #include <stdlib.h>
+#include <context.h>
+#include <misc/sched.h>
 
 extern multiboot_info_t *g_mbi;
 
+static int kb_ctx_allow(uint32 caps, uint32 cost) {
+        command_context_t* ctx = current_command_context;
+        if (ctx && !cap_check(ctx->caps, caps)) return 0;
+        if (ctx) {
+                scheduler_account(ctx->wo, cost);
+                scheduler_yield_if_needed(ctx->wo);
+                if (sched_det_is_enabled()) ctx->det_seq++;
+        }
+        return 1;
+}
+
+static void kb_ctx_account(uint32 cost) {
+        command_context_t* ctx = current_command_context;
+        if (!ctx) return;
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
+int kb_getchar_nonblocking() {
+        if (!kb_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) return 0;
+        uint8 status = inportb(0x64);
+        if (!(status & 0x1)) {
+                return 0;
+        }
+        if (status & 0x20) {
+                // AUX (mouse) data present
+                return 0;
+        }
+
+        uint8 scancode = inportb(0x60);
+        if (scancode & 0x80) {
+                // key release
+                return 0;
+        }
+
+        // Minimal scancode -> ASCII mapping (lowercase).
+        switch (scancode) {
+                case 2: return '1';
+                case 3: return '2';
+                case 4: return '3';
+                case 5: return '4';
+                case 6: return '5';
+                case 7: return '6';
+                case 8: return '7';
+                case 9: return '8';
+                case 10: return '9';
+                case 11: return '0';
+                case 14: return '\b';
+                case 16: return 'q';
+                case 17: return 'w';
+                case 18: return 'e';
+                case 19: return 'r';
+                case 20: return 't';
+                case 21: return 'y';
+                case 22: return 'u';
+                case 23: return 'i';
+                case 24: return 'o';
+                case 25: return 'p';
+                case 28: return '\n';
+                case 30: return 'a';
+                case 31: return 's';
+                case 32: return 'd';
+                case 33: return 'f';
+                case 34: return 'g';
+                case 35: return 'h';
+                case 36: return 'j';
+                case 37: return 'k';
+                case 38: return 'l';
+                case 44: return 'z';
+                case 45: return 'x';
+                case 46: return 'c';
+                case 47: return 'v';
+                case 48: return 'b';
+                case 49: return 'n';
+                case 50: return 'm';
+                case 57: return ' ';
+                default: return 0;
+        }
+}
+
 string readStr() {
-    string buffstr = (string) malloc(200);
-    uint8 i = 0;
+        if (!kb_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) {
+                static char empty[1] = { '\0' };
+                return empty;
+        }
+        // Avoid heap usage: stdin reads can occur while the heap is unhealthy.
+        // Single-core kernel: a single static buffer is sufficient here.
+        static char buffstr_storage[200];
+        string buffstr = buffstr_storage;
+        uint32 i = 0;
+        uint32 spin = 0;
     uint8 reading = 1;
     uint8 shift_pressed = 0;  // Track shift key state
     uint8 caps_lock = 0;      // Track caps lock state
@@ -20,9 +111,18 @@ string readStr() {
     
     while(reading)
     {
-        if(inportb(0x64) & 0x1)
-        {
-            uint8 scancode = inportb(0x60);
+                if ((spin++ & 0x3FFu) == 0u) kb_ctx_account(SCHED_COST_CONSOLE);
+                {
+                        uint8 status = inportb(0x64);
+                        if (!(status & 0x1)) {
+                                /* no data available */
+                                continue;
+                        }
+                        if (status & 0x20) {
+                                /* AUX (mouse) data present; let mouse handler consume it */
+                                continue;
+                        }
+                        uint8 scancode = inportb(0x60);
             
             // Handle modifier keys
             if(scancode == 42 || scancode == 54) {  // Left or Right shift press
@@ -52,19 +152,26 @@ string readStr() {
             }
             
             // Check for Ctrl+C
-            if(ctrl_pressed && scancode == 46) {  // 'c' key
-                g_user_interrupt = 1;
-                buffstr[0] = '\0';  // Clear the buffer
-                reading = 0;        // Exit the reading loop
-                printf("%c^C\n", 255, 255, 255);  // Print ^C in white
-                free(buffstr);   // Clean up memory
-                return buffstr;
-            }
+                        if(ctrl_pressed && scancode == 46) {  // 'c' key
+                                g_user_interrupt = 1;
+                                buffstr[0] = '\0';  // Clear the buffer
+                                reading = 0;        // Exit the reading loop
+                                /* Print ^C without color formatting (kernel printf doesn't accept RGB args here) */
+                                printf("^C\n");
+                                /* Return the (cleared) buffer to the caller */
+                                return buffstr;
+                        }
             
             // Determine if we should use uppercase (shift XOR caps lock)
             uint8 use_uppercase = shift_pressed ^ caps_lock;
             
-            switch(scancode)
+                        // Hard cap input length to avoid heap corruption.
+                        // Leave room for NUL terminator.
+                        if (i >= 199 && scancode != 14 && scancode != 28) {
+                                continue;
+                        }
+
+                        switch(scancode)
             {
                 case 1:  // Escape
                         drawText((char)27, 255, 255, 255);  // white
@@ -620,14 +727,17 @@ string readStr() {
 
 void poll_keyboard_for_ctrl_c() {
     static uint8 ctrl_pressed = 0;
-    if (inportb(0x64) & 0x1) {
-        uint8 scancode = inportb(0x60);
-        if (scancode == 29) { // Ctrl press
-            ctrl_pressed = 1;
-        } else if (scancode == 157) { // Ctrl release
-            ctrl_pressed = 0;
-        } else if (ctrl_pressed && scancode == 46) { // 'c' key
-            g_user_interrupt = 1;
+        {
+                uint8 status = inportb(0x64);
+                if (!(status & 0x1)) return; /* no data */
+                if (status & 0x20) return; /* mouse data */
+                uint8 scancode = inportb(0x60);
+                if (scancode == 29) { // Ctrl press
+                        ctrl_pressed = 1;
+                } else if (scancode == 157) { // Ctrl release
+                        ctrl_pressed = 0;
+                } else if (ctrl_pressed && scancode == 46) { // 'c' key
+                        g_user_interrupt = 1;
+                }
         }
-    }
 }

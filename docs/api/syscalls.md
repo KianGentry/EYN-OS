@@ -64,6 +64,37 @@ mov edx, 10         ; max bytes
 int 0x80            ; make syscall
 ```
 
+### Selected additional syscalls
+
+#### Sleep in microseconds (syscall 22)
+Cooperatively yields and sleeps for at least the specified duration.
+
+**Arguments:**
+- EBX: Microseconds to sleep
+
+#### GUI continuous redraw (syscall 23)
+Enables or disables continuous redraw for a GUI tile.
+
+**Arguments:**
+- EBX: GUI handle
+- ECX: 0 to disable, non-zero to enable
+
+#### GUI RGB565 blit (syscall 24)
+Copies a RGB565LE framebuffer into the GUI content area.
+
+**Arguments:**
+- EBX: GUI handle
+- ECX: Pointer to a `gui_blit_rgb565_t`
+
+**Structure:**
+```c
+typedef struct {
+    int src_w, src_h;
+    const uint16_t* pixels; // RGB565LE
+    int dst_w, dst_h;       // <=0 means use content size
+} gui_blit_rgb565_t;
+```
+
 ## Implementation Details
 
 ### Syscall Handler

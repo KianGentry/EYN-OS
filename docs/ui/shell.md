@@ -1,22 +1,22 @@
 # EYN-OS Shell System
 
-The EYN-OS shell provides a command-line interface for interacting with the operating system. It features command history, tab completion, and a rich set of built-in commands with an innovative streaming architecture for memory efficiency.
+The EYN-OS shell provides a command-line interface for interacting with the operating system. In the modern EYN-OS environment, the shell runs inside **Virtual Terminals** managed by the **Tiling Manager**.
 
 ## Shell Architecture
 
 ### Core Components
-- **Command Parser**: Processes user input and dispatches commands
-- **History System**: Stores and retrieves previous commands
-- **Input Handler**: Manages keyboard input and special keys
-- **Streaming Command System**: Dynamic command loading for memory efficiency
-- **Command Registry**: Maintains list of available commands
+- **Virtual Terminal Integration**: Runs inside a tile or window, supporting standard I/O.
+- **Command Parser**: Processes user input and dispatches commands.
+- **History System**: Stores and retrieves previous commands.
+- **Streaming Command System**: Dynamic command loading for memory efficiency.
+- **Command Registry**: Maintains list of available commands.
 
 ### Design Philosophy
-- **Simple and Fast**: Minimal overhead for quick response
-- **User-Friendly**: Clear error messages and helpful feedback
-- **Extensible**: Easy to add new commands
-- **Consistent**: Uniform command interface
-- **Memory Efficient**: Streaming architecture for low-end systems
+- **Integrated**: Works seamlessly with the GUI/Tiling environment.
+- **Simple and Fast**: Minimal overhead for quick response.
+- **User-Friendly**: Clear error messages and helpful feedback.
+- **Extensible**: Easy to add new commands.
+- **Memory Efficient**: Streaming architecture for low-end systems.
 
 ## Streaming Command Architecture
 
@@ -29,7 +29,7 @@ Always available in RAM for core functionality:
 ### Streaming Commands
 Loaded on-demand to conserve memory:
 - **Filesystem**: `format`, `fdisk`, `fscheck`, `copy`, `move`, `del`, `cd`, `makedir`, `deldir`
-- **File Operations**: `read`, `write`, `read_raw`, `read_md`, `read_image`
+- **File Operations**: `read`, `write`, `read_raw`, `read_md`
 - **Basic Commands**: `echo`, `ver`, `calc`, `search`, `drive`, `run`
 - **Advanced**: `random`, `history`, `sort`, `game`, `draw`, `spam`
 - **Development**: `assemble`, `hexdump`, `log`
@@ -43,6 +43,12 @@ status          # Show which commands are currently loaded
 ```
 
 ## User Interface
+
+### Tiling Environment
+The shell typically runs in one of the 4 tiles managed by the Tiling Manager.
+- **Focus**: Click a tile to focus it. Keyboard input goes to the focused tile.
+- **Scrolling**: Use the mouse wheel to scroll the terminal history.
+- **Selection**: You can select text on the input line for editing.
 
 ### Prompt Format
 ```
@@ -60,11 +66,12 @@ RAM:/!         # RAM disk (special drive)
 ```
 
 ### Special Keys
-- **Arrow Keys**: Navigate command history
-- **Backspace**: Delete character
-- **Enter**: Execute command
-- **Escape**: Clear current input
-- **Ctrl+C**: Interrupt current operation
+- **Arrow Keys**: Navigate command history.
+- **Backspace**: Delete character.
+- **Enter**: Execute command.
+- **Escape**: Clear current input.
+- **Ctrl+C**: Interrupt current operation.
+- **Ctrl+L**: Clear screen (in some contexts).
 
 ## Built-in Commands
 
@@ -77,21 +84,23 @@ init            # Initialize all system services
 ```
 
 #### `exit`
-Exit the shell and return to kernel.
+Exit the shell (or close the current tile/window).
 ```bash
-exit            # Exit EYN-OS
+exit            # Exit shell session
 ```
 
 #### `clear`
-Clear the screen.
+Clear the terminal screen.
 ```bash
 clear           # Clear terminal screen
 ```
 
 #### `help`
-Show interactive help system.
+Launch the interactive Help Viewer.
+- In Tiling Mode: Opens a graphical help viewer in a new tile/window.
+- In Text Mode: Opens the legacy TUI help browser.
 ```bash
-help            # Launch TUI help system
+help            # Launch Help Viewer
 ```
 
 ### Memory Management
@@ -169,7 +178,7 @@ makedir new_dir # Create new directory
 ### File Operations
 
 #### `read <filename>`
-Smart file display - detects file type and displays appropriately.
+Display text files (.txt) or render markdown (.md). For images, use the GUI viewer commands `view` or `vieww`.
 ```bash
 read test.txt   # Display text file
 read image.rei  # Display REI image
@@ -188,10 +197,10 @@ Display markdown files with formatting.
 read_md doc.md  # Display markdown with bold/italic formatting
 ```
 
-#### `read_image <filename>`
-Display REI image files.
+> Note: Image viewing moved to GUI commands:
 ```bash
-read_image logo.rei # Display REI image file
+view logo.rei   # Viewer in a tile
+vieww logo.rei  # Viewer in a floating window
 ```
 
 #### `write <filename>`
@@ -248,6 +257,23 @@ Show version information.
 ```bash
 ver             # Display EYN-OS version
 ```
+
+#### `setfont <file.hex>` / `setfont builtin`
+Switch the **system font** at runtime.
+
+- Loads a `.hex` bitmap font from disk into RAM and makes it the active font used by text rendering.
+- Use `setfont builtin` to revert to the built-in fallback font.
+- Fonts are typically stored under `/fonts/` in the EYNFS image (the build copies the repository's top-level `fonts/` directory into the image).
+
+```bash
+setfont /fonts/unscii-16.hex
+setfont /fonts/unscii-8.hex
+setfont builtin
+```
+
+Notes:
+- Today the UI/terminal text pipeline is **byte-based** (glyph indices 0–255). Unicode-indexed `.hex` fonts will render correctly only for codepoints that map into 0–255 in the font table.
+- GUI/TUI sizing is based on the active font metrics (see `vga_text_cell_w()` / `vga_text_cell_h()`).
 
 ### Utility Commands
 

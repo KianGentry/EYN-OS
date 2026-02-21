@@ -1,9 +1,5 @@
-#include <types.h>
-#include <stdint.h>
-#include <stddef.h>
-#include <util.h> // for g_user_interrupt
-
-
+#include <system.h>
+#include <util.h> // g_user_interrupt
 
 uint8 inportb (uint16 _port)
 {
@@ -29,10 +25,22 @@ void outw(uint16 _port, uint16 _data)
     __asm__ __volatile__ ("outw %1, %0" : : "dN" (_port), "a" (_data));
 }
 
+uint32 inl(uint16 _port)
+{
+    // Needed for interfaces that expose 32-bit I/O registers (e.g., PCI config access).
+    uint32 rv;
+    __asm__ __volatile__ ("inl %1, %0" : "=a" (rv) : "dN" (_port));
+    return rv;
+}
+
+void outl(uint16 _port, uint32 _data)
+{
+    // Keep this as a thin wrapper so callsites stay readable and consistent.
+    __asm__ __volatile__ ("outl %1, %0" : : "dN" (_port), "a" (_data));
+}
+
 // Simple timer-based sleep using CPU cycles but with better efficiency
 void sleep(uint8 times) {
-    extern volatile int g_user_interrupt;
-    
     // Use a more efficient delay calculation
     // Instead of 500,000 iterations per unit, use a smaller, more predictable number
     volatile uint32_t delay_cycles = times * 10000; // Reduced from 500,000
@@ -44,12 +52,9 @@ void sleep(uint8 times) {
         
         // Add a small delay to prevent excessive CPU usage
         // This allows other potential tasks to run
-        if (i % 1000 == 0) {
-            // Small pause every 1000 iterations
-            volatile uint32_t pause = 0;
-            for (volatile uint32_t j = 0; j < 10; j++) {
-                pause = j; // Prevent optimization
-            }
+        if ((i % 1000u) == 0u) {
+            // Hint to the CPU we're in a spin-loop.
+            __asm__ __volatile__("pause");
         }
     }
 }

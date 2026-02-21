@@ -3,39 +3,34 @@
 #include <string.h>
 #include <util.h>
 #include <vga.h>
+#include <types.h>
+#include <context.h>
+#include <misc/sched.h>
+#include <utilities/shell/shell_args.h>
 
-void native_run_command(string arg);
+void native_run_command(const shell_args_t* args);
 
-// Parse filename from command arguments
-static char* parse_filename(string arg) {
-    static char filename[64];
-    uint8 i = 0;
-    
-    // Skip command name
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
-        return NULL; // No filename provided
+static int native_run_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
     }
-    
-    uint8 j = 0;
-    while (arg[i] && arg[i] != ' ' && j < 63) {
-        filename[j++] = arg[i++];
-    }
-    filename[j] = 0;
-    
-    return filename;
+    return 1;
 }
 
-void native_run_command(string arg) {
-    char* filename = parse_filename(arg);
-    
-    if (!filename) {
+void native_run_command(const shell_args_t* args) {
+    if (!args || args->argc < 2) {
         printf("Usage: nrun <program.eyn>\n");
         printf("Native execution of EYN programs with kernel API access\n");
         return;
     }
+
+    const char* filename = args->argv[1];
+
+    if (!native_run_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
     
     exec_result_t result = native_execute_program(filename);
     

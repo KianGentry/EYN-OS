@@ -4,8 +4,111 @@
 #include <vga.h>
 #include <stdint.h>
 #include <multiboot.h>
+#include <tile_manager.h>
+#include <shell.h>
+#include <mm/vmm.h>
+#include <isr.h>
+#include <cpu/segdom.h>
+#include <cpu/gdt.h>
+#include <context.h>
+#include <misc/sched.h>
 
 volatile int g_user_interrupt = 0;
+volatile int g_user_task_active = 0;
+volatile int g_abort_to_shell = 0;
+volatile int g_user_task_term = -1;
+volatile int g_user_task_ui_dirty = 0;
+
+// User-task console color state (used by ring3 stdout/stderr). Defaults to white.
+volatile int g_user_task_color_r = 255;
+volatile int g_user_task_color_g = 255;
+volatile int g_user_task_color_b = 255;
+// Parser state for 0xFF,r,g,b control sequences that may be split across writes.
+volatile uint8 g_user_task_color_state = 0;
+volatile uint8 g_user_task_color_bytes[3] = {0, 0, 0};
+
+volatile uint32 g_user_code_base = 0;
+volatile uint32 g_user_code_pages = 0;
+volatile uint32 g_user_stack_page = 0;
+
+void user_task_cleanup_mappings(void) {
+    // Best-effort cleanup; safe to call repeatedly.
+    uint32 base = g_user_code_base;
+    uint32 pages = g_user_code_pages;
+    uint32 stack_page = g_user_stack_page;
+    uint32 stack_bottom = vmm_kernel_as.stack_bottom;
+
+    if (base && pages) {
+        for (uint32 i = 0; i < pages; ++i) {
+            (void)vmm_unmap_page(&vmm_kernel_as, base + i * PAGE_SIZE);
+        }
+    }
+
+    // Unmap user stack pages. The VMM can grow the stack on-demand, so we use
+    // the current stack_bottom as the lower bound when it looks valid.
+    if (stack_bottom >= USER_STACK_BASE && stack_bottom < USER_STACK_TOP) {
+        for (uint32 va = stack_bottom; va < USER_STACK_TOP; va += PAGE_SIZE) {
+            (void)vmm_unmap_page(&vmm_kernel_as, va);
+        }
+    } else if (stack_page) {
+        // Back-compat: older callers only tracked a single stack page.
+        (void)vmm_unmap_page(&vmm_kernel_as, stack_page);
+    }
+
+    g_user_code_base = 0;
+    g_user_code_pages = 0;
+    g_user_stack_page = 0;
+
+    g_user_segdom_cs = GDT_USER_CS;
+    g_user_segdom_ds = GDT_USER_DS;
+
+    // Reset stack metadata for the kernel address space.
+    vmm_kernel_as.stack_bottom = USER_STACK_TOP - PAGE_SIZE;
+
+    syscall_reset_user_fds();
+}
+
+void ui_return_from_user_task(void) {
+    // Best-effort cleanup and clear state before re-entering the UI.
+    user_task_cleanup_mappings();
+    g_abort_to_shell = 0;
+    g_user_task_active = 0;
+    g_user_task_term = -1;
+    g_user_task_ui_dirty = 0;
+
+    g_user_task_color_r = 255;
+    g_user_task_color_g = 255;
+    g_user_task_color_b = 255;
+    g_user_task_color_state = 0;
+
+    // Prefer the graphical tiling-manager shell when it's been initialized.
+    if (tile_is_tiling_active()) {
+        start_tiling_manager();
+    } else {
+        launch_shell(0);
+    }
+
+    // Shouldn't return; if it does, stop safely.
+    for (;;) {
+        __asm__ __volatile__("hlt");
+    }
+}
+
+static int mem_ctx_allow(void) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, CAP_ALLOC_MEMORY)) {
+        return 0;
+    }
+    return 1;
+}
+
+static void mem_ctx_account(void) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, SCHED_COST_ALLOC);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 uint32_t __stack_chk_fail(){
     return 0;
@@ -95,6 +198,10 @@ void *memset(void *s, int c, size_t n) {
     return s;
 }
 
+void util_escape_ptr(const void* p) {
+    __asm__ __volatile__(/*! escape */ "" : : "g"(p) : "memory");
+}
+
 // EYN-OS specific memory functions
 // Provide POSIX-like names for allocators to standardize usage
 
@@ -104,17 +211,17 @@ void *memmove(void *dest, const void *src, size_t n) {
     // If source and destination overlap and source is before destination,
     // we need to copy backwards to avoid overwriting source data
     if (src < dest && (char*)src + n > (char*)dest) {
-        char *d = (char*)dest + n - 1;
-        const char *s = (const char*)src + n - 1;
-        for (size_t i = 0; i < n; i++) {
-            d[i] = s[i];
+        // Copy backwards for overlapping ranges.
+        char *d = (char*)dest;
+        const char *s = (const char*)src;
+        for (size_t i = n; i > 0; --i) {
+            d[i - 1] = s[i - 1];
         }
-    } else {
-        // Use memcpy for non-overlapping or forward copy
-        return memcpy(dest, src, n);
+        return dest;
     }
-    
-    return dest;
+
+    // Use memcpy for non-overlapping or forward copy.
+    return memcpy(dest, src, n);
 }
 
 /**
@@ -138,12 +245,13 @@ string int_to_ascii(int n, char str[]) {
 
 // String validation functions moved to string.c for standardization
 
-// --- Robust Memory Manager with Enhanced Error Handling ---
-#define HEAP_START 0x200000   // 2MB - start after kernel and initial data
+// Robust Memory Manager with Enhanced Error Handling ---
+// Heap start must be after the kernel image (.text/.rodata/.data/.bss).
+// Using a fixed address (like 0x200000) breaks as soon as .bss grows.
+extern uint8 __kernel_end;
 #define HEAP_SIZE_DEFAULT 0x100000    // 1MB default heap size (increased for assembler)
 #define HEAP_SIZE_MIN 0x40000         // 256KB minimum heap size
 #define HEAP_SIZE_MAX 0x1000000       // 16MB maximum heap size
-#define BLOCK_HEADER_SIZE 12  // Reduced from 24 for memory savings
 #define MIN_BLOCK_SIZE 16     // Reduced from 32
 #define NO_BLOCK 0xFFFFFFFF
 #define MAGIC_NUMBER 0xDEADBEEF
@@ -155,13 +263,23 @@ typedef struct {
     uint32 magic;       // Magic number for corruption detection
 } block_header_t;
 
-static uint8* heap_start = (uint8*)HEAP_START;
+// Must match block_header_t layout. If this is smaller than sizeof(block_header_t),
+// malloc() will hand out pointers into the header and corrupt allocator metadata.
+#define BLOCK_HEADER_SIZE ((uint32)sizeof(block_header_t))
+
+static uint8* heap_start = (uint8*)0;
+static uint32 heap_phys_start = 0;
 static uint32 heap_size = HEAP_SIZE_DEFAULT;  // Dynamic heap size
 static uint32 first_block = 0;
 static int memory_initialized = 0;
 static uint32 memory_errors = 0;
 static uint32 allocation_count = 0;
 static uint32 free_count = 0;
+
+static inline uint32 align_up_u32(uint32 v, uint32 align) {
+    if (align == 0) return v;
+    return (v + align - 1) & ~(align - 1);
+}
 
 // Stack overflow protection - ultra lightweight
 static volatile int stack_overflow_detected = 0;
@@ -229,6 +347,18 @@ uint32 detect_available_memory() {
     return total_ram;
 }
 
+// Cached total RAM accessor for consumers like stats GUI
+uint32 get_total_ram(void) {
+    static uint32 cached_total = 0;
+    if (cached_total == 0) {
+        uint32 v = detect_available_memory();
+        // Basic sanity clamp to avoid zero
+        if (v == 0) v = 32 * 1024 * 1024;
+        cached_total = v;
+    }
+    return cached_total;
+}
+
 // Adaptive heap sizing based on available memory (safer)
 static void calculate_optimal_heap_size() {
     uint32 available_ram = detect_available_memory();
@@ -246,9 +376,14 @@ static void calculate_optimal_heap_size() {
         heap_size = 0x2000000;                       // 32MB (doubled)
     }
     
-    // Ensure heap doesn't exceed available memory (more conservative)
-    if (heap_size > available_ram / 4) { // Use 1/4 instead of 1/8
-        heap_size = available_ram / 4;
+    // Ensure heap doesn't exceed available memory
+    // Be more generous on low-RAM systems to support tools like the assembler
+    if (available_ram <= 8 * 1024 * 1024) {
+        // Up to half of RAM as heap when total RAM <= 8MB
+        if (heap_size > available_ram / 2) heap_size = available_ram / 2;
+    } else {
+        // Otherwise cap at a quarter of RAM
+        if (heap_size > available_ram / 4) heap_size = available_ram / 4;
     }
     
     // Ensure minimum heap size
@@ -273,9 +408,39 @@ static int validate_block(block_header_t* block, uint32 offset) {
         memory_errors++;
         return 0;
     }
+
+    // Validate heap_start/heap_size before touching any block fields.
+    uint32 heap_begin = (uint32)heap_start;
+    if (!heap_begin || heap_begin < 0x100000 || heap_size < HEAP_SIZE_MIN) {
+        printf("%c[MEMORY] Heap base corrupt (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
+        memory_errors++;
+        return 0;
+    }
+    uint32 heap_end = heap_begin + heap_size;
+    if (heap_end <= heap_begin) {
+        printf("%c[MEMORY] Heap bounds overflow (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
+        memory_errors++;
+        return 0;
+    }
+
+    // Ensure the block pointer itself is within the heap before dereferencing.
+    uint32 block_addr = (uint32)block;
+    if (block_addr < heap_begin || block_addr + sizeof(block_header_t) > heap_end) {
+        printf("%c[MEMORY] Block pointer out of heap (block=0x%X heap=[0x%X..0x%X))\n", 255, 0, 0, block_addr, heap_begin, heap_end);
+        memory_errors++;
+        return 0;
+    }
+
+    // Sanity: offset should match the pointer.
+    if (block_addr != heap_begin + offset) {
+        printf("%c[MEMORY] Block pointer mismatch (offset=0x%X block=0x%X expected=0x%X)\n", 255, 0, 0, offset, block_addr, heap_begin + offset);
+        memory_errors++;
+        return 0;
+    }
     
     // Check if block is within heap bounds first
-    if (offset >= heap_size || offset + block->size > heap_size) {
+    // (safe now that block pointer is validated)
+    if (offset >= heap_size || offset + BLOCK_HEADER_SIZE > heap_size || offset + block->size > heap_size) {
         printf("%c[MEMORY] Block out of bounds at offset 0x%X (size: %d, heap: %d)\n", 255, 0, 0, offset, block->size, heap_size);
         memory_errors++;
         return 0;
@@ -309,6 +474,28 @@ void check_stack_overflow() {
 
 void init_memory_manager() {
     if (memory_initialized) return;
+
+    // Choose a heap start that cannot overlap the VMM's boot-time allocations
+    // (page tables, etc.). IMPORTANT: user tasks are mapped into the *low* user
+    // range (starting at USER_CODE_BASE = 0x00400000). If the kernel heap also
+    // lives in the low identity range, loading a user task can overwrite/unmap
+    // heap pages and corrupt the allocator.
+    //
+    // To avoid that, we keep the heap in the kernel high-half by using the
+    // KERNEL_BASE alias of low physical memory.
+    if (heap_phys_start == 0) {
+        uint32 boot_end = vmm_get_boot_alloc_end();
+        if (boot_end != 0) {
+            heap_phys_start = boot_end;
+        } else {
+            // Fallback (should only happen if malloc is used before vmm_init())
+            uint32 end = (uint32)&__kernel_end;
+            heap_phys_start = align_up_u32(end + 0x10000, 0x1000);
+        }
+    }
+    if (!heap_start || heap_start == (uint8*)0) {
+        heap_start = (uint8*)(KERNEL_BASE + heap_phys_start);
+    }
     
     // Try to detect available memory and adjust heap size accordingly
     uint32 available_ram = detect_available_memory();
@@ -316,12 +503,16 @@ void init_memory_manager() {
     // Use the new generous heap sizing for zero-copy operations
     calculate_optimal_heap_size();
     
-    // Verify heap start address is accessible
-    if ((uint32)heap_start < 0x200000) {
+    // Basic sanity check (physical)
+    if (heap_phys_start < 0x100000) {
         return;
     }
     
-    // Initialize heap with calculated size
+    // Initialize heap with calculated size.
+    // Reserve the physical region so paging/frame_alloc will never hand out
+    // frames that overlap the heap.
+    vmm_reserve_phys_range(heap_phys_start, heap_phys_start + heap_size);
+
     memset(heap_start, 0, heap_size);
     
     // Verify the memory was set properly
@@ -367,12 +558,15 @@ static uint32 find_free_block(uint32 size) {
     while (current != NO_BLOCK && blocks_checked < 100) { // Prevent infinite loops
         block_header_t* block = (block_header_t*)(heap_start + current);
         blocks_checked++;
+        if ((blocks_checked & 0x7) == 0) {
+            mem_ctx_account();
+        }
         
-        // Validate block integrity (but don't fail if validation is disabled)
+        // Validate block integrity. If this fails, the heap metadata is unsafe
+        // to traverse (we cannot safely read block->next), so fail fast.
         if (!validate_block(block, current)) {
-            // Since validation is disabled, just continue instead of failing
-            current = block->next;
-            continue;
+            printf("%c[MEMORY] Heap traversal aborted (corruption near offset 0x%X)\n", 255, 0, 0, current);
+            return NO_BLOCK;
         }
         
         if (!block->used && block->size >= size) {
@@ -410,8 +604,13 @@ static void split_block(uint32 block_offset, uint32 needed_size) {
 
 static void merge_free_blocks() {
     uint32 current = first_block;
+    int blocks_checked = 0;
     while (current != NO_BLOCK) {
         block_header_t* block = (block_header_t*)(heap_start + current);
+        blocks_checked++;
+        if ((blocks_checked & 0x7) == 0) {
+            mem_ctx_account();
+        }
         
         // Validate block integrity
         if (!validate_block(block, current)) {
@@ -438,6 +637,10 @@ static void merge_free_blocks() {
 }
 
 void* malloc(size_t nbytes) {
+    if (!mem_ctx_allow()) {
+        return NULL;
+    }
+    mem_ctx_account();
     // Lazy initialization
     ensure_memory_initialized();
     
@@ -450,7 +653,7 @@ void* malloc(size_t nbytes) {
     }
     
     // Increased limit for larger files like .rei images, assembler, and zero-copy operations
-    uint32 max_allocation = heap_size * 4 / 5; // 80% of heap for larger files (increased from 75%)
+    uint32 max_allocation = heap_size * 9 / 10; // 90% of heap allowed for single allocation
     if (nbytes > max_allocation) {
         printf("%c[MEMORY] Request too large: %d bytes (heap: %d KB, max: %d bytes)\n", 255, 0, 0, nbytes, heap_size / 1024, max_allocation);
         return NULL;
@@ -482,6 +685,8 @@ void* malloc(size_t nbytes) {
 }
 
 void free(void* ptr) {
+    if (!mem_ctx_allow()) return;
+    mem_ctx_account();
     if (!ptr) return;
     
     // Lazy initialization check
@@ -530,6 +735,10 @@ void free(void* ptr) {
 }
 
 void* realloc(void* ptr, size_t new_size) {
+    if (!mem_ctx_allow()) {
+        return NULL;
+    }
+    mem_ctx_account();
     if (!ptr) return malloc(new_size);
     if (new_size <= 0) {
         free(ptr);
@@ -565,12 +774,14 @@ void* realloc(void* ptr, size_t new_size) {
     }
     void* new_ptr = malloc(new_size);
     if (!new_ptr) return NULL;
-    memcpy((char*)ptr, (char*)new_ptr, current_size);
+    memcpy((char*)new_ptr, (char*)ptr, current_size);
     free(ptr);
     return new_ptr;
 }
 
 void* calloc(size_t count, size_t size) {
+    if (!mem_ctx_allow()) return NULL;
+    mem_ctx_account();
     // Lazy initialization
     ensure_memory_initialized();
     
@@ -600,6 +811,8 @@ void print_memory_stats() {
         
         if (!validate_block(block, current)) {
             corrupted_blocks++;
+            // Heap is unsafe to traverse further.
+            break;
         } else {
             if (block->used) {
                 total_used += block->size;
@@ -657,4 +870,31 @@ uint32 get_heap_size() {
 
 void putchar(char c) {
     drawText(c, 255, 255, 255);
+}
+
+// Compute total used bytes in heap by scanning blocks
+uint32 get_heap_used(void) {
+    if (!memory_initialized) return 0;
+    uint32 total_used = 0;
+    uint32 current = first_block;
+    int guard = 0;
+    while (current != NO_BLOCK && guard++ < 20000) {
+        block_header_t* block = (block_header_t*)(heap_start + current);
+        if ((guard & 0xFF) == 0) {
+            mem_ctx_account();
+        }
+        if (!validate_block(block, current)) {
+            break;
+        }
+        if (block->used) {
+            total_used += block->size;
+        }
+        if (block->next == current || block->next >= heap_size) break; // safety
+        current = block->next;
+    }
+    // Exclude header overhead to present closer to payload usage
+    if (total_used >= BLOCK_HEADER_SIZE) {
+        // Roughly subtract one header per average block (approx): keep as-is to avoid negative
+    }
+    return total_used;
 }

@@ -1,20 +1,6 @@
 # EYN-OS Shell Script Demo
-# This is a comment line
 
-echo "Hello from EYN-OS shell script!"
-echo "This script demonstrates shell file execution"
+set RAND1=$(random 1 1000)
+set RAND2=$(random 1 1000)
 
-# show system information
-ver
-
-# show current directory
-ls
-
-# demonstrate calculator
-calc 2+3
-calc 10*5
-
-# show memory status
-memory stats
-
-echo "Shell script execution completed successfully!"
+calc $RAND1 + $RAND2

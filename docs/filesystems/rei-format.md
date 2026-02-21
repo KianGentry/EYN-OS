@@ -1,211 +1,106 @@
 # REI Image Format
 
-**REI** (Raw EYN Image) is a custom image format designed specifically for EYN-OS. It provides a simple, efficient way to store and display images without the complexity of modern formats like PNG or JPEG.
+REI (Raw EYN Image) is a simple, efficient image format for EYN-OS.
 
 ## Overview
 
-REI is a raw pixel format with a minimal header, designed for:
-- **Simplicity**: Easy to parse and implement
-- **Efficiency**: Direct pixel data access
-- **Extensibility**: Reserved fields for future features
-- **EYN-OS Integration**: Native support in the OS
+- Minimal 12-byte header
+- Raw pixel data (optionally compressed)
+- Mono (1 Bpp), RGB (3 Bpp), RGBA (4 Bpp)
 
 ## File Extension
 
-REI files use the `.rei` extension (Raw EYN Image).
+- `.rei`
 
-## Format Specification
+## Header Structure (12 bytes)
 
-### Header Structure (12 bytes)
+| Offset | Size | Field   | Description                                                    |
+|--------|------|---------|----------------------------------------------------------------|
+| 0x00   | 4    | Magic   | 0x52454900 ("REI\0")                                           |
+| 0x04   | 2    | Width   | Image width in pixels (max 320)                                |
+| 0x06   | 2    | Height  | Image height in pixels (max 200)                               |
+| 0x08   | 1    | Depth   | 1=mono, 3=RGB, 4=RGBA                                          |
+| 0x09   | 1    | Flags   | Low nibble: compression (0=none, 1=RLE)                        |
+| 0x0A   | 2    | Reserved| Reserved                                                       |
 
-| Offset | Size | Field | Description |
-|--------|------|-------|-------------|
-| 0x00   | 4    | Magic | Magic number: `0x52454900` ("REI\0") |
-| 0x04   | 2    | Width | Image width in pixels (16-bit, max 320) |
-| 0x06   | 2    | Height | Image height in pixels (16-bit, max 200) |
-| 0x08   | 1    | Depth | Color depth (1=mono, 3=RGB, 4=RGBA) |
-| 0x09   | 1    | Reserved1 | Reserved for future use |
-| 0x0A   | 2    | Reserved2 | Reserved for future use |
+## Pixel Data
 
-### Pixel Data
+Uncompressed size is:
 
-Raw pixel data follows immediately after the header. The data size is calculated as:
 ```
 data_size = width × height × depth
 ```
 
-### Color Depths
+- If flags compression=0: raw pixels follow header.
+- If compression=1 (RLE): a compressed bytestream follows the header and decompresses to the size above.
 
-#### Mono (1 byte per pixel)
-- Single grayscale value (0-255)
-- 0 = black, 255 = white
+## Compression
 
-#### RGB (3 bytes per pixel)
-- Red component (0-255)
-- Green component (0-255)  
-- Blue component (0-255)
+Low-nibble of Flags indicates compression:
 
-#### RGBA (4 bytes per pixel)
-- Red component (0-255)
-- Green component (0-255)
-- Blue component (0-255)
-- Alpha component (0-255, currently ignored in rendering)
+- 0x0: None (raw)
+- 0x1: RLE (PackBits-style), operating on whole pixels (1/3/4 bytes).
 
-### Data Layout
+PackBits-like rules:
 
-Pixels are stored in row-major order (left to right, top to bottom):
+- Read signed int8 `n`
+  - 0..127: copy next (n+1) pixels literally
+  - -127..-1: repeat next single pixel (1 - n) times
+  - -128: no-op
 
-```
-Pixel (0,0) | Pixel (1,0) | ... | Pixel (width-1,0)
-Pixel (0,1) | Pixel (1,1) | ... | Pixel (width-1,1)
-...
-Pixel (0,height-1) | ... | Pixel (width-1,height-1)
-```
+Note: A "pixel" is `depth` bytes; output must exactly equal `width×height×depth` bytes.
 
-## Usage in EYN-OS
+## Usage
 
-### Reading REI Files
-
-REI files are automatically detected and rendered by the `read` command:
+View images in EYN-OS:
 
 ```bash
-read image.rei              # Smart detection
-read_image image.rei        # Direct subcommand
+view image.rei
+vieww image.rei
 ```
 
-### Display Features
+## Conversion (PNG → REI)
 
-- **Pixel-perfect rendering** to VGA framebuffer
-- **Automatic centering** on screen
-- **Smart scaling** for oversized images
-- **Support for all color depths**
-
-## Conversion Tools
-
-### PNG to REI Converter
-
-Located at `devtools/png_to_rei.py`:
+Tool: `devtools/png_to_rei.py`
 
 ```bash
-# Convert PNG to REI
+# RLE compressed by default
 python3 devtools/png_to_rei.py image.png -o image.rei
 
 # Create test pattern
 python3 devtools/png_to_rei.py --test -o test.rei
 
-# Specify color depth
+# Select depth
 python3 devtools/png_to_rei.py image.png -d 1  # Mono
 python3 devtools/png_to_rei.py image.png -d 3  # RGB
 python3 devtools/png_to_rei.py image.png -d 4  # RGBA
+
+# Disable compression (write raw pixels)
+python3 devtools/png_to_rei.py image.png -o image.raw.rei --no-rle
 ```
 
-### Options
+Options:
 
-- `-o, --output`: Specify output filename
-- `-d, --depth`: Color depth (1, 3, or 4)
-- `--test`: Create test pattern instead of converting
+- `-o, --output`: Output filename
+- `-d, --depth`: 1, 3, or 4
+- `--test`: Generate test pattern
+- `--rle`: Enable RLE (default)
+- `--no-rle`: Disable RLE (raw output)
 
-## Implementation Details
+## Implementation
 
-### OS Integration
+EYN-OS integration:
 
-REI support is implemented in:
-- `include/rei.h` - Header definitions and function prototypes
-- `src/drivers/rei.c` - Core REI parsing and rendering
-- `src/utilities/shell/subcommands.c` - `read_image_cmd` integration
-- `src/utilities/shell/fs_commands.c` - Smart detection in `read_cmd`
+- `include/drivers/rei.h` - format and API
+- `src/drivers/rei.c` - parsing, optional RLE decompression, rendering helpers
+- `src/utilities/shell/image_viewer_gui.c` - GUI viewer
 
-### Key Functions
+## Notes
 
-```c
-// Parse REI image from data
-int rei_parse_image(const uint8_t* data, size_t size, rei_image_t* image);
-
-// Display image with pixel-perfect rendering
-int rei_display_image(const rei_image_t* image, int x, int y);
-
-// Get pixel color at coordinates
-uint32_t rei_get_pixel_color(const rei_image_t* image, int x, int y);
-
-// Free image memory
-void rei_free_image(rei_image_t* image);
-```
-
-### Rendering Process
-
-1. **Parse Header**: Validate magic number and dimensions
-2. **Load Pixel Data**: Copy raw pixel data to memory
-3. **Calculate Position**: Center image on screen if needed
-4. **Render Pixels**: Draw each pixel to VGA framebuffer
-5. **Handle Scaling**: Scale down oversized images automatically
-
-## Limitations
-
-- **Maximum dimensions**: 320×200 pixels (VGA text mode limits)
-- **No compression**: Raw pixel data only
-- **Limited color depth**: Mono, RGB, and RGBA only
-- **No metadata**: No support for image metadata or color profiles
-
-## Future Extensions
-
-The REI format is designed for extensibility:
-
-- **Animation support**: Multiple frames in single file
-- **Compression**: Simple RLE or delta compression
-- **Palette support**: Indexed color mode
-- **Metadata**: Image properties and color profiles
-- **Layers**: Multiple image layers
-
-## Examples
-
-### Test Files
-
-- `testdir/test_pattern.rei` - 64×48 RGB gradient pattern
-- `testdir/eynos.rei` - 128×64 EYN-OS logo
-- `testdir/mono_test.rei` - 64×48 monochrome test
-
-### Creating Custom Images
-
-```python
-# Simple gradient pattern
-import struct
-
-# Header
-magic = 0x52454900
-width = 64
-height = 48
-depth = 3  # RGB
-
-header = struct.pack('<IHHBBH', magic, width, height, depth, 0, 0)
-
-# Pixel data
-pixels = []
-for y in range(height):
-    for x in range(width):
-        r = int((x / width) * 255)
-        g = int((y / height) * 255)
-        b = 128
-        pixels.append(struct.pack('BBB', r, g, b))
-
-# Write REI file
-with open('gradient.rei', 'wb') as f:
-    f.write(header)
-    for pixel in pixels:
-        f.write(pixel)
-```
-
-## Technical Notes
-
-- **Endianness**: All multi-byte values are little-endian
-- **Alignment**: No padding between pixels or rows
-- **Memory**: Images are loaded entirely into memory
-- **Performance**: Direct framebuffer access for optimal rendering
-
-## Integration with EYN-OS
-
-REI is fully integrated into EYN-OS's file reading system:
-
-- **Smart detection** in `read` command
+- Endianness: little-endian
+- Alignment: no row padding
+- Images are fully loaded into memory
+- GUI compositor respects alpha in overlays
 - **Subcommand support** via `read_image`
 - **Help system integration** with proper documentation
 - **Error handling** for invalid or corrupted files

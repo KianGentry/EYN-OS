@@ -4,6 +4,8 @@
 #include <string.h>
 #include <eynfs.h>
 #include <stdint.h>
+#include <context.h>
+#include <misc/sched.h>
 
 // Global predictive memory state
 static predictive_allocator_t g_predictive_allocator;
@@ -16,6 +18,25 @@ static uint32_t g_prediction_timer = 0;
 // Size-based hash table for O(1) block lookups
 static uint8_t g_size_hash_table[64]; // Maps common sizes to block indices
 static int g_hash_table_initialized = 0;
+
+static int pred_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void pred_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
 
 // Initialize predictive memory management system
 void predictive_memory_init(void) {
@@ -70,6 +91,7 @@ static void update_size_hash_table(uint32_t size, uint8_t block_index) {
 
 // Predictive memory allocation with pattern analysis and O(1) lookup optimization
 void* predictive_malloc(size_t size, memory_prediction_t* pattern) {
+    if (!pred_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
     // First, try O(1) lookup using size hash table
     if (g_hash_table_initialized) {
         uint8_t hash_index = get_size_hash_index(size);
@@ -90,6 +112,9 @@ void* predictive_malloc(size_t size, memory_prediction_t* pattern) {
     
     // Fallback to linear search if hash lookup fails
     for (int i = 0; i < 16; i++) {
+        if ((i & 0x7) == 0) {
+            pred_ctx_account(SCHED_COST_ALLOC);
+        }
         if (g_predictive_allocator.predicted_blocks[i] &&
             !g_predictive_allocator.block_used[i] &&
             g_predictive_allocator.block_sizes[i] >= size) {
@@ -128,6 +153,9 @@ void predictive_free(void* ptr) {
     
     // If this was tracked as a predictive block, mark free and free memory when idle
     for (int i = 0; i < 16; i++) {
+        if ((i & 0x7) == 0) {
+            pred_ctx_account(SCHED_COST_ALLOC);
+        }
         if (g_predictive_allocator.predicted_blocks[i] == ptr) {
             g_predictive_allocator.block_used[i] = 0;
             
@@ -163,12 +191,18 @@ void update_access_pattern(uint32_t address, uint32_t size) {
     
     // Update allocation size patterns
     for (int i = 0; i < 63; i++) {
+        if ((i & 0xF) == 0) {
+            pred_ctx_account(SCHED_COST_ALLOC);
+        }
         g_memory_pattern.allocation_sizes[i] = g_memory_pattern.allocation_sizes[i + 1];
     }
     g_memory_pattern.allocation_sizes[63] = size;
     
     // Update access pattern history
     for (int i = 0; i < PATTERN_HISTORY_SIZE - 1; i++) {
+        if ((i & 0x3F) == 0) {
+            pred_ctx_account(SCHED_COST_ALLOC);
+        }
         g_memory_pattern.access_pattern[i] = g_memory_pattern.access_pattern[i + 1];
     }
     g_memory_pattern.access_pattern[PATTERN_HISTORY_SIZE - 1] = address;
@@ -185,6 +219,9 @@ float calculate_prediction_score(memory_prediction_t* pattern) {
     uint32_t common_size = 0;
     uint32_t size_count = 0;
     for (int i = 0; i < 64; i++) {
+        if ((i & 0xF) == 0) {
+            pred_ctx_account(SCHED_COST_ALLOC);
+        }
         if (pattern->allocation_sizes[i] > 0) {
             common_size = pattern->allocation_sizes[i];
             size_count++;
@@ -216,6 +253,9 @@ void prefetch_memory_blocks(void) {
         uint32_t size_counts[4] = {0};
         
         for (int i = 0; i < 64; i++) {
+            if ((i & 0xF) == 0) {
+                pred_ctx_account(SCHED_COST_ALLOC);
+            }
             uint32_t size = g_memory_pattern.allocation_sizes[i];
             if (size > 0) {
                 for (int j = 0; j < 4; j++) {
@@ -229,6 +269,9 @@ void prefetch_memory_blocks(void) {
         for (int i = 0; i < 4; i++) {
             if (size_counts[i] > 5) {
                 for (int j = 0; j < 16; j++) {
+                    if ((j & 0x7) == 0) {
+                        pred_ctx_account(SCHED_COST_ALLOC);
+                    }
                     if (g_predictive_allocator.predicted_blocks[j] == NULL) {
                         g_predictive_allocator.block_sizes[j] = common_sizes[i];
                         g_predictive_allocator.block_used[j] = 0;
@@ -251,6 +294,9 @@ void adaptive_memory_optimization(void) {
     // If hit rate is low, clear unused cached slots to reduce memory footprint
     if (g_predictive_allocator.hit_rate < 0.3f) {
         for (int i = 0; i < 16; i++) {
+            if ((i & 0x7) == 0) {
+                pred_ctx_account(SCHED_COST_ALLOC);
+            }
             if (g_predictive_allocator.predicted_blocks[i] && !g_predictive_allocator.block_used[i]) {
                 free(g_predictive_allocator.predicted_blocks[i]);
                 g_predictive_allocator.predicted_blocks[i] = NULL;
@@ -265,6 +311,7 @@ void adaptive_memory_optimization(void) {
 
 // Memory mapping for zero-copy file operations
 int eynfs_mmap(const char* path, void** addr, size_t* size, uint8_t read_only) {
+    if (!pred_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
     if (g_mapping_count >= 32) {
         printf("%cError: Too many mapped files\n", 255, 0, 0);
         return -1;
@@ -316,9 +363,16 @@ int eynfs_mmap(const char* path, void** addr, size_t* size, uint8_t read_only) {
     g_file_mappings[g_mapping_count].mapped_address = mapped_addr;
     g_file_mappings[g_mapping_count].file_size = entry.size;
     g_file_mappings[g_mapping_count].block_start = entry.first_block;
+    g_file_mappings[g_mapping_count].block_count = 0;
     g_file_mappings[g_mapping_count].drive = drive;
     g_file_mappings[g_mapping_count].read_only = read_only;
     g_file_mappings[g_mapping_count].access_count = 0;
+
+    strncpy(g_file_mappings[g_mapping_count].path, abspath, sizeof(g_file_mappings[g_mapping_count].path) - 1);
+    g_file_mappings[g_mapping_count].path[sizeof(g_file_mappings[g_mapping_count].path) - 1] = '\0';
+    g_file_mappings[g_mapping_count].parent_block = parent_block;
+    g_file_mappings[g_mapping_count].entry_index = entry_index;
+    g_file_mappings[g_mapping_count].entry = entry;
     
     *addr = mapped_addr;
     *size = entry.size;
@@ -331,7 +385,11 @@ int eynfs_mmap(const char* path, void** addr, size_t* size, uint8_t read_only) {
 
 // Unmap a memory-mapped file
 int eynfs_munmap(void* addr, size_t size) {
+    if (!pred_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
     for (int i = 0; i < g_mapping_count; i++) {
+        if ((i & 0x7) == 0) {
+            pred_ctx_account(SCHED_COST_ALLOC);
+        }
         if (g_file_mappings[i].mapped_address == addr) {
             free(addr);
             
@@ -352,14 +410,49 @@ int eynfs_munmap(void* addr, size_t size) {
 
 // Synchronize memory-mapped file to disk
 int eynfs_msync(void* addr, size_t size) {
+    if (!pred_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     for (int i = 0; i < g_mapping_count; i++) {
+        if ((i & 0x7) == 0) {
+            pred_ctx_account(SCHED_COST_FS);
+        }
         if (g_file_mappings[i].mapped_address == addr) {
             if (g_file_mappings[i].read_only) {
                 printf("%cWarning: Cannot sync read-only mapping\n", 255, 165, 0);
                 return 0;
             }
-            
-            // TODO: Implement actual file writing back to disk
+
+            // Write back the full mapping to disk.
+            // Note: This is intentionally simple (rewrite) to keep semantics predictable.
+            eynfs_superblock_t sb;
+            if (eynfs_read_superblock(g_file_mappings[i].drive, 2048, &sb) != 0) {
+                printf("%cError: Cannot read filesystem for msync\n", 255, 0, 0);
+                return -1;
+            }
+
+            if (size > 0 && size != g_file_mappings[i].file_size) {
+                // Caller-provided size mismatch; prefer the mapping's authoritative size.
+                (void)size;
+            }
+
+            // Keep entry size consistent with the mapped size.
+            g_file_mappings[i].entry.size = g_file_mappings[i].file_size;
+
+            int n = eynfs_write_file(
+                g_file_mappings[i].drive,
+                &sb,
+                &g_file_mappings[i].entry,
+                g_file_mappings[i].mapped_address,
+                g_file_mappings[i].file_size,
+                g_file_mappings[i].parent_block,
+                g_file_mappings[i].entry_index);
+
+            if (n < 0) {
+                printf("%cError: Failed to write back mapping\n", 255, 0, 0);
+                return -1;
+            }
+
+            // Update cached metadata after rewrite.
+            g_file_mappings[i].block_start = g_file_mappings[i].entry.first_block;
             printf("%cFile synchronized to disk\n", 0, 255, 0);
             return 0;
         }
@@ -367,6 +460,26 @@ int eynfs_msync(void* addr, size_t size) {
     
     printf("%cError: Address not mapped\n", 255, 0, 0);
     return -1;
+}
+
+void invalidate_mapped_file(const char* path) {
+    if (!path || !path[0]) return;
+
+    // Resolve path relative to current working directory
+    extern char shell_current_path[128];
+    extern void resolve_path(const char* input, const char* cwd, char* out, size_t outsz);
+    char abspath[128];
+    resolve_path(path, shell_current_path, abspath, sizeof(abspath));
+
+    for (int i = 0; i < g_mapping_count; i++) {
+        if ((i & 0x7) == 0) {
+            pred_ctx_account(SCHED_COST_ALLOC);
+        }
+        if (strcmp(g_file_mappings[i].path, abspath) == 0) {
+            (void)eynfs_munmap(g_file_mappings[i].mapped_address, g_file_mappings[i].file_size);
+            return;
+        }
+    }
 }
 
 // Read-only memory mapping
@@ -385,6 +498,9 @@ void* eynfs_mmap_readonly(const char* path, size_t* size) {
 // Check if address is memory-mapped
 int is_memory_mapped(void* addr) {
     for (int i = 0; i < g_mapping_count; i++) {
+        if ((i & 0x7) == 0) {
+            pred_ctx_account(SCHED_COST_ALLOC);
+        }
         if (g_file_mappings[i].mapped_address == addr) {
             return 1;
         }
@@ -395,6 +511,9 @@ int is_memory_mapped(void* addr) {
 // Get file mapping information
 file_mapping_t* get_file_mapping(void* addr) {
     for (int i = 0; i < g_mapping_count; i++) {
+        if ((i & 0x7) == 0) {
+            pred_ctx_account(SCHED_COST_ALLOC);
+        }
         if (g_file_mappings[i].mapped_address == addr) {
             return &g_file_mappings[i];
         }
