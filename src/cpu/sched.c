@@ -20,8 +20,8 @@ typedef struct sched_queue {
     int tail;
 } sched_queue_t;
 
-static sched_work_t g_work[SCHED_WORK_MAX];
-static sched_queue_t g_runq[SCHED_WORK_PRIOS];
+static sched_work_t g_work[SCHED_WORK_MAX] CACHE_ALIGNED_32;
+static sched_queue_t g_runq[SCHED_WORK_PRIOS] CACHE_ALIGNED_32;
 static int g_sched_work_inflight = 0;
 static uint32 g_ready_bitmap = 0;
 

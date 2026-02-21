@@ -61,7 +61,7 @@ typedef struct {
 #define USER_HEAP_BASE  0x5000000   // 80MB
 
 // Global process table
-static native_process_t g_processes[MAX_NATIVE_PROCESSES];
+static native_process_t g_processes[MAX_NATIVE_PROCESSES] CACHE_ALIGNED_32;
 static native_process_t* g_current_process = NULL;
 static int g_next_pid = 1;
 static uint32 g_user_heap_ptr = USER_HEAP_BASE;

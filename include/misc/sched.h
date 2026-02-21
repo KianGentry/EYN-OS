@@ -33,15 +33,15 @@ typedef struct sched_work sched_work_t;
 struct sched_work {
 	uint32 id;
 	uint32 priority;
+	int next;
+	uint8 in_queue;
+	uint8 _pad[3];
+	void (*run)(sched_work_t* w);
+	void* userdata;
 	uint32 affinity_mask;
 	uint32 budget_ticks;
 	uint32 budget_left;
 	uint32 cache_hint;
-	void (*run)(sched_work_t* w);
-	void* userdata;
-	int next;
-	uint8 in_queue;
-	uint8 _pad[3];
 };
 
 void sched_work_init(void);

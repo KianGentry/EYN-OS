@@ -7,22 +7,31 @@
 // Process execution context
 typedef struct {
     uint32 pid;                 // Process ID
+    uint8 active;               // Process active flag
+    uint8 owned;                // Non-zero if this process struct is owned by the global process table
+    uint8 segment_count;        // Number of valid entries in segments[]
+    uint8 _pad0;
+
+    uint32 entry_point;         // Entry point address
+    uint32 esp;                 // Stack pointer
+    uint32 eip;                 // Instruction pointer
+    uint32 eflags;              // Flags register
+    uint32 eax, ebx, ecx, edx;  // General purpose registers
+    uint32 esi, edi, ebp;       // Additional registers
+
     uint32 code_start;          // Code section start address
     uint32 code_size;           // Code section size
     uint32 data_start;          // Data section start address
     uint32 data_size;           // Data section size
     uint32 stack_start;         // Stack start address
     uint32 stack_size;          // Stack size
-    uint32 entry_point;         // Entry point address
-    uint32 esp;                 // Stack pointer
-    uint32 eip;                 // Instruction pointer
-    uint32 eax, ebx, ecx, edx;  // General purpose registers
-    uint32 esi, edi, ebp;       // Additional registers
-    uint32 eflags;              // Flags register
-    uint8 active;               // Process active flag
-    uint8 owned;                // Non-zero if this process struct is owned by the global process table
+
+    uint32 elf_vaddr_min;       // If loaded from ELF: lowest virtual address mapped
+    uint32 elf_vaddr_max;       // If loaded from ELF: highest virtual address mapped (exclusive)
+    void*  linux_fd_table;      // optional per-process Linux-like fd table
+    uint32 brk_end;             // simple brk end pointer for malloc
+
     // Per-segment mapping for ELF PT_LOAD segments
-    uint8 segment_count;
     struct {
         uint32 vaddr;   // ELF virtual address of segment
         uint32 memsz;   // in-memory size (includes bss)
@@ -30,10 +39,6 @@ typedef struct {
         void*  mem;     // kernel-side allocation pointer for this segment
         uint32 flags;   // PF_* flags from program header
     } segments[8];
-    uint32 elf_vaddr_min;       // If loaded from ELF: lowest virtual address mapped
-    uint32 elf_vaddr_max;       // If loaded from ELF: highest virtual address mapped (exclusive)
-    void*  linux_fd_table;      // optional per-process Linux-like fd table
-    uint32 brk_end;             // simple brk end pointer for malloc
     char name[64];              // Process name
 } native_process_t;
 
