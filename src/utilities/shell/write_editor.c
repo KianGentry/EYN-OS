@@ -338,10 +338,48 @@ static char write_editor_open_warn_line2[96];
 
 // Editor-local storage to avoid heap fragmentation/exhaustion.
 // NOTE: Keep this modest; QEMU default RAM is tiny.
-static char write_editor_read_buf[WRITE_EDITOR_MAX_FILE_BYTES + 1];
-static char write_editor_save_buf[WRITE_EDITOR_MAX_FILE_BYTES + 1];
-static uint8 write_editor_arena[WRITE_EDITOR_MAX_FILE_BYTES + 16384];
+static char* write_editor_read_buf = NULL;
+static char* write_editor_save_buf = NULL;
+static uint8* write_editor_arena = NULL;
+static uint32 write_editor_arena_cap = 0;
 static uint32 write_editor_arena_pos = 0;
+
+static int write_editor_storage_init(void) {
+    if (write_editor_read_buf && write_editor_save_buf && write_editor_arena) return 0;
+
+    if (!write_editor_read_buf) {
+        write_editor_read_buf = (char*)malloc((size_t)WRITE_EDITOR_MAX_FILE_BYTES + 1);
+        if (!write_editor_read_buf) goto fail;
+    }
+    if (!write_editor_save_buf) {
+        write_editor_save_buf = (char*)malloc((size_t)WRITE_EDITOR_MAX_FILE_BYTES + 1);
+        if (!write_editor_save_buf) goto fail;
+    }
+    if (!write_editor_arena) {
+        write_editor_arena_cap = (uint32)WRITE_EDITOR_MAX_FILE_BYTES + 16384;
+        write_editor_arena = (uint8*)malloc((size_t)write_editor_arena_cap);
+        if (!write_editor_arena) goto fail;
+    }
+
+    write_editor_arena_pos = 0;
+    return 0;
+
+fail:
+    if (write_editor_read_buf) { free(write_editor_read_buf); write_editor_read_buf = NULL; }
+    if (write_editor_save_buf) { free(write_editor_save_buf); write_editor_save_buf = NULL; }
+    if (write_editor_arena) { free(write_editor_arena); write_editor_arena = NULL; }
+    write_editor_arena_cap = 0;
+    write_editor_arena_pos = 0;
+    return -1;
+}
+
+static void write_editor_storage_free(void) {
+    if (write_editor_read_buf) { free(write_editor_read_buf); write_editor_read_buf = NULL; }
+    if (write_editor_save_buf) { free(write_editor_save_buf); write_editor_save_buf = NULL; }
+    if (write_editor_arena) { free(write_editor_arena); write_editor_arena = NULL; }
+    write_editor_arena_cap = 0;
+    write_editor_arena_pos = 0;
+}
 
 static void write_editor_warn(const char* l1, const char* l2) {
     write_editor_open_warn_active = 1;
@@ -354,13 +392,14 @@ static void write_editor_arena_reset(void) {
 }
 
 static void* write_editor_arena_alloc(uint32 bytes, uint32 align) {
+    if (!write_editor_arena || write_editor_arena_cap == 0) return NULL;
     if (align < 1) align = 1;
     uint32 p = write_editor_arena_pos;
     uint32 mask = align - 1;
     if ((align & mask) == 0) {
         p = (p + mask) & ~mask;
     }
-    if (p + bytes > (uint32)sizeof(write_editor_arena)) return NULL;
+    if (p + bytes > write_editor_arena_cap) return NULL;
     void* out = &write_editor_arena[p];
     write_editor_arena_pos = p + bytes;
     return out;
@@ -627,6 +666,10 @@ static int write_editor_delete_active_selection(void) {
 // Load file content into editor buffer
 int load_file_to_write_editor(const char* path, uint8 disk) {
     if (!write_editor_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+    if (write_editor_storage_init() != 0) {
+        write_editor_warn("Out of memory", "Editor storage alloc failed");
+        return -1;
+    }
     write_editor_open_warn_active = 0;
     write_editor_open_warn_line1[0] = '\0';
     write_editor_open_warn_line2[0] = '\0';
@@ -749,6 +792,7 @@ int load_file_to_write_editor(const char* path, uint8 disk) {
 // Save editor buffer to file
 int save_write_editor_buffer(const char* path, uint8 disk) {
     if (!write_editor_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (write_editor_storage_init() != 0) return -1;
     // Calculate total size needed
     int total_size = 0;
     for (int i = 0; i < write_editor_num_lines; i++) {
@@ -1338,7 +1382,11 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
                 write_editor_modified = 0;
                 write_editor_update_tile_modified();
                 write_editor_exit_prompt_active = 0;
+                write_editor_free_all_lines();
+                write_editor_num_lines = 1;
+                write_editor_sel_active = 0;
                 if (write_editor_gui_tile >= 0) tile_unregister_gui_client(write_editor_gui_tile);
+                write_editor_storage_free();
             } else {
                 write_editor_last_save_failed = 1;
             }
@@ -1347,7 +1395,11 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
         }
         if (key == 'x' || key == 'X') {
             write_editor_exit_prompt_active = 0;
+            write_editor_free_all_lines();
+            write_editor_num_lines = 1;
+            write_editor_sel_active = 0;
             if (write_editor_gui_tile >= 0) tile_unregister_gui_client(write_editor_gui_tile);
+            write_editor_storage_free();
             return;
         }
         return;
@@ -2162,7 +2214,17 @@ static int write_editor_gui_close_request(int tile_idx, void* userdata) {
     (void)tile_idx;
     (void)userdata;
     if (write_editor_exit_prompt_active) return 0;
-    if (!write_editor_modified) return 1;
+    if (!write_editor_modified) {
+        write_editor_free_all_lines();
+        write_editor_num_lines = 1;
+        write_editor_cursor_x = 0;
+        write_editor_cursor_y = 0;
+        write_editor_scroll_x = 0;
+        write_editor_scroll_y = 0;
+        write_editor_sel_active = 0;
+        write_editor_storage_free();
+        return 1;
+    }
     write_editor_exit_prompt_active = 1;
     if (write_editor_gui_tile >= 0) tile_invalidate_gui(write_editor_gui_tile);
     return 0;
@@ -2170,6 +2232,10 @@ static int write_editor_gui_close_request(int tile_idx, void* userdata) {
 
 // Main editor loop
 void write_editor(const char* filename, uint8 disk) {
+    if (write_editor_storage_init() != 0) {
+        printf("%cWrite editor: out of memory\n", 255, 0, 0);
+        return;
+    }
     // Reset editor state for new file
     write_editor_cursor_x = 0;
     write_editor_cursor_y = 0;
@@ -2180,6 +2246,7 @@ void write_editor(const char* filename, uint8 disk) {
     write_editor_reset_ephemeral_state();
     if (load_file_to_write_editor(filename, disk) < 0) {
         printf("%cFailed to load file.\n", 255, 0, 0);
+        write_editor_storage_free();
         return;
     }
     // If tiling manager is active, register as a GUI client for focused tile
@@ -2216,4 +2283,5 @@ void write_editor(const char* filename, uint8 disk) {
         // ...existing key handling (kept above) ...
     }
     printf("\n\n");
+    write_editor_storage_free();
 }

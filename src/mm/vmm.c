@@ -23,6 +23,9 @@ static frame_allocator_t g_frame_alloc;
 /* Swap state */
 static swap_state_t g_swap;
 
+/* Forward declarations (used by early teardown paths). */
+static void swap_free_slot(uint32 slot);
+
 /* Clock page replacement state */
 static clock_state_t g_clock;
 
@@ -468,8 +471,31 @@ int vmm_map_page(address_space_t* as, uint32 va, uint32 pa, uint32 flags) {
 
 int vmm_unmap_page(address_space_t* as, uint32 va) {
     pte_t* pte = vmm_walk_page_tables(as, va, 0);
-    if (!pte || !(*pte & PTE_PRESENT)) {
-        return -1;  /* Page not mapped */
+    if (!pte) {
+        return -1;  /* No page table / no PTE */
+    }
+
+    /* Treat non-present demand-zero and swapped pages as mapped so callers can
+     * tear down reserved regions without faulting them in.
+     */
+    if (!(*pte & PTE_PRESENT)) {
+        if (*pte & PTE_SWAPPED) {
+            uint32 slot = (*pte >> 12) & 0xFFFFF;
+            swap_free_slot(slot);
+            *pte = 0;
+            if (as == vmm_current_as) {
+                vm_invalidate_page((void*)va);
+            }
+            return 0;
+        }
+        if (*pte & PTE_DEMAND) {
+            *pte = 0;
+            if (as == vmm_current_as) {
+                vm_invalidate_page((void*)va);
+            }
+            return 0;
+        }
+        return -1;  /* Not mapped */
     }
     
     uint32 frame = *pte & PTE_FRAME_MASK;
@@ -882,10 +908,10 @@ static int swap_write_page(uint32 slot, void* page_data) {
     if (swap_partition_get_info()) {
         return swap_partition_write_page(slot, page_data);
     }
-    /* Fallback: no swap partition, operation fails silently */
+    /* No swap partition: swapping is unavailable (report failure). */
     (void)slot;
     (void)page_data;
-    return 0;
+    return -1;
 }
 
 /* Read page from swap device */
@@ -894,10 +920,10 @@ static int swap_read_page(uint32 slot, void* page_data) {
     if (swap_partition_get_info()) {
         return swap_partition_read_page(slot, page_data);
     }
-    /* Fallback: zero the page as placeholder */
+    /* No swap partition: swapping is unavailable (report failure). */
     (void)slot;
-    memset(page_data, 0, PAGE_SIZE);
-    return 0;
+    (void)page_data;
+    return -1;
 }
 
 /*

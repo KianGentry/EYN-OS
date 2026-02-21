@@ -69,8 +69,11 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     // address and can be overwritten by early_alloc(), corrupting heap
     // metadata and later causing copyout/page faults in user mode.
     uint32 ram = detect_available_memory();
+        printf("Detected RAM: %u KB\n", (unsigned)(ram / 1024u));
     printf("Starting memory manager...\n");
     vmm_init(ram);
+        printf("Frames: %u total, %u free\n",
+            (unsigned)vmm_get_total_frames(), (unsigned)vmm_get_free_frames());
     vmm_enable_paging();
     printf("Done.\n");
 

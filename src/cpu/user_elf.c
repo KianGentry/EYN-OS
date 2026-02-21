@@ -83,8 +83,19 @@ typedef struct {
 // This cap is intentionally conservative for low-memory QEMU configs.
 #define USER_ELF_MAX_FILE_BYTES (2u * 1024u * 1024u)
 
-// Initial user stack mapping. The VMM can still grow the stack on-demand via #PF.
-#define USER_ELF_INITIAL_STACK_PAGES 32u  // 128KB
+/*
+ * ABI-INVARIANT: Initial user stack mapping size.
+ *
+ * Why: Bounds the physical frames we must allocate up-front before entering ring3.
+ * Invariant: The VMM can grow the stack on-demand via #PF, but growth is limited
+ *            to one page below the current stack_bottom to keep faults bounded.
+ * Breakage if changed:
+ *   - Increasing: can exhaust frames on low-RAM configs and prevent any user
+ *     program from starting.
+ *   - Decreasing: may cause programs that reserve a large stack frame early to
+ *     fault below stack_bottom and segfault.
+ */
+#define USER_ELF_INITIAL_STACK_PAGES 8u  // 32KB
 
 static inline uint32 align_down(uint32 v, uint32 a) { return v & ~(a - 1); }
 static inline uint32 align_up(uint32 v, uint32 a) { return (v + a - 1) & ~(a - 1); }
@@ -289,38 +300,56 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     // Clear the stdin buffer for this terminal so the user task starts fresh
     vterm_stdin_clear(g_user_task_term);
 
-    // Map code/data region pages.
+    // Record mappings incrementally so any mid-loop OOM can be cleaned up.
+    g_user_code_base = map_start;
+    g_user_code_pages = 0;
+    g_user_stack_page = 0;
+    vmm_kernel_as.stack_bottom = USER_STACK_TOP - PAGE_SIZE;
+
+    /* Low-RAM-friendly program image mapping:
+     * - Pre-create PTEs for the full PT_LOAD range as demand-zero (not present).
+     * - Allocate/map/initialize only the pages that contain file-backed bytes.
+     * This avoids eagerly allocating large .bss regions (e.g. userland malloc's
+     * 1MB static heap) while still providing correct zero-fill semantics.
+     */
     for (uint32 pi = 0; pi < pages; ++pi) {
         uint32 va = map_start + pi * PAGE_SIZE;
-        uint32 frame = frame_alloc();
-        if (frame == 0) {
-            printf("%cError: out of physical frames.\n", 255, 0, 0);
+        pte_t* pte = vmm_walk_page_tables(&vmm_kernel_as, va, 1);
+        if (!pte) {
+            printf("%cError: failed to create PTEs for user image.\n", 255, 0, 0);
             user_task_cleanup_mappings();
             free(file);
             return -1;
         }
-        if (vmm_map_page(&vmm_kernel_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
-            printf("%cError: failed to map user pages.\n", 255, 0, 0);
-            frame_free(frame);
-            user_task_cleanup_mappings();
-            free(file);
-            return -1;
-        }
+        /* Ensure PDE is user-accessible when we eventually fault/map. */
+        pde_t* pde = &vmm_kernel_as.pd->entries[PDE_INDEX(va)];
+        *pde |= PTE_USER;
+        *pte = PTE_DEMAND | PTE_USER | PTE_RW;
     }
+    g_user_code_pages = pages;
 
     // Map user stack (initial N pages; can grow further on page faults).
     const uint32 user_stack_pages = USER_ELF_INITIAL_STACK_PAGES;
     const uint32 user_stack_page = USER_STACK_TOP - user_stack_pages * PAGE_SIZE;
     const uint32 user_stack_top = USER_STACK_TOP - 0x10;
+
+    // Enable VMM stack growth for the current address space.
+    vmm_kernel_as.stack_bottom = user_stack_page;
+    g_user_stack_page = user_stack_page;
+
     for (uint32 spi = 0; spi < user_stack_pages; ++spi) {
         uint32 va = user_stack_page + spi * PAGE_SIZE;
         uint32 frame = frame_alloc();
         if (frame == 0) {
-            printf("%cError: out of physical frames.\n", 255, 0, 0);
+            printf("%cError: out of physical frames (free=%u/%u).\n",
+                   255, 0, 0, (unsigned)vmm_get_free_frames(), (unsigned)vmm_get_total_frames());
             user_task_cleanup_mappings();
             free(file);
             return -1;
         }
+
+        memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+
         if (vmm_map_page(&vmm_kernel_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
             printf("%cError: failed to map user stack.\n", 255, 0, 0);
             frame_free(frame);
@@ -328,20 +357,12 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
             free(file);
             return -1;
         }
+
+        /* Pin during argv/stack construction. */
+        clock_remove_page(frame);
     }
 
-    // Enable VMM stack growth for the current address space.
-    vmm_kernel_as.stack_bottom = user_stack_page;
-
-    // Record mappings for cleanup on exit/abort.
-    g_user_code_base = map_start;
-    g_user_code_pages = pages;
-    // Bottom of mapped stack region (not necessarily a single page anymore).
-    g_user_stack_page = user_stack_page;
-
-    // Zero the full mapped region and apply PT_LOAD contents.
-    memset((void*)map_start, 0, map_size);
-
+    // Map/initialize only the file-backed portions of PT_LOAD segments.
     for (uint16 i = 0; i < eh->e_phnum; ++i) {
         Elf32_Phdr* ph = (Elf32_Phdr*)(file + eh->e_phoff + (uint32)i * (uint32)eh->e_phentsize);
         if (ph->p_type != PT_LOAD) continue;
@@ -358,10 +379,44 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
             free(file);
             return -1;
         }
-        memcpy((void*)ph->p_vaddr, file + ph->p_offset, ph->p_filesz);
+
+        /* Allocate and map each page that contains file bytes. */
+        uint32 seg_file_start = ph->p_vaddr;
+        uint32 seg_file_end = ph->p_vaddr + ph->p_filesz;
+        uint32 page_start = align_down(seg_file_start, PAGE_SIZE);
+        uint32 page_end = align_up(seg_file_end, PAGE_SIZE);
+        for (uint32 va = page_start; va < page_end; va += PAGE_SIZE) {
+            uint32 frame = frame_alloc();
+            if (frame == 0) {
+                printf("%cError: out of physical frames (free=%u/%u).\n",
+                       255, 0, 0, (unsigned)vmm_get_free_frames(), (unsigned)vmm_get_total_frames());
+                user_task_cleanup_mappings();
+                free(file);
+                return -1;
+            }
+
+            /* Zero via kernel mapping so we don't touch user VAs unnecessarily. */
+            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+
+            if (vmm_map_page(&vmm_kernel_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
+                printf("%cError: failed to map ELF segment page.\n", 255, 0, 0);
+                frame_free(frame);
+                user_task_cleanup_mappings();
+                free(file);
+                return -1;
+            }
+
+            /* Pin during load so eviction can't swap out the page before memcpy. */
+            clock_remove_page(frame);
+        }
+
+        /* Copy file-backed bytes into the now-present mappings. */
+        if (ph->p_filesz) {
+            memcpy((void*)ph->p_vaddr, file + ph->p_offset, ph->p_filesz);
+        }
     }
 
-    memset((void*)user_stack_page, 0, user_stack_pages * PAGE_SIZE);
+    /* Stack pages were zeroed via KERNEL_BASE mapping during allocation. */
 
     // Save entry before releasing the ELF buffer.
     uint32 entry = eh->e_entry;
@@ -379,6 +434,24 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
         printf("%cError: argv too large.\n", 255, 0, 0);
         user_task_cleanup_mappings();
         return -1;
+    }
+
+    /* Done writing into user VAs from CPL0: re-add pages to the clock so ring3 can
+     * fault/swap them normally.
+     */
+    for (uint32 pi = 0; pi < pages; ++pi) {
+        uint32 va = map_start + pi * PAGE_SIZE;
+        pte_t* pte = vmm_walk_page_tables(&vmm_kernel_as, va, 0);
+        if (pte && (*pte & PTE_PRESENT)) {
+            clock_add_page(*pte & PTE_FRAME_MASK, pte, va, &vmm_kernel_as);
+        }
+    }
+    for (uint32 spi = 0; spi < user_stack_pages; ++spi) {
+        uint32 va = user_stack_page + spi * PAGE_SIZE;
+        pte_t* pte = vmm_walk_page_tables(&vmm_kernel_as, va, 0);
+        if (pte && (*pte & PTE_PRESENT)) {
+            clock_add_page(*pte & PTE_FRAME_MASK, pte, va, &vmm_kernel_as);
+        }
     }
 
     uint32 seg_base = 0;

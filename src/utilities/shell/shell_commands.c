@@ -2490,30 +2490,50 @@ void ring3_cmd(const shell_args_t* args) {
     const uint32 user_stack_page = USER_STACK_TOP - PAGE_SIZE; // 0xBFFFF000
     const uint32 user_stack_top = USER_STACK_TOP - 0x10;
 
-    uint32 code_frame = frame_alloc();
-    uint32 stack_frame = frame_alloc();
-    if (code_frame == 0 || stack_frame == 0) {
-        printf("%cError: out of physical frames\n", 255, 0, 0);
-        if (code_frame) frame_free(code_frame);
-        if (stack_frame) frame_free(stack_frame);
-        return;
-    }
-
-    if (vmm_map_page(&vmm_kernel_as, user_code_va, code_frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0 ||
-        vmm_map_page(&vmm_kernel_as, user_stack_page, stack_frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
-        printf("%cError: failed to map user pages\n", 255, 0, 0);
-        frame_free(code_frame);
-        frame_free(stack_frame);
-        return;
-    }
-
-    // Record mappings for cleanup on exit/abort
+    // Ensure partial failures can be cleaned up.
+    user_task_cleanup_mappings();
     g_user_code_base = user_code_va;
-    g_user_code_pages = 1;
+    g_user_code_pages = 0;
     g_user_stack_page = user_stack_page;
-
-    // Enable stack growth for this task (even though this stub only maps one page).
     vmm_kernel_as.stack_bottom = user_stack_page;
+
+    uint32 code_frame = frame_alloc();
+    if (code_frame == 0) {
+        printf("%cError: out of physical frames (free=%u/%u)\n",
+               255, 0, 0, (unsigned)vmm_get_free_frames(), (unsigned)vmm_get_total_frames());
+        return;
+    }
+
+    if (vmm_map_page(&vmm_kernel_as, user_code_va, code_frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
+        printf("%cError: failed to map user code page\n", 255, 0, 0);
+        frame_free(code_frame);
+        user_task_cleanup_mappings();
+        return;
+    }
+    /* Keep the newly-mapped user page present while the kernel writes into it.
+     * Without this, low-RAM configs can evict the page between map and memset/memcpy,
+     * causing a CPL0 page fault (which we intentionally panic on).
+     */
+    clock_remove_page(code_frame);
+    g_user_code_pages = 1;
+
+    uint32 stack_frame = frame_alloc();
+    if (stack_frame == 0) {
+        printf("%cError: out of physical frames (free=%u/%u)\n",
+               255, 0, 0, (unsigned)vmm_get_free_frames(), (unsigned)vmm_get_total_frames());
+        user_task_cleanup_mappings();
+        return;
+    }
+
+    if (vmm_map_page(&vmm_kernel_as, user_stack_page, stack_frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
+        printf("%cError: failed to map user stack\n", 255, 0, 0);
+        frame_free(stack_frame);
+        user_task_cleanup_mappings();
+        return;
+    }
+
+    /* Pin stack too while we initialize it from CPL0. */
+    clock_remove_page(stack_frame);
 
     memset((void*)user_code_va, 0, PAGE_SIZE);
     memset((void*)user_stack_page, 0, PAGE_SIZE);
@@ -2539,6 +2559,18 @@ void ring3_cmd(const shell_args_t* args) {
     memcpy((void*)(user_code_va + msg_off), msg, msg_len);
     *msg_ptr = user_code_va + msg_off;
     *len_ptr = msg_len;
+
+    /* Allow normal eviction behavior once the kernel is done initializing pages. */
+    {
+        pte_t* pte_code = vmm_walk_page_tables(&vmm_kernel_as, user_code_va, 0);
+        if (pte_code && (*pte_code & PTE_PRESENT)) {
+            clock_add_page(*pte_code & PTE_FRAME_MASK, pte_code, user_code_va, &vmm_kernel_as);
+        }
+        pte_t* pte_stack = vmm_walk_page_tables(&vmm_kernel_as, user_stack_page, 0);
+        if (pte_stack && (*pte_stack & PTE_PRESENT)) {
+            clock_add_page(*pte_stack & PTE_FRAME_MASK, pte_stack, user_stack_page, &vmm_kernel_as);
+        }
+    }
 
     printf("%c[ring3] entering user mode...\n", 0, 255, 0);
     tss_set_kernel_stack((uint32)&stack_space);
@@ -2596,18 +2628,25 @@ void userrun_cmd(const shell_args_t* args) {
     g_user_task_ui_dirty = 1;
 
     const uint32 user_code_va = USER_CODE_BASE;
-    const uint32 user_stack_pages = 32; // 128KB initial; VMM can grow further on #PF
+    const uint32 user_stack_pages = 8; // 32KB initial; VMM can grow further on #PF
     const uint32 user_stack_page = USER_STACK_TOP - user_stack_pages * PAGE_SIZE;
     const uint32 user_stack_top = USER_STACK_TOP - 0x10;
 
     uint32 pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
     if (pages == 0) pages = 1;
 
+    // Record mappings incrementally so OOM mid-loop can be cleaned up.
+    g_user_code_base = user_code_va;
+    g_user_code_pages = 0;
+    g_user_stack_page = user_stack_page;
+    vmm_kernel_as.stack_bottom = user_stack_page;
+
     // Allocate and map code pages
     for (uint32 pi = 0; pi < pages; ++pi) {
         uint32 frame = frame_alloc();
         if (frame == 0) {
-            printf("%cError: out of physical frames\n", 255, 0, 0);
+            printf("%cError: out of physical frames (free=%u/%u)\n",
+                   255, 0, 0, (unsigned)vmm_get_free_frames(), (unsigned)vmm_get_total_frames());
             free(buf);
             user_task_cleanup_mappings();
             return;
@@ -2619,6 +2658,11 @@ void userrun_cmd(const shell_args_t* args) {
             user_task_cleanup_mappings();
             return;
         }
+
+        /* Pin during load so we can't evict the page before memset/memcpy. */
+        clock_remove_page(frame);
+
+        g_user_code_pages++;
     }
 
     // Allocate and map user stack (initial N pages)
@@ -2626,7 +2670,8 @@ void userrun_cmd(const shell_args_t* args) {
         uint32 va = user_stack_page + spi * PAGE_SIZE;
         uint32 frame = frame_alloc();
         if (frame == 0) {
-            printf("%cError: out of physical frames\n", 255, 0, 0);
+            printf("%cError: out of physical frames (free=%u/%u)\n",
+                   255, 0, 0, (unsigned)vmm_get_free_frames(), (unsigned)vmm_get_total_frames());
             free(buf);
             user_task_cleanup_mappings();
             return;
@@ -2638,21 +2683,34 @@ void userrun_cmd(const shell_args_t* args) {
             user_task_cleanup_mappings();
             return;
         }
+
+        /* Pin during load so we can't evict the page before stack memset. */
+        clock_remove_page(frame);
     }
 
-    // Record mappings for cleanup on exit/abort
-    g_user_code_base = user_code_va;
-    g_user_code_pages = pages;
-    g_user_stack_page = user_stack_page;
-
-    // Enable VMM stack growth for this task.
-    vmm_kernel_as.stack_bottom = user_stack_page;
+    // g_user_* already reflects current mappings; stack growth already enabled.
 
     // Copy file into mapped user code region
     memset((void*)user_code_va, 0, pages * PAGE_SIZE);
     memcpy((void*)user_code_va, buf, size);
     memset((void*)user_stack_page, 0, user_stack_pages * PAGE_SIZE);
     free(buf);
+
+    /* Done writing from CPL0: re-add pages to the clock so ring3 can fault/swap normally. */
+    for (uint32 pi = 0; pi < pages; ++pi) {
+        uint32 va = user_code_va + pi * PAGE_SIZE;
+        pte_t* pte = vmm_walk_page_tables(&vmm_kernel_as, va, 0);
+        if (pte && (*pte & PTE_PRESENT)) {
+            clock_add_page(*pte & PTE_FRAME_MASK, pte, va, &vmm_kernel_as);
+        }
+    }
+    for (uint32 spi = 0; spi < user_stack_pages; ++spi) {
+        uint32 va = user_stack_page + spi * PAGE_SIZE;
+        pte_t* pte = vmm_walk_page_tables(&vmm_kernel_as, va, 0);
+        if (pte && (*pte & PTE_PRESENT)) {
+            clock_add_page(*pte & PTE_FRAME_MASK, pte, va, &vmm_kernel_as);
+        }
+    }
 
     printf("%c[userrun] entering user mode: %s (%d bytes)\n", 0, 255, 0, abspath, (int)size);
     tss_set_kernel_stack((uint32)&stack_space);

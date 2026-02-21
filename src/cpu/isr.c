@@ -939,7 +939,18 @@ static void syscall_maybe_render_ui(void) {
 #endif
 
 #ifndef GUI_HANDLE_SYSCALLS_DISABLED
-#define GUI_HANDLE_SYSCALLS_DISABLED 1
+/*
+ * ABI-INVARIANT: Legacy GUI handle syscalls.
+ *
+ * Why: Existing userland programs (including the bundled testdir UELFs) use
+ * the original GUI handle syscalls (EYN_SYSCALL_GUI_ATTACH/BEGIN/CLEAR/...).
+ * Disabling them makes those binaries fail with "gui_attach failed".
+ *
+ * Security note: Capability-based GUI syscalls exist (EYN_SYSCALL_CAP_GUI_*).
+ * Hardened builds can disable legacy handle syscalls by defining
+ * GUI_HANDLE_SYSCALLS_DISABLED=1 at build time.
+ */
+#define GUI_HANDLE_SYSCALLS_DISABLED 0
 #endif
 
 static int syscall_read_file(user_fd_t* ufd, char* user_dst, int maxlen) {

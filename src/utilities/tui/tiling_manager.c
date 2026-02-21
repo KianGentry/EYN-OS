@@ -3123,8 +3123,9 @@ void start_tiling_manager() {
             }
         }
 
-        // No need to restore the previous cursor from a saved-under buffer; we refreshed
-        // the excluded area directly from the backbuffer post-swap above.
+        // With the software backbuffer enabled, the previous cursor rectangle is refreshed
+        // from the backbuffer post-swap above. In low-RAM/no-backbuffer mode, that path is
+        // a no-op, so we must restore from the save-under buffer to avoid cursor trails.
 
         // Choose cursor kind (normal vs resize) based on hover/active state.
         cursor_set_style(CURSOR_NORMAL, 0);
@@ -3166,6 +3167,11 @@ void start_tiling_manager() {
 
         // Draw mouse cursor overlay on top of the freshly swapped framebuffer
         if (cur_mx > -100 && cur_my > -100) {
+            if (!vga_has_backbuffer() && cursor_savebuf && prev_saved_w > 0 && prev_saved_h > 0) {
+                vga_restore_fb_region(prev_saved_x, prev_saved_y, prev_saved_w, prev_saved_h,
+                                     cursor_savebuf, cursor_save_len);
+            }
+
             int draw_x = cur_mx;
             int draw_y = cur_my;
             cursor_get_draw_pos_for_kind(cur_mx, cur_my, &draw_x, &draw_y);

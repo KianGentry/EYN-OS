@@ -11,6 +11,7 @@
 #include <serial.h>
 #include <watchdog.h>
 #include <fs/vfs.h>
+#include <mm/vmm.h>
 #include <context.h>
 #include <misc/sched.h>
 
@@ -448,6 +449,47 @@ void vga_font_release(int font_handle) {
 static unsigned char* g_backbuffer = NULL;
 static int g_backbuffer_w = 0;
 static int g_backbuffer_h = 0;
+
+typedef enum {
+	VGA_BACKBUFFER_ALLOC_NONE = 0,
+	VGA_BACKBUFFER_ALLOC_HEAP = 1,
+	VGA_BACKBUFFER_ALLOC_CONTIG_FRAMES = 2,
+} vga_backbuffer_alloc_t;
+
+static vga_backbuffer_alloc_t g_backbuffer_alloc = VGA_BACKBUFFER_ALLOC_NONE;
+static uint32 g_backbuffer_pages = 0;
+
+/*
+ * RESOURCE-INVARIANT: Backbuffer allocation on low-RAM systems.
+ *
+ * Why: A full-screen RGBA8 backbuffer is large (w*h*4). On ~5MB targets it can
+ *      easily consume essentially all free physical frames and starve paging,
+ *      slabs, and user programs. The UI can still function without a backbuffer
+ *      (with more flicker), so prefer skipping allocation when frames are tight.
+ */
+#define VGA_BACKBUFFER_MIN_FREE_FRAMES_AFTER 64u /* 256KB headroom */
+
+static void vga_free_backbuffer(void) {
+	if (!g_backbuffer) return;
+
+	if (g_backbuffer_alloc == VGA_BACKBUFFER_ALLOC_CONTIG_FRAMES) {
+		uint32 va = (uint32)(uintptr_t)g_backbuffer;
+		if (va >= KERNEL_BASE && g_backbuffer_pages) {
+			uint32 phys = va - KERNEL_BASE;
+			for (uint32 i = 0; i < g_backbuffer_pages; ++i) {
+				frame_free(phys + i * PAGE_SIZE);
+			}
+		}
+	} else {
+		free(g_backbuffer);
+	}
+
+	g_backbuffer = NULL;
+	g_backbuffer_w = 0;
+	g_backbuffer_h = 0;
+	g_backbuffer_alloc = VGA_BACKBUFFER_ALLOC_NONE;
+	g_backbuffer_pages = 0;
+}
 
 static void vga_draw_glyph8xN_at(const unsigned char* font, int glyph_h, int x0, int y0, int charnum, int rr, int gg, int bb) {
 	if (!font) font = vga_builtin_font();
@@ -1532,21 +1574,40 @@ void vga_init_double_buffer(void) {
 	// If backbuffer already allocated and matches size, nothing to do
 	if (g_backbuffer && g_backbuffer_w == fbw && g_backbuffer_h == fbh) return;
 	// Free existing if sizes differ
-	if (g_backbuffer) {
-		free(g_backbuffer);
-		g_backbuffer = NULL;
-	}
+	vga_free_backbuffer();
 	// Try to allocate backbuffer; if allocation fails, leave g_backbuffer NULL and use direct framebuffer
 	size_t bytes = (size_t)fbw * (size_t)fbh * 4;
+	uint32 pages = (uint32)((bytes + PAGE_SIZE - 1) / PAGE_SIZE);
+	if (pages == 0) return;
+
+	// Low-RAM guard: skip the backbuffer when it would starve the system.
+	// This avoids noisy heap "Request too large" prints and prevents frame exhaustion.
+	uint32 free_frames = vmm_get_free_frames();
+	if (free_frames <= pages + VGA_BACKBUFFER_MIN_FREE_FRAMES_AFTER) {
+		return;
+	}
+
 	// Try predictive allocator first if available
 	void* buf = NULL;
 	// predictive_malloc is declared in predictive_memory.h if available
 	// We'll attempt to use it via weak reference: if symbol exists, use it, otherwise fall back to malloc
-	buf = malloc(bytes);
+	buf = vmm_kmalloc_aligned((uint32)bytes);
+	if (buf) {
+		g_backbuffer_alloc = VGA_BACKBUFFER_ALLOC_CONTIG_FRAMES;
+		g_backbuffer_pages = pages;
+	} else {
+		buf = malloc(bytes);
+		if (buf) {
+			g_backbuffer_alloc = VGA_BACKBUFFER_ALLOC_HEAP;
+			g_backbuffer_pages = 0;
+		}
+	}
 	g_backbuffer = (unsigned char*)buf;
 	if (!g_backbuffer) {
 		g_backbuffer_w = 0;
 		g_backbuffer_h = 0;
+		g_backbuffer_alloc = VGA_BACKBUFFER_ALLOC_NONE;
+		g_backbuffer_pages = 0;
 		return;
 	}
 	g_backbuffer_w = fbw;
@@ -1819,6 +1880,10 @@ void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h) {
 			}
 		}
 	}
+}
+
+int vga_has_backbuffer(void) {
+	return g_backbuffer != NULL;
 }
 
 // Fast overlay rectangle fill directly to framebuffer, clipped

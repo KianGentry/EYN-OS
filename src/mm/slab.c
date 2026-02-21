@@ -2,6 +2,7 @@
 #include <mm/vmm.h>
 #include <string.h>
 #include <vga.h>
+#include <misc/panic.h>
 
 #define SLAB_MAGIC 0x534C4142u /* 'SLAB' */
 
@@ -46,6 +47,46 @@ static inline uint32 slab_align_up_u32(uint32 v, uint32 align) {
     return (v + align - 1u) & ~(align - 1u);
 }
 
+static inline int slab_is_pow2_u32(uint32 v);
+
+static inline uint32 slab_header_bytes(void) {
+    return slab_align_up_u32((uint32)sizeof(slab_header_t), 4u);
+}
+
+static inline int slab_obj_ptr_is_valid(const slab_header_t* h, const void* ptr) {
+    if (!h || !ptr) return 0;
+    if (h->magic != SLAB_MAGIC) return 0;
+    if (!slab_is_pow2_u32((uint32)h->obj_size)) return 0;
+    if (h->obj_size < (1u << SLAB_MIN_SHIFT) || h->obj_size > (1u << SLAB_MAX_SHIFT)) return 0;
+
+    uint32 page_base = (uint32)h;
+    uint32 header_bytes = slab_header_bytes();
+    uint32 start = page_base + header_bytes;
+    uint32 end = page_base + PAGE_SIZE;
+    uint32 p = (uint32)ptr;
+
+    if (p < start || p >= end) return 0;
+
+    uint32 offset = p - start;
+    if (offset % (uint32)h->obj_size != 0u) return 0;
+    return 1;
+}
+
+static int slab_freelist_contains(const slab_header_t* h, const void* ptr) {
+    if (!h || !ptr) return 0;
+    const void* it = h->free_list;
+    /* Total objects per slab is small (<=256 for 16-byte class). */
+    for (uint32 i = 0; i < (uint32)h->total_objs; ++i) {
+        if (!it) return 0;
+        if (it == ptr) return 1;
+        if (!slab_obj_ptr_is_valid(h, it)) {
+            return 0;
+        }
+        it = *(const void* const*)it;
+    }
+    return 0;
+}
+
 /* Returns 0..31 for non-zero v. Undefined for v==0 (caller guards). */
 static inline uint32 slab_bsr32(uint32 v) {
 #if defined(__GNUC__)
@@ -82,7 +123,7 @@ static slab_header_t* slab_new_page(uint32 class_index, uint32 obj_size) {
     if (!page) return NULL;
 
     slab_header_t* h = (slab_header_t*)page;
-    uint32 header_bytes = slab_align_up_u32((uint32)sizeof(*h), 4u);
+    uint32 header_bytes = slab_header_bytes();
     uint32 usable = PAGE_SIZE - header_bytes;
 
     /* Slow path: compute object count (division is OK here). */
@@ -167,7 +208,23 @@ void* slab_alloc(size_t size) {
 
     /* Fast path: pop one object from the slab's freelist. */
     void* obj = h->free_list;
-    h->free_list = *(void**)obj;
+    if (!slab_obj_ptr_is_valid(h, obj)) {
+         uint32 ra0 = (uint32)__builtin_return_address(0);
+         uint32 ra1 = (uint32)__builtin_return_address(1);
+         PANICF("SLAB freelist corrupted: page=0x%X free_list=0x%X class=%u obj_size=%u free=%u/%u ra0=0x%X ra1=0x%X",
+               (uint32)h, (uint32)obj, (uint32)h->class_index, (uint32)h->obj_size,
+             (uint32)h->free_objs, (uint32)h->total_objs, ra0, ra1);
+    }
+
+    void* next = *(void**)obj;
+    if (next && !slab_obj_ptr_is_valid(h, next)) {
+         uint32 ra0 = (uint32)__builtin_return_address(0);
+         uint32 ra1 = (uint32)__builtin_return_address(1);
+         PANICF("SLAB freelist next corrupted: page=0x%X obj=0x%X next=0x%X class=%u obj_size=%u free=%u/%u ra0=0x%X ra1=0x%X",
+             (uint32)h, (uint32)obj, (uint32)next, (uint32)h->class_index, (uint32)h->obj_size,
+             (uint32)h->free_objs, (uint32)h->total_objs, ra0, ra1);
+    }
+    h->free_list = next;
     if (h->free_objs) h->free_objs--;
 
     /* If slab is now full, remove it from the partial list head (O(1)). */
@@ -194,6 +251,20 @@ int slab_free(void* ptr) {
 
     slab_class_t* c = &g_slab_classes[class_index];
     uint32 obj_size = (uint32)h->obj_size;
+
+    if (!slab_obj_ptr_is_valid(h, ptr)) {
+         uint32 ra0 = (uint32)__builtin_return_address(0);
+         uint32 ra1 = (uint32)__builtin_return_address(1);
+         PANICF("SLAB invalid free: page=0x%X ptr=0x%X class=%u obj_size=%u ra0=0x%X ra1=0x%X",
+             (uint32)h, (uint32)ptr, (uint32)h->class_index, (uint32)h->obj_size, ra0, ra1);
+    }
+
+    if (slab_freelist_contains(h, ptr)) {
+         uint32 ra0 = (uint32)__builtin_return_address(0);
+         uint32 ra1 = (uint32)__builtin_return_address(1);
+         PANICF("SLAB double free: page=0x%X ptr=0x%X class=%u obj_size=%u ra0=0x%X ra1=0x%X",
+             (uint32)h, (uint32)ptr, (uint32)h->class_index, (uint32)h->obj_size, ra0, ra1);
+    }
 
 #if CONFIG_SLAB_POISON
     memset(ptr, (int)SLAB_FREE_POISON_BYTE, obj_size);

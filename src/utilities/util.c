@@ -282,6 +282,19 @@ static uint32 memory_errors = 0;
 static uint32 allocation_count = 0;
 static uint32 free_count = 0;
 
+/*
+ * RESOURCE-INVARIANT: Minimum physical memory to keep outside the legacy heap.
+ *
+ * Why: The heap reserves physical frames up-front via vmm_reserve_phys_range().
+ *      On low-RAM targets this can otherwise drive the frame allocator to 0 and
+ *      effectively brick paging, page-table allocation, slab growth, and user
+ *      program startup.
+ * Breakage if changed:
+ *   - Increasing: smaller heap, but more reliable user task + VMM operation.
+ *   - Decreasing: higher risk of "out of physical frames" and silent failures.
+ */
+#define HEAP_PHYS_RESERVE_BYTES (512u * 1024u) /* 512KB */
+
 static inline uint32 align_up_u32(uint32 v, uint32 align) {
     if (align == 0) return v;
     return (v + align - 1) & ~(align - 1);
@@ -292,65 +305,67 @@ static volatile int stack_overflow_detected = 0;
 
 // Dynamic memory detection (safer implementation)
 uint32 detect_available_memory() {
-    // Try to detect available RAM using multiboot info
-    extern multiboot_info_t *g_mbi;
-    
-    // First, validate the multiboot info pointer
+    extern multiboot_info_t* g_mbi;
+
     if (!g_mbi) {
-        return 32 * 1024 * 1024; // Assume 32MB minimum
+        return 32u * 1024u * 1024u; // Conservative fallback
     }
-    
-    // Check if memory map is available
-    if (!(g_mbi->flags & MULTIBOOT_INFO_MEM_MAP)) {
-        return 32 * 1024 * 1024; // Assume 32MB minimum
+
+    // Prefer the basic mem_lower/mem_upper fields when available.
+    // They are simple and robust and avoid relying on the mmap buffer being
+    // mapped/accessible after paging is enabled.
+    uint32 total_basic = 0;
+    if (g_mbi->flags & MULTIBOOT_INFO_MEMORY) {
+        uint64 total_kb = (uint64)g_mbi->mem_lower + (uint64)g_mbi->mem_upper;
+        uint64 total_bytes = total_kb * 1024ull;
+        if (total_bytes > 0xFFFFFFFFull) total_bytes = 0xFFFFFFFFull;
+        total_basic = (uint32)total_bytes;
     }
-    
-    // Validate memory map pointer
-    if (!g_mbi->mmap_addr || g_mbi->mmap_length == 0) {
-        return 32 * 1024 * 1024; // Assume 32MB minimum
-    }
-    
-    // Safe memory map traversal
-    uint32 total_ram = 0;
-    uint32 entries_processed = 0;
-    uint32 max_entries = g_mbi->mmap_length / sizeof(multiboot_memory_map_t);
-    
-    // Limit the number of entries to prevent infinite loops
-    if (max_entries > 100) {
-        max_entries = 100;
-    }
-    
-    multiboot_memory_map_t* mmap = (multiboot_memory_map_t*)g_mbi->mmap_addr;
-    
-    for (uint32 i = 0; i < max_entries && entries_processed < 50; i++) {
-        // Validate entry pointer
-        if (!mmap) {
-            break;
-        }
-        
-        // Only count available memory regions
-        if (mmap[i].type == MULTIBOOT_MEMORY_AVAILABLE) {
-            // Limit individual region size to prevent overflow
-            if (mmap[i].len > 0 && mmap[i].len < 0x80000000) { // 2GB limit
-                // Check for overflow before addition
-                if (total_ram + mmap[i].len >= total_ram) { // Overflow check
-                    total_ram += mmap[i].len;
-                } else {
-                    // Overflow detected, cap at maximum safe value
-                    total_ram = 0xFFFFFFFF;
-                    break;
+
+    // If a full memory map is available, walk it using the multiboot-defined
+    // variable-sized entry format.
+    uint32 total_mmap = 0;
+    if ((g_mbi->flags & MULTIBOOT_INFO_MEM_MAP) && g_mbi->mmap_addr && g_mbi->mmap_length) {
+        const uint8* p = (const uint8*)(uintptr_t)g_mbi->mmap_addr;
+        const uint8* end = p + (uint32)g_mbi->mmap_length;
+
+        uint64 max_usable_end = 0;
+        uint32 guard = 0;
+        while (p + sizeof(multiboot_memory_map_t) <= end && guard++ < 256) {
+            const multiboot_memory_map_t* e = (const multiboot_memory_map_t*)(const void*)p;
+
+            // Entry size includes everything after the 'size' field.
+            uint32 entry_bytes = (uint32)e->size + (uint32)sizeof(e->size);
+            if (entry_bytes < sizeof(multiboot_memory_map_t) || p + entry_bytes > end) {
+                break;
+            }
+
+            if (e->type == MULTIBOOT_MEMORY_AVAILABLE && e->len) {
+                uint64 start = e->addr;
+                uint64 region_end = e->addr + e->len;
+                // Clamp to 32-bit physical for this kernel.
+                if (start < 0x100000000ull) {
+                    if (region_end > 0x100000000ull) region_end = 0x100000000ull;
+                    if (region_end > max_usable_end) max_usable_end = region_end;
                 }
             }
+
+            p += entry_bytes;
         }
-        entries_processed++;
+
+        if (max_usable_end > 0xFFFFFFFFull) max_usable_end = 0xFFFFFFFFull;
+        total_mmap = (uint32)max_usable_end;
     }
-    
-    // Ensure we have a reasonable amount of memory
-    if (total_ram < 1024 * 1024) { // Less than 1MB
-        return 32 * 1024 * 1024; // Assume 32MB minimum
+
+    uint32 total = total_basic;
+    if (total_mmap > total) total = total_mmap;
+
+    // Final sanity fallback: if we couldn't detect anything plausible, pick a
+    // conservative default so the system can still boot.
+    if (total < 1u * 1024u * 1024u) {
+        return 32u * 1024u * 1024u;
     }
-    
-    return total_ram;
+    return total;
 }
 
 // Cached total RAM accessor for consumers like stats GUI
@@ -478,6 +493,9 @@ void check_stack_overflow() {
     return;
 }
 
+static void* heap_malloc(size_t nbytes);
+static void heap_free(void* ptr);
+
 void init_memory_manager() {
     if (memory_initialized) return;
 
@@ -508,6 +526,40 @@ void init_memory_manager() {
     
     // Use the new generous heap sizing for zero-copy operations
     calculate_optimal_heap_size();
+
+    // Clamp heap_size against the *actual* current free-frame budget.
+    // detect_available_memory() reports total physical RAM, but does not account
+    // for reserved ranges (BIOS low 1MB, kernel image, boot allocations, etc.).
+    // The heap reserves frames up-front, so it must not consume all free frames.
+    uint32 free_frames_before = vmm_get_free_frames();
+    if (free_frames_before != 0) {
+        uint32 free_bytes_before = free_frames_before * PAGE_SIZE;
+        uint32 heap_cap = 0;
+
+        if (free_bytes_before > HEAP_PHYS_RESERVE_BYTES) {
+            heap_cap = free_bytes_before - HEAP_PHYS_RESERVE_BYTES;
+        }
+
+        // Keep at least a minimally useful heap, but never exceed the cap.
+        // If the cap is too small, prefer a tiny heap over starving the system.
+        if (heap_cap >= PAGE_SIZE) {
+            if (heap_size > heap_cap) heap_size = heap_cap;
+        } else {
+            heap_size = PAGE_SIZE;
+        }
+
+        // Keep heap page-aligned for vmm_reserve_phys_range().
+        heap_size &= PAGE_MASK;
+
+        // Enforce the existing min/max bounds (min may be relaxed on extreme low RAM).
+        if (heap_size > HEAP_SIZE_MAX) heap_size = HEAP_SIZE_MAX;
+        if (heap_size < HEAP_SIZE_MIN) {
+            // Only force the minimum if it still leaves a reasonable reserve.
+            if (free_bytes_before > (HEAP_PHYS_RESERVE_BYTES + HEAP_SIZE_MIN)) {
+                heap_size = HEAP_SIZE_MIN;
+            }
+        }
+    }
     
     // Basic sanity check (physical)
     if (heap_phys_start < 0x100000) {
@@ -538,11 +590,13 @@ void init_memory_manager() {
     stack_overflow_detected = 0;
     allocation_count = 0;
     free_count = 0;
-    
-    // Test allocation to verify heap is working
-    void* test_alloc = malloc(16);
+
+    // Heap-only smoke test: avoid calling malloc() here because malloc() may
+    // call ensure_memory_initialized(), which would recurse back into
+    // init_memory_manager().
+    void* test_alloc = heap_malloc(16);
     if (test_alloc) {
-        free(test_alloc);
+        heap_free(test_alloc);
     } else {
         memory_initialized = 0;
     }
@@ -740,6 +794,16 @@ void* malloc(size_t nbytes) {
     }
     mem_ctx_account();
 
+    // IMPORTANT: reserve and initialize the legacy heap before allowing the
+    // slab allocator to allocate pages from the frame allocator.
+    //
+    // Without this, early malloc() calls can allocate slab pages from physical
+    // frames that later become part of the heap region. When init_memory_manager()
+    // runs, it reserves+memsets the heap physical range and writes heap headers
+    // (MAGIC_NUMBER), which would silently overwrite slab metadata and cause
+    // freelist/header corruption (observed as free_list=0xDEADBEEF).
+    ensure_memory_initialized();
+
     if (nbytes == 0) return NULL;
 
     // Fast path: try slab allocator for small allocations.
@@ -849,6 +913,13 @@ void print_memory_stats() {
     
     printf("%cMemory Statistics:\n", 255, 255, 255);
     printf("%c  Total Heap: %d KB\n", 255, 255, 255, heap_size / 1024);
+    {
+        uint32 free_frames = vmm_get_free_frames();
+        uint32 total_frames = vmm_get_total_frames();
+        uint32 free_kb = free_frames * (PAGE_SIZE / 1024);
+        printf("%c  Phys Frames: %u/%u free (%u KB free)\n",
+               255, 255, 255, (unsigned)free_frames, (unsigned)total_frames, (unsigned)free_kb);
+    }
     printf("%c  Used: %d bytes (%d%%)\n", 255, 255, 255, total_used, (total_used * 100) / heap_size);
     printf("%c  Free: %d bytes (%d%%)\n", 255, 255, 255, total_free, (total_free * 100) / heap_size);
     printf("%c  Blocks: %d\n", 255, 255, 255, block_count);
@@ -866,7 +937,9 @@ void print_memory_stats() {
     }
     
     if (allocation_count > free_count + 10) {
-        printf("%c  WARNING: Possible memory leak detected!\n", 255, 165, 0);
+        printf("%c  WARNING: Possible heap leak (or long-lived allocations): %d outstanding\n",
+               255, 165, 0, (int)(allocation_count - free_count));
+        printf("%c  Note: this counter tracks heap_malloc/heap_free only (not slab).\n", 200, 200, 200);
     }
 }
 

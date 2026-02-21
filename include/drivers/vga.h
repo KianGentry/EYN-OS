@@ -133,6 +133,8 @@ void vga_clear_swap_exclude(void);
 // Overlay helpers (draw directly to framebuffer without touching backbuffer)
 void vga_drawPixel_fb(int x, int y, int r, int g, int b);
 void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h);
+// Returns 1 if a software backbuffer is allocated and being used, else 0.
+int vga_has_backbuffer(void);
 // Blit a RGB565LE source image into the backbuffer, scaling (nearest-neighbor)
 // into the destination rectangle. Call vga_mark_dirty_rect() separately.
 void vga_blit_rgb565_scaled_bb(int dst_x, int dst_y, int dst_w, int dst_h,
