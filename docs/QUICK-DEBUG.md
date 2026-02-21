@@ -256,10 +256,11 @@ serial_write(SERIAL_COM1, buf, strlen(buf));
 - **Watch for**: Corruption, leaks, fragmentation
 
 ### Paging
-- **File**: `src/mm/vmm.c`, `src/cpu/paging.c`
+- **File**: `src/mm/vmm.c`, `src/mm/paging_compat.c`
 - **Check**: CR2 register (fault address)
 - **Map**: 0x00400000 = user code start
 - **Watch for**: Null pointer (0x0), stack overflow
+- **Note**: Many user-mode non-present faults are expected (demand paging / swap-in) and may be handled silently for performance.
 
 ### Filesystems
 - **EYNFS**: `src/fs/eynfs.c`, magic 0x454E5946
@@ -274,7 +275,7 @@ serial_write(SERIAL_COM1, buf, strlen(buf));
 | Code | Category | Meaning | Check |
 |------|----------|---------|-------|
 | Any | ASSERT | Assertion failed | Source line, condition |
-| Any | PAGING | Page fault | CR2 address, backtrace |
+| Any | PAGING | Unhandled page fault | CR2 address, backtrace |
 | Any | WATCHDOG | Hang detected | Last kick context |
 | Any | IRQ | Interrupt error | IDT, handler, EOI |
 

@@ -11,6 +11,10 @@ The paging system implements:
 - **Demand Paging**: Pages allocated on-demand when accessed
 - **Frame Management**: Efficient physical frame allocation and tracking
 
+Low-RAM notes:
+- Boot-time RAM pressure is heavily influenced by the kernel's **in-memory** footprint (not ISO size).
+- Large zero-initialized globals in **`.bss` consume RAM at boot**; prefer on-demand allocations for infrequently-used large buffers.
+
 ## Architecture
 
 ### Memory Layout
@@ -104,6 +108,10 @@ void kfree(void* ptr);
 ## Page Fault Handling
 
 The system includes intelligent page fault handling:
+
+EYN-OS-specific notes:
+- Many user-mode not-present faults are expected under demand paging/swap and can be recoverable.
+- For performance (especially under low RAM), recoverable user-mode faults may be handled without printing verbose diagnostics.
 
 ### Page Fault Types
 - **Not Present**: Page not mapped in virtual memory
@@ -229,6 +237,9 @@ memory protect
 
 # Monitor page faults
 error details
+
+# Intentionally trigger a fault (for testing)
+pf yes 0x0 r
 ```
 
 ## Conclusion

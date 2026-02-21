@@ -11,6 +11,11 @@ This document describes the current, minimal ABI/format requirements for **ring3
 
 The kernel loader reads the entire ELF into memory, validates the ELF header, walks program headers, and maps a single contiguous region covering all `PT_LOAD` segments.
 
+Low-RAM behavior:
+- The loader pre-creates PTEs for the full `PT_LOAD` span as **demand-zero** (not present).
+- It then allocates/maps/initializes only the pages that contain file-backed bytes.
+- The remaining zero-fill span (typical `.bss`) is backed by demand paging: physical frames are allocated and zeroed on first access.
+
 Implementation: [src/cpu/user_elf.c](src/cpu/user_elf.c)
 
 ## 2) Virtual address expectations

@@ -154,6 +154,10 @@ portable stats    # Check system resources
 - Stack overflow
 - Corrupted page tables
 
+**Note**:
+- EYN-OS uses demand paging and swap, so a **user-mode not-present fault can be recoverable** (e.g. demand-zero allocation, swap-in, stack growth).
+- You typically only see a **PAGING stop code** when the fault is **kernel-mode** or **cannot be resolved** (protection fault with no valid recovery, reserved-bit violation, corrupted tables, etc).
+
 **Example Messages**:
 - `"Page fault at 0x00000000"` (null dereference)
 - `"Page fault at 0xDEADBEEF"` (invalid pointer)

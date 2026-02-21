@@ -52,9 +52,11 @@ typedef struct heap_block {
 
 ---
 
-### Paging (`src/cpu/paging.c`, `src/mm/vmm.c`)
+### Paging (`src/mm/vmm.c`, `src/mm/paging_compat.c`)
 
-**Implementation**: Optional page-based virtual memory
+**Implementation**: Page-based virtual memory via the VMM.
+
+Note: `src/cpu/paging.c` contains an older paging implementation kept for historical reference and is intentionally not built.
 
 **Key Structures**:
 ```c

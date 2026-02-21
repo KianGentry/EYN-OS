@@ -7,6 +7,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 ### Core System
 - **[System Overview](system-overview.md)** - High-level architecture and design principles
 - **[Memory Management with Paging](mm/virtual-memory.md)** - Virtual memory and paging system
+- **[Low-Memory Notes](general/low-memory.md)** - Boot/runtime behavior in 4–9MB RAM targets
 - **[Panic & Assertions](general/panic.md)** - Panic screen, assertions, and developer macros
 - **[Watchdog Timer](general/watchdog.md)** - Detecting stalls and tuning timeouts
 - **[Pipeline System](general/pipeline-system.md)** - Unix-like pipelines and redirection
