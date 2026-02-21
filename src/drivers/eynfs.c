@@ -11,6 +11,7 @@
 #include <context.h>
 #include <misc/sched.h>
 #include <fs/fs_txn.h>
+#include <mm/vmm.h>
 
 #define EYNFS_BLOCK_SIZE 512 // For now, fixed block size
 #define EYNFS_SUPERBLOCK_LBA 2048 // Standard superblock location
@@ -57,17 +58,249 @@ static inline uint32_t eynfs_block_to_lba(uint32_t fs_block) {
 }
 
 // Performance optimization: Block cache
-#define EYNFS_CACHE_SIZE 16
+// Dynamically sized to avoid a fixed baseline .bss cost on low-memory systems.
+// Eviction is true LRU with clean-first preference to avoid unnecessary writeback.
 typedef struct {
     uint32_t block_num;
-    uint8_t data[EYNFS_BLOCK_SIZE];
+    uint32_t last_use;
+    uint8_t* data;
     uint8_t dirty;
     uint8_t valid;
 } eynfs_cache_entry_t;
 
-static eynfs_cache_entry_t block_cache[EYNFS_CACHE_SIZE];
+static eynfs_cache_entry_t* g_block_cache = NULL;
+static uint8_t* g_block_cache_data = NULL;
+static uint32_t g_block_cache_capacity = 0;
+static uint32_t g_block_cache_use_clock = 0;
+
+static int g_block_cache_perma_disabled = 0;
+static int g_block_cache_corruption_reported = 0;
+
 static uint32_t cache_hits = 0;
 static uint32_t cache_misses = 0;
+
+static uint32_t eynfs_block_cache_compute_capacity(void) {
+    // Heuristic: roughly 1 cached sector per 128 physical frames, clamped.
+    // This keeps the cache small on the default 9MB target, but scales gently.
+    uint32_t frames = vmm_get_total_frames();
+    uint32_t desired = frames / 128u;
+    if (desired < 16u) desired = 16u;
+    if (desired > 128u) desired = 128u;
+    return desired;
+}
+
+static int eynfs_block_cache_is_enabled(void) {
+    if (g_block_cache_perma_disabled) return 0;
+    return g_block_cache && g_block_cache_data && g_block_cache_capacity;
+}
+
+static void eynfs_serial_write_cstr(const char* s) {
+    if (!s) return;
+    serial_write(SERIAL_COM1, s, (int)strlen(s));
+}
+
+static void eynfs_serial_write_hex32(uint32 v) {
+    static const char* hex = "0123456789ABCDEF";
+    char buf[10];
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < 8; i++) {
+        uint32 shift = (uint32)(28 - i * 4);
+        buf[2 + i] = hex[(v >> shift) & 0xFu];
+    }
+    serial_write(SERIAL_COM1, buf, (int)sizeof(buf));
+}
+
+static void eynfs_serial_write_u32(uint32 v) {
+    char buf[11];
+    int pos = 0;
+    if (v == 0) {
+        buf[pos++] = '0';
+    } else {
+        char tmp[11];
+        int tpos = 0;
+        while (v && tpos < (int)sizeof(tmp)) {
+            tmp[tpos++] = (char)('0' + (v % 10u));
+            v /= 10u;
+        }
+        while (tpos-- > 0) {
+            buf[pos++] = tmp[tpos];
+        }
+    }
+    serial_write(SERIAL_COM1, buf, pos);
+}
+
+static void eynfs_block_cache_disable_permanently(const char* why) {
+    if (g_block_cache_perma_disabled) return;
+    g_block_cache_perma_disabled = 1;
+
+    // Don't attempt to free: the heap/slab may already be corrupted.
+    // Also prevent future allocation attempts.
+    g_block_cache = NULL;
+    g_block_cache_data = NULL;
+    g_block_cache_capacity = 1;
+
+    if (!g_block_cache_corruption_reported) {
+        g_block_cache_corruption_reported = 1;
+        eynfs_serial_write_cstr("[EYNFS] block cache disabled: ");
+        eynfs_serial_write_cstr(why ? why : "(no reason)");
+        eynfs_serial_write_cstr("\n");
+    }
+}
+
+static int eynfs_block_cache_validate_or_disable(const char* where) {
+    if (!eynfs_block_cache_is_enabled()) return 0;
+
+    uint32 total_frames = vmm_get_total_frames();
+    uint32 physmap_bytes = total_frames * PAGE_SIZE;
+    uint32 physmap_start = KERNEL_BASE;
+    uint32 physmap_end = physmap_start + physmap_bytes;
+
+    uint32 cache_ptr = (uint32)g_block_cache;
+    uint32 data_ptr = (uint32)g_block_cache_data;
+
+    if (cache_ptr < KERNEL_BASE || cache_ptr >= physmap_end) {
+        if (!g_block_cache_corruption_reported) {
+            eynfs_serial_write_cstr("[EYNFS] cache corruption at ");
+            eynfs_serial_write_cstr(where ? where : "?");
+            eynfs_serial_write_cstr(": g_block_cache=");
+            eynfs_serial_write_hex32(cache_ptr);
+            eynfs_serial_write_cstr(" physmap_end=");
+            eynfs_serial_write_hex32(physmap_end);
+            eynfs_serial_write_cstr("\n");
+        }
+        eynfs_block_cache_disable_permanently("corrupt g_block_cache");
+        return 0;
+    }
+    if (data_ptr < KERNEL_BASE || data_ptr >= physmap_end) {
+        if (!g_block_cache_corruption_reported) {
+            eynfs_serial_write_cstr("[EYNFS] cache corruption at ");
+            eynfs_serial_write_cstr(where ? where : "?");
+            eynfs_serial_write_cstr(": g_block_cache_data=");
+            eynfs_serial_write_hex32(data_ptr);
+            eynfs_serial_write_cstr(" physmap_end=");
+            eynfs_serial_write_hex32(physmap_end);
+            eynfs_serial_write_cstr("\n");
+        }
+        eynfs_block_cache_disable_permanently("corrupt g_block_cache_data");
+        return 0;
+    }
+    if (g_block_cache_capacity < 1u || g_block_cache_capacity > 1024u) {
+        if (!g_block_cache_corruption_reported) {
+            eynfs_serial_write_cstr("[EYNFS] cache corruption at ");
+            eynfs_serial_write_cstr(where ? where : "?");
+            eynfs_serial_write_cstr(": g_block_cache_capacity=");
+            eynfs_serial_write_u32((uint32)g_block_cache_capacity);
+            eynfs_serial_write_cstr("\n");
+        }
+        eynfs_block_cache_disable_permanently("corrupt g_block_cache_capacity");
+        return 0;
+    }
+
+    // Ensure each entry's data pointer is the expected slice into g_block_cache_data.
+    // SECURITY-INVARIANT: Cache entry pointers must stay within the kernel physmap.
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        uint8_t* expected = &g_block_cache_data[i * EYNFS_BLOCK_SIZE];
+        if (g_block_cache[i].data != expected) {
+            if (!g_block_cache_corruption_reported) {
+                eynfs_serial_write_cstr("[EYNFS] cache corruption at ");
+                eynfs_serial_write_cstr(where ? where : "?");
+                eynfs_serial_write_cstr(": entry ");
+                eynfs_serial_write_u32((uint32)i);
+                eynfs_serial_write_cstr(" data=");
+                eynfs_serial_write_hex32((uint32)g_block_cache[i].data);
+                eynfs_serial_write_cstr(" expected=");
+                eynfs_serial_write_hex32((uint32)expected);
+                eynfs_serial_write_cstr("\n");
+            }
+            eynfs_block_cache_disable_permanently("corrupt cache entry data pointer");
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int eynfs_block_cache_alloc_if_needed(void) {
+    if (eynfs_block_cache_is_enabled()) return 1;
+    if (g_block_cache_perma_disabled) return 0;
+    if (g_block_cache_capacity != 0) return 0;
+
+    g_block_cache_capacity = eynfs_block_cache_compute_capacity();
+
+    g_block_cache = (eynfs_cache_entry_t*)malloc(sizeof(eynfs_cache_entry_t) * g_block_cache_capacity);
+    g_block_cache_data = (uint8_t*)malloc(EYNFS_BLOCK_SIZE * g_block_cache_capacity);
+    if (!g_block_cache || !g_block_cache_data) {
+        if (g_block_cache) free(g_block_cache);
+        if (g_block_cache_data) free(g_block_cache_data);
+        g_block_cache = NULL;
+        g_block_cache_data = NULL;
+        g_block_cache_capacity = 0;
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        g_block_cache[i].valid = 0;
+        g_block_cache[i].dirty = 0;
+        g_block_cache[i].last_use = 0;
+        g_block_cache[i].block_num = 0;
+        g_block_cache[i].data = &g_block_cache_data[i * EYNFS_BLOCK_SIZE];
+    }
+    g_block_cache_use_clock = 1;
+    return 1;
+}
+
+static int eynfs_block_cache_choose_victim_index(uint32_t* out_index, int* out_need_writeback) {
+    if (!out_index || !out_need_writeback) return 0;
+    if (!eynfs_block_cache_is_enabled()) return 0;
+
+    // Prefer an invalid slot. Otherwise choose clean LRU. Only evict dirty LRU
+    // when no clean slot exists.
+    int found_clean = 0;
+    uint32_t clean_best_i = 0;
+    uint32_t clean_best_use = 0xFFFFFFFFu;
+
+    int found_dirty = 0;
+    uint32_t dirty_best_i = 0;
+    uint32_t dirty_best_use = 0xFFFFFFFFu;
+
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        if (!g_block_cache[i].valid) {
+            *out_index = i;
+            *out_need_writeback = 0;
+            return 1;
+        }
+
+        if (g_block_cache[i].dirty) {
+            if (!found_dirty || g_block_cache[i].last_use < dirty_best_use) {
+                found_dirty = 1;
+                dirty_best_use = g_block_cache[i].last_use;
+                dirty_best_i = i;
+            }
+            continue;
+        }
+
+        if (!found_clean || g_block_cache[i].last_use < clean_best_use) {
+            found_clean = 1;
+            clean_best_use = g_block_cache[i].last_use;
+            clean_best_i = i;
+        }
+    }
+
+    if (found_clean) {
+        *out_index = clean_best_i;
+        *out_need_writeback = 0;
+        return 1;
+    }
+
+    if (found_dirty) {
+        *out_index = dirty_best_i;
+        *out_need_writeback = 1;
+        return 1;
+    }
+
+    return 0;
+}
 
 // Performance optimization: Free block tracking
 #define EYNFS_FREE_BLOCK_CACHE_SIZE 64
@@ -99,11 +332,8 @@ static int eynfs_ctx_check(uint32 cap, uint32 cost) {
 
 // Initialize caches
 static void eynfs_init_caches() {
-    // Initialize block cache
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        block_cache[i].valid = 0;
-        block_cache[i].dirty = 0;
-    }
+    // Initialize (allocate) block cache
+    (void)eynfs_block_cache_alloc_if_needed();
     
     // Initialize directory cache
     for (int i = 0; i < EYNFS_DIR_CACHE_SIZE; i++) {
@@ -120,11 +350,38 @@ static void eynfs_init_caches() {
 // Block cache functions
 int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data) {
     if (!eynfs_ctx_check(CAP_READ_FS, SCHED_COST_FS)) return -1;
+
+    if (!eynfs_block_cache_alloc_if_needed()) {
+        // Cache disabled (allocation failure). Fall back to direct I/O.
+        uint32_t lba = eynfs_block_to_lba(block_num);
+        if (ata_read_sector(drive, lba, data) != 0) {
+            static int g_eynfs_read_fail_printed = 0;
+            if (!g_eynfs_read_fail_printed) {
+                g_eynfs_read_fail_printed = 1;
+                char sbuf[160];
+                int n = snprintf(sbuf, sizeof(sbuf), "[EYNFS] read fail drive=%d fs_block=%d lba=%d\n", (int)drive, (int)block_num, (int)lba);
+                if (n > 0) serial_write(SERIAL_COM1, sbuf, n);
+            }
+            return -1;
+        }
+        cache_misses++;
+        return 0;
+    }
+
+    if (!eynfs_block_cache_validate_or_disable("eynfs_cache_get_block")) {
+        // Cache was disabled due to corruption; fall back to direct I/O.
+        uint32_t lba = eynfs_block_to_lba(block_num);
+        if (ata_read_sector(drive, lba, data) != 0) return -1;
+        cache_misses++;
+        return 0;
+    }
+
     // Look for block in cache
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        if (block_cache[i].valid && block_cache[i].block_num == block_num) {
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        if (g_block_cache[i].valid && g_block_cache[i].block_num == block_num) {
             // Cache hit - copy data
-            memcpy(data, block_cache[i].data, EYNFS_BLOCK_SIZE);
+            memcpy(data, g_block_cache[i].data, EYNFS_BLOCK_SIZE);
+            g_block_cache[i].last_use = g_block_cache_use_clock++;
             cache_hits++;
             return 0;
         }
@@ -142,33 +399,22 @@ int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data) {
         }
         return -1;
     }
-    
-    // Find least recently used cache entry
-    int lru_index = 0;
-    uint32_t oldest_time = 0xFFFFFFFF;
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        if (!block_cache[i].valid) {
-            lru_index = i;
-            break;
+
+    uint32_t victim_index = 0;
+    int need_writeback = 0;
+    if (eynfs_block_cache_choose_victim_index(&victim_index, &need_writeback)) {
+        if (need_writeback) {
+            if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+            ata_write_sector(drive, eynfs_block_to_lba(g_block_cache[victim_index].block_num), g_block_cache[victim_index].data);
         }
-        // Simple LRU: use block number as time (lower = older)
-        if (block_cache[i].block_num < oldest_time) {
-            oldest_time = block_cache[i].block_num;
-            lru_index = i;
-        }
+
+        // Cache the new block
+        g_block_cache[victim_index].block_num = block_num;
+        memcpy(g_block_cache[victim_index].data, data, EYNFS_BLOCK_SIZE);
+        g_block_cache[victim_index].valid = 1;
+        g_block_cache[victim_index].dirty = 0;
+        g_block_cache[victim_index].last_use = g_block_cache_use_clock++;
     }
-    
-    // Write dirty block if needed
-    if (block_cache[lru_index].valid && block_cache[lru_index].dirty) {
-        if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
-        ata_write_sector(drive, eynfs_block_to_lba(block_cache[lru_index].block_num), block_cache[lru_index].data);
-    }
-    
-    // Cache the new block
-    block_cache[lru_index].block_num = block_num;
-    memcpy(block_cache[lru_index].data, data, EYNFS_BLOCK_SIZE);
-    block_cache[lru_index].valid = 1;
-    block_cache[lru_index].dirty = 0;
     
     cache_misses++;
     return 0;
@@ -176,35 +422,66 @@ int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data) {
 
 int eynfs_cache_write_block(uint8 drive, uint32_t block_num, const uint8_t* data) {
     if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+
+    if (!eynfs_block_cache_alloc_if_needed()) {
+        // Cache disabled; preserve existing behavior.
+        return ata_write_sector(drive, eynfs_block_to_lba(block_num), data);
+    }
+
+    if (!eynfs_block_cache_validate_or_disable("eynfs_cache_write_block")) {
+        // Cache was disabled due to corruption; preserve on-disk semantics.
+        return ata_write_sector(drive, eynfs_block_to_lba(block_num), data);
+    }
+
     // Look for block in cache
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        if (block_cache[i].valid && block_cache[i].block_num == block_num) {
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        if (g_block_cache[i].valid && g_block_cache[i].block_num == block_num) {
             // Update cache
-            memcpy(block_cache[i].data, data, EYNFS_BLOCK_SIZE);
-            block_cache[i].dirty = 1;
+            memcpy(g_block_cache[i].data, data, EYNFS_BLOCK_SIZE);
+            g_block_cache[i].dirty = 1;
+            g_block_cache[i].last_use = g_block_cache_use_clock++;
             return 0;
         }
     }
-    
-    // Not in cache - write directly to disk
-    return ata_write_sector(drive, eynfs_block_to_lba(block_num), data);
+
+    // Not in cache - write directly to disk (keep on-disk semantics the same)
+    if (ata_write_sector(drive, eynfs_block_to_lba(block_num), data) != 0) return -1;
+
+    // Opportunistically cache the freshly written block as clean.
+    uint32_t victim_index = 0;
+    int need_writeback = 0;
+    if (eynfs_block_cache_choose_victim_index(&victim_index, &need_writeback)) {
+        if (need_writeback) {
+            // Avoid cascading writeback pressure; keep the just-written sector durable.
+            ata_write_sector(drive, eynfs_block_to_lba(g_block_cache[victim_index].block_num), g_block_cache[victim_index].data);
+        }
+        g_block_cache[victim_index].block_num = block_num;
+        memcpy(g_block_cache[victim_index].data, data, EYNFS_BLOCK_SIZE);
+        g_block_cache[victim_index].valid = 1;
+        g_block_cache[victim_index].dirty = 0;
+        g_block_cache[victim_index].last_use = g_block_cache_use_clock++;
+    }
+
+    return 0;
 }
 
 static void eynfs_cache_flush(uint8 drive) {
     if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return;
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        if (block_cache[i].valid && block_cache[i].dirty) {
-            ata_write_sector(drive, eynfs_block_to_lba(block_cache[i].block_num), block_cache[i].data);
-            block_cache[i].dirty = 0;
+    if (!eynfs_block_cache_is_enabled()) return;
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        if (g_block_cache[i].valid && g_block_cache[i].dirty) {
+            ata_write_sector(drive, eynfs_block_to_lba(g_block_cache[i].block_num), g_block_cache[i].data);
+            g_block_cache[i].dirty = 0;
         }
     }
 }
 
 static void eynfs_cache_invalidate_block(uint32_t block_num) {
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        if (block_cache[i].valid && block_cache[i].block_num == block_num) {
-            block_cache[i].valid = 0;
-            block_cache[i].dirty = 0;
+    if (!eynfs_block_cache_is_enabled()) return;
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        if (g_block_cache[i].valid && g_block_cache[i].block_num == block_num) {
+            g_block_cache[i].valid = 0;
+            g_block_cache[i].dirty = 0;
         }
     }
 }
@@ -1407,10 +1684,21 @@ void eynfs_reset_cache_stats() {
 }
 
 void eynfs_cache_clear() {
-    eynfs_cache_flush(0); // Flush all dirty blocks
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        block_cache[i].valid = 0;
-        block_cache[i].dirty = 0;
+    int can_write = eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS);
+    if (can_write) {
+        eynfs_cache_flush(0); // Flush all dirty blocks
+    }
+
+    if (eynfs_block_cache_is_enabled()) {
+        for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+            if (!can_write && g_block_cache[i].dirty) {
+                // Refuse to drop dirty data if we cannot write it back.
+                continue;
+            }
+            g_block_cache[i].valid = 0;
+            g_block_cache[i].dirty = 0;
+            g_block_cache[i].last_use = 0;
+        }
     }
     
     // Clear directory cache

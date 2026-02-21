@@ -174,10 +174,23 @@ static void backtrace_to_serial(void) {
         uint32_t* frame = (uint32_t*)ebp;
         uint32_t next_ebp = frame[0];
         uint32_t ret = frame[1];
-        char linebuf[64];
-        // Format:  "  #nn 0xXXXXXXXX\n"
-        snprintf(linebuf, sizeof(linebuf), "  #%02d 0x%08X\n", i, ret);
-        serial_write(SERIAL_COM1, linebuf, (int)strlen(linebuf));
+        // Format:  "  #nn 0xXXXXXXXX\n" (avoid relying on snprintf formatting)
+        char linebuf[32];
+        int pos = 0;
+        linebuf[pos++] = ' ';
+        linebuf[pos++] = ' ';
+        linebuf[pos++] = '#';
+        linebuf[pos++] = (char)('0' + ((i / 10) % 10));
+        linebuf[pos++] = (char)('0' + (i % 10));
+        linebuf[pos++] = ' ';
+        linebuf[pos++] = '0';
+        linebuf[pos++] = 'x';
+        for (int n = 7; n >= 0; --n) {
+            uint32_t nib = (ret >> (n * 4)) & 0xFu;
+            linebuf[pos++] = (char)((nib < 10) ? ('0' + nib) : ('A' + (nib - 10)));
+        }
+        linebuf[pos++] = '\n';
+        serial_write(SERIAL_COM1, linebuf, pos);
 
         // EBP should monotonically increase as we unwind (stack grows down).
         if (next_ebp <= ebp) break;
@@ -212,12 +225,96 @@ void panicf(const char* file, int line, const char* fmt, ...) {
     char buf[256];
     va_list ap;
     va_start(ap, fmt);
-    int pos = 0; const char* p = fmt;
-    while (*p && pos < (int)sizeof(buf)-1) {
-        if (*p == '%' && *(p+1) == 's') { p+=2; const char* s = va_arg(ap, const char*); while (s && *s && pos < (int)sizeof(buf)-1) buf[pos++]=*s++; }
-        else if (*p == '%' && *(p+1) == 'd') { p+=2; char* s = int_to_string(va_arg(ap,int)); while (*s && pos < (int)sizeof(buf)-1) buf[pos++]=*s++; }
-        else if (*p == '%' && *(p+1) == 'c') { p+=2; buf[pos++] = (char)va_arg(ap,int); }
-        else { buf[pos++] = *p++; }
+    int pos = 0;
+    const char* p = fmt;
+    while (*p && pos < (int)sizeof(buf) - 1) {
+        if (*p != '%') {
+            buf[pos++] = *p++;
+            continue;
+        }
+
+        // '%' sequence
+        ++p;
+        if (*p == '%') {
+            buf[pos++] = '%';
+            ++p;
+            continue;
+        }
+
+        // Optional zero-padding and width (supports %08X, %02d)
+        char pad = ' ';
+        int width = 0;
+        if (*p == '0') {
+            pad = '0';
+            ++p;
+        }
+        while (*p >= '0' && *p <= '9') {
+            width = (width * 10) + (int)(*p - '0');
+            ++p;
+            if (width > 32) { width = 32; break; }
+        }
+
+        char spec = *p ? *p++ : '\0';
+
+        if (spec == 's') {
+            const char* s = va_arg(ap, const char*);
+            if (!s) s = "(null)";
+            while (*s && pos < (int)sizeof(buf) - 1) buf[pos++] = *s++;
+            continue;
+        }
+
+        if (spec == 'c') {
+            buf[pos++] = (char)va_arg(ap, int);
+            continue;
+        }
+
+        if (spec == 'd' || spec == 'u' || spec == 'x' || spec == 'X' || spec == 'p') {
+            uint32_t v;
+            int base = (spec == 'x' || spec == 'X' || spec == 'p') ? 16 : 10;
+            int upper = (spec == 'X' || spec == 'p');
+
+            if (spec == 'd') {
+                int iv = va_arg(ap, int);
+                if (iv < 0) {
+                    if (pos < (int)sizeof(buf) - 1) buf[pos++] = '-';
+                    v = (uint32_t)(-iv);
+                } else {
+                    v = (uint32_t)iv;
+                }
+            } else if (spec == 'p') {
+                v = (uint32_t)va_arg(ap, void*);
+                if (width == 0) { width = 8; pad = '0'; }
+            } else {
+                v = va_arg(ap, unsigned);
+            }
+
+            char tmp[32];
+            int ti = 0;
+            if (v == 0) {
+                tmp[ti++] = '0';
+            } else {
+                while (v && ti < (int)sizeof(tmp)) {
+                    uint32_t digit = (base == 16) ? (v & 0xFu) : (v % 10u);
+                    v = (base == 16) ? (v >> 4) : (v / 10u);
+                    if (digit < 10) tmp[ti++] = (char)('0' + digit);
+                    else tmp[ti++] = (char)((upper ? 'A' : 'a') + (digit - 10));
+                }
+            }
+
+            while (ti < width && pos < (int)sizeof(buf) - 1) {
+                buf[pos++] = pad;
+                --width;
+            }
+
+            while (ti-- > 0 && pos < (int)sizeof(buf) - 1) {
+                buf[pos++] = tmp[ti];
+            }
+            continue;
+        }
+
+        // Unknown specifier: print literally.
+        if (pos < (int)sizeof(buf) - 1) buf[pos++] = '%';
+        if (pos < (int)sizeof(buf) - 1 && spec) buf[pos++] = spec;
     }
     buf[pos] = '\0';
     va_end(ap);

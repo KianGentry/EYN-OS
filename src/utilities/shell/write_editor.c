@@ -53,8 +53,22 @@ static int write_editor_ctx_allow(uint32 caps, uint32 cost) {
 static int write_editor_sel_active = 0;
 static int write_editor_sel_ax = 0, write_editor_sel_ay = 0; // anchor (col,x) within absolute line
 static int write_editor_sel_fx = 0, write_editor_sel_fy = 0; // focus (col,x)
-static char write_editor_clipboard[4096];
+static char* write_editor_clipboard = NULL;
+static int write_editor_clipboard_cap = 0;
 static int write_editor_clipboard_len = 0;
+
+static int write_editor_clipboard_ensure_alloc(void) {
+    if (write_editor_clipboard && write_editor_clipboard_cap > 0) return 1;
+    // Keep the existing 4KB upper bound, but allocate on-demand.
+    write_editor_clipboard_cap = 4096;
+    write_editor_clipboard = (char*)malloc((size_t)write_editor_clipboard_cap);
+    if (!write_editor_clipboard) {
+        write_editor_clipboard_cap = 0;
+        return 0;
+    }
+    write_editor_clipboard[0] = '\0';
+    return 1;
+}
 
 // Forward declarations for helpers used before their definitions
 static void write_editor_update_tile_modified(void);
@@ -113,13 +127,18 @@ static void write_editor_set_status(const char* msg) {
 static void write_editor_copy_selection_to_clipboard(void) {
     write_editor_clipboard_len = 0;
     if (!write_editor_sel_active) {
-        write_editor_clipboard[0] = '\0';
+        if (write_editor_clipboard) write_editor_clipboard[0] = '\0';
+        return;
+    }
+
+    if (!write_editor_clipboard_ensure_alloc()) {
+        // Clipboard remains empty on allocation failure.
         return;
     }
     int sel_sy = write_editor_sel_ay, sel_sx = write_editor_sel_ax;
     int sel_fy = write_editor_sel_fy, sel_fx = write_editor_sel_fx;
     if (sel_fy < sel_sy || (sel_fy == sel_sy && sel_fx < sel_sx)) { int ty = sel_sy; sel_sy = sel_fy; sel_fy = ty; int tx = sel_sx; sel_sx = sel_fx; sel_fx = tx; }
-    (void)write_editor_copy_range_text(sel_sy, sel_sx, sel_fy, sel_fx, write_editor_clipboard, (int)sizeof(write_editor_clipboard) - 1, &write_editor_clipboard_len);
+    (void)write_editor_copy_range_text(sel_sy, sel_sx, sel_fy, sel_fx, write_editor_clipboard, write_editor_clipboard_cap - 1, &write_editor_clipboard_len);
     if (write_editor_clipboard_len < 0) write_editor_clipboard_len = 0;
     write_editor_clipboard[write_editor_clipboard_len] = '\0';
 }
@@ -1473,7 +1492,7 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
     // Ctrl+V paste
     if (key == 0x2207) {
         write_editor_clear_status();
-        if (write_editor_clipboard_len <= 0) {
+        if (write_editor_clipboard_len <= 0 || !write_editor_clipboard) {
             write_editor_set_status("Paste: empty");
             tile_invalidate_gui(write_editor_gui_tile);
             return;
@@ -1516,7 +1535,7 @@ static void write_editor_gui_key(int tile_idx, int key, void* userdata) {
         write_editor_sel_active = 0;
 
         // Record undo when bounded
-        if ((write_editor_clipboard_len <= WRITE_EDITOR_UNDO_TEXT_MAX) && (!replaced_selection || ok_before)) {
+        if ((write_editor_clipboard_len <= WRITE_EDITOR_UNDO_TEXT_MAX) && write_editor_clipboard && (!replaced_selection || ok_before)) {
             write_editor_undo_t rec;
             memset(&rec, 0, sizeof(rec));
             rec.y = (uint16)ins_y;
@@ -2086,7 +2105,7 @@ static void write_editor_gui_mouse(int tile_idx, const mouse_event_t* me, void* 
     }
     // Middle-click: paste clipboard at cursor
     if ((changed & MOUSE_BUTTON_MIDDLE) && mb) {
-        if (write_editor_clipboard_len > 0) {
+        if (write_editor_clipboard && write_editor_clipboard_len > 0) {
             for (int i = 0; i < write_editor_clipboard_len; ++i) {
                 char ch = write_editor_clipboard[i];
                 if (ch == '\n') {
