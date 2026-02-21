@@ -12,6 +12,7 @@
 #include <cpu/gdt.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <mm/slab.h>
 
 volatile int g_user_interrupt = 0;
 volatile int g_user_task_active = 0;
@@ -115,7 +116,7 @@ uint32_t __stack_chk_fail(){
 }
 
 // Standard C library memory functions (optimized implementations)
-void *memcpy(void *dest, const void *src, size_t n) {
+__attribute__((weak)) void *memcpy(void *dest, const void *src, size_t n) {
     if (n <= 0) return dest;
     
     // Check if we can do word-aligned copying (both pointers aligned to 4-byte boundary)
@@ -156,7 +157,7 @@ void *memcpy(void *dest, const void *src, size_t n) {
     return dest;
 }
 
-void *memset(void *s, int c, size_t n) {
+__attribute__((weak)) void *memset(void *s, int c, size_t n) {
     if (n <= 0) return s;
     
     uint8_t *ptr = (uint8_t*)s;
@@ -636,11 +637,7 @@ static void merge_free_blocks() {
     }
 }
 
-void* malloc(size_t nbytes) {
-    if (!mem_ctx_allow()) {
-        return NULL;
-    }
-    mem_ctx_account();
+static void* heap_malloc(size_t nbytes) {
     // Lazy initialization
     ensure_memory_initialized();
     
@@ -684,9 +681,7 @@ void* malloc(size_t nbytes) {
     return (void*)(heap_start + block_offset + BLOCK_HEADER_SIZE);
 }
 
-void free(void* ptr) {
-    if (!mem_ctx_allow()) return;
-    mem_ctx_account();
+static void heap_free(void* ptr) {
     if (!ptr) return;
     
     // Lazy initialization check
@@ -734,6 +729,29 @@ void free(void* ptr) {
     free_count++;
 }
 
+void* malloc(size_t nbytes) {
+    if (!mem_ctx_allow()) {
+        return NULL;
+    }
+    mem_ctx_account();
+
+    if (nbytes == 0) return NULL;
+
+    // Fast path: try slab allocator for small allocations.
+    // Large allocations fall back to the existing heap allocator.
+    void* p = slab_alloc(nbytes);
+    if (p) return p;
+    return heap_malloc(nbytes);
+}
+
+void free(void* ptr) {
+    if (!mem_ctx_allow()) return;
+    mem_ctx_account();
+    if (!ptr) return;
+    if (slab_free(ptr)) return;
+    heap_free(ptr);
+}
+
 void* realloc(void* ptr, size_t new_size) {
     if (!mem_ctx_allow()) {
         return NULL;
@@ -745,7 +763,7 @@ void* realloc(void* ptr, size_t new_size) {
         return NULL;
     }
     
-    // Lazy initialization
+    // Lazy initialization (heap uses this; slab does not require it)
     ensure_memory_initialized();
     
     // Check for stack overflow
