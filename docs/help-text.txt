@@ -90,6 +90,7 @@ Utility Commands:
   hello           - Run the hello command.
   history         - Show or clear command history.
   jobs            - List background jobs.
+  metadata        - Show metadata for a file or directory.
   pipe            - Run a command pipeline from userspace command launcher.
   random          - Generate random numbers.
   search          - Search for text in filenames and file contents.

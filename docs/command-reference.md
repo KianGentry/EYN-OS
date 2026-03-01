@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-01 11:42:18
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-01 12:05:17
 
-**Total Commands:** 75
+**Total Commands:** 76
 
 ## Table of Contents
 
@@ -1132,6 +1132,22 @@ jobs
 
 ---
 
+### metadata
+
+**Binary:** `testdir/binaries/metadata`
+
+**Metadata Source:** `testdir/code/metadata_uelf.c`
+
+**Description:**
+Show metadata for a file or directory.
+
+**Example:**
+```bash
+metadata /binaries/ping
+```
+
+---
+
 ### pipe
 
 **Binary:** `testdir/binaries/pipe`
@@ -1238,5 +1254,5 @@ tiling
 | Memory Commands | 7 |
 | GUI/Window Commands | 10 |
 | Development Commands | 10 |
-| Utility Commands | 16 |
+| Utility Commands | 17 |
 

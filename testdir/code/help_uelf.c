@@ -35,13 +35,24 @@ static int g_cmd_count = 0;
  * version=1, u16 reserved=0), then two NUL-terminated strings: description
  * and example/usage.  This layout must match userland/include/eynos_cmdmeta.h
  * exactly; any divergence silently produces wrong or missing help text.
+ *
+ * The array is stored XOR'd with 0xFF so that the raw marker sequence is
+ * never present in this binary's .rodata -- without this the scanner would
+ * hit the constant itself as a false-positive match before reaching the
+ * actual EYN_CMDMETA_V1 payload embedded in each scanned binary.
  */
-static const unsigned char CMDMETA_MARKER[] = {
-    'E', 'C', 'M', 'D',
-    0x01, 0x00,  /* version = 1, little-endian u16 */
-    0x00, 0x00   /* reserved */
+static const unsigned char CMDMETA_MARKER_XOR[] = {
+    'E'^0xFF, 'C'^0xFF, 'M'^0xFF, 'D'^0xFF,
+    0x01^0xFF, 0x00^0xFF,  /* version = 1, little-endian u16 */
+    0x00^0xFF, 0x00^0xFF   /* reserved */
 };
 #define CMDMETA_MARKER_LEN 8
+
+static int cmdmeta_marker_match(const unsigned char* p) {
+    for (int i = 0; i < CMDMETA_MARKER_LEN; i++)
+        if (p[i] != (unsigned char)(CMDMETA_MARKER_XOR[i] ^ 0xFF)) return 0;
+    return 1;
+}
 
 /*
  * Scan an already-open file descriptor for the ECMD metadata marker and
@@ -73,7 +84,7 @@ static int scan_for_meta(int fd,
         buf_used += n;
 
         for (int i = 0; i + CMDMETA_MARKER_LEN <= buf_used; i++) {
-            if (memcmp(buf + i, CMDMETA_MARKER, CMDMETA_MARKER_LEN) != 0)
+            if (!cmdmeta_marker_match(buf + i))
                 continue;
 
             /* Marker found.  Collect the two NUL-terminated strings that
