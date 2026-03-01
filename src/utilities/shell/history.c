@@ -20,8 +20,6 @@ static int history_ctx_allow(uint32 caps, uint32 cost) {
     return 1;
 }
 
-void history_cmd(const shell_args_t* args);
-
 // Global command history instance
 command_history_t g_command_history = {0};
 
@@ -293,24 +291,3 @@ string readStr_with_history(command_history_t* history) {
     // Return a pointer to the static buffer
     return (string)buffstr;
 }
-
-void history_cmd(const shell_args_t* args) {
-    if (!args) return;
-
-    if (args->argc < 2) {
-        show_history(&g_command_history);
-        return;
-    }
-
-    if (strcmp(args->argv[1], "clear") == 0) {
-        clear_history(&g_command_history);
-        printf("%cCommand history cleared.\n", 0, 255, 0);
-        return;
-    }
-
-    printf("%cUsage: history [clear]\n", 255, 255, 255);
-    printf("%c  history       - Show command history\n", 255, 255, 255);
-    printf("%c  history clear - Clear command history\n", 255, 255, 255);
-}
-
-REGISTER_SHELL_COMMAND(history, "history", history_cmd, CMD_STREAMING, "Show or clear command history.\nUsage: history [clear]\nExample: history | history clear", "history");

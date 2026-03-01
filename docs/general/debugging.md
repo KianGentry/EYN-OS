@@ -331,8 +331,8 @@ python3 devtools/extract_from_eynfs.py eynfs.img output_dir/
 # Scan for issues
 fatfix
 
-# List FAT32 files
-lsram
+# List files on the current drive
+ls
 ```
 
 ### File Operation Tracing

@@ -167,8 +167,6 @@ static void alias_load_if_needed(void) {
             continue;
         if (contains_meta_chars(tmpl))
             continue;
-        if (find_command(name) != NULL)
-            continue;
         if (alias_find_mut(name) != NULL)
             continue;
         if (g_alias_count >= ALIAS_MAX_COUNT)
@@ -227,9 +225,6 @@ int shell_alias_define(const char *name, const char *template_cmd) {
     if (contains_meta_chars(template_cmd))
         return -1;
 
-    // Disallow overriding built-ins or existing aliases.
-    if (find_command(name) != NULL)
-        return -2;
     if (alias_find_mut(name) != NULL)
         return -3;
 
@@ -281,6 +276,14 @@ static int parse_arg_placeholder(const char *tok) {
     return n;
 }
 
+static int is_args_placeholder(const char* tok) {
+    // Matches "[args]" to expand all provided invocation arguments.
+    // This is intentionally varargs-friendly so compat aliases can forward
+    // arbitrary arguments (e.g. `ls files [args]`).
+    if (!tok) return 0;
+    return strcmp(tok, "[args]") == 0;
+}
+
 int shell_alias_expand_line(const char *input, char *out, int out_size) {
     alias_load_if_needed();
 
@@ -297,10 +300,6 @@ int shell_alias_expand_line(const char *input, char *out, int out_size) {
     name[i] = '\0';
 
     if (!name[0])
-        return 0;
-
-    // Never override built-ins
-    if (find_command(name) != NULL)
         return 0;
 
     alias_entry_t *ent = alias_find_mut(name);
@@ -345,6 +344,24 @@ int shell_alias_expand_line(const char *input, char *out, int out_size) {
 
         const char *emit = tok;
         int emit_len = tl;
+
+        if (is_args_placeholder(tok)) {
+            // Emit all invocation args and continue.
+            for (int ai = 0; ai < argc; ai++) {
+                const char* a = args[ai];
+                int al = 0;
+                while (a[al] && a[al] != ' ' && a[al] != '\t') al++;
+                if (al <= 0) continue;
+
+                if (pos != 0) {
+                    if (pos + 1 >= out_size) return -1;
+                    out[pos++] = ' ';
+                }
+                if (pos + al >= out_size) return -1;
+                for (int k = 0; k < al; k++) out[pos++] = a[k];
+            }
+            continue;
+        }
 
         int n = parse_arg_placeholder(tok);
         if (n > 0) {

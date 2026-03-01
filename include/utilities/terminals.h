@@ -10,6 +10,8 @@ const char* vterm_get_line(int idx, int row);
 void vterm_feed_input(int idx, int key);
 void vterm_set_active(int idx, int active);
 int vterm_is_active(int idx);
+// Move all terminal state from src slot to dst slot and reset src to a fresh state.
+void vterm_move_state(int dst_idx, int src_idx);
 // Set/Get scrollback offset (0 = follow tail). Positive values scroll up into history.
 void vterm_set_scroll(int idx, int scroll);
 int vterm_get_scroll(int idx);
@@ -48,6 +50,10 @@ const char* vterm_get_line_icon_key(int idx, int row, int* out_indent_px, int* o
 int vterm_get_line_icon_count(int idx, int row);
 const char* vterm_get_line_icon_key_n(int idx, int row, int n, int* out_anchor_col);
 
+// Register an icon on the current output line at the current cursor column.
+// Intended for ring3 tasks that print directly into a vterm via syscalls.
+void vterm_register_line_icon(int idx, const char* icon_key);
+
 // Absolute helpers for rendering/wrapping
 // Get per-character color at absolute (row, col) indices
 void vterm_get_char_color_abs(int idx, int row, int col, int* out_r, int* out_g, int* out_b);
@@ -57,6 +63,8 @@ int vterm_get_version(int idx);
 
 // Get per-vterm current working directory (read-only pointer).
 const char* vterm_get_cwd(int idx);
+// Set per-vterm current working directory (used by ring3 cd syscall path).
+void vterm_set_cwd(int idx, const char* cwd);
 
 #define TERM_COLS 80
 // Increase terminal buffer height so the terminal can fill tall tiles/screens (480px ~= 60 rows)

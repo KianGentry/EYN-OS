@@ -170,12 +170,6 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     printf("Starting Tiling Manager...");
     start_tiling_manager();
 
-    // Pre-initialize help UI state (build sorted command list) so the help UI
-    // can be shown later without rebuilding and to avoid runtime recomputation
-    // that may expose memory layout differences.
-    extern void help_tui_init_state(void);
-    help_tui_init_state();
-
     // If tiling manager exits (e.g., user closes it), fall back to classic shell
     launch_shell(0);
     

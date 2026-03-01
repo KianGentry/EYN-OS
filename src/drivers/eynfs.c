@@ -14,7 +14,6 @@
 #include <mm/vmm.h>
 
 #define EYNFS_BLOCK_SIZE 512 // For now, fixed block size
-#define EYNFS_SUPERBLOCK_LBA 2048 // Standard superblock location
 
 // Optional integration point: when the interactive shell is linked in, it
 // exposes the current physical drive. Keep this weak so the driver can still

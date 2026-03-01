@@ -19,6 +19,21 @@
 #include <fs_commands.h>
 #include <eynfs.h>
 #include <context.h>
+#include <ata.h>
+#include <serial.h>
+#include <crashlog.h>
+#include <shell_commands.h>
+#include <pipeline.h>
+#include <drivers/pci.h>
+#include <drivers/e1000.h>
+#include <network/netstack.h>
+#include <predictive_memory.h>
+#include <run_command.h>
+#include <write_editor.h>
+#include <paging.h>
+
+extern background_process_t g_background_processes[MAX_BACKGROUND_PROCESSES];
+
 extern multiboot_info_t *g_mbi;
 
 // Global error tracking
@@ -282,6 +297,65 @@ uint32 get_last_error_eip() {
 // args: (const char* path, const void* buf, int len)
 #define SYSCALL_WRITEFILE 21
 
+// Filesystem mutation helpers from ring3.
+// args: (const char* path)
+#define SYSCALL_MKDIR 49
+#define SYSCALL_UNLINK 50
+#define SYSCALL_RMDIR 51
+#define SYSCALL_GETCWD 52
+#define SYSCALL_EYNFS_STREAM_BEGIN 53
+#define SYSCALL_EYNFS_STREAM_WRITE 54
+#define SYSCALL_EYNFS_STREAM_END 55
+#define SYSCALL_DRIVE_SET_LOGICAL 56
+#define SYSCALL_DRIVE_GET_LOGICAL 57
+#define SYSCALL_DRIVE_GET_COUNT 58
+#define SYSCALL_DRIVE_IS_PRESENT 59
+#define SYSCALL_INIT_SERVICES 60
+#define SYSCALL_SERIAL_WRITE_COM1 61
+#define SYSCALL_SHELL_LOG_SET 62
+#define SYSCALL_SHELL_LOG_GET 63
+#define SYSCALL_CRASHLOG_COUNT 64
+#define SYSCALL_CRASHLOG_INFO 65
+#define SYSCALL_CRASHLOG_DATA 66
+#define SYSCALL_CRASHLOG_CLEAR 67
+#define SYSCALL_SHELL_MIGRATED_DISPATCH 68
+#define SYSCALL_PCI_GET_COUNT 69
+#define SYSCALL_PCI_GET_ENTRY 70
+#define SYSCALL_E1000_PROBE 71
+#define SYSCALL_E1000_INIT 72
+#define SYSCALL_NETCFG_GET 73
+#define SYSCALL_NETCFG_SET 74
+#define SYSCALL_NETCFG_DEFAULTS 75
+#define SYSCALL_NET_IS_INITED 76
+#define SYSCALL_NET_GET_MAC 77
+#define SYSCALL_NET_GET_ARP 78
+#define SYSCALL_NET_GET_UDP_STATS 79
+#define SYSCALL_NET_GET_IP_STATS 80
+#define SYSCALL_NET_GET_SOCKETS 81
+#define SYSCALL_NET_PING 82
+#define SYSCALL_FS_CHECK_INTEGRITY 83
+#define SYSCALL_FS_FATFIX 84
+#define SYSCALL_VTERM_CLEAR 85
+#define SYSCALL_HISTORY_COUNT 86
+#define SYSCALL_HISTORY_ENTRY 87
+#define SYSCALL_HISTORY_CLEAR 88
+#define SYSCALL_BG_JOB_COUNT 89
+#define SYSCALL_BG_JOB_INFO 90
+#define SYSCALL_TILING_START 91
+#define SYSCALL_SETBG_PATH 92
+#define SYSCALL_CLEARBG_FOCUSED 93
+#define SYSCALL_SETFONT_PATH 94
+#define SYSCALL_CHDIR 95
+#define SYSCALL_RUN 96
+#define SYSCALL_WRITE_EDITOR 97
+#define SYSCALL_MMAP 98
+#define SYSCALL_MUNMAP 99
+#define SYSCALL_MSYNC 100
+#define SYSCALL_PAGING_GUARDS 101
+#define SYSCALL_PANIC 102
+#define SYSCALL_PF 103
+#define SYSCALL_RING3 104
+
 // Cooperative scheduling from userland
 #define SYSCALL_SLEEP_US 22
 
@@ -393,6 +467,41 @@ typedef struct {
 #define USER_FD_MAX 16
 static user_fd_t g_user_fds[USER_FD_MAX];
 
+/*
+ * SECURITY-INVARIANT: Maximum number of concurrent ring3 EYNFS stream writers.
+ *
+ * Why: Bounds per-task kernel memory usage and prevents stream-handle exhaustion.
+ * Invariant: Each active stream reserves an `eynfs_stream_t` and can create/overwrite
+ *           a file on disk. Handles are small integers in [0, USER_STREAM_MAX).
+ * Breakage if changed:
+ *   - Increasing: increases kernel .bss footprint (low-RAM boot sensitive).
+ *   - Decreasing: reduces concurrency for user utilities (copy/move).
+ * ABI-sensitive: Yes (user-visible via failure to begin additional streams).
+ * Disk-format-sensitive: No.
+ * Security-critical: Yes (resource exhaustion boundary).
+ */
+#define USER_STREAM_MAX 4
+
+typedef struct {
+    int used;
+    eynfs_stream_t s;
+} user_stream_t;
+
+static user_stream_t g_user_streams[USER_STREAM_MAX];
+
+void syscall_reset_user_streams(void) {
+    for (int i = 0; i < USER_STREAM_MAX; ++i) {
+        g_user_streams[i].used = 0;
+        memset(&g_user_streams[i].s, 0, sizeof(g_user_streams[i].s));
+    }
+}
+
+static user_stream_t* user_stream_get(int handle) {
+    if (handle < 0 || handle >= USER_STREAM_MAX) return NULL;
+    if (!g_user_streams[handle].used) return NULL;
+    return &g_user_streams[handle];
+}
+
 void syscall_reset_user_fds(void) {
     for (int i = 0; i < USER_FD_MAX; ++i) {
         if (g_user_fds[i].used) {
@@ -420,6 +529,7 @@ typedef struct {
     // Immediate-mode command list. Draw callback replays this list.
     int cmd_count;
     user_gui_cmd_t cmds[48];
+    uint8 frame_pending;
 
     // Input event ring buffer.
     uint8 ev_head;
@@ -474,6 +584,7 @@ static void user_gui_free_entry(user_gui_t* e) {
     e->status_left = NULL;
 
     e->cmd_count = 0;
+    e->frame_pending = 0;
     e->ev_head = 0;
     e->ev_tail = 0;
 }
@@ -492,12 +603,20 @@ static int user_gui_alloc_handle(void) {
             g_user_guis[i].blit_dst_w = 0;
             g_user_guis[i].blit_dst_h = 0;
             g_user_guis[i].cmd_count = 0;
+            g_user_guis[i].frame_pending = 0;
             g_user_guis[i].ev_head = 0;
             g_user_guis[i].ev_tail = 0;
             return i;
         }
     }
     return -1;
+}
+
+static void user_gui_flush_pending_frame(user_gui_t* e) {
+    if (!e || e->tile_idx < 0 || !e->frame_pending) return;
+    tile_invalidate_gui(e->tile_idx);
+    tile_render_once();
+    e->frame_pending = 0;
 }
 
 static void user_gui_push_event(user_gui_t* e, const user_gui_event_t* ev) {
@@ -659,6 +778,7 @@ void syscall_reset_user_guis(void) {
         g_user_guis[0].used = 0;
         g_user_guis[0].tile_idx = -1;
         g_user_guis[0].cmd_count = 0;
+        g_user_guis[0].frame_pending = 0;
         g_user_guis[0].ev_head = 0;
         g_user_guis[0].ev_tail = 0;
     }
@@ -846,6 +966,8 @@ static void syscall_console_write(const char* buf, int len) {
     extern volatile int g_user_task_color_b;
     extern volatile uint8 g_user_task_color_state;
     extern volatile uint8 g_user_task_color_bytes[3];
+    extern volatile uint8 g_user_task_icon_state;
+    extern volatile uint8 g_user_task_icon_bytes[16];
     extern int shell_redirect_color_r;
     extern int shell_redirect_color_g;
     extern int shell_redirect_color_b;
@@ -858,6 +980,12 @@ static void syscall_console_write(const char* buf, int len) {
     shell_redirect_color_r = (int)g_user_task_color_r;
     shell_redirect_color_g = (int)g_user_task_color_g;
     shell_redirect_color_b = (int)g_user_task_color_b;
+
+    // Control sequences for ring3 stdout/stderr.
+    //  - 0xFF,r,g,b: set current color
+    //  - 0xFE,<16 bytes>: register line icon key
+    const uint8 CTRL_COLOR = 0xFF;
+    const uint8 CTRL_ICON = 0xFE;
     if (tile_is_tiling_active()) {
         int term = tile_get_focused();
         if (g_user_task_active) {
@@ -867,12 +995,7 @@ static void syscall_console_write(const char* buf, int len) {
         for (int i = 0; i < len; ++i) {
             uint8 ch = (uint8)buf[i];
 
-            if (g_user_task_color_state == 0) {
-                if (ch == 0xFF) {
-                    g_user_task_color_state = 1;
-                    continue;
-                }
-            } else {
+            if (g_user_task_color_state != 0) {
                 // Collect r,g,b across bytes (sequence may be split across writes).
                 int idx = (int)g_user_task_color_state - 1;
                 if (idx >= 0 && idx < 3) {
@@ -891,6 +1014,33 @@ static void syscall_console_write(const char* buf, int len) {
                 continue;
             }
 
+            if (g_user_task_icon_state != 0) {
+                int idx = (int)g_user_task_icon_state - 1;
+                if (idx >= 0 && idx < 16) {
+                    g_user_task_icon_bytes[idx] = ch;
+                }
+                g_user_task_icon_state++;
+                if (g_user_task_icon_state == 17) {
+                    char icon_key[16];
+                    memcpy(icon_key, (const void*)g_user_task_icon_bytes, 16);
+                    icon_key[15] = '\0';
+                    if (icon_key[0]) {
+                        vterm_register_line_icon(term, icon_key);
+                    }
+                    g_user_task_icon_state = 0;
+                }
+                continue;
+            }
+
+            if (ch == CTRL_COLOR) {
+                g_user_task_color_state = 1;
+                continue;
+            }
+            if (ch == CTRL_ICON) {
+                g_user_task_icon_state = 1;
+                continue;
+            }
+
             vterm_write_char(term, (char)ch);
         }
         if (g_user_task_active) {
@@ -902,16 +1052,54 @@ static void syscall_console_write(const char* buf, int len) {
         return;
     }
     // Fallback: use kernel printf (serial/text console)
-    int pos = 0;
-    while (pos < len) {
-        int chunk = len - pos;
-        if (chunk > 120) chunk = 120;
-        char out[121];
-        memcpy(out, buf + pos, chunk);
-        out[chunk] = '\0';
-        printf("%s", out);
-        pos += chunk;
+    char out[121];
+    int out_len = 0;
+
+    #define FLUSH_OUT() do { \
+        if (out_len > 0) { \
+            out[out_len] = '\0'; \
+            printf("%s", out); \
+            out_len = 0; \
+        } \
+    } while (0)
+
+    for (int i = 0; i < len; ++i) {
+        uint8 ch = (uint8)buf[i];
+
+        if (g_user_task_color_state != 0) {
+            int idx = (int)g_user_task_color_state - 1;
+            if (idx >= 0 && idx < 3) g_user_task_color_bytes[idx] = ch;
+            g_user_task_color_state++;
+            if (g_user_task_color_state == 4) {
+                g_user_task_color_r = (int)g_user_task_color_bytes[0];
+                g_user_task_color_g = (int)g_user_task_color_bytes[1];
+                g_user_task_color_b = (int)g_user_task_color_bytes[2];
+                g_user_task_color_state = 0;
+            }
+            continue;
+        }
+
+        if (g_user_task_icon_state != 0) {
+            int idx = (int)g_user_task_icon_state - 1;
+            if (idx >= 0 && idx < 16) g_user_task_icon_bytes[idx] = ch;
+            g_user_task_icon_state++;
+            if (g_user_task_icon_state == 17) {
+                g_user_task_icon_state = 0;
+            }
+            continue;
+        }
+
+        if (ch == CTRL_COLOR) { FLUSH_OUT(); g_user_task_color_state = 1; continue; }
+        if (ch == CTRL_ICON) { FLUSH_OUT(); g_user_task_icon_state = 1; continue; }
+
+        out[out_len++] = (char)ch;
+        if (out_len >= 120) {
+            FLUSH_OUT();
+        }
     }
+
+    FLUSH_OUT();
+    #undef FLUSH_OUT
 
     shell_redirect_color_r = prev_r;
     shell_redirect_color_g = prev_g;
@@ -1040,6 +1228,143 @@ static int syscall_seek_fd(user_fd_t* ufd, int32 offset, int whence) {
     return (int)ufd->offset;
 }
 
+static int syscall_shell_migrated_dispatch(const char* user_cmd, const char* user_raw) {
+    if (!user_cmd || !user_raw) return -1;
+
+    char cmd_name[24];
+    char raw_line[256];
+    if (copyin_cstr(cmd_name, sizeof(cmd_name), user_cmd) != 0) return -1;
+    if (copyin_cstr(raw_line, sizeof(raw_line), user_raw) != 0) return -1;
+    if (!cmd_name[0]) return -1;
+
+    (void)cmd_name;
+    (void)raw_line;
+    return -1;
+}
+
+typedef struct {
+    uint8 bus;
+    uint8 device;
+    uint8 function;
+    uint8 class_code;
+    uint8 subclass;
+    uint8 prog_if;
+    uint8 header_type;
+    uint8 bar0_is_io;
+    uint16 vendor_id;
+    uint16 device_id;
+    uint16 command;
+    uint16 _pad;
+    uint32 bar0_base;
+} syscall_pci_entry_t;
+
+typedef struct {
+    int filter_net_only;
+    int count;
+} syscall_pci_count_ctx_t;
+
+static void syscall_pci_count_cb(const pci_device_info* info, void* user) {
+    syscall_pci_count_ctx_t* ctx = (syscall_pci_count_ctx_t*)user;
+    if (!ctx || !info) return;
+    if (ctx->filter_net_only && info->class_code != 0x02) return;
+    ctx->count++;
+}
+
+typedef struct {
+    int filter_net_only;
+    int target_index;
+    int current_index;
+    int found;
+    syscall_pci_entry_t out;
+} syscall_pci_entry_ctx_t;
+
+static void syscall_pci_entry_cb(const pci_device_info* info, void* user) {
+    syscall_pci_entry_ctx_t* ctx = (syscall_pci_entry_ctx_t*)user;
+    if (!ctx || !info) return;
+    if (ctx->filter_net_only && info->class_code != 0x02) return;
+    if (ctx->current_index != ctx->target_index) {
+        ctx->current_index++;
+        return;
+    }
+
+    uint16 command = pci_read_config_word(info->bus, info->device, info->function, 0x04);
+    uint32 bar0 = pci_read_config_dword(info->bus, info->device, info->function, 0x10);
+    uint8 bar0_is_io = (uint8)(bar0 & 0x1u);
+    uint32 bar0_base = bar0_is_io ? (bar0 & ~0x3u) : (bar0 & ~0xFu);
+
+    memset(&ctx->out, 0, sizeof(ctx->out));
+    ctx->out.bus = info->bus;
+    ctx->out.device = info->device;
+    ctx->out.function = info->function;
+    ctx->out.class_code = info->class_code;
+    ctx->out.subclass = info->subclass;
+    ctx->out.prog_if = info->prog_if;
+    ctx->out.header_type = info->header_type;
+    ctx->out.bar0_is_io = bar0_is_io;
+    ctx->out.vendor_id = info->vendor_id;
+    ctx->out.device_id = info->device_id;
+    ctx->out.command = command;
+    ctx->out.bar0_base = bar0_base;
+    ctx->found = 1;
+}
+
+typedef struct {
+    uint8 bus;
+    uint8 device;
+    uint8 function;
+    uint8 _pad0;
+    uint32 bar0;
+    uint32 ctrl;
+    uint32 status;
+    uint8 mac[6];
+    uint8 _pad1[2];
+    int32 link_up;
+} syscall_e1000_probe_t;
+
+typedef struct {
+    uint8 local_ip[4];
+    uint8 gateway_ip[4];
+    uint8 netmask[4];
+    uint8 dns_ip[4];
+} syscall_net_config_t;
+
+typedef struct {
+    uint8 ip[4];
+    uint8 mac[6];
+    uint8 valid;
+    uint8 _pad;
+} syscall_net_arp_entry_t;
+
+typedef struct {
+    uint32 udp_rx_enqueued;
+    uint32 udp_rx_dropped;
+    uint32 udp_rx_truncated;
+    uint32 udp_rx_bad_checksum;
+    uint32 udp_tx_checksums;
+} syscall_net_udp_stats_t;
+
+typedef struct {
+    uint32 ipv4_rx_fragments;
+    uint32 ipv4_rx_frag_dropped;
+} syscall_net_ip_stats_t;
+
+typedef struct {
+    uint8 bound;
+    uint8 _pad0;
+    uint16 port;
+    uint32 queued;
+    uint32 dropped;
+} syscall_net_socket_info_t;
+
+typedef struct {
+    int32 pid;
+    int32 status;
+    int32 active;
+    char command[96];
+} syscall_bg_job_info_t;
+
+extern uint8 g_current_drive;
+
 // C dispatcher called by the assembly stub. Returns value in EAX to user.
 uint32 syscall_dispatch(regs_t* regs) {
     uint32 syscall_num = regs->eax;
@@ -1048,6 +1373,726 @@ uint32 syscall_dispatch(regs_t* regs) {
     uint32 arg3 = regs->edx;
 
     switch (syscall_num) {
+        case SYSCALL_EYNFS_STREAM_BEGIN: {
+            if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+
+            const char* user_path = (const char*)arg1;
+            if (!user_path) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+            trim_trailing_crlf(path);
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                cwd = vterm_get_cwd(g_user_task_term);
+            }
+            if (!cwd || cwd[0] != '/') cwd = "/";
+
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            uint8 drive = g_current_drive;
+
+            // Only support EYNFS for streaming writes today.
+            eynfs_superblock_t sb;
+            if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) != 0 || sb.magic != EYNFS_MAGIC) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            int handle = -1;
+            for (int i = 0; i < USER_STREAM_MAX; ++i) {
+                if (!g_user_streams[i].used) { handle = i; break; }
+            }
+            if (handle < 0) { regs->eax = (uint32)-1; break; }
+
+            g_user_streams[handle].used = 1;
+            if (eynfs_stream_begin(drive, abspath, &g_user_streams[handle].s) != 0) {
+                g_user_streams[handle].used = 0;
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            regs->eax = (uint32)handle;
+            break;
+        }
+        case SYSCALL_EYNFS_STREAM_WRITE: {
+            if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            const void* user_buf = (const void*)arg2;
+            int len = (int)arg3;
+            if (!user_buf || len < 0) { regs->eax = (uint32)-1; break; }
+            if (len == 0) { regs->eax = 0; break; }
+
+            user_stream_t* us = user_stream_get(handle);
+            if (!us) { regs->eax = (uint32)-1; break; }
+
+            // Copy from user memory in bounded chunks.
+            int total = 0;
+            const uint8* src = (const uint8*)user_buf;
+            while (total < len) {
+                int remaining = len - total;
+                int chunk = remaining;
+                if (chunk > 1024) chunk = 1024;
+                uint8 tmp[1024];
+                if (copyin(tmp, src + total, (size_t)chunk) != 0) { regs->eax = (uint32)-1; return regs->eax; }
+                int w = eynfs_stream_write(&us->s, tmp, (size_t)chunk);
+                if (w != chunk) { regs->eax = (uint32)-1; break; }
+                total += chunk;
+            }
+            regs->eax = (regs->eax == (uint32)-1) ? (uint32)-1 : (uint32)total;
+            break;
+        }
+        case SYSCALL_EYNFS_STREAM_END: {
+            if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            user_stream_t* us = user_stream_get(handle);
+            if (!us) { regs->eax = (uint32)-1; break; }
+
+            int rc = eynfs_stream_end(&us->s);
+            us->used = 0;
+            memset(&us->s, 0, sizeof(us->s));
+            regs->eax = (rc == 0) ? 0 : (uint32)-1;
+            break;
+        }
+        case SYSCALL_GETCWD: {
+            // getcwd(buf=arg1, buflen=arg2) -> returns bytes written (excluding NUL)
+            // Used by ring3 utilities (e.g. /binaries/pwd).
+            char* user_buf = (char*)arg1;
+            int buflen = (int)arg2;
+            if (!user_buf || buflen <= 0) { regs->eax = (uint32)-1; break; }
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                const char* t = vterm_get_cwd(g_user_task_term);
+                if (t && t[0] == '/') {
+                    cwd = t;
+                }
+            }
+
+            int n = (int)strlen(cwd);
+            if (n >= buflen) n = buflen - 1;
+            if (n < 0) n = 0;
+
+            if (copyout(user_buf, cwd, (size_t)n) != 0) { regs->eax = (uint32)-1; break; }
+            if (copyout(user_buf + n, "\0", 1) != 0) { regs->eax = (uint32)-1; break; }
+
+            regs->eax = (uint32)n;
+            break;
+        }
+        case SYSCALL_DRIVE_SET_LOGICAL: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint8 logical = (uint8)arg1;
+            uint8 physical = ata_logical_to_physical(logical);
+            if (physical == 0xFFu) { regs->eax = (uint32)-1; break; }
+            g_current_drive = physical;
+            regs->eax = (uint32)logical;
+            break;
+        }
+        case SYSCALL_DRIVE_GET_LOGICAL: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)ata_physical_to_logical(g_current_drive);
+            break;
+        }
+        case SYSCALL_DRIVE_GET_COUNT: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)ata_get_num_logical_drives();
+            break;
+        }
+        case SYSCALL_DRIVE_IS_PRESENT: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = ata_logical_drive_present((uint8)arg1) ? 1u : 0u;
+            break;
+        }
+        case SYSCALL_INIT_SERVICES: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            ata_init_drives();
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_SERIAL_WRITE_COM1: {
+            if (!syscall_ctx_allow(CAP_DEV_SERIAL, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            const char* user_buf = (const char*)arg1;
+            int len = (int)arg2;
+            if (!user_buf || len < 0) { regs->eax = (uint32)-1; break; }
+            if (len == 0) { regs->eax = 0; break; }
+            if (len > SYSCALL_IO_MAX) len = SYSCALL_IO_MAX;
+
+            int total = 0;
+            while (total < len) {
+                int chunk = len - total;
+                if (chunk > 256) chunk = 256;
+                char tmp[256];
+                if (copyin(tmp, user_buf + total, (size_t)chunk) != 0) { regs->eax = (uint32)-1; return regs->eax; }
+                int w = serial_write(SERIAL_COM1, tmp, chunk);
+                if (w != chunk) { regs->eax = (uint32)-1; return regs->eax; }
+                total += chunk;
+            }
+            regs->eax = (uint32)total;
+            break;
+        }
+        case SYSCALL_SHELL_LOG_SET: {
+            if (!syscall_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            if ((int)arg1 != 0) shell_log_enable();
+            else shell_log_disable();
+            regs->eax = (uint32)(shell_log_is_enabled() ? 1 : 0);
+            break;
+        }
+        case SYSCALL_SHELL_LOG_GET: {
+            regs->eax = (uint32)(shell_log_is_enabled() ? 1 : 0);
+            break;
+        }
+        case SYSCALL_CRASHLOG_COUNT: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int count = crashlog_get_record_count();
+            regs->eax = (count < 0) ? (uint32)-1 : (uint32)count;
+            break;
+        }
+        case SYSCALL_CRASHLOG_INFO: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint32 index = (uint32)arg1;
+            void* user_out = (void*)arg3;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+            crashlog_record_info_t info;
+            if (crashlog_get_record_info(index, &info) != 0) { regs->eax = (uint32)-1; break; }
+            if (copyout(user_out, &info, sizeof(info)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_CRASHLOG_DATA: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint32 index = (uint32)arg1;
+            void* user_out = (void*)arg2;
+            int out_cap = (int)arg3;
+            if (!user_out || out_cap <= 0) { regs->eax = (uint32)-1; break; }
+            if (out_cap > CRASHLOG_MAX_DATA) out_cap = CRASHLOG_MAX_DATA;
+
+            uint8 data[CRASHLOG_MAX_DATA];
+            int n = crashlog_get_record_data(index, data, (uint32)out_cap);
+            if (n < 0) { regs->eax = (uint32)-1; break; }
+            if (n > 0 && copyout(user_out, data, (size_t)n) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)n;
+            break;
+        }
+        case SYSCALL_CRASHLOG_CLEAR: {
+            if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (crashlog_clear() == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_SHELL_MIGRATED_DISPATCH: {
+            const char* user_cmd = (const char*)arg1;
+            const char* user_raw = (const char*)arg2;
+            regs->eax = (syscall_shell_migrated_dispatch(user_cmd, user_raw) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_PCI_GET_COUNT: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            syscall_pci_count_ctx_t ctx;
+            memset(&ctx, 0, sizeof(ctx));
+            ctx.filter_net_only = ((int)arg1 != 0) ? 1 : 0;
+            pci_enumerate(syscall_pci_count_cb, &ctx);
+            regs->eax = (uint32)ctx.count;
+            break;
+        }
+        case SYSCALL_PCI_GET_ENTRY: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int filter_net_only = ((int)arg1 != 0) ? 1 : 0;
+            int target_index = (int)arg2;
+            void* user_out = (void*)arg3;
+            if (!user_out || target_index < 0) { regs->eax = (uint32)-1; break; }
+
+            syscall_pci_entry_ctx_t ctx;
+            memset(&ctx, 0, sizeof(ctx));
+            ctx.filter_net_only = filter_net_only;
+            ctx.target_index = target_index;
+            pci_enumerate(syscall_pci_entry_cb, &ctx);
+            if (!ctx.found) { regs->eax = (uint32)-1; break; }
+            if (copyout(user_out, &ctx.out, sizeof(ctx.out)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_E1000_PROBE: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            void* user_out = (void*)arg3;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+            e1000_probe_info info;
+            if (e1000_probe(&info) != 0) { regs->eax = (uint32)-1; break; }
+            syscall_e1000_probe_t out;
+            memset(&out, 0, sizeof(out));
+            out.bus = info.bus;
+            out.device = info.device;
+            out.function = info.function;
+            out.bar0 = info.bar0;
+            out.ctrl = info.ctrl;
+            out.status = info.status;
+            for (int i = 0; i < 6; i++) out.mac[i] = info.mac[i];
+            out.link_up = info.link_up;
+            if (copyout(user_out, &out, sizeof(out)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_E1000_INIT: {
+            if (!syscall_ctx_allow(CAP_DEV_NET | CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_init_e1000_default();
+            break;
+        }
+        case SYSCALL_NETCFG_GET: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            void* user_out = (void*)arg3;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+            net_config cfg;
+            net_config_get(&cfg);
+            syscall_net_config_t out;
+            memset(&out, 0, sizeof(out));
+            for (int i = 0; i < 4; i++) {
+                out.local_ip[i] = cfg.local_ip[i];
+                out.gateway_ip[i] = cfg.gateway_ip[i];
+                out.netmask[i] = cfg.netmask[i];
+                out.dns_ip[i] = cfg.dns_ip[i];
+            }
+            if (copyout(user_out, &out, sizeof(out)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_NETCFG_SET: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const void* user_in = (const void*)arg1;
+            if (!user_in) { regs->eax = (uint32)-1; break; }
+            syscall_net_config_t in;
+            if (copyin(&in, user_in, sizeof(in)) != 0) { regs->eax = (uint32)-1; break; }
+            net_config cfg;
+            memset(&cfg, 0, sizeof(cfg));
+            for (int i = 0; i < 4; i++) {
+                cfg.local_ip[i] = in.local_ip[i];
+                cfg.gateway_ip[i] = in.gateway_ip[i];
+                cfg.netmask[i] = in.netmask[i];
+                cfg.dns_ip[i] = in.dns_ip[i];
+            }
+            regs->eax = (uint32)net_config_set(&cfg);
+            break;
+        }
+        case SYSCALL_NETCFG_DEFAULTS: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            net_config_set_defaults();
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_NET_IS_INITED: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)(net_is_inited() ? 1 : 0);
+            break;
+        }
+        case SYSCALL_NET_GET_MAC: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            void* user_out = (void*)arg3;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+            uint8 mac[6];
+            if (net_get_mac(mac) != 0) { regs->eax = (uint32)-1; break; }
+            if (copyout(user_out, mac, 6) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_NET_GET_ARP: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int out_cap = (int)arg2;
+            void* user_out = (void*)arg3;
+            if (!user_out || out_cap <= 0) { regs->eax = (uint32)-1; break; }
+            if (out_cap > 32) out_cap = 32;
+
+            net_arp_entry entries[32];
+            uint32 n = net_get_arp_cache(entries, (uint32)out_cap);
+            if (n > (uint32)out_cap) n = (uint32)out_cap;
+
+            syscall_net_arp_entry_t out_entries[32];
+            for (uint32 i = 0; i < n; i++) {
+                memset(&out_entries[i], 0, sizeof(out_entries[i]));
+                for (int k = 0; k < 4; k++) out_entries[i].ip[k] = entries[i].ip[k];
+                for (int k = 0; k < 6; k++) out_entries[i].mac[k] = entries[i].mac[k];
+                out_entries[i].valid = entries[i].valid;
+            }
+            if (copyout(user_out, out_entries, sizeof(out_entries[0]) * n) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = n;
+            break;
+        }
+        case SYSCALL_NET_GET_UDP_STATS: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            void* user_out = (void*)arg3;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+            net_udp_stats st = net_udp_get_stats();
+            syscall_net_udp_stats_t out;
+            out.udp_rx_enqueued = st.udp_rx_enqueued;
+            out.udp_rx_dropped = st.udp_rx_dropped;
+            out.udp_rx_truncated = st.udp_rx_truncated;
+            out.udp_rx_bad_checksum = st.udp_rx_bad_checksum;
+            out.udp_tx_checksums = st.udp_tx_checksums;
+            if (copyout(user_out, &out, sizeof(out)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_NET_GET_IP_STATS: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            void* user_out = (void*)arg3;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+            net_ip_stats st = net_ip_get_stats();
+            syscall_net_ip_stats_t out;
+            out.ipv4_rx_fragments = st.ipv4_rx_fragments;
+            out.ipv4_rx_frag_dropped = st.ipv4_rx_frag_dropped;
+            if (copyout(user_out, &out, sizeof(out)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_NET_GET_SOCKETS: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int out_cap = (int)arg2;
+            void* user_out = (void*)arg3;
+            if (!user_out || out_cap <= 0) { regs->eax = (uint32)-1; break; }
+            if (out_cap > 16) out_cap = 16;
+            net_socket_info sockets[16];
+            uint32 n = net_get_sockets(sockets, (uint32)out_cap);
+            if (n > (uint32)out_cap) n = (uint32)out_cap;
+            syscall_net_socket_info_t out[16];
+            for (uint32 i = 0; i < n; i++) {
+                memset(&out[i], 0, sizeof(out[i]));
+                out[i].bound = sockets[i].bound;
+                out[i].port = sockets[i].port;
+                out[i].queued = sockets[i].queued;
+                out[i].dropped = sockets[i].dropped;
+            }
+            if (copyout(user_out, out, sizeof(out[0]) * n) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = n;
+            break;
+        }
+        case SYSCALL_NET_PING: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const void* user_dst = (const void*)arg1;
+            const void* user_local = (const void*)arg2;
+            int count = (int)arg3;
+            if (!user_dst || !user_local) { regs->eax = (uint32)-1; break; }
+            if (count <= 0) count = 4;
+            if (count > 64) count = 64;
+            uint8 dst_ip[4];
+            uint8 local_ip[4];
+            if (copyin(dst_ip, user_dst, 4) != 0) { regs->eax = (uint32)-1; break; }
+            if (copyin(local_ip, user_local, 4) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_icmp_ping(local_ip, dst_ip, count, 0);
+            break;
+        }
+        case SYSCALL_FS_CHECK_INTEGRITY: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)check_filesystem_integrity(g_current_drive);
+            break;
+        }
+        case SYSCALL_FS_FATFIX: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const char* user_path = (const char*)arg1;
+            if (!user_path) { regs->eax = (uint32)-1; break; }
+            char path[256];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)fatfix_repair_path(g_current_drive, path);
+            break;
+        }
+        case SYSCALL_VTERM_CLEAR: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (!g_user_task_active || g_user_task_term < 0) { regs->eax = (uint32)-1; break; }
+            vterm_clear(g_user_task_term);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_HISTORY_COUNT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)g_command_history.count;
+            break;
+        }
+        case SYSCALL_HISTORY_ENTRY: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            int index = (int)arg1;
+            int out_len = (int)arg2;
+            char* user_out = (char*)arg3;
+            if (!user_out || out_len <= 0) { regs->eax = (uint32)-1; break; }
+            if (index < 0 || index >= g_command_history.count) { regs->eax = (uint32)-1; break; }
+
+            const char* src = g_command_history.commands[index];
+            int n = (int)strlen(src);
+            if (n >= out_len) n = out_len - 1;
+            if (n < 0) n = 0;
+            if (copyout(user_out, src, (size_t)n) != 0) { regs->eax = (uint32)-1; break; }
+            if (copyout(user_out + n, "\0", 1) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)n;
+            break;
+        }
+        case SYSCALL_HISTORY_CLEAR: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            clear_history(&g_command_history);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_BG_JOB_COUNT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            int count = 0;
+            for (int i = 0; i < MAX_BACKGROUND_PROCESSES; i++) {
+                if (g_background_processes[i].active) count++;
+            }
+            regs->eax = (uint32)count;
+            break;
+        }
+        case SYSCALL_BG_JOB_INFO: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            int target = (int)arg1;
+            void* user_out = (void*)arg3;
+            if (!user_out || target < 0) { regs->eax = (uint32)-1; break; }
+
+            int seen = 0;
+            int found = -1;
+            for (int i = 0; i < MAX_BACKGROUND_PROCESSES; i++) {
+                if (!g_background_processes[i].active) continue;
+                if (seen == target) { found = i; break; }
+                seen++;
+            }
+            if (found < 0) { regs->eax = (uint32)-1; break; }
+
+            syscall_bg_job_info_t out;
+            memset(&out, 0, sizeof(out));
+            out.pid = g_background_processes[found].pid;
+            out.status = g_background_processes[found].status;
+            out.active = g_background_processes[found].active;
+            if (g_background_processes[found].command) {
+                strncpy(out.command, g_background_processes[found].command, sizeof(out.command) - 1);
+                out.command[sizeof(out.command) - 1] = '\0';
+            }
+
+            if (copyout(user_out, &out, sizeof(out)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_TILING_START: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            start_tiling_manager();
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_SETBG_PATH: {
+            if (!syscall_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const char* user_path = (const char*)arg1;
+            if (!user_path) { regs->eax = (uint32)-1; break; }
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                const char* t = vterm_get_cwd(g_user_task_term);
+                if (t && t[0] == '/') cwd = t;
+            }
+
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            vfs_stat_t st;
+            if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) { regs->eax = (uint32)-1; break; }
+            if (st.size == 0 || st.size > 512 * 1024) { regs->eax = (uint32)-1; break; }
+
+            uint8* buf = (uint8*)malloc(st.size);
+            if (!buf) { regs->eax = (uint32)-1; break; }
+            int br = vfs_read_file(g_current_drive, abspath, (char*)buf, (int)st.size);
+            if (br <= 0) { free(buf); regs->eax = (uint32)-1; break; }
+
+            rei_image_t* img = (rei_image_t*)malloc(sizeof(rei_image_t));
+            if (!img) { free(buf); regs->eax = (uint32)-1; break; }
+            if (rei_parse_image(buf, br, img) != 0) { free(buf); free(img); regs->eax = (uint32)-1; break; }
+            free(buf);
+
+            int focused = tile_get_focused();
+            if (focused < 0) { rei_free_image(img); free(img); regs->eax = (uint32)-1; break; }
+
+            regs->eax = (tile_begin_set_background_from_rei(focused, img) == 0) ? 0u : (uint32)-1;
+            if (regs->eax != 0u) {
+                rei_free_image(img);
+                free(img);
+            }
+            break;
+        }
+        case SYSCALL_CLEARBG_FOCUSED: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            int focused = tile_get_focused();
+            if (focused < 0) { regs->eax = (uint32)-1; break; }
+            tile_clear_background(focused);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_SETFONT_PATH: {
+            if (!syscall_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const char* user_path = (const char*)arg1;
+            if (!user_path) { regs->eax = (uint32)-1; break; }
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+
+            if (strcmp(path, "builtin") == 0 || path[0] == '\0') {
+                regs->eax = (vga_system_font_set(g_current_drive, "builtin") == 0) ? 0u : (uint32)-1;
+                if (regs->eax == 0u) tile_render_once();
+                break;
+            }
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                const char* t = vterm_get_cwd(g_user_task_term);
+                if (t && t[0] == '/') cwd = t;
+            }
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+            regs->eax = (vga_system_font_set(g_current_drive, abspath) == 0) ? 0u : (uint32)-1;
+            if (regs->eax == 0u) tile_render_once();
+            break;
+        }
+        case SYSCALL_CHDIR: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            if (!g_user_task_active || g_user_task_term < 0) { regs->eax = (uint32)-1; break; }
+
+            const char* user_path = (const char*)arg1;
+            if (!user_path) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+
+            const char* cwd = vterm_get_cwd(g_user_task_term);
+            if (!cwd || cwd[0] != '/') cwd = "/";
+
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            if (strcmp(abspath, "/") == 0) {
+                vterm_set_cwd(g_user_task_term, "/");
+                regs->eax = 0;
+                break;
+            }
+
+            vfs_stat_t st;
+            if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_DIR) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            vterm_set_cwd(g_user_task_term, abspath);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_RUN: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const char* user_raw = (const char*)arg1;
+            if (!user_raw) { regs->eax = (uint32)-1; break; }
+
+            char raw_args[192];
+            if (copyin_cstr(raw_args, sizeof(raw_args), user_raw) != 0) { regs->eax = (uint32)-1; break; }
+
+            char full_line[196];
+            full_line[0] = 'r';
+            full_line[1] = 'u';
+            full_line[2] = 'n';
+            full_line[3] = ' ';
+            full_line[4] = '\0';
+            strncat(full_line, raw_args, sizeof(full_line) - strlen(full_line) - 1);
+            run_command(full_line);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_WRITE_EDITOR: {
+            if (!syscall_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const char* user_path = (const char*)arg1;
+            if (!user_path) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                const char* t = vterm_get_cwd(g_user_task_term);
+                if (t && t[0] == '/') cwd = t;
+            }
+
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+            write_editor(abspath, g_current_drive);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_MMAP: {
+            int read_only = ((int)arg3 != 0) ? 1 : 0;
+            uint32 caps = read_only ? (CAP_READ_FS | CAP_ALLOC_MEMORY) : (CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY);
+            if (!syscall_ctx_allow(caps, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+
+            const char* user_path = (const char*)arg1;
+            size_t* user_out_size = (size_t*)arg2;
+            if (!user_path) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+
+            void* mapped_addr = NULL;
+            size_t mapped_size = 0;
+            if (eynfs_mmap(path, &mapped_addr, &mapped_size, (uint8_t)read_only) != 0 || !mapped_addr) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            if (user_out_size && copyout(user_out_size, &mapped_size, sizeof(mapped_size)) != 0) {
+                (void)eynfs_munmap(mapped_addr, mapped_size);
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            regs->eax = (uint32)(uintptr_t)mapped_addr;
+            break;
+        }
+        case SYSCALL_MUNMAP: {
+            if (!syscall_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) { regs->eax = (uint32)-1; break; }
+            void* addr = (void*)(uintptr_t)arg1;
+            regs->eax = (eynfs_munmap(addr, 0) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_MSYNC: {
+            if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            void* addr = (void*)(uintptr_t)arg1;
+            regs->eax = (eynfs_msync(addr, 0) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_PAGING_GUARDS: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            paging_install_null_guard();
+            paging_protect_kernel_text_ro();
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_PANIC: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if ((int)arg1 != 1) { regs->eax = (uint32)-1; break; }
+            PANIC("manual panic via ring3 syscall");
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_PF: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if ((int)arg3 != 1) { regs->eax = (uint32)-1; break; }
+
+            uint32 addr = (uint32)arg1;
+            int mode = (int)arg2;
+            if (mode == 1) {
+                *(volatile uint32*)addr = 0x12345678u;
+            } else if (mode == 2) {
+                void (*fn)(void) = (void (*)(void))addr;
+                fn();
+            } else {
+                volatile uint32 tmp = *(volatile uint32*)addr;
+                (void)tmp;
+            }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_RING3: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE | CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) { regs->eax = (uint32)-1; break; }
+            if ((int)arg1 != 1) { regs->eax = (uint32)-1; break; }
+
+            regs->eax = (uint32)-1;
+            break;
+        }
         case SYSCALL_WRITE: {
             if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) {
                 regs->eax = (uint32)-1;
@@ -1226,7 +2271,6 @@ uint32 syscall_dispatch(regs_t* regs) {
             char abspath[128];
             resolve_path(path, cwd, abspath, sizeof(abspath));
 
-            extern uint8 g_current_drive;
             uint8 drive = g_current_drive;
 
                  // Log the open request even on failure (stdout goes to vterm, but
@@ -1405,7 +2449,6 @@ uint32 syscall_dispatch(regs_t* regs) {
             int len = (int)arg3;
 
             if (!user_path || !user_buf || len < 0) { regs->eax = (uint32)-1; break; }
-            if (len == 0) { regs->eax = 0; break; }
 
             char path[128];
             if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
@@ -1421,12 +2464,20 @@ uint32 syscall_dispatch(regs_t* regs) {
             char abspath[128];
             resolve_path(path, cwd, abspath, sizeof(abspath));
 
-            extern uint8 g_current_drive;
             uint8 drive = g_current_drive;
 
             if (SYSCALL_WRITEFILE_DEBUG) {
                 printf("[SYSCALL:WRITEFILE] req='%s' cwd='%s' => '%s' len=%d drive=%d\n",
                        path, cwd ? cwd : "(null)", abspath, len, (int)drive);
+            }
+
+            // Special-case empty writes: still create/truncate the file.
+            // `vfs_write_file` requires a non-NULL buffer pointer even when size==0.
+            if (len == 0) {
+                const uint8 dummy = 0;
+                int written = vfs_write_file(drive, abspath, &dummy, 0);
+                regs->eax = (written < 0) ? (uint32)-1 : (uint32)written;
+                break;
             }
 
             // Stream the user buffer into the filesystem to avoid large kernel allocations.
@@ -1494,6 +2545,84 @@ uint32 syscall_dispatch(regs_t* regs) {
                 printf("[SYSCALL:WRITEFILE] vfs_write_file rc=%d\n", written);
             }
             regs->eax = (uint32)written;
+            break;
+        }
+
+        case SYSCALL_MKDIR: {
+            if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const char* user_path = (const char*)arg1;
+            if (!user_path) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+            trim_trailing_crlf(path);
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                cwd = vterm_get_cwd(g_user_task_term);
+            }
+            if (!cwd || cwd[0] != '/') {
+                cwd = "/";
+            }
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            uint8 drive = g_current_drive;
+
+            int rc = vfs_mkdir(drive, abspath);
+            regs->eax = (rc == 0) ? 0u : (uint32)-1;
+            break;
+        }
+
+        case SYSCALL_UNLINK: {
+            if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const char* user_path = (const char*)arg1;
+            if (!user_path) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+            trim_trailing_crlf(path);
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                cwd = vterm_get_cwd(g_user_task_term);
+            }
+            if (!cwd || cwd[0] != '/') {
+                cwd = "/";
+            }
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            uint8 drive = g_current_drive;
+
+            int rc = vfs_unlink(drive, abspath);
+            regs->eax = (rc == 0) ? 0u : (uint32)-1;
+            break;
+        }
+
+        case SYSCALL_RMDIR: {
+            if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const char* user_path = (const char*)arg1;
+            if (!user_path) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+            trim_trailing_crlf(path);
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                cwd = vterm_get_cwd(g_user_task_term);
+            }
+            if (!cwd || cwd[0] != '/') {
+                cwd = "/";
+            }
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            uint8 drive = g_current_drive;
+
+            int rc = vfs_rmdir(drive, abspath);
+            regs->eax = (rc == 0) ? 0u : (uint32)-1;
             break;
         }
         case SYSCALL_SLEEP_US: {
@@ -1850,6 +2979,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             user_gui_t* e = user_gui_get(handle);
             if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
             e->cmd_count = 0;
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -1871,6 +3001,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             c->r = rgb.r;
             c->g = rgb.g;
             c->b = rgb.b;
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -1896,6 +3027,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             c->r = rect.r;
             c->g = rect.g;
             c->b = rect.b;
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -1923,6 +3055,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (copyin_cstr(c->text, sizeof(c->text), t.text) != 0) {
                 c->text[0] = '\0';
             }
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -1949,6 +3082,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             c->r = l.r;
             c->g = l.g;
             c->b = l.b;
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -1963,6 +3097,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             // If the main tiler loop is blocked by a running ring3 task, render
             // a single frame now so GUI updates appear without input events.
             tile_render_once();
+            e->frame_pending = 0;
             regs->eax = 0;
             break;
         }
@@ -2005,7 +3140,6 @@ uint32 syscall_dispatch(regs_t* regs) {
                         if (g_user_task_active) cwd = vterm_get_cwd(g_user_task_term);
                         char abspath[128];
                         resolve_path(path, cwd, abspath, sizeof(abspath));
-                        extern uint8 g_current_drive;
                         uint8 drive = g_current_drive;
                         int h = vga_font_acquire_hex(drive, abspath);
                         if (h > 0) new_font = h;
@@ -2071,6 +3205,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (copyin((uint8*)e->blit_buf, cmd.pixels, need) != 0) { regs->eax = (uint32)-1; break; }
             e->blit_dst_w = cmd.dst_w;
             e->blit_dst_h = cmd.dst_h;
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -2085,6 +3220,10 @@ uint32 syscall_dispatch(regs_t* regs) {
             int out_sz = (int)arg3;
             user_gui_t* e = user_gui_get(handle);
             if (!e || !user_out || out_sz < (int)sizeof(user_gui_event_t)) { regs->eax = (uint32)-1; break; }
+
+            // Back-end safety net: if a user GUI app queued draw commands but forgot
+            // to call gui_present(), flush one frame before polling/waiting for input.
+            user_gui_flush_pending_frame(e);
 
             user_gui_event_t ev;
             int have = 0;
@@ -2114,6 +3253,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
             if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
             e->cmd_count = 0;
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -2135,6 +3275,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             c->r = rgb.r;
             c->g = rgb.g;
             c->b = rgb.b;
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -2160,6 +3301,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             c->r = rect.r;
             c->g = rect.g;
             c->b = rect.b;
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -2187,6 +3329,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (copyin_cstr(c->text, sizeof(c->text), t.text) != 0) {
                 c->text[0] = '\0';
             }
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -2212,6 +3355,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             c->r = l.r;
             c->g = l.g;
             c->b = l.b;
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -2224,6 +3368,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
             tile_invalidate_gui(e->tile_idx);
             tile_render_once();
+            e->frame_pending = 0;
             regs->eax = 0;
             break;
         }
@@ -2307,7 +3452,6 @@ uint32 syscall_dispatch(regs_t* regs) {
                         if (g_user_task_active) cwd = vterm_get_cwd(g_user_task_term);
                         char abspath[128];
                         resolve_path(path, cwd, abspath, sizeof(abspath));
-                        extern uint8 g_current_drive;
                         uint8 drive = g_current_drive;
                         int h = vga_font_acquire_hex(drive, abspath);
                         if (h > 0) new_font = h;
@@ -2373,6 +3517,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (copyin((uint8*)e->blit_buf, cmd.pixels, need) != 0) { regs->eax = (uint32)-1; break; }
             e->blit_dst_w = cmd.dst_w;
             e->blit_dst_h = cmd.dst_h;
+            e->frame_pending = 1;
             regs->eax = 0;
             break;
         }
@@ -2388,6 +3533,8 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_READ, NULL);
             if (!e) { regs->eax = (uint32)-1; break; }
+
+            user_gui_flush_pending_frame(e);
 
             user_gui_event_t ev;
             int have = 0;
@@ -2429,6 +3576,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             g_user_interrupt = 0;
             g_abort_to_shell = 1;
             syscall_reset_user_fds();
+            syscall_reset_user_streams();
             regs->eax = 0;
             break;
         }

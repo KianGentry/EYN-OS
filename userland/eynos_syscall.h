@@ -58,6 +58,25 @@ enum {
     // Deterministic execution mode
     EYN_SYSCALL_DET_ENABLE = 47,
     EYN_SYSCALL_DET_STEP = 48,
+
+    // Filesystem mutation helpers
+    // args: (const char* path)
+    EYN_SYSCALL_MKDIR = 49,
+    EYN_SYSCALL_UNLINK = 50,
+    EYN_SYSCALL_RMDIR = 51,
+
+    // Query current working directory (vterm cwd)
+    // args: (char* buf, int buflen)
+    // returns: bytes written excluding NUL, or -1
+    EYN_SYSCALL_GETCWD = 52,
+
+    // Low-memory streaming file writer (EYNFS only today)
+    // begin: args (const char* path)
+    // write: args (int handle, const void* buf, int len) -> bytes written or -1
+    // end: args (int handle) -> 0 or -1
+    EYN_SYSCALL_EYNFS_STREAM_BEGIN = 53,
+    EYN_SYSCALL_EYNFS_STREAM_WRITE = 54,
+    EYN_SYSCALL_EYNFS_STREAM_END = 55,
 };
 
 enum {

@@ -18,6 +18,11 @@ int close(int fd);
 // Create/overwrite a file with given contents.
 int writefile(const char* path, const void* buf, size_t len);
 
+// Filesystem mutation helpers.
+int mkdir(const char* path);
+int unlink(const char* path);
+int rmdir(const char* path);
+
 void _exit(int code) EYN_ATTR_NORETURN;
 
 // Non-blocking single-key read. Returns 0 if none available.
@@ -26,3 +31,16 @@ int getkey(void);
 // Sleep helpers (cooperative).
 int usleep(unsigned int usec);
 unsigned int sleep(unsigned int seconds);
+
+// Query current working directory (shell/vterm cwd).
+// Returns bytes written excluding NUL, or -1 on error.
+int getcwd(char* buf, size_t size);
+
+// Change current working directory (shell/vterm cwd).
+// Returns 0 on success, -1 on error.
+int chdir(const char* path);
+
+// Low-memory streaming file writer (EYNFS only today).
+int eynfs_stream_begin(const char* path);
+ssize_t eynfs_stream_write(int handle, const void* buf, size_t len);
+int eynfs_stream_end(int handle);

@@ -279,6 +279,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 
     // Reset per-task syscall state.
     syscall_reset_user_fds();
+    syscall_reset_user_streams();
     syscall_reset_user_guis();
 
     g_user_interrupt = 0;
@@ -292,10 +293,12 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     extern volatile int g_user_task_color_g;
     extern volatile int g_user_task_color_b;
     extern volatile uint8 g_user_task_color_state;
+    extern volatile uint8 g_user_task_icon_state;
     g_user_task_color_r = 255;
     g_user_task_color_g = 255;
     g_user_task_color_b = 255;
     g_user_task_color_state = 0;
+    g_user_task_icon_state = 0;
     
     // Clear the stdin buffer for this terminal so the user task starts fresh
     vterm_stdin_clear(g_user_task_term);
@@ -462,7 +465,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     segdom_load(&g_user_segdom);
 
     // Enter ring3 at ELF entry.
-    printf("%c[elfrun] entering user mode: %s (entry=0x%X)\n", 0, 255, 0, abspath, (unsigned)entry);
+    // printf("%c[elfrun] entering user mode: %s (entry=0x%X)\n", 0, 255, 0, abspath, (unsigned)entry);
     tss_set_kernel_stack((uint32)&stack_space);
     enter_user_mode_segdom(entry, user_esp, g_user_segdom_cs, g_user_segdom_ds);
 

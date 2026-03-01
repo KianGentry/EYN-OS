@@ -2,32 +2,34 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-int main(void) {
-    char path[128];
-    puts("cat: enter path:");
-    int n = (int)read(0, path, sizeof(path));
-    if (n <= 0) {
-        puts("cat: no input");
-        return 1;
-    }
+#include <eynos_cmdmeta.h>
 
-    // `readStr()` returns a newline-terminated line; strip it.
-    if (n > 0 && (path[n - 1] == '\n' || path[n - 1] == '\r')) {
-        path[n - 1] = '\0';
-        n--;
-    }
-    while (n > 0 && (path[n - 1] == '\n' || path[n - 1] == '\r')) {
-        path[n - 1] = '\0';
-        n--;
-    }
-    if (path[0] == '\0') {
-        puts("cat: empty path");
+// Optional help metadata consumed by the kernel's `help` command.
+// This is stored in an ELF section named `.eynos.cmdmeta`.
+EYN_CMDMETA_V1("Print a file to stdout.", "read /test.txt");
+
+static void usage(void) {
+    puts("Usage: read <path>\nExample: read /test.txt");
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        usage();
         return 1;
     }
+    if (argv[1][0] == '-' && argv[1][1] == 'h' && argv[1][2] == '\0') {
+        usage();
+        return 0;
+    }
+    if (argv[1][0] == '\0') {
+        usage();
+        return 1;
+    }
+    const char* path = argv[1];
 
     int fd = open(path, O_RDONLY, 0);
     if (fd < 0) {
-        printf("cat: failed to open: %s\n", path);
+        printf("read: failed to open: %s\n", path);
         return 1;
     }
 
@@ -35,7 +37,7 @@ int main(void) {
     for (;;) {
         int r = (int)read(fd, buf, sizeof(buf));
         if (r < 0) {
-            puts("cat: read error");
+            puts("read: read error");
             break;
         }
         if (r == 0) break;

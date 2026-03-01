@@ -17,5 +17,12 @@ char* getenv(const char* name);
 void abort(void);
 void exit(int code);
 
+#ifndef RAND_MAX
+#define RAND_MAX 32767
+#endif
+
+int rand(void);
+void srand(unsigned int seed);
+
 unsigned long strtoul(const char* nptr, char** endptr, int base);
 long double strtold(const char* nptr, char** endptr);

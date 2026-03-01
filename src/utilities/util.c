@@ -28,6 +28,15 @@ volatile int g_user_task_color_b = 255;
 volatile uint8 g_user_task_color_state = 0;
 volatile uint8 g_user_task_color_bytes[3] = {0, 0, 0};
 
+// Parser state for ring3 stdout control sequences.
+//
+// - 0xFF,r,g,b sets the current user-task RGB text color.
+// - 0xFE,<16 bytes> registers a GUI icon key for the current output line.
+//   The key is a NUL-terminated string padded with zeros up to 16 bytes,
+//   matching entries in /icons (e.g. "file_txt", "dir_full").
+volatile uint8 g_user_task_icon_state = 0;
+volatile uint8 g_user_task_icon_bytes[16] = {0};
+
 volatile uint32 g_user_code_base = 0;
 volatile uint32 g_user_code_pages = 0;
 volatile uint32 g_user_stack_page = 0;
@@ -71,6 +80,7 @@ void user_task_cleanup_mappings(void) {
     vm_tlb_defer_end();
 
     syscall_reset_user_fds();
+    syscall_reset_user_streams();
 }
 
 void ui_return_from_user_task(void) {
@@ -86,6 +96,7 @@ void ui_return_from_user_task(void) {
     g_user_task_color_g = 255;
     g_user_task_color_b = 255;
     g_user_task_color_state = 0;
+    g_user_task_icon_state = 0;
 
     // Prefer the graphical tiling-manager shell when it's been initialized.
     if (tile_is_tiling_active()) {

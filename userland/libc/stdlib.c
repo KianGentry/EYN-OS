@@ -13,6 +13,30 @@
 
 static uint8_t g_heap[USERLAND_HEAP_SIZE];
 static size_t g_heap_used = 0;
+static uint32_t g_rand_state = 1u;
+static int g_rand_seeded = 0;
+
+static uint32_t mix32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+static uint32_t entropy_seed(void) {
+    uint32_t t_lo = 0;
+    uint32_t t_hi = 0;
+#if defined(__i386__) || defined(__x86_64__)
+    __asm__ __volatile__("rdtsc" : "=a"(t_lo), "=d"(t_hi));
+#endif
+    uint32_t addr_mix = (uint32_t)(uintptr_t)&g_heap_used ^ (uint32_t)(uintptr_t)&t_lo;
+    uint32_t seed = t_lo ^ (t_hi * 1664525u) ^ addr_mix ^ 0x9e3779b9u;
+    seed = mix32(seed);
+    if (seed == 0) seed = 1u;
+    return seed;
+}
 
 static size_t align_up(size_t v, size_t a) {
     return (v + (a - 1)) & ~(a - 1);
@@ -85,6 +109,20 @@ void abort(void) {
 
 void exit(int code) {
     _exit(code);
+}
+
+void srand(unsigned int seed) {
+    g_rand_state = (uint32_t)seed;
+    if (g_rand_state == 0) g_rand_state = 1u;
+    g_rand_seeded = 1;
+}
+
+int rand(void) {
+    if (!g_rand_seeded) {
+        srand(entropy_seed());
+    }
+    g_rand_state = g_rand_state * 1103515245u + 12345u;
+    return (int)((g_rand_state >> 16) & RAND_MAX);
 }
 
 unsigned long strtoul(const char* nptr, char** endptr, int base) {

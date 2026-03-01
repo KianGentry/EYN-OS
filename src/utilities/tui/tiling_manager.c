@@ -2238,6 +2238,8 @@ void tile_close(int tile_idx) {
         tiles[i].term_idx = i;
         // if the term index changed, update vterm active mapping
         if (old_idx != i) {
+            // Move terminal state with the tile so scrollback/input/history remain intact.
+            vterm_move_state(i, old_idx);
             // move active flag: deactivate old index and activate new index
             vterm_set_active(old_idx, 0);
             vterm_set_active(i, 1);

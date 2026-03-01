@@ -101,6 +101,17 @@ const char* vterm_get_cwd(int idx) {
     return vterms[idx].cwd;
 }
 
+void vterm_set_cwd(int idx, const char* cwd) {
+    if (idx < 0 || idx >= 4) return;
+    if (!cwd || cwd[0] != '/') {
+        strncpy(vterms[idx].cwd, "/", sizeof(vterms[idx].cwd) - 1);
+        vterms[idx].cwd[sizeof(vterms[idx].cwd) - 1] = '\0';
+        return;
+    }
+    strncpy(vterms[idx].cwd, cwd, sizeof(vterms[idx].cwd) - 1);
+    vterms[idx].cwd[sizeof(vterms[idx].cwd) - 1] = '\0';
+}
+
 void vterm_init_all() {
     for (int i = 0; i < 4; ++i) {
         vterms[i].cur_x = 0;
@@ -299,6 +310,33 @@ void vterm_write_char(int idx, char ch) {
     t->version++;
 
     // If a ring3 task is active, mark UI dirty so IRQ0 will repaint all tiles.
+    if (g_user_task_active) {
+        g_user_task_ui_dirty = 1;
+    }
+}
+
+void vterm_register_line_icon(int idx, const char* icon_key) {
+    if (!vterm_ctx_allow(CAP_WRITE_CONSOLE)) return;
+    if (idx < 0 || idx >= 4) return;
+    if (!icon_key || !icon_key[0]) return;
+
+    vterm_t* t = &vterms[idx];
+    if (!t->active) t->active = 1;
+
+    int slot = vterm_row_slot(t->cur_y);
+    int slot_idx = (int)t->line_icon_count[slot];
+    if (slot_idx >= VTERM_MAX_LINE_ICONS) return;
+
+    strncpy(t->line_icon_key[slot][slot_idx], icon_key, sizeof(t->line_icon_key[slot][slot_idx]) - 1);
+    t->line_icon_key[slot][slot_idx][sizeof(t->line_icon_key[slot][slot_idx]) - 1] = '\0';
+    if (t->cur_x < 0) t->cur_x = 0;
+    if (t->cur_x >= TERM_COLS) t->cur_x = TERM_COLS - 1;
+    t->line_icon_anchor_col[slot][slot_idx] = (uint8_t)t->cur_x;
+    t->line_icon_count[slot] = (uint8_t)(slot_idx + 1);
+    t->line_indent_px[slot] = 0;
+
+    t->version++;
+
     if (g_user_task_active) {
         g_user_task_ui_dirty = 1;
     }
@@ -559,6 +597,14 @@ void vterm_handle_key(int idx, int key) {
         vterm_write_char(idx, '\n');
         // handle command: use existing handle_shell_command, but capture output via shell redirect
         if (strlen(t->input_buf) > 0) {
+            char raw_input[INPUT_BUF_LEN];
+            strncpy(raw_input, t->input_buf, sizeof(raw_input) - 1);
+            raw_input[sizeof(raw_input) - 1] = '\0';
+
+            // Add to global history before command execution so parser/tokenizer mutations
+            // in command handlers cannot alter what Up/Down navigation recalls.
+            add_to_history(&g_command_history, raw_input);
+
             // temporarily redirect shell output to vterm buffer by using start_shell_redirect / shell_redirect_buf
             // Swap global shell_current_path into this vterm's cwd so commands (like cd) operate per-vterm
             char saved_global_cwd[128];
@@ -569,20 +615,7 @@ void vterm_handle_key(int idx, int key) {
             shell_current_path[127] = '\0';
 
             start_shell_redirect();
-                // If the command is "clear" (possibly with surrounding spaces), perform vterm_clear instead of global clearScreen
-                // Trim leading spaces
-                const char* cmd = t->input_buf;
-                while (*cmd == ' ' || *cmd == '\t') cmd++;
-                // Extract first token
-                char first[64];
-                int i = 0;
-                while (cmd[i] && cmd[i] != ' ' && cmd[i] != '\t' && i < (int)sizeof(first)-1) { first[i] = cmd[i]; i++; }
-                first[i] = '\0';
-                if (strcmp(first, "clear") == 0) {
-                    vterm_clear(idx);
-                } else {
-                    handle_shell_command(t->input_buf);
-                }
+                handle_shell_command(t->input_buf);
             // Capture the redirect length before stopping, since stop() resets the position
             int captured_redirect_pos = shell_redirect_pos;
             stop_shell_redirect();
@@ -705,8 +738,6 @@ void vterm_handle_key(int idx, int key) {
                     shell_redirect_buf[0] = '\0';
                     shell_redirect_icon_count = 0;
                 }
-            // add to global history
-            add_to_history(&g_command_history, t->input_buf);
             // reset this vterm's browsing state so next Up starts from the most-recent entry
             t->history_idx = -1;
         }
@@ -785,6 +816,48 @@ void vterm_set_active(int idx, int active) {
 int vterm_is_active(int idx) {
     if (idx < 0 || idx >= 4) return 0;
     return vterms[idx].active;
+}
+
+void vterm_move_state(int dst_idx, int src_idx) {
+    if (dst_idx < 0 || dst_idx >= 4) return;
+    if (src_idx < 0 || src_idx >= 4) return;
+    if (dst_idx == src_idx) return;
+
+    vterms[dst_idx] = vterms[src_idx];
+
+    vterm_t* src = &vterms[src_idx];
+    src->cur_x = 0;
+    src->cur_y = 0;
+    src->head_row = 0;
+    src->scroll = 0;
+    src->active = 0;
+    src->input_buf[0] = '\0';
+    src->input_pos = 0;
+    src->history_idx = -1;
+    src->saved_input[0] = '\0';
+    strncpy(src->cwd, "/", sizeof(src->cwd) - 1);
+    src->cwd[sizeof(src->cwd) - 1] = '\0';
+    for (int r = 0; r < VTERM_HISTORY_ROWS; ++r) {
+        src->buf[r][0] = '\0';
+        src->line_r[r] = 200;
+        src->line_g[r] = 200;
+        src->line_b[r] = 200;
+        vterm_clear_line_icons(src, r);
+        for (int c = 0; c < TERM_COLS; ++c) {
+            src->char_r[r][c] = 200;
+            src->char_g[r][c] = 200;
+            src->char_b[r][c] = 200;
+        }
+    }
+    src->version++;
+    src->sel_active = 0;
+    src->sel_start_col = 0;
+    src->sel_end_col = 0;
+    src->input_row = 0;
+    src->input_start_col = 0;
+    src->stdin_buf[0] = '\0';
+    src->stdin_len = 0;
+    src->stdin_ready = 0;
 }
 
 int vterm_get_cursor_row(int idx) {

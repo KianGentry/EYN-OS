@@ -4,18 +4,13 @@
 #include <util.h>
 #include <misc/types.h>
 #include <vga.h>
-#include <shell_command_info.h>
 #include <string.h>
 #include <fs_commands.h> // resolve_path, shell_current_path
 #include <cpu/user_elf.h>
 #include <context.h>
 #include <misc/sched.h>
-#include <utilities/shell/shell_args.h>
 
 extern uint8 g_current_drive;
-
-// Function declarations
-void run_cmd(const shell_args_t* args);
 
 static int run_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -133,5 +128,3 @@ void* user_malloc(uint32 size) {
     if (!run_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
     return malloc(size); // Use standard malloc
 }
-
-REGISTER_SHELL_COMMAND(run, "run", run_cmd, CMD_STREAMING, "Run a native program, ring3 ELF, or a shell script.\nUsage: run <program.eyn|program.bin|program.flat|program.uelf|script.shell>", "run user_hello.uelf");

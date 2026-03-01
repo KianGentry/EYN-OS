@@ -432,14 +432,12 @@ command_t* parse_command(const char* cmd_str) {
 
     // Alias expansion for pipeline segments (simple commands only).
     // Do not override built-in commands.
-    if (find_command(cmd->name) == NULL) {
-        char linebuf[256];
-        linebuf[0] = '\0';
-        for (int a = 0; a < cmd->argc && cmd->args[a]; a++) {
-            if (a != 0)
-                strcat(linebuf, " ");
-            strcat(linebuf, cmd->args[a]);
-        }
+    char linebuf[256];
+    linebuf[0] = '\0';
+    for (int a = 0; a < cmd->argc && cmd->args[a]; a++) {
+        if (a != 0)
+            strcat(linebuf, " ");
+        strcat(linebuf, cmd->args[a]);
 
         char expanded[256];
         int rc = shell_alias_expand_line(linebuf, expanded, (int)sizeof(expanded));
@@ -653,17 +651,8 @@ int execute_simple_command(command_t* cmd) {
         // Use existing shell redirection mechanism
         start_shell_redirect();
         
-        // Execute command
-        shell_cmd_handler_t handler = find_command(cmd->name);
-        if (handler) {
-            shell_args_t args;
-            if (shell_args_parse(&args, cmd_str) == 0)
-                handler(&args);
-            else
-                printf("Command line too long: %s\n", cmd->name);
-        } else {
-            printf("Command not found: %s\n", cmd->name);
-        }
+        // Execute through unified shell path (binaries-only resolution).
+        handle_shell_command(cmd_str);
         
         // Stop redirection and write to file
         stop_shell_redirect();
@@ -692,16 +681,7 @@ int execute_simple_command(command_t* cmd) {
         }
     } else {
         // No output redirection, execute normally
-        shell_cmd_handler_t handler = find_command(cmd->name);
-        if (handler) {
-            shell_args_t args;
-            if (shell_args_parse(&args, cmd_str) == 0)
-                handler(&args);
-            else
-                printf("Command line too long: %s\n", cmd->name);
-        } else {
-            printf("Command not found: %s\n", cmd->name);
-        }
+        handle_shell_command(cmd_str);
     }
     
     // Clean up input data
@@ -734,18 +714,8 @@ int execute_background_command(command_t* cmd) {
     // Simulate background execution
     printf("Running command in background: %s\n", cmd_str);
     
-    // Execute the command (for now, synchronously)
-    shell_cmd_handler_t handler = find_command(cmd->name);
-    if (handler) {
-        shell_args_t args;
-        if (shell_args_parse(&args, cmd_str) == 0)
-            handler(&args);
-        else
-            printf("Command line too long: %s\n", cmd->name);
-    } else {
-        printf("Command not found: %s\n", cmd->name);
-        return -1;
-    }
+    // Execute through unified shell path (binaries-only resolution).
+    handle_shell_command(cmd_str);
     
     // Add to background process list (simulated PID)
     int simulated_pid = add_background_process(12345, cmd_str); // Simulated PID
@@ -795,22 +765,6 @@ int execute_pipeline(pipeline_t* pipeline) {
             strcat(first_cmd_str, first_cmd->args[i]);
         }
         
-        shell_cmd_handler_t first_handler = find_command(first_cmd->name);
-        if (first_handler) {
-            shell_args_t args;
-            if (shell_args_parse(&args, first_cmd_str) == 0) {
-                first_handler(&args);
-            } else {
-                printf("Pipeline: failed to parse command: %s\n", first_cmd_str);
-                stop_shell_redirect();
-                return -1;
-            }
-        } else {
-            printf("Command not found: %s\n", first_cmd->name);
-            stop_shell_redirect();
-            return -1;
-        }
-        
         // Get the output
         stop_shell_redirect();
         char* output = shell_redirect_buf;
@@ -833,19 +787,6 @@ int execute_pipeline(pipeline_t* pipeline) {
             
             // Store the input data for the search command to use
             g_pipeline_input_data = output;
-            
-            // Execute second command
-            shell_cmd_handler_t second_handler = find_command(second_cmd->name);
-            if (second_handler) {
-                shell_args_t args;
-                if (shell_args_parse(&args, second_cmd_str) == 0) {
-                    second_handler(&args);
-                } else {
-                    printf("Pipeline: failed to parse command: %s\n", second_cmd_str);
-                }
-            } else {
-                printf("Command not found: %s\n", second_cmd->name);
-            }
             
             // Clear the pipeline input data
             g_pipeline_input_data = NULL;
@@ -880,19 +821,6 @@ int execute_pipeline(pipeline_t* pipeline) {
             }
             
             free(output_copy);
-            
-            // Execute second command
-            shell_cmd_handler_t second_handler = find_command(second_cmd->name);
-            if (second_handler) {
-                shell_args_t args;
-                if (shell_args_parse(&args, second_cmd_str) == 0) {
-                    second_handler(&args);
-                } else {
-                    printf("Pipeline: failed to parse command: %s\n", second_cmd_str);
-                }
-            } else {
-                printf("Command not found: %s\n", second_cmd->name);
-            }
         }
         
         return 0;
@@ -962,21 +890,6 @@ int execute_complex_pipeline(pipeline_t* pipeline) {
                 
                 free(input_copy);
             }
-        }
-        
-        // Execute the command
-        shell_cmd_handler_t handler = find_command(cmd->name);
-        if (handler) {
-            shell_args_t args;
-            if (shell_args_parse(&args, cmd_str) == 0)
-                handler(&args);
-            else
-                printf("Command line too long: %s\n", cmd->name);
-        } else {
-            printf("Command not found: %s\n", cmd->name);
-            stop_shell_redirect();
-            if (current_input) free(current_input);
-            return -1;
         }
         
         // Stop redirection and get output

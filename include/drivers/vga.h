@@ -19,6 +19,7 @@ void vga_set_color(int nr, int ng, int nb);
 void init_dynamic_log_buffer(void);
 void shell_log_enable(void);
 void shell_log_disable(void);
+int shell_log_is_enabled(void);
 void shell_log_flush(void);
 
 // Drawing functions

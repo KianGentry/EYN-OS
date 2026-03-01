@@ -6,6 +6,8 @@
 #include <util.h>  // for malloc/free
 #include <context.h>
 #include <misc/sched.h>
+#include <vga.h>
+#include <utilities/shell/shell_args.h>
 
 #define EYNFS_SUPERBLOCK_LBA 2048
 
@@ -781,4 +783,324 @@ int vfs_unlink(uint8 drive, const char* path) {
         cluster = fat32_next_cluster_sector(drive, part_lba, &bpb, cluster);
     }
     return -15;
+}
+
+/*
+    ALL BELOW IS MIGRATED FROM LEGACY FS_COMMANDS.C
+*/
+
+// Global variable for current drive (default 0)
+extern uint8_t g_current_drive;
+
+// Helper function prototypes (if not already declared)
+void to_fat32_83(const char* input, char* output);
+int parse_redirection(const char* input, char* cmd, char* filename);
+uint32 str_to_uint(const char* s);
+
+extern void* fat32_disk_img;
+
+static int fs_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void fs_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
+void to_fat32_83(const char* input, char* output)
+{
+    // convert input like "test.txt" to "TEST    TXT" (cancerous)
+    int i = 0, j = 0;
+    // copy name part (up to dot or 8 chars)
+    while (input[i] && input[i] != '.' && j < 8) 
+	{
+        char c = input[i];
+        if (c >= 'a' && c <= 'z') c -= 32; // to upper
+        output[j++] = c;
+        i++;
+    }
+
+    // pad with spaces
+    while (j < 8) output[j++] = ' ';
+    // if dot, skip it
+    if (input[i] == '.') i++;
+    int ext = 0;
+    // copy extension (up to 3 chars)
+    while (input[i] && ext < 3) 
+	{
+        char c = input[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        output[j++] = c;
+        i++; ext++;
+    }
+
+    // pad extension with spaces
+    while (ext < 3) 
+	{
+		output[j++] = ' '; ext++; 
+	}
+    output[j] = '\0';
+}
+
+// Helper: resolve relative/absolute path to absolute
+void resolve_path(const char* input, const char* cwd, char* out, size_t outsz) {
+    if (!input || !input[0]) {
+        if (!out || outsz == 0) return;
+        if (!cwd) { out[0] = '\0'; return; }
+        size_t i = 0;
+        while (i + 1 < outsz && cwd[i]) {
+            out[i] = cwd[i];
+            i++;
+        }
+        out[i] = '\0';
+        return;
+    }
+    if (input[0] == '/') {
+        strncpy(out, input, outsz-1); out[outsz-1] = '\0';
+        return;
+    }
+    // Join cwd and input
+    char tmp[256];
+    size_t cwdlen = strlen(cwd);
+    if (cwdlen > 1 && cwd[cwdlen-1] == '/') cwdlen--;
+    strncpy(tmp, cwd, cwdlen); tmp[cwdlen] = '\0';
+    if (cwdlen > 0 && tmp[cwdlen-1] != '/') strncat(tmp, "/", sizeof(tmp)-strlen(tmp)-1);
+    strncat(tmp, input, sizeof(tmp)-strlen(tmp)-1);
+    // Normalize: handle ., .., //
+    char* parts[64]; int nparts = 0;
+    char* tok; char* save;
+    for (tok = strtok_r(tmp, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
+        if (strcmp(tok, ".") == 0) continue;
+        if (strcmp(tok, "..") == 0) { if (nparts > 0) nparts--; continue; }
+        parts[nparts++] = tok;
+    }
+    out[0] = '/'; out[1] = '\0';
+    for (int i = 0; i < nparts; ++i) {
+        strncat(out, parts[i], outsz-strlen(out)-1);
+        if (i < nparts-1) strncat(out, "/", outsz-strlen(out)-1);
+    }
+    // Do NOT add a trailing slash
+}
+
+// Filesystem integrity check
+int check_filesystem_integrity(uint8_t disk) {
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(disk, EYNFS_SUPERBLOCK_LBA, &sb) != 0) {
+        printf("Cannot read superblock - filesystem may be corrupted.\n");
+        return -1;
+    }
+    
+    if (sb.magic != EYNFS_MAGIC) {
+        printf("Invalid filesystem magic - filesystem is corrupted.\n");
+        return -1;
+    }
+    
+    // Try to read the root directory - count entries first
+    int entry_count = eynfs_count_dir_entries(disk, sb.root_dir_block);
+    if (entry_count < 0) {
+        printf("Cannot count root directory entries - filesystem is corrupted.\n");
+        return -1;
+    }
+    
+    size_t allocation_size = sizeof(eynfs_dir_entry_t) * entry_count;
+    
+    // Safety check: limit allocation to prevent memory exhaustion
+    if (allocation_size > 16384) { // 16KB limit for directory operations
+        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 16KB\n", 255, 165, 0, allocation_size);
+        entry_count = 16384 / sizeof(eynfs_dir_entry_t);
+        allocation_size = 16384;
+    }
+    
+    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(allocation_size);
+    if (!entries) {
+        printf("Out of memory for filesystem integrity check.\n");
+        return -1;
+    }
+    int count = eynfs_read_dir_table(disk, sb.root_dir_block, entries, entry_count);
+    if (count < 0) {
+        printf("Cannot read root directory - filesystem is corrupted.\n");
+        free(entries);
+        return -1;
+    }
+    
+    free(entries);
+    printf("Filesystem integrity check passed.\n");
+    return 0;
+}
+
+
+// FAT32 repair: fix entries marked as directory that aren't real directories
+static int fatfix_dir(uint8 drive, const char* dirpath) {
+    uint32 part_lba = fat32_get_partition_lba_start(drive);
+    struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -1;
+    // Resolve directory cluster
+    struct fat32_dir_entry dent;
+    uint32 dclus = bpb.RootClus;
+    memset(&dent, 0, sizeof(dent));
+    dent.Attr = 0x10;
+    if (strcmp(dirpath, "/") == 0) { dclus = bpb.RootClus; memset(&dent,0,sizeof(dent)); dent.Attr = 0x10; }
+    else {
+        // Local FAT32 absolute path traversal (8.3)
+        char tmp[256]; strncpy(tmp, dirpath, sizeof(tmp)-1); tmp[sizeof(tmp)-1] = '\0';
+        char* p = tmp; if (*p == '/') p++;
+        uint32 cur = bpb.RootClus;
+        if (*p == '\0') { dclus = cur; dent.Attr = 0x10; }
+        else {
+            char comp[13]; struct fat32_dir_entry ent;
+            while (*p) {
+                size_t k=0; while (*p && *p != '/' && k < sizeof(comp)-1) comp[k++]=*p++;
+                comp[k]='\0'; if (*p == '/') p++;
+                char fatname[12]; to_fat32_83(comp, fatname);
+                int found = fat32_find_entry_sector(drive, &bpb, cur, fatname, &ent);
+                if (found < 0) return -2;
+                cur = (uint32)found;
+                if (*p == '\0') { dclus = cur; dent = ent; break; }
+                if (!(ent.Attr & 0x10)) return -2; // not a dir
+            }
+        }
+        if (!(dent.Attr & 0x10)) return -2;
+    }
+    uint32 first_data_sec = bpb.RsvdSecCnt + (bpb.NumFATs * bpb.FATSz32);
+    uint8 sector[512]; uint32 cluster = dclus; int fixes = 0;
+    while (cluster < 0x0FFFFFF8) {
+        fs_ctx_account(SCHED_COST_FS);
+        uint32 csec = first_data_sec + ((cluster - 2) * bpb.SecPerClus);
+        for (uint32 s=0; s<bpb.SecPerClus; ++s) {
+            if (ata_read_sector(drive, part_lba + csec + s, sector) != 0) return -3;
+            struct fat32_dir_entry* ents = (struct fat32_dir_entry*)sector; int per = bpb.BytsPerSec / sizeof(struct fat32_dir_entry);
+            int dirty = 0;
+            for (int i=0;i<per;++i) {
+                if (ents[i].Name[0] == 0x00) break; // end
+                if ((ents[i].Attr & 0x0F) == 0x0F) continue; // LFN
+                if (ents[i].Name[0] == 0xE5) continue; // deleted
+                if (ents[i].Attr & 0x08) continue; // volume label
+                // Skip dots
+                if (ents[i].Name[0] == '.') continue;
+                if (ents[i].Attr & 0x10) {
+                    // Validate directory by checking first two entries of its cluster
+                    uint32 fclus = ((uint32)ents[i].FstClusHI << 16) | ents[i].FstClusLO;
+                    int is_real_dir = 0;
+                    if (fclus >= 2) {
+                        uint8 dsec[512];
+                        if (ata_read_sector(drive, part_lba + first_data_sec + ((fclus - 2) * bpb.SecPerClus), dsec) == 0) {
+                            struct fat32_dir_entry* dents = (struct fat32_dir_entry*)dsec;
+                            // Check dot entries pattern
+                            if (dents[0].Attr & 0x10) {
+                                char n0[12]; for (int j=0;j<11;j++) n0[j]=dents[0].Name[j]; n0[11]='\0';
+                                char n1[12]; for (int j=0;j<11;j++) n1[j]=dents[1].Name[j]; n1[11]='\0';
+                                if (n0[0]=='.' && n1[0]=='.' && n1[1]=='.') is_real_dir = 1;
+                            }
+                        }
+                    }
+                    if (!is_real_dir) {
+                        ents[i].Attr = 0x20; // flip to file
+                        dirty = 1; fixes++;
+                    }
+                }
+            }
+            if (dirty) {
+                if (ata_write_sector(drive, part_lba + csec + s, sector) != 0) return -4;
+            }
+        }
+        cluster = fat32_next_cluster_sector(drive, part_lba, &bpb, cluster);
+    }
+    return fixes;
+}
+
+int fatfix_repair_path(uint8_t disk, const char* dirpath) {
+    return fatfix_dir((uint8)disk, dirpath);
+}
+
+
+int write_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
+    if (!fs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    int written = vfs_write_file(disk, filename, buf, (uint32)len);
+    if (written != len) {
+        printf("Failed to write file data: expected %d, got %d\n", len, written);
+        return -1;
+    }
+    printf("Successfully wrote %d bytes to %s\n", len, filename);
+    return 0;
+}
+
+// Append output to file using EYNFS append mode
+int append_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
+    // Read existing contents if any
+    vfs_stat_t st;
+    int existing_len = 0;
+    char* existing = NULL;
+    if (vfs_stat(disk, filename, &st) == 0 && st.type == VFS_NODE_FILE && st.size > 0) {
+        existing = (char*)malloc(st.size);
+        if (!existing) return -1;
+        int n = vfs_read_file(disk, filename, existing, (int)st.size);
+        if (n < 0) { free(existing); return -1; }
+        existing_len = n;
+    }
+    // Concatenate existing + new
+    char* combined = (char*)malloc(existing_len + len);
+    if (!combined) { if (existing) free(existing); return -1; }
+    if (existing_len) memcpy(combined, existing, existing_len);
+    memcpy(combined + existing_len, buf, len);
+    int written = vfs_write_file(disk, filename, combined, (uint32)(existing_len + len));
+    free(combined);
+    if (existing) free(existing);
+    if (written != existing_len + len) {
+        printf("Failed to append to %s\n", filename);
+        return -1;
+    }
+    printf("Successfully appended %d bytes to %s\n", len, filename);
+    return 0;
+}
+
+// writefat implementation
+void writefat(string ch)
+{
+    if (!fs_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
+    uint32 partition_lba_start = fat32_get_partition_lba_start(0);
+    struct fat32_bpb bpb;
+    if (fat32_read_bpb_sector(0, partition_lba_start, &bpb) != 0) {
+        printf("%cFailed to read FAT32 BPB from drive 0\n", 255, 0, 0);
+        return;
+    }
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 3 || !args.argv[1] || !args.argv[2]) {
+        printf("%cUsage: writefat <filename> <data>\n", 255, 255, 255);
+        return;
+    }
+
+    const char* filename = args.argv[1];
+    char fatname[12];
+    to_fat32_83(filename, fatname);
+
+    const char* data_str = shell_args_rest_raw(&args, 2);
+    if (!data_str || !data_str[0]) {
+        printf("%cUsage: writefat <filename> <data>\n", 255, 255, 255);
+        return;
+    }
+
+    char data[512];
+    uint32 data_len = (uint32)strlen(data_str);
+    if (data_len > 511) data_len = 511;
+    memcpy(data, data_str, data_len);
+    data[data_len] = '\0';
+
+    int res = fat32_write_file_sector(0, partition_lba_start, &bpb, fatname, data, (int)data_len);
+    if (res < 0) {
+        printf("%cFailed to write file to disk. Error %d\n", 255, 0, 0, res);
+    } else {
+        printf("%cFile written successfully to disk.\n", 0, 255, 0);
+    }
 }

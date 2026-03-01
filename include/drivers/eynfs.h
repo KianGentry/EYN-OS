@@ -5,6 +5,21 @@
 #include <stddef.h>
 #include <misc/types.h>
 
+/*
+ * FS-INVARIANT: Absolute LBA of the EYNFS superblock.
+ *
+ * Why: Boot tools, fsck, and the kernel driver all locate the filesystem by
+ *      reading the superblock at this fixed sector.
+ * Invariant: The EYNFS on-disk format assumes its superblock resides at this
+ *           absolute LBA; changing it breaks mounting existing images.
+ * Breakage if changed: Existing disk images will not be recognized and may be
+ *                      treated as unformatted/invalid.
+ * ABI-sensitive: No.
+ * Disk-format-sensitive: Yes.
+ * Security-critical: Yes (mount-time format identification boundary).
+ */
+#define EYNFS_SUPERBLOCK_LBA 2048u
+
 // EYNFS magic number ('EYNF')
 #define EYNFS_MAGIC 0x45594E46
 #define EYNFS_NAME_MAX 32

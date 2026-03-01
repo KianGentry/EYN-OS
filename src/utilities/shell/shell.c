@@ -65,8 +65,6 @@ static volatile char last_failed_command[64] = {0};
 // Command types are now defined in shell_command_info.h
 
 #include <watchdog.h>
-void handler_cmd(const shell_args_t* args);
-void handler_exit(const shell_args_t* args);
 
 // Auto-run support: if a command isn't recognized, search for a matching .uelf and run it.
 static int has_slash(const char* s) {
@@ -79,6 +77,16 @@ static int ends_with_uelf(const char* s) {
     int n = (int)strlen(s);
     if (n < 5) return 0;
     return strcmp(s + (n - 5), ".uelf") == 0;
+}
+
+static int try_run_uelf_at_path(uint8 drive, const char* abspath, int argc, const char* const* argv) {
+    if (!abspath || !abspath[0]) return 0;
+    vfs_stat_t st;
+    if (vfs_stat(drive, abspath, &st) == 0 && st.type == VFS_NODE_FILE) {
+        (void)user_elf_run_argv(drive, abspath, argc, argv);
+        return 1;
+    }
+    return 0;
 }
 
 static int shell_ctx_allow(uint32 caps, uint32 cost) {
@@ -180,260 +188,49 @@ static int try_run_unknown_as_uelf(const shell_args_t* args) {
         argv[argc++] = args->argv[i];
     }
 
-    // Determine target filename (.uelf).
-    char target_name[72];
+    // Determine candidate filenames.
+    // We support both extensionless files (recommended for /binaries, like /bin on Linux)
+    // and explicit ".uelf" files for backward compatibility.
+    char target_plain[72];
+    char target_uelf[72];
     if (ends_with_uelf(cmd)) {
-        strncpy(target_name, cmd, sizeof(target_name) - 1);
-        target_name[sizeof(target_name) - 1] = 0;
+        // If the user typed an explicit .uelf, treat it as the plain name.
+        strncpy(target_plain, cmd, sizeof(target_plain) - 1);
+        target_plain[sizeof(target_plain) - 1] = 0;
+        strncpy(target_uelf, cmd, sizeof(target_uelf) - 1);
+        target_uelf[sizeof(target_uelf) - 1] = 0;
     } else {
-        snprintf(target_name, sizeof(target_name), "%s.uelf", cmd);
+        strncpy(target_plain, cmd, sizeof(target_plain) - 1);
+        target_plain[sizeof(target_plain) - 1] = 0;
+        snprintf(target_uelf, sizeof(target_uelf), "%s.uelf", cmd);
     }
 
     // If the user provided a path, just resolve and try it.
     char abspath[128];
     if (has_slash(cmd)) {
         resolve_path(cmd, shell_current_path, abspath, sizeof(abspath));
+        // Try the path as given (extensionless allowed).
+        if (try_run_uelf_at_path(g_current_drive, abspath, argc, argv)) return 1;
+
+        // Also try with .uelf appended if the user omitted it.
         if (!ends_with_uelf(abspath)) {
             char tmp[128];
             snprintf(tmp, sizeof(tmp), "%s.uelf", abspath);
-            strncpy(abspath, tmp, sizeof(abspath) - 1);
-            abspath[sizeof(abspath) - 1] = 0;
-        }
-        vfs_stat_t st;
-        if (vfs_stat(g_current_drive, abspath, &st) == 0 && st.type == VFS_NODE_FILE) {
-            (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
-            return 1;
+            if (try_run_uelf_at_path(g_current_drive, tmp, argc, argv)) return 1;
         }
         return 0;
     }
 
-    // Try current directory first.
-    resolve_path(target_name, shell_current_path, abspath, sizeof(abspath));
-    vfs_stat_t st;
-    if (vfs_stat(g_current_drive, abspath, &st) == 0 && st.type == VFS_NODE_FILE) {
-        (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
-        return 1;
-    }
+    // Prefer /binaries first (like /bin). This avoids surprising "current directory" shadowing
+    // and makes command resolution deterministic.
+    // Note: keep path resolution simple; /binaries is always absolute.
+    snprintf(abspath, sizeof(abspath), "/binaries/%s", target_plain);
+    if (try_run_uelf_at_path(g_current_drive, abspath, argc, argv)) return 1;
+    snprintf(abspath, sizeof(abspath), "/binaries/%s", target_uelf);
+    if (try_run_uelf_at_path(g_current_drive, abspath, argc, argv)) return 1;
 
-    // Fall back to a bounded recursive search from root.
-    char found_path[128];
-    if (find_uelf_recursive(g_current_drive, "/", target_name, 0, found_path, (int)sizeof(found_path))) {
-        (void)user_elf_run_argv(g_current_drive, found_path, argc, argv);
-        return 1;
-    }
+    // Binaries-only policy: no current-directory or recursive fallback for unknown commands.
     return 0;
-}
-
-// Wrapper function for joke_spam to match expected signature
-void spam_cmd(const shell_args_t* args);
-void echo_cmd(const shell_args_t* args);
-void ver_cmd(const shell_args_t* args);
-void calc_cmd(const shell_args_t* args);
-void lsata_cmd(const shell_args_t* args);
-void catram_cmd(const shell_args_t* args);
-void lsram_cmd(const shell_args_t* args);
-
-void spam_cmd(const shell_args_t* args) {
-    (void)args;
-    joke_spam();
-}
-
-// Wrapper functions to match existing function names
-void ls_cmd(const shell_args_t* args) { ls((string)(args ? args->raw : "")); }
-void clear_cmd(const shell_args_t* args) { (void)args; clearScreen(); }
-void echo_cmd(const shell_args_t* args) {
-    const char* rest = shell_args_rest_raw(args, 1);
-    echo((string)(rest ? rest : ""));
-}
-void ver_cmd(const shell_args_t* args) { (void)args; ver(); }
-void calc_cmd(const shell_args_t* args) {
-    const char* rest = shell_args_rest_raw(args, 1);
-    calc((string)(rest ? rest : ""));
-}
-void lsata_cmd(const shell_args_t* args) { (void)args; lsata(); }
-void run_cmd(const shell_args_t* args) { run_command((string)(args ? args->raw : "")); }
-
-// RAM disk command wrappers
-void catram_cmd(const shell_args_t* args) { catram((string)(args ? args->raw : "")); }
-void lsram_cmd(const shell_args_t* args) { lsram((string)(args ? args->raw : "")); }
-
-// Command registration is now handled by the linker section .shellcmds
-// All command information is stored in shell_command_info_t structures
-
-// Unified command registration - all commands are now registered via REGISTER_SHELL_COMMAND macro
-// The linker section .shellcmds contains all registered commands
-
-// Command loading state
-static int streaming_commands_loaded = 0;
-static int commands_loaded_count = 0;
-// ...existing code...
-// Command management functions (simplified for unified system)
-static void load_streaming_commands() {
-    // All commands are now always available through the linker section
-    printf("%cAll commands are now always available\n", 0, 255, 0);
-}
-
-static void unload_streaming_commands() {
-    // Commands are always loaded in the unified system
-    printf("%cCommands are always loaded in unified system\n", 255, 165, 0);
-}
-
-// Hash function for command names
-static uint32_t command_hash(const char* name) {
-    uint32_t hash = 5381;
-    int c;
-    while ((c = *name++)) {
-        hash = ((hash << 5) + hash) + c; // hash * 33 + c
-    }
-    return hash % COMMAND_HASH_SIZE;
-}
-
-// Initialize command hash table
-static void init_command_hash_table() {
-    if (g_command_hash_initialized) return;
-    
-    // Clear hash table
-    for (int i = 0; i < COMMAND_HASH_SIZE; i++) {
-        g_command_hash_table[i].name = NULL;
-        g_command_hash_table[i].handler = NULL;
-    }
-    
-    // Build hash table from all registered commands
-    size_t num_commands = shell_command_count();
-    // If the number of commands would fill the table completely, disable hashing and fallback to linear search
-    if (num_commands >= COMMAND_HASH_SIZE - 1) {
-        g_command_hash_disabled = 1;
-        g_command_hash_initialized = 1;
-        return;
-    }
-    for (size_t i = 0; i < num_commands; i++) {
-        const shell_command_info_t* cmd = &__start_shellcmds[i];
-        uint32_t hash = command_hash(cmd->name);
-        
-        // Simple linear probing for collisions
-        while (g_command_hash_table[hash].name != NULL) {
-            hash = (hash + 1) % COMMAND_HASH_SIZE;
-        }
-        g_command_hash_table[hash].name = cmd->name;
-        g_command_hash_table[hash].handler = cmd->handler;
-    }
-    
-    g_command_hash_initialized = 1;
-}
-
-// Unified command lookup from linker section with O(1) hash optimization
-shell_cmd_handler_t find_command(const char* name) {
-    // Initialize hash table on first use
-    init_command_hash_table();
-    if (!name || !*name) return NULL;
-    
-    // If hashing is disabled due to table saturation, use linear search
-    if (g_command_hash_disabled) {
-        size_t num_commands = shell_command_count();
-        for (size_t i = 0; i < num_commands; i++) {
-            const shell_command_info_t* cmd = &__start_shellcmds[i];
-            if (strcmp(cmd->name, name) == 0) {
-                return cmd->handler;
-            }
-        }
-        return NULL;
-    }
-    
-    // Try O(1) hash lookup first using open addressing and key comparison
-    uint32_t hash = command_hash(name);
-    for (int probes = 0; probes < COMMAND_HASH_SIZE; ++probes) {
-        const char* slot_name = g_command_hash_table[hash].name;
-        if (slot_name == NULL) {
-            // Empty slot: not found
-            return NULL;
-        }
-        if (strcmp(slot_name, name) == 0) {
-            return g_command_hash_table[hash].handler;
-        }
-        hash = (hash + 1) % COMMAND_HASH_SIZE;
-    }
-    // Not found after probing entire table
-    
-    // Fallback to linear search if hash lookup fails
-    size_t num_commands = shell_command_count();
-    for (size_t i = 0; i < num_commands; i++) {
-        const shell_command_info_t* cmd = &__start_shellcmds[i];
-        if (strcmp(cmd->name, name) == 0) {
-            return cmd->handler;
-        }
-    }
-    return NULL;
-}
-
-// Remove unused functions to fix compilation warnings
-/*
-// Command validation function
-static int validate_command_name(const char* name) {
-    if (!name) return 0;
-    
-    // Basic validation - command names should be alphanumeric with underscores
-    for (size_t i = 0; name[i]; i++) {
-        if (!((name[i] >= 'a' && name[i] <= 'z') ||
-              (name[i] >= 'A' && name[i] <= 'Z') ||
-              (name[i] >= '0' && name[i] <= '9') ||
-              name[i] == '_')) {
-            return 0;
-        }
-    }
-    
-    return 1;
-}
-
-// Get command information
-static const shell_command_info_t* get_command_info(const char* name) {
-    if (!name) return NULL;
-    
-    // This would normally look up command metadata
-    // For now, return NULL since we don't have a command registry
-    return NULL;
-}
-*/
-
-static int validate_command_arguments(const char* cmd) {
-    if (!cmd) return 0;
-    
-    // Check for null bytes (potential buffer overflow)
-    for (int i = 0; cmd[i]; i++) {
-        if (cmd[i] == 0) {
-            return 0; // Null byte found
-        }
-    }
-    
-    // Check for excessive length
-    if (strlen(cmd) > 200) {
-        return 0; // Command too long
-    }
-    
-    return 1;
-}
-
-static void safe_command_execution(const shell_args_t* args, shell_cmd_handler_t handler) {
-    if (!args || !handler) return;
-
-    // Validate command before execution
-    if (!validate_command_arguments(args->raw)) {
-        printf("%c[SAFETY] Invalid command arguments\n", 255, 0, 0);
-        command_execution_errors++;
-        return;
-    }
-
-    handler(args);
-}
-
-// Handler wrappers for commands needing extra context
-void handler_cmd(const shell_args_t* args) {
-    printf("%c\nNew recursive shell opened.\n", 0, 255, 0);
-    launch_shell(1); // Always launches a new shell at depth 1
-}
-void handler_exit(const shell_args_t* args) {
-    printf("%cGoodbye!\n", 255, 140, 0); // Orange
-    // For now, just exit the shell
-    asm("hlt");
 }
 
 // Enhanced command handling with unified registration
@@ -463,14 +260,7 @@ void handle_shell_command(string input) {
             goto cleanup;
         }
 
-        // Find and execute built-in commands
-        shell_cmd_handler_t handler = find_command(args.argv[0]);
-        if (handler) {
-            safe_command_execution(&args, handler);
-            goto cleanup;
-        }
-
-        // If not a built-in command, try alias expansion
+        // Expand aliases before resolving userland binaries.
         int rc = shell_alias_expand_line(current, out, 256);
         if (rc == 1) {
             current = out;
@@ -486,16 +276,16 @@ void handle_shell_command(string input) {
         break;
     }
 
-    // If not a built-in command or alias, try auto-running a matching .uelf.
+    // Resolve and execute userland binaries only.
     shell_args_t unknown_args;
     if (shell_args_parse(&unknown_args, current) == 0 && try_run_unknown_as_uelf(&unknown_args))
         goto cleanup;
 
     // Command not found
     if (unknown_args.argc > 0 && unknown_args.argv[0])
-        printf("%cCommand not found: %s\n", 255, 0, 0, unknown_args.argv[0]);
+        printf("%cCommand not found in /binaries: %s\n", 255, 0, 0, unknown_args.argv[0]);
     else
-        printf("%cCommand not found\n", 255, 0, 0);
+        printf("%cCommand not found in /binaries\n", 255, 0, 0);
 cleanup:
     if (ctx_pushed) {
         command_context_pop();
@@ -517,25 +307,6 @@ string get_last_failed_command() {
     }
     if (i == 63) snapshot[63] = '\0';
     return snapshot;
-}
-
-// Streaming command management
-void load_cmd(const shell_args_t* args) {
-    printf("%cLoading streaming commands...\n", 255, 255, 255);
-    load_streaming_commands();
-}
-
-void unload_cmd(const shell_args_t* args) {
-    printf("%cUnloading streaming commands...\n", 255, 255, 255);
-    unload_streaming_commands();
-}
-
-void status_cmd(const shell_args_t* args) {
-    printf("%cCommand System Status:\n", 255, 255, 255);
-    printf("%c  System: Unified Command Registration\n", 255, 255, 255);
-    printf("%c  Total Commands: %d\n", 255, 255, 255, (int)shell_command_count());
-    printf("%c  Memory Mode: All commands always available\n", 255, 255, 255);
-    printf("%c  Registration: Linker-based automatic\n", 255, 255, 255);
 }
 
 void launch_shell(int n) {

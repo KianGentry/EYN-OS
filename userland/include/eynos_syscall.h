@@ -1,4 +1,5 @@
 // Low-level EYN-OS syscall ABI (int 0x80).
+#include <stddef.h>
 #include <stdint.h>
 
 // eax = syscall number
@@ -78,7 +79,157 @@ enum {
     // Deterministic execution mode
     EYN_SYSCALL_DET_ENABLE = 47,
     EYN_SYSCALL_DET_STEP = 48,
+
+    // Filesystem mutation helpers
+    // args: (const char* path)
+    EYN_SYSCALL_MKDIR = 49,
+    EYN_SYSCALL_UNLINK = 50,
+    EYN_SYSCALL_RMDIR = 51,
+
+    // Query current working directory (vterm cwd)
+    // args: (char* buf, int buflen)
+    // returns: bytes written excluding NUL, or -1
+    EYN_SYSCALL_GETCWD = 52,
+
+    // Low-memory streaming file writer (EYNFS only today)
+    // begin: args (const char* path)
+    // write: args (int handle, const void* buf, int len) -> bytes written or -1
+    // end: args (int handle) -> 0 or -1
+    EYN_SYSCALL_EYNFS_STREAM_BEGIN = 53,
+    EYN_SYSCALL_EYNFS_STREAM_WRITE = 54,
+    EYN_SYSCALL_EYNFS_STREAM_END = 55,
+
+    EYN_SYSCALL_DRIVE_SET_LOGICAL = 56,
+    EYN_SYSCALL_DRIVE_GET_LOGICAL = 57,
+    EYN_SYSCALL_DRIVE_GET_COUNT = 58,
+    EYN_SYSCALL_DRIVE_IS_PRESENT = 59,
+    EYN_SYSCALL_INIT_SERVICES = 60,
+    EYN_SYSCALL_SERIAL_WRITE_COM1 = 61,
+    EYN_SYSCALL_SHELL_LOG_SET = 62,
+    EYN_SYSCALL_SHELL_LOG_GET = 63,
+    EYN_SYSCALL_CRASHLOG_COUNT = 64,
+    EYN_SYSCALL_CRASHLOG_INFO = 65,
+    EYN_SYSCALL_CRASHLOG_DATA = 66,
+    EYN_SYSCALL_CRASHLOG_CLEAR = 67,
+    EYN_SYSCALL_SHELL_MIGRATED_DISPATCH = 68,
+
+    EYN_SYSCALL_PCI_GET_COUNT = 69,
+    EYN_SYSCALL_PCI_GET_ENTRY = 70,
+    EYN_SYSCALL_E1000_PROBE = 71,
+    EYN_SYSCALL_E1000_INIT = 72,
+    EYN_SYSCALL_NETCFG_GET = 73,
+    EYN_SYSCALL_NETCFG_SET = 74,
+    EYN_SYSCALL_NETCFG_DEFAULTS = 75,
+    EYN_SYSCALL_NET_IS_INITED = 76,
+    EYN_SYSCALL_NET_GET_MAC = 77,
+    EYN_SYSCALL_NET_GET_ARP = 78,
+    EYN_SYSCALL_NET_GET_UDP_STATS = 79,
+    EYN_SYSCALL_NET_GET_IP_STATS = 80,
+    EYN_SYSCALL_NET_GET_SOCKETS = 81,
+    EYN_SYSCALL_NET_PING = 82,
+    EYN_SYSCALL_FS_CHECK_INTEGRITY = 83,
+    EYN_SYSCALL_FS_FATFIX = 84,
+    EYN_SYSCALL_VTERM_CLEAR = 85,
+    EYN_SYSCALL_HISTORY_COUNT = 86,
+    EYN_SYSCALL_HISTORY_ENTRY = 87,
+    EYN_SYSCALL_HISTORY_CLEAR = 88,
+    EYN_SYSCALL_BG_JOB_COUNT = 89,
+    EYN_SYSCALL_BG_JOB_INFO = 90,
+    EYN_SYSCALL_TILING_START = 91,
+    EYN_SYSCALL_SETBG_PATH = 92,
+    EYN_SYSCALL_CLEARBG_FOCUSED = 93,
+    EYN_SYSCALL_SETFONT_PATH = 94,
+
+    EYN_SYSCALL_CHDIR = 95,
+    EYN_SYSCALL_RUN = 96,
+    EYN_SYSCALL_WRITE_EDITOR = 97,
+    EYN_SYSCALL_MMAP = 98,
+    EYN_SYSCALL_MUNMAP = 99,
+    EYN_SYSCALL_MSYNC = 100,
+    EYN_SYSCALL_PAGING_GUARDS = 101,
+    EYN_SYSCALL_PANIC = 102,
+    EYN_SYSCALL_PF = 103,
+    EYN_SYSCALL_RING3 = 104,
 };
+
+typedef struct {
+    uint8_t bus;
+    uint8_t device;
+    uint8_t function;
+    uint8_t class_code;
+    uint8_t subclass;
+    uint8_t prog_if;
+    uint8_t header_type;
+    uint8_t bar0_is_io;
+    uint16_t vendor_id;
+    uint16_t device_id;
+    uint16_t command;
+    uint16_t _pad;
+    uint32_t bar0_base;
+} eyn_pci_entry_t;
+
+typedef struct {
+    uint8_t bus;
+    uint8_t device;
+    uint8_t function;
+    uint8_t _pad0;
+    uint32_t bar0;
+    uint32_t ctrl;
+    uint32_t status;
+    uint8_t mac[6];
+    uint8_t _pad1[2];
+    int32_t link_up;
+} eyn_e1000_probe_info_t;
+
+typedef struct {
+    uint8_t local_ip[4];
+    uint8_t gateway_ip[4];
+    uint8_t netmask[4];
+    uint8_t dns_ip[4];
+} eyn_net_config_t;
+
+typedef struct {
+    uint8_t ip[4];
+    uint8_t mac[6];
+    uint8_t valid;
+    uint8_t _pad;
+} eyn_net_arp_entry_t;
+
+typedef struct {
+    uint32_t udp_rx_enqueued;
+    uint32_t udp_rx_dropped;
+    uint32_t udp_rx_truncated;
+    uint32_t udp_rx_bad_checksum;
+    uint32_t udp_tx_checksums;
+} eyn_net_udp_stats_t;
+
+typedef struct {
+    uint32_t ipv4_rx_fragments;
+    uint32_t ipv4_rx_frag_dropped;
+} eyn_net_ip_stats_t;
+
+typedef struct {
+    uint8_t bound;
+    uint8_t _pad0;
+    uint16_t port;
+    uint32_t queued;
+    uint32_t dropped;
+} eyn_net_socket_info_t;
+
+typedef struct {
+    int32_t pid;
+    int32_t status;
+    int32_t active;
+    char command[96];
+} eyn_bg_job_info_t;
+
+typedef struct {
+    uint32_t obj_type;
+    uint32_t obj_id;
+    uint32_t epoch;
+    uint32_t data_len;
+    uint32_t checksum;
+} eyn_crashlog_record_info_t;
 
 enum {
     EYN_CAP_OBJ_USER_FD = 1,
@@ -248,6 +399,204 @@ static inline int eyn_sys_cap_gui_wait_event(const eyn_cap_t* cap, void* out_eve
 
 static inline int eyn_sys_cap_gui_close(const eyn_cap_t* cap) {
     return eyn_syscall1(EYN_SYSCALL_CAP_GUI_CLOSE, (int)(uintptr_t)cap);
+}
+
+static inline int eyn_sys_drive_set_logical(uint32_t logical_drive) {
+    return eyn_syscall1(EYN_SYSCALL_DRIVE_SET_LOGICAL, (int)logical_drive);
+}
+
+static inline int eyn_sys_drive_get_logical(void) {
+    return eyn_syscall0(EYN_SYSCALL_DRIVE_GET_LOGICAL);
+}
+
+static inline int eyn_sys_drive_get_count(void) {
+    return eyn_syscall0(EYN_SYSCALL_DRIVE_GET_COUNT);
+}
+
+static inline int eyn_sys_drive_is_present(uint32_t logical_drive) {
+    return eyn_syscall1(EYN_SYSCALL_DRIVE_IS_PRESENT, (int)logical_drive);
+}
+
+static inline int eyn_sys_init_services(void) {
+    return eyn_syscall0(EYN_SYSCALL_INIT_SERVICES);
+}
+
+static inline int eyn_sys_serial_write_com1(const void* buf, int len) {
+    return eyn_syscall3_pii(EYN_SYSCALL_SERIAL_WRITE_COM1, buf, len, 0);
+}
+
+static inline int eyn_sys_shell_log_set(int enabled) {
+    return eyn_syscall1(EYN_SYSCALL_SHELL_LOG_SET, enabled ? 1 : 0);
+}
+
+static inline int eyn_sys_shell_log_get(void) {
+    return eyn_syscall0(EYN_SYSCALL_SHELL_LOG_GET);
+}
+
+static inline int eyn_sys_crashlog_count(void) {
+    return eyn_syscall0(EYN_SYSCALL_CRASHLOG_COUNT);
+}
+
+static inline int eyn_sys_crashlog_info(uint32_t index, eyn_crashlog_record_info_t* out) {
+    return eyn_syscall3_iip(EYN_SYSCALL_CRASHLOG_INFO, (int)index, 0, out);
+}
+
+static inline int eyn_sys_crashlog_data(uint32_t index, void* out, int out_cap) {
+    return eyn_syscall3_iip(EYN_SYSCALL_CRASHLOG_DATA, (int)index, out_cap, out);
+}
+
+static inline int eyn_sys_crashlog_clear(void) {
+    return eyn_syscall0(EYN_SYSCALL_CRASHLOG_CLEAR);
+}
+
+static inline int eyn_sys_shell_migrated_dispatch(const char* command_name, const char* raw_line) {
+    return eyn_syscall3_ppi(EYN_SYSCALL_SHELL_MIGRATED_DISPATCH, command_name, raw_line, 0);
+}
+
+static inline int eyn_sys_pci_get_count(int net_only) {
+    return eyn_syscall1(EYN_SYSCALL_PCI_GET_COUNT, net_only ? 1 : 0);
+}
+
+static inline int eyn_sys_pci_get_entry(int net_only, int index, eyn_pci_entry_t* out) {
+    return eyn_syscall3_iip(EYN_SYSCALL_PCI_GET_ENTRY, net_only ? 1 : 0, index, out);
+}
+
+static inline int eyn_sys_e1000_probe(eyn_e1000_probe_info_t* out) {
+    return eyn_syscall3_iip(EYN_SYSCALL_E1000_PROBE, 0, 0, out);
+}
+
+static inline int eyn_sys_e1000_init(void) {
+    return eyn_syscall0(EYN_SYSCALL_E1000_INIT);
+}
+
+static inline int eyn_sys_netcfg_get(eyn_net_config_t* out) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NETCFG_GET, 0, 0, out);
+}
+
+static inline int eyn_sys_netcfg_set(const eyn_net_config_t* in) {
+    return eyn_syscall3_ppi(EYN_SYSCALL_NETCFG_SET, in, 0, 0);
+}
+
+static inline int eyn_sys_netcfg_defaults(void) {
+    return eyn_syscall0(EYN_SYSCALL_NETCFG_DEFAULTS);
+}
+
+static inline int eyn_sys_net_is_inited(void) {
+    return eyn_syscall0(EYN_SYSCALL_NET_IS_INITED);
+}
+
+static inline int eyn_sys_net_get_mac(uint8_t out_mac[6]) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_GET_MAC, 0, 0, out_mac);
+}
+
+static inline int eyn_sys_net_get_arp(eyn_net_arp_entry_t* out, int out_cap) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_GET_ARP, out_cap, 0, out);
+}
+
+static inline int eyn_sys_net_get_udp_stats(eyn_net_udp_stats_t* out) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_GET_UDP_STATS, 0, 0, out);
+}
+
+static inline int eyn_sys_net_get_ip_stats(eyn_net_ip_stats_t* out) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_GET_IP_STATS, 0, 0, out);
+}
+
+static inline int eyn_sys_net_get_sockets(eyn_net_socket_info_t* out, int out_cap) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_GET_SOCKETS, out_cap, 0, out);
+}
+
+static inline int eyn_sys_net_ping(const uint8_t dst_ip[4], const uint8_t local_ip[4], int count) {
+    return eyn_syscall3_ppi(EYN_SYSCALL_NET_PING, dst_ip, local_ip, count);
+}
+
+static inline int eyn_sys_fs_check_integrity(void) {
+    return eyn_syscall0(EYN_SYSCALL_FS_CHECK_INTEGRITY);
+}
+
+static inline int eyn_sys_fs_fatfix(const char* path) {
+    return eyn_syscall1(EYN_SYSCALL_FS_FATFIX, (int)(uintptr_t)path);
+}
+
+static inline int eyn_sys_vterm_clear(void) {
+    return eyn_syscall0(EYN_SYSCALL_VTERM_CLEAR);
+}
+
+static inline int eyn_sys_history_count(void) {
+    return eyn_syscall0(EYN_SYSCALL_HISTORY_COUNT);
+}
+
+static inline int eyn_sys_history_entry(int index, char* out, int out_len) {
+    return eyn_syscall3_iip(EYN_SYSCALL_HISTORY_ENTRY, index, out_len, out);
+}
+
+static inline int eyn_sys_history_clear(void) {
+    return eyn_syscall0(EYN_SYSCALL_HISTORY_CLEAR);
+}
+
+static inline int eyn_sys_bg_job_count(void) {
+    return eyn_syscall0(EYN_SYSCALL_BG_JOB_COUNT);
+}
+
+static inline int eyn_sys_bg_job_info(int index, eyn_bg_job_info_t* out) {
+    return eyn_syscall3_iip(EYN_SYSCALL_BG_JOB_INFO, index, 0, out);
+}
+
+static inline int eyn_sys_tiling_start(void) {
+    return eyn_syscall0(EYN_SYSCALL_TILING_START);
+}
+
+static inline int eyn_sys_setbg_path(const char* path) {
+    return eyn_syscall1(EYN_SYSCALL_SETBG_PATH, (int)(uintptr_t)path);
+}
+
+static inline int eyn_sys_clearbg_focused(void) {
+    return eyn_syscall0(EYN_SYSCALL_CLEARBG_FOCUSED);
+}
+
+static inline int eyn_sys_setfont_path(const char* path) {
+    return eyn_syscall1(EYN_SYSCALL_SETFONT_PATH, (int)(uintptr_t)path);
+}
+
+static inline int eyn_sys_chdir(const char* path) {
+    return eyn_syscall1(EYN_SYSCALL_CHDIR, (int)(uintptr_t)path);
+}
+
+static inline int eyn_sys_run(const char* raw_args) {
+    return eyn_syscall1(EYN_SYSCALL_RUN, (int)(uintptr_t)raw_args);
+}
+
+static inline int eyn_sys_write_editor(const char* path) {
+    return eyn_syscall1(EYN_SYSCALL_WRITE_EDITOR, (int)(uintptr_t)path);
+}
+
+static inline void* eyn_sys_mmap(const char* path, size_t* out_size, int read_only) {
+    int ret = eyn_syscall3_ppi(EYN_SYSCALL_MMAP, path, out_size, read_only ? 1 : 0);
+    if (ret < 0) return (void*)0;
+    return (void*)(uintptr_t)(uint32_t)ret;
+}
+
+static inline int eyn_sys_munmap(void* addr) {
+    return eyn_syscall1(EYN_SYSCALL_MUNMAP, (int)(uintptr_t)addr);
+}
+
+static inline int eyn_sys_msync(void* addr) {
+    return eyn_syscall1(EYN_SYSCALL_MSYNC, (int)(uintptr_t)addr);
+}
+
+static inline int eyn_sys_paging_guards(void) {
+    return eyn_syscall0(EYN_SYSCALL_PAGING_GUARDS);
+}
+
+static inline int eyn_sys_trigger_panic(int confirmed_yes) {
+    return eyn_syscall1(EYN_SYSCALL_PANIC, confirmed_yes ? 1 : 0);
+}
+
+static inline int eyn_sys_trigger_pf(uint32_t addr, int mode, int confirmed_yes) {
+    return eyn_syscall3(EYN_SYSCALL_PF, (int)addr, (const void*)(uintptr_t)mode, confirmed_yes ? 1 : 0);
+}
+
+static inline int eyn_sys_ring3_test(int confirmed_yes) {
+    return eyn_syscall1(EYN_SYSCALL_RING3, confirmed_yes ? 1 : 0);
 }
 
 static inline void eyn_user_read_segments(uint16_t* out_cs, uint16_t* out_ds) {

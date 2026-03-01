@@ -17,14 +17,21 @@ void size(const shell_args_t* args);
 void log_cmd(const shell_args_t* args);
 void hexdump_cmd(const shell_args_t* args);
 void random_cmd(const shell_args_t* args);
-void history_cmd(const shell_args_t* args);
 void sort_cmd(const shell_args_t* args);
 void search_cmd(const shell_args_t* args);
 void error_cmd(const shell_args_t* args);
 void validate_cmd(const shell_args_t* args);
 void process_cmd(const shell_args_t* args);
+void pciscan_cmd(const shell_args_t* args);
+void e1000probe_cmd(const shell_args_t* args);
+void e1000_cmd(const shell_args_t* args);
+void ping_cmd(const shell_args_t* args);
+void netstat_cmd(const shell_args_t* args);
+void netcfg_cmd(const shell_args_t* args);
 void portable_cmd(const shell_args_t* args);
 void init_cmd(const shell_args_t* args);
+void ring3_cmd(const shell_args_t* args);
+void netcfg_try_autoload_quiet(uint8 drive);
 
 // Streaming command system functions
 void load_cmd(const shell_args_t* args);

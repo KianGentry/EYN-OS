@@ -643,6 +643,7 @@ void shell_log_enable() {
 	shell_log_active = 1;
 }
 void shell_log_disable() { shell_log_active = 0; }
+int shell_log_is_enabled(void) { return shell_log_active ? 1 : 0; }
 
 void shell_log_flush() {
 	if (!vga_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;

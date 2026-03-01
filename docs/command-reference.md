@@ -1,31 +1,303 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from the source code. Last updated: 2026-02-21 23:53:44
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-01 11:42:18
 
-**Total Commands:** 67
+**Total Commands:** 75
 
 ## Table of Contents
 
-- [Essential Commands](#essential-commands)
-- [Streaming Commands](#streaming-commands)
 - [Filesystem Commands](#filesystem-commands)
 - [System Commands](#system-commands)
-- [Utility Commands](#utility-commands)
+- [Network Commands](#network-commands)
+- [Memory Commands](#memory-commands)
+- [GUI/Window Commands](#gui/window-commands)
 - [Development Commands](#development-commands)
+- [Utility Commands](#utility-commands)
 
-## Essential Commands
+## Filesystem Commands
+
+### cd
+
+**Binary:** `testdir/binaries/cd`
+
+**Metadata Source:** `testdir/code/cd_uelf.c`
+
+**Description:**
+Change the current directory.
+
+**Example:**
+```bash
+cd <directory>
+```
+
+---
+
+### copy
+
+**Binary:** `testdir/binaries/copy`
+
+**Metadata Source:** `testdir/code/copy_uelf.c`
+
+**Description:**
+Copy a file from source to destination.
+
+**Example:**
+```bash
+copy file1.txt file2.txt
+```
+
+---
+
+### create
+
+**Binary:** `testdir/binaries/create`
+
+**Metadata Source:** `testdir/code/create_uelf.c`
+
+**Description:**
+Create a file or directory.
+
+**Example:**
+```bash
+create test/
+```
+
+---
+
+### del
+
+**Binary:** `testdir/binaries/del`
+
+**Metadata Source:** `testdir/code/del_uelf.c`
+
+**Description:**
+Delete a file from the filesystem.
+
+**Example:**
+```bash
+del myfile.txt
+```
+
+---
+
+### deldir
+
+**Binary:** `testdir/binaries/deldir`
+
+**Metadata Source:** `testdir/code/deldir_uelf.c`
+
+**Description:**
+Delete an empty directory.
+
+**Example:**
+```bash
+deldir myfolder
+```
+
+---
+
+### delete
+
+**Binary:** `testdir/binaries/delete`
+
+**Metadata Source:** `testdir/code/delete_uelf.c`
+
+**Description:**
+Delete a file or directory.
+
+**Example:**
+```bash
+delete test.txt
+```
+
+---
+
+### fatfix
+
+**Binary:** `testdir/binaries/fatfix`
+
+**Metadata Source:** `testdir/code/fatfix_uelf.c`
+
+**Description:**
+Repair FAT32 directory entry flags.
+
+**Example:**
+```bash
+fatfix /
+```
+
+---
+
+### fscheck
+
+**Binary:** `testdir/binaries/fscheck`
+
+**Metadata Source:** `testdir/code/fscheck_uelf.c`
+
+**Description:**
+Check filesystem integrity.
+
+**Example:**
+```bash
+fscheck
+```
+
+---
+
+### head
+
+**Binary:** `testdir/binaries/head`
+
+**Metadata Source:** `testdir/code/head_uelf.c`
+
+**Description:**
+Print the first lines of a file.
+
+**Example:**
+```bash
+head -n 10 /test.txt
+```
+
+---
+
+### ls
+
+**Binary:** `testdir/binaries/ls`
+
+**Metadata Source:** `testdir/code/ls_uelf.c`
+
+**Description:**
+List directory entries.
+
+**Example:**
+```bash
+ls
+```
+
+---
+
+### makedir
+
+**Binary:** `testdir/binaries/makedir`
+
+**Metadata Source:** `testdir/code/makedir_uelf.c`
+
+**Description:**
+Create a new directory.
+
+**Example:**
+```bash
+makedir myfolder
+```
+
+---
+
+### move
+
+**Binary:** `testdir/binaries/move`
+
+**Metadata Source:** `testdir/code/move_uelf.c`
+
+**Description:**
+Move a file from source to destination.
+
+**Example:**
+```bash
+move file1.txt /backup/file1.txt
+```
+
+---
+
+### pwd
+
+**Binary:** `testdir/binaries/pwd`
+
+**Metadata Source:** `testdir/code/pwd_uelf.c`
+
+**Description:**
+Print the current working directory.
+
+**Example:**
+```bash
+pwd
+```
+
+---
+
+### read
+
+**Binary:** `testdir/binaries/read`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the read command.
+
+**Example:**
+```bash
+read
+```
+
+---
+
+### size
+
+**Binary:** `testdir/binaries/size`
+
+**Metadata Source:** `testdir/code/size_uelf.c`
+
+**Description:**
+Show the size of a file in bytes.
+
+**Example:**
+```bash
+size myfile.txt
+```
+
+---
+
+### tail
+
+**Binary:** `testdir/binaries/tail`
+
+**Metadata Source:** `testdir/code/tail_uelf.c`
+
+**Description:**
+Print the last lines of a file.
+
+**Example:**
+```bash
+tail -n 10 /test.txt
+```
+
+---
+
+### write
+
+**Binary:** `testdir/binaries/write`
+
+**Metadata Source:** `testdir/code/write_uelf.c`
+
+**Description:**
+Open GUI text editor.
+
+**Example:**
+```bash
+write <filename>
+```
+
+---
+
+## System Commands
 
 ### clear
 
-**Handler:** `clear_cmd`
+**Binary:** `testdir/binaries/clear`
 
-**Type:** CMD_ESSENTIAL
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/clear_uelf.c`
 
 **Description:**
-Clears the screen and resets the shell display.
-Usage: clear
+Clear terminal output.
 
 **Example:**
 ```bash
@@ -34,17 +306,30 @@ clear
 
 ---
 
+### drive
+
+**Binary:** `testdir/binaries/drive`
+
+**Metadata Source:** `testdir/code/drive_uelf.c`
+
+**Description:**
+Drive selection helper.
+
+**Example:**
+```bash
+drive 0
+```
+
+---
+
 ### exit
 
-**Handler:** `handler_exit`
+**Binary:** `testdir/binaries/exit`
 
-**Type:** CMD_ESSENTIAL
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/exit_uelf.c`
 
 **Description:**
 Exits the kernel and shuts down the system.
-Usage: exit
 
 **Example:**
 ```bash
@@ -55,15 +340,12 @@ exit
 
 ### help
 
-**Handler:** `help_cmd`
+**Binary:** `testdir/binaries/help.uelf`
 
-**Type:** CMD_ESSENTIAL
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/help_uelf.c`
 
 **Description:**
-Display this message and show all available commands with descriptions and examples.
-Usage: help
+Display command help.
 
 **Example:**
 ```bash
@@ -74,15 +356,12 @@ help
 
 ### init
 
-**Handler:** `init_cmd`
+**Binary:** `testdir/binaries/init`
 
-**Type:** CMD_ESSENTIAL
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/init_uelf.c`
 
 **Description:**
-Initialize full system services (ATA drives, etc.).
-Usage: init
+Initialize core services.
 
 **Example:**
 ```bash
@@ -91,132 +370,80 @@ init
 
 ---
 
-### memory
+### lsata
 
-**Handler:** `memory_cmd`
+**Binary:** `testdir/binaries/lsata`
 
-**Type:** CMD_ESSENTIAL
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/lsata_uelf.c`
 
 **Description:**
-Memory management and testing.
-Usage: memory stats | test | stress
+List detected logical drives.
 
 **Example:**
 ```bash
-memory stats
+lsata
 ```
 
 ---
 
 ### portable
 
-**Handler:** `portable_cmd`
+**Binary:** `testdir/binaries/portable`
 
-**Type:** CMD_ESSENTIAL
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/portable_uelf.c`
 
 **Description:**
-Display portability optimizations and memory usage.
-Usage: portable [stats|optimize]
+Show portability optimization status.
 
 **Example:**
 ```bash
-portable
+portable stats
 ```
 
 ---
 
-## Streaming Commands
+### serialtest
 
-### assertfail
+**Binary:** `testdir/binaries/serialtest`
 
-**Handler:** `assertfail_cmd`
-
-**Type:** CMD_DIAGNOSTIC
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/serialtest_uelf.c`
 
 **Description:**
-Trigger an assertion failure (ASSERT).
-Usage: assertfail yes
+Serial output test (userland).
 
 **Example:**
 ```bash
-assertfail yes
+serialtest
 ```
 
 ---
 
-### catram
+### ver
 
-**Handler:** `catram_cmd`
+**Binary:** `testdir/binaries/ver`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/ver_uelf.c`
 
 **Description:**
-Display contents of a file from RAM disk (FAT32).
-Usage: catram <filename>
+Show system version information.
 
 **Example:**
 ```bash
-catram test.txt
+ver
 ```
 
 ---
 
-### clearbg
-
-**Handler:** `clearbg_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
-
-**Description:**
-Clear background image for the focused tile.
-
-**Example:**
-```bash
-clearbg
-```
-
----
-
-### crashlog
-
-**Handler:** `crashlog_cmd`
-
-**Type:** CMD_DIAGNOSTIC
-
-**File:** `shell_commands.c`
-
-**Description:**
-Inspect or clear the crash-consistent kernel object log.
-Usage: crashlog dump | crashlog clear yes
-
-**Example:**
-```bash
-crashlog dump
-```
-
----
+## Network Commands
 
 ### e1000
 
-**Handler:** `e1000_cmd`
+**Binary:** `testdir/binaries/e1000`
 
-**Type:** CMD_DIAGNOSTIC
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/e1000_uelf.c`
 
 **Description:**
-Intel e1000 utilities (probe + bring-up helpers).
-Usage: e1000 probe | e1000 init | e1000 regs | e1000 test [--expect-link up|down] [--expect-mac xx:xx:xx:xx:xx:xx] | e1000 udp-send | e1000 tcp-send | e1000 tcp-listen | e1000 tcp-recv | e1000 tcp-sendcur | e1000 tcp-close
+Intel e1000 utilities.
 
 **Example:**
 ```bash
@@ -227,15 +454,12 @@ e1000 init
 
 ### e1000probe
 
-**Handler:** `e1000probe_cmd`
+**Binary:** `testdir/binaries/e1000probe`
 
-**Type:** CMD_DIAGNOSTIC
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/e1000probe_uelf.c`
 
 **Description:**
-Probe the Intel e1000 NIC (read-only MMIO sanity check).
-Usage: e1000probe
+Probe Intel e1000 NIC.
 
 **Example:**
 ```bash
@@ -244,70 +468,93 @@ e1000probe
 
 ---
 
-### error
+### netcfg
 
-**Handler:** `error_cmd`
+**Binary:** `testdir/binaries/netcfg`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/netcfg_uelf.c`
 
 **Description:**
-Display system error statistics and status.
-Usage: error [clear|details]
+Network configuration command.
 
 **Example:**
 ```bash
-error
+netcfg show
 ```
 
 ---
 
-### fatfix
+### netstat
 
-**Handler:** `fatfix_cmd`
+**Binary:** `testdir/binaries/netstat`
 
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
+**Metadata Source:** `testdir/code/netstat_uelf.c`
 
 **Description:**
-Scan and repair FAT32 entries incorrectly marked as directories.
-Usage: fatfix [path]
+Show network status.
 
 **Example:**
 ```bash
-fatfix /
+netstat
 ```
 
 ---
 
-### lsram
+### pciscan
 
-**Handler:** `lsram_cmd`
+**Binary:** `testdir/binaries/pciscan`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/pciscan_uelf.c`
 
 **Description:**
-List files in the RAM disk (FAT32) with directory tree.
-Usage: lsram
+Scan PCI devices.
 
 **Example:**
 ```bash
-lsram
+pciscan net
+```
+
+---
+
+### ping
+
+**Binary:** `testdir/binaries/ping`
+
+**Metadata Source:** `testdir/code/ping_uelf.c`
+
+**Description:**
+Send ICMP echo requests.
+
+**Example:**
+```bash
+ping 10.0.2.2
+```
+
+---
+
+## Memory Commands
+
+### memory
+
+**Binary:** `testdir/binaries/memory`
+
+**Metadata Source:** `testdir/code/memory_uelf.c`
+
+**Description:**
+Memory management and testing.
+
+**Example:**
+```bash
+memory stats
 ```
 
 ---
 
 ### memory_stats
 
-**Handler:** `memory_stats_cmd`
+**Binary:** `testdir/binaries/memory_stats`
 
-**Type:** CMD_STREAMING
-
-**File:** `predictive_commands.c`
+**Metadata Source:** `testdir/code/memory_stats_uelf.c`
 
 **Description:**
 Show predictive memory statistics
@@ -321,32 +568,28 @@ memory_stats
 
 ### mmap
 
-**Handler:** `mmap_cmd`
+**Binary:** `testdir/binaries/mmap`
 
-**Type:** CMD_STREAMING
-
-**File:** `predictive_commands.c`
+**Metadata Source:** `testdir/code/mmap_uelf.c`
 
 **Description:**
-Memory map a file for zero-copy access
+Memory map a file for zero-copy access.
 
 **Example:**
 ```bash
-mmap <filename>
+mmap <filename> [readonly]
 ```
 
 ---
 
 ### msync
 
-**Handler:** `msync_cmd`
+**Binary:** `testdir/binaries/msync`
 
-**Type:** CMD_STREAMING
-
-**File:** `predictive_commands.c`
+**Metadata Source:** `testdir/code/msync_uelf.c`
 
 **Description:**
-Synchronize memory-mapped file to disk
+Synchronize memory-mapped file to disk.
 
 **Example:**
 ```bash
@@ -357,14 +600,12 @@ msync <address>
 
 ### munmap
 
-**Handler:** `munmap_cmd`
+**Binary:** `testdir/binaries/munmap`
 
-**Type:** CMD_STREAMING
-
-**File:** `predictive_commands.c`
+**Metadata Source:** `testdir/code/munmap_uelf.c`
 
 **Description:**
-Unmap a memory-mapped file
+Unmap a memory-mapped file.
 
 **Example:**
 ```bash
@@ -373,57 +614,14 @@ munmap <address>
 
 ---
 
-### netcfg
-
-**Handler:** `netcfg_cmd`
-
-**Type:** CMD_DIAGNOSTIC
-
-**File:** `shell_commands.c`
-
-**Description:**
-Network configuration (defaults match QEMU user-net).
-Usage: netcfg show | netcfg verify | netcfg route <dst_ip> | netcfg defaults [--save] | netcfg set ip|gw|mask|dns <a.b.c.d> [--save] | netcfg save [path] | netcfg load [path]
-Default path: /config/net.cfg
-
-**Example:**
-```bash
-netcfg show
-```
-
----
-
-### netstat
-
-**Handler:** `netstat_cmd`
-
-**Type:** CMD_DIAGNOSTIC
-
-**File:** `shell_commands.c`
-
-**Description:**
-Network status (netstack + ARP + UDP + ICMP).
-Usage: netstat
-Note: run 'e1000 init' first for full info.
-
-**Example:**
-```bash
-netstat
-```
-
----
-
 ### pagingguards
 
-**Handler:** `pagingguards_cmd`
+**Binary:** `testdir/binaries/pagingguards`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/pagingguards_uelf.c`
 
 **Description:**
-Install optional paging guards (null-page, .text/.rodata RO).
-Usage: pagingguards
+Install optional paging guards.
 
 **Example:**
 ```bash
@@ -432,92 +630,11 @@ pagingguards
 
 ---
 
-### panic
-
-**Handler:** `panic_cmd`
-
-**Type:** CMD_DIAGNOSTIC
-
-**File:** `shell_commands.c`
-
-**Description:**
-Trigger a kernel panic to test diagnostics.
-Usage: panic yes
-
-**Example:**
-```bash
-panic yes
-```
-
----
-
-### pciscan
-
-**Handler:** `pciscan_cmd`
-
-**Type:** CMD_DIAGNOSTIC
-
-**File:** `shell_commands.c`
-
-**Description:**
-Scan PCI devices and print vendor/device IDs and BAR0.
-Usage: pciscan [net]
-Tip: e1000 usually shows as 8086:100E.
-
-**Example:**
-```bash
-pciscan net
-```
-
----
-
-### pf
-
-**Handler:** `pf_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
-
-**Description:**
-Intentionally trigger a page fault (read/write/exec a chosen address).
-Usage: pf yes [addr] [r|w|x]
-
-**Example:**
-```bash
-pf yes 0x0 r
-```
-
----
-
-### ping
-
-**Handler:** `ping_cmd`
-
-**Type:** CMD_DIAGNOSTIC
-
-**File:** `shell_commands.c`
-
-**Description:**
-Send ICMP echo request(s).
-Usage: ping <dst_ip> [count] [local_ip]
-Example: ping 10.0.2.2
-Note: run 'e1000 init' first.
-
-**Example:**
-```bash
-ping 10.0.2.2
-```
-
----
-
 ### predict
 
-**Handler:** `predict_cmd`
+**Binary:** `testdir/binaries/predict`
 
-**Type:** CMD_STREAMING
-
-**File:** `predictive_commands.c`
+**Metadata Source:** `testdir/code/predict_uelf.c`
 
 **Description:**
 Predictive memory management
@@ -529,18 +646,80 @@ predict [stats|reset|optimize]
 
 ---
 
+## GUI/Window Commands
+
+### clearbg
+
+**Binary:** `testdir/binaries/clearbg`
+
+**Metadata Source:** `testdir/code/clearbg_uelf.c`
+
+**Description:**
+Clear background image for focused tile.
+
+**Example:**
+```bash
+clearbg
+```
+
+---
+
+### draw
+
+**Binary:** `testdir/binaries/draw`
+
+**Metadata Source:** `testdir/code/draw_uelf.c`
+
+**Description:**
+Open the draw canvas editor.
+
+**Example:**
+```bash
+draw /images/sketch.rei
+```
+
+---
+
+### kstats
+
+**Binary:** `testdir/binaries/kstats`
+
+**Metadata Source:** `testdir/code/kstats_uelf.c`
+
+**Description:**
+Legacy kernel stats GUI (migrated default is userland 'stats').
+
+**Example:**
+```bash
+kstats
+```
+
+---
+
+### kwin_test
+
+**Binary:** `testdir/binaries/kwin_test`
+
+**Metadata Source:** `testdir/code/kwin_test_uelf.c`
+
+**Description:**
+Legacy kernel window-test command (migrated default is userland 'win_test').
+
+**Example:**
+```bash
+kwin_test
+```
+
+---
+
 ### rect
 
-**Handler:** `draw_cmd_handler`
+**Binary:** `testdir/binaries/rect`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/rect_uelf.c`
 
 **Description:**
 Draw a rectangle.
-Usage: rect <x> <y> <width> <height> <r> <g> <b>.
-Example: rect 10 20 100 50 255 0 0 draws a red rectangle.
 
 **Example:**
 ```bash
@@ -549,74 +728,30 @@ rect 10 20 100 50 255 0 0
 
 ---
 
-### ring3
-
-**Handler:** `ring3_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
-
-**Description:**
-Switch to ring 3 and run a tiny user-mode stub (prints via int 0x80).
-Usage: ring3 yes
-
-**Example:**
-```bash
-ring3 yes
-```
-
----
-
-### serialtest
-
-**Handler:** `serialtest_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
-
-**Description:**
-Write a test line to COM1 to verify serial output.
-Usage: serialtest
-
-**Example:**
-```bash
-serialtest
-```
-
----
-
 ### setbg
 
-**Handler:** `setbg_cmd`
+**Binary:** `testdir/binaries/setbg`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/setbg_uelf.c`
 
 **Description:**
-Set a REI image as background for the focused tile (shows Tile/Scale/Center chooser).
-Usage: setbg <file.rei>
+Set background image for focused tile.
 
 **Example:**
 ```bash
-setbg eynos.rei
+setbg /images/eynos.rei
 ```
 
 ---
 
 ### setfont
 
-**Handler:** `setfont_cmd`
+**Binary:** `testdir/binaries/setfont`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/setfont_uelf.c`
 
 **Description:**
-Set the system font at runtime (loads .hex from disk into RAM).
-Usage: setfont <file.hex> | setfont builtin
+Set runtime system font.
 
 **Example:**
 ```bash
@@ -625,35 +760,14 @@ setfont /fonts/unscii-16.hex
 
 ---
 
-### size
-
-**Handler:** `size`
-
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
-
-**Description:**
-Show the size of a file in bytes.
-Usage: size <filename>
-
-**Example:**
-```bash
-size myfile.txt
-```
-
----
-
 ### stats
 
-**Handler:** `stats_cmd`
+**Binary:** `testdir/binaries/stats`
 
-**Type:** CMD_STREAMING
-
-**File:** `stats_gui.c`
+**Metadata Source:** `testdir/code/stats_uelf.c`
 
 **Description:**
-Graphical system performance monitor with CPU, memory, disk pies and sortable table
+Open the stats GUI.
 
 **Example:**
 ```bash
@@ -664,496 +778,110 @@ stats
 
 ### theme
 
-**Handler:** `theme_cmd`
+**Binary:** `testdir/binaries/theme`
 
-**Type:** CMD_STREAMING
-
-**File:** `theme_cmd.c`
+**Metadata Source:** `testdir/code/theme_uelf.c`
 
 **Description:**
-Open a GUI theme editor (colors + font).
+Open the theme editor.
 
 **Example:**
 ```bash
-theme
-```
-
----
-
-### tiling
-
-**Handler:** `tiling_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `tiling_cmd.c`
-
-**Description:**
-Launch the tiling front-end manager.
-
-**Example:**
-```bash
-tiling
-```
-
----
-
-### userrun
-
-**Handler:** `userrun_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
-
-**Description:**
-Load a raw user-mode code blob from VFS into ring 3 and run it at 0x00400000.
-The program should use int 0x80 with EYN-OS syscall numbers (write=1, exit=2).
-Usage: userrun <path>
-
-**Example:**
-```bash
-userrun /testdir/user_hello.bin
-```
-
----
-
-### validate
-
-**Handler:** `validate_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
-
-**Description:**
-Display input validation statistics and test validation.
-Usage: validate [test|stats]
-
-**Example:**
-```bash
-validate
+theme /fonts/unscii-16.hex
 ```
 
 ---
 
 ### view
 
-**Handler:** `view_cmd`
+**Binary:** `testdir/binaries/view`
 
-**Type:** CMD_STREAMING
-
-**File:** `image_viewer_gui.c`
+**Metadata Source:** `testdir/code/view_uelf.c`
 
 **Description:**
-Open a REI image in a GUI viewer.
-Usage: view <file.rei>
+Open an REI image or REIV video viewer.
 
 **Example:**
 ```bash
-view eynos.rei
+view /images/picture.rei
 ```
 
 ---
 
-### vieww
+## Development Commands
 
-**Handler:** `vieww_cmd`
+### assertfail
 
-**Type:** CMD_STREAMING
+**Binary:** `testdir/binaries/assertfail`
 
-**File:** `image_viewer_gui.c`
+**Metadata Source:** `testdir/code/assertfail_uelf.c`
 
 **Description:**
-Open a REI image in a floating window.
-Usage: vieww <file.rei>
+Trigger an assertion failure (ASSERT).
 
 **Example:**
 ```bash
-vieww eynos.rei
+assertfail yes
 ```
 
 ---
 
-### win_test
+### crashlog
 
-**Handler:** `win_test_cmd`
+**Binary:** `testdir/binaries/crashlog`
 
-**Type:** CMD_STREAMING
-
-**File:** `window_test.c`
+**Metadata Source:** `testdir/code/crashlog_uelf.c`
 
 **Description:**
-Open a sample floating window to test compositor performance.
+Inspect and clear crashlog records.
 
 **Example:**
 ```bash
-win_test
+crashlog dump
 ```
 
 ---
 
-## Filesystem Commands
+### error
 
-### cd
+**Binary:** `testdir/binaries/error`
 
-**Handler:** `cd`
-
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
+**Metadata Source:** `testdir/code/error_uelf.c`
 
 **Description:**
-Change the current directory.
-Usage: cd <directory>
+Display command error status.
 
 **Example:**
 ```bash
-cd myfolder
+error details
 ```
 
 ---
 
-### copy
+### hexdump
 
-**Handler:** `copy_cmd`
+**Binary:** `testdir/binaries/hexdump`
 
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
+**Metadata Source:** `testdir/code/hexdump_uelf.c`
 
 **Description:**
-Copy a file from source to destination.
-Usage: copy <source> <destination>
+Hex dump file bytes.
 
 **Example:**
 ```bash
-copy file1.txt file2.txt
-```
-
----
-
-### del
-
-**Handler:** `del`
-
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
-
-**Description:**
-Delete a file from the filesystem.
-Usage: del <filename>
-
-**Example:**
-```bash
-del myfile.txt
-```
-
----
-
-### deldir
-
-**Handler:** `deldir`
-
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
-
-**Description:**
-Delete an empty directory.
-Usage: deldir <directory>
-
-**Example:**
-```bash
-deldir myfolder
-```
-
----
-
-### fdisk
-
-**Handler:** `fdisk_cmd_handler`
-
-**Type:** CMD_STREAMING
-
-**File:** `fdisk_commands.c`
-
-**Description:**
-List partition table or create partitions.
-Usage: fdisk [create <start_lba> <size> <type>]
-
-**Example:**
-```bash
-fdisk create 2048 1024000 0x0C
-```
-
----
-
-### format
-
-**Handler:** `format_cmd_handler`
-
-**Type:** CMD_STREAMING
-
-**File:** `format_command.c`
-
-**Description:**
-Format partition n (0-3) as FAT32 or EYNFS.
-FAT32: widely supported, max 4GB files.
-EYNFS: native, supports long filenames, fast directory access.
-Usage: format <partition_num> <filesystem_type>
-
-**Example:**
-```bash
-format 1 fat32
-```
-
----
-
-### fscheck
-
-**Handler:** `fscheck`
-
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
-
-**Description:**
-Check filesystem integrity.
-Usage: fscheck
-
-**Example:**
-```bash
-fscheck
-```
-
----
-
-### ls
-
-**Handler:** `ls_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
-
-**Description:**
-List files in the root directory of the selected drive.
-Usage: ls
-
-**Example:**
-```bash
-ls
-```
-
----
-
-### makedir
-
-**Handler:** `makedir`
-
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
-
-**Description:**
-Create a new directory.
-Usage: makedir <directory>
-
-**Example:**
-```bash
-makedir myfolder
-```
-
----
-
-### move
-
-**Handler:** `move_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
-
-**Description:**
-Move a file from source to destination.
-Usage: move <source> <destination>
-
-**Example:**
-```bash
-move file1.txt /backup/file1.txt
-```
-
----
-
-### read
-
-**Handler:** `read_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
-
-**Description:**
-Display text files (.txt) or render markdown (.md). For images, use 'view' or 'vieww'.
-Usage: read <filename>
-
-**Example:**
-```bash
-read myfile.txt
-```
-
----
-
-### write
-
-**Handler:** `write_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `fs_commands.c`
-
-**Description:**
-Open nano-like text editor for a file.
-Usage: write <filename>
-
-**Example:**
-```bash
-write myfile.txt
-```
-
----
-
-## System Commands
-
-### drive
-
-**Handler:** `drive_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
-
-**Description:**
-Change between different drives (from lsata).
-Usage: drive <n>
-
-**Example:**
-```bash
-drive 0
-```
-
----
-
-### lsata
-
-**Handler:** `lsata_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
-
-**Description:**
-List detected ATA drives and their details.
-Usage: lsata
-
-**Example:**
-```bash
-lsata
-```
-
----
-
-## Utility Commands
-
-### calc
-
-**Handler:** `calc_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
-
-**Description:**
-32-bit fixed-point calculator. Supports +, -, *, /.
-Usage: calc <expression>
-
-**Example:**
-```bash
-calc 2.5+3.7
-```
-
----
-
-### draw
-
-**Handler:** `draw_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `draw_gui.c`
-
-**Description:**
-Create or edit a REI image with a GUI. Usage: draw <filename.rei>
-
-**Example:**
-```bash
-draw test.rei
-```
-
----
-
-### echo
-
-**Handler:** `echo_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
-
-**Description:**
-Reprints a given text to the screen.
-Usage: echo <text>
-
-**Example:**
-```bash
-echo Hello, world!
-```
-
----
-
-### history
-
-**Handler:** `history_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `history.c`
-
-**Description:**
-Show or clear command history.
-Usage: history [clear]
-Example: history | history clear
-
-**Example:**
-```bash
-history
+hexdump /test.txt 256
 ```
 
 ---
 
 ### log
 
-**Handler:** `log_cmd`
+**Binary:** `testdir/binaries/log`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/log_uelf.c`
 
 **Description:**
 Enable or disable shell logging.
-Usage: log on|off
 
 **Example:**
 ```bash
@@ -1162,18 +890,272 @@ log on
 
 ---
 
+### panic
+
+**Binary:** `testdir/binaries/panic`
+
+**Metadata Source:** `testdir/code/panic_uelf.c`
+
+**Description:**
+Trigger a kernel panic for diagnostics.
+
+**Example:**
+```bash
+panic yes
+```
+
+---
+
+### pf
+
+**Binary:** `testdir/binaries/pf`
+
+**Metadata Source:** `testdir/code/pf_uelf.c`
+
+**Description:**
+Intentionally trigger a page fault.
+
+**Example:**
+```bash
+pf yes [addr] [r|w|x]
+```
+
+---
+
+### ring3
+
+**Binary:** `testdir/binaries/ring3`
+
+**Metadata Source:** `testdir/code/ring3_uelf.c`
+
+**Description:**
+Switch to ring 3 and run a tiny user-mode stub.
+
+**Example:**
+```bash
+ring3 yes
+```
+
+---
+
+### run
+
+**Binary:** `testdir/binaries/run`
+
+**Metadata Source:** `testdir/code/run_uelf.c`
+
+**Description:**
+Run a native program, .uelf, or script.
+
+**Example:**
+```bash
+run <program> [args...]
+```
+
+---
+
+### validate
+
+**Binary:** `testdir/binaries/validate`
+
+**Metadata Source:** `testdir/code/validate_uelf.c`
+
+**Description:**
+Show input validation status and tests.
+
+**Example:**
+```bash
+validate test
+```
+
+---
+
+## Utility Commands
+
+### alias
+
+**Binary:** `testdir/binaries/alias`
+
+**Metadata Source:** `testdir/code/alias_uelf.c`
+
+**Description:**
+Create or remove command aliases.
+
+**Example:**
+```bash
+alias ll ls -l
+```
+
+---
+
+### calc
+
+**Binary:** `testdir/binaries/calc`
+
+**Metadata Source:** `testdir/code/calc_uelf.c`
+
+**Description:**
+Integer calculator supporting + - * /.
+
+**Example:**
+```bash
+calc 2+3*4
+```
+
+---
+
+### diskmgr
+
+**Binary:** `testdir/binaries/diskmgr`
+
+**Metadata Source:** `testdir/code/diskmgr_uelf.c`
+
+**Description:**
+Manage logical drives from userland.
+
+**Example:**
+```bash
+diskmgr status
+```
+
+---
+
+### echo
+
+**Binary:** `testdir/binaries/echo`
+
+**Metadata Source:** `testdir/code/echo_uelf.c`
+
+**Description:**
+Print arguments to stdout.
+
+**Example:**
+```bash
+echo hello world
+```
+
+---
+
+### fdisk
+
+**Binary:** `testdir/binaries/fdisk`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the fdisk command.
+
+**Example:**
+```bash
+fdisk
+```
+
+---
+
+### files
+
+**Binary:** `testdir/binaries/files`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the files command.
+
+**Example:**
+```bash
+files
+```
+
+---
+
+### format
+
+**Binary:** `testdir/binaries/format`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the format command.
+
+**Example:**
+```bash
+format
+```
+
+---
+
+### hello
+
+**Binary:** `testdir/binaries/hello`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the hello command.
+
+**Example:**
+```bash
+hello
+```
+
+---
+
+### history
+
+**Binary:** `testdir/binaries/history`
+
+**Metadata Source:** `testdir/code/history_uelf.c`
+
+**Description:**
+Show or clear command history.
+
+**Example:**
+```bash
+history
+```
+
+---
+
+### jobs
+
+**Binary:** `testdir/binaries/jobs`
+
+**Metadata Source:** `testdir/code/jobs_uelf.c`
+
+**Description:**
+List background jobs.
+
+**Example:**
+```bash
+jobs
+```
+
+---
+
+### pipe
+
+**Binary:** `testdir/binaries/pipe`
+
+**Metadata Source:** `testdir/code/pipe_uelf.c`
+
+**Description:**
+Run a command pipeline from userspace command launcher.
+
+**Example:**
+```bash
+pipe files 'search test -a'
+```
+
+---
+
 ### random
 
-**Handler:** `random_cmd`
+**Binary:** `testdir/binaries/random`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/random_uelf.c`
 
 **Description:**
 Generate random numbers.
-Usage: random [count] | random [min] [max]
-Example: random 5 | random 10 20
 
 **Example:**
 ```bash
@@ -1184,16 +1166,12 @@ random 5
 
 ### search
 
-**Handler:** `search_cmd`
+**Binary:** `testdir/binaries/search`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/search_uelf.c`
 
 **Description:**
-Search for text in filenames and file contents using Boyer-Moore algorithm.
-Usage: search <pattern> [-f|-c|-a]
-Example: search hello -a
+Search for text in filenames and file contents.
 
 **Example:**
 ```bash
@@ -1204,16 +1182,12 @@ search hello -a
 
 ### sort
 
-**Handler:** `sort_cmd`
+**Binary:** `testdir/binaries/sort`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/sort_uelf.c`
 
 **Description:**
 Sort strings alphabetically.
-Usage: sort <string1> <string2> <string3> ...
-Example: sort zebra apple banana
 
 **Example:**
 ```bash
@@ -1224,15 +1198,12 @@ sort zebra apple banana
 
 ### spam
 
-**Handler:** `spam_cmd`
+**Binary:** `testdir/binaries/spam`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/spam_uelf.c`
 
 **Description:**
-Spam 'EYN-OS' to the shell 100 times for fun.
-Usage: spam
+Spam 'EYN-OS' to stdout 100 times.
 
 **Example:**
 ```bash
@@ -1241,62 +1212,18 @@ spam
 
 ---
 
-### ver
+### tiling
 
-**Handler:** `ver_cmd`
+**Binary:** `testdir/binaries/tiling`
 
-**Type:** CMD_STREAMING
-
-**File:** `shell_commands.c`
+**Metadata Source:** `testdir/code/tiling_uelf.c`
 
 **Description:**
-Shows the current system version and release information.
-Usage: ver
+Launch the tiling manager.
 
 **Example:**
 ```bash
-ver
-```
-
----
-
-## Development Commands
-
-### assemble
-
-**Handler:** `handler_assemble`
-
-**Type:** CMD_STREAMING
-
-**File:** `assemble.c`
-
-**Description:**
-Converts assembly code into machine code.
-Supports NASM syntax.
-Usage: assemble <input file> <output file>
-
-**Example:**
-```bash
-assemble example.asm example.eyn
-```
-
----
-
-### run
-
-**Handler:** `run_cmd`
-
-**Type:** CMD_STREAMING
-
-**File:** `run_command.c`
-
-**Description:**
-Run a native program, ring3 ELF, or a shell script.
-Usage: run <program.eyn|program.bin|program.flat|program.uelf|script.shell>
-
-**Example:**
-```bash
-run user_hello.uelf
+tiling
 ```
 
 ---
@@ -1305,10 +1232,11 @@ run user_hello.uelf
 
 | Category | Count |
 |----------|-------|
-| Essential Commands | 6 |
-| Streaming Commands | 35 |
-| Filesystem Commands | 12 |
-| System Commands | 2 |
-| Utility Commands | 10 |
-| Development Commands | 2 |
+| Filesystem Commands | 17 |
+| System Commands | 9 |
+| Network Commands | 6 |
+| Memory Commands | 7 |
+| GUI/Window Commands | 10 |
+| Development Commands | 10 |
+| Utility Commands | 16 |
 
