@@ -29,7 +29,6 @@
 #include <network/netstack.h>
 #include <predictive_memory.h>
 #include <run_command.h>
-#include <write_editor.h>
 #include <paging.h>
 
 extern background_process_t g_background_processes[MAX_BACKGROUND_PROCESSES];
@@ -347,7 +346,6 @@ uint32 get_last_error_eip() {
 #define SYSCALL_SETFONT_PATH 94
 #define SYSCALL_CHDIR 95
 #define SYSCALL_RUN 96
-#define SYSCALL_WRITE_EDITOR 97
 #define SYSCALL_MMAP 98
 #define SYSCALL_MUNMAP 99
 #define SYSCALL_MSYNC 100
@@ -355,6 +353,18 @@ uint32 get_last_error_eip() {
 #define SYSCALL_PANIC 102
 #define SYSCALL_PF 103
 #define SYSCALL_RING3 104
+
+// GUI icon drawing (kernel-side icon cache)
+#define SYSCALL_GUI_DRAW_ICON 105
+
+// GUI outlined rectangle (border only, no fill)
+#define SYSCALL_GUI_OUTLINE_RECT 106
+
+// GUI single-character draw (faster than draw_text for char-at-a-time rendering)
+#define SYSCALL_GUI_DRAW_CHAR 107
+
+// GUI font metrics query (returns cell width and height)
+#define SYSCALL_GUI_GET_FONT_METRICS 108
 
 // Cooperative scheduling from userland
 #define SYSCALL_SLEEP_US 22
@@ -430,6 +440,7 @@ enum {
     USER_GUI_EVENT_NONE = 0,
     USER_GUI_EVENT_KEY = 1,
     USER_GUI_EVENT_MOUSE = 2,
+    USER_GUI_EVENT_CLOSE = 3,
 };
 
 typedef struct {
@@ -452,6 +463,9 @@ enum {
     USER_GUI_CMD_FILL_RECT = 2,
     USER_GUI_CMD_TEXT = 3,
     USER_GUI_CMD_LINE = 4,
+    USER_GUI_CMD_ICON = 5,
+    USER_GUI_CMD_OUTLINE_RECT = 6,
+    USER_GUI_CMD_CHAR = 7,
 };
 
 typedef struct {
@@ -520,6 +534,15 @@ void syscall_reset_user_fds(void) {
 typedef struct {
     int used;
     int tile_idx;
+    /*
+     * Floating-window fields.
+     * When is_floating is non-zero, win_id holds the index returned by
+     * wm_create_window() and tile_idx is unused (-1).  All GUI syscalls
+     * branch on is_floating to dispatch to the correct subsystem.
+     * ABI-INVARIANT: These fields are kernel-internal and not visible to ring3.
+     */
+    int win_id;
+    int is_floating;
     char* title;
     char* status_left;
 
@@ -527,8 +550,22 @@ typedef struct {
     int font_handle;
 
     // Immediate-mode command list. Draw callback replays this list.
+    /*
+     * SECURITY-INVARIANT: Per-GUI command buffer upper bound.
+     *
+     * Why: Bounds kernel memory per GUI handle. Each gui_fill_rect, gui_draw_text,
+     *      gui_draw_line, or gui_clear consumes one slot.
+     * Invariant: User programs that exceed this limit silently lose draw commands
+     *            (syscall returns -1). Callers should minimise per-frame commands.
+     * Breakage if changed:
+     *   - Increasing: linearly grows per-user-GUI kernel memory (~96 bytes/slot).
+     *     256 slots ≈ 24 KB — acceptable on 9 MB target. Needed for text-heavy
+     *     applications (e.g. text editors drawing 30+ lines per frame).
+     *   - Decreasing: existing GUI programs may silently lose draw calls.
+     * ABI-sensitive: Yes (user-visible limit on draw throughput per frame).
+     */
     int cmd_count;
-    user_gui_cmd_t cmds[48];
+    user_gui_cmd_t cmds[256];
     uint8 frame_pending;
 
     // Input event ring buffer.
@@ -572,14 +609,26 @@ static void user_gui_free_entry(user_gui_t* e) {
     e->blit_h = 0;
     e->blit_dst_w = 0;
     e->blit_dst_h = 0;
-    if (e->tile_idx >= 0) {
-        tile_unregister_gui_client(e->tile_idx);
-        tile_close(e->tile_idx);
+    if (e->is_floating) {
+        /* Floating window: unregister callbacks then close the window.
+         * wm_close_window will skip its veto path because we already cleared
+         * close_cb in wm_unregister_gui_client before reaching here. */
+        if (e->win_id >= 0) {
+            wm_unregister_gui_client(e->win_id);
+            wm_close_window(e->win_id);
+        }
+    } else {
+        if (e->tile_idx >= 0) {
+            tile_unregister_gui_client(e->tile_idx);
+            tile_close(e->tile_idx);
+        }
     }
     if (e->title) free(e->title);
     if (e->status_left) free(e->status_left);
     e->used = 0;
     e->tile_idx = -1;
+    e->win_id = -1;
+    e->is_floating = 0;
     e->title = NULL;
     e->status_left = NULL;
 
@@ -595,6 +644,8 @@ static int user_gui_alloc_handle(void) {
         if (!g_user_guis[i].used) {
             g_user_guis[i].used = 1;
             g_user_guis[i].tile_idx = -1;
+            g_user_guis[i].win_id = -1;
+            g_user_guis[i].is_floating = 0;
             g_user_guis[i].title = NULL;
             g_user_guis[i].status_left = NULL;
             g_user_guis[i].blit_buf = NULL;
@@ -613,9 +664,15 @@ static int user_gui_alloc_handle(void) {
 }
 
 static void user_gui_flush_pending_frame(user_gui_t* e) {
-    if (!e || e->tile_idx < 0 || !e->frame_pending) return;
-    tile_invalidate_gui(e->tile_idx);
-    tile_render_once();
+    if (!e || !e->frame_pending) return;
+    if (e->is_floating) {
+        if (e->win_id < 0) return;
+        wm_invalidate_window(e->win_id);
+    } else {
+        if (e->tile_idx < 0) return;
+        tile_invalidate_gui(e->tile_idx);
+        tile_render_once();
+    }
     e->frame_pending = 0;
 }
 
@@ -653,7 +710,8 @@ static int user_gui_pop_event(user_gui_t* e, user_gui_event_t* out) {
 static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
     int handle = (int)(uint32)userdata;
     user_gui_t* e = user_gui_get(handle);
-    if (!e || e->tile_idx != tile_idx) return;
+    /* tile_idx carries win_id when called from the floating window manager */
+    if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return;
     if (content_w <= 0 || content_h <= 0) return;
 
     if (e->blit_buf && e->blit_w > 0 && e->blit_h > 0) {
@@ -703,13 +761,39 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
             drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
             continue;
         }
+        if (c->type == USER_GUI_CMD_OUTLINE_RECT) {
+            int x = content_x + c->x;
+            int y = content_y + c->y;
+            int w = c->w;
+            int h = c->h;
+            if (w > 0 && h > 0) {
+                drawLine(x, y, x + w - 1, y, c->r, c->g, c->b);             /* top    */
+                drawLine(x, y + h - 1, x + w - 1, y + h - 1, c->r, c->g, c->b); /* bottom */
+                drawLine(x, y, x, y + h - 1, c->r, c->g, c->b);             /* left   */
+                drawLine(x + w - 1, y, x + w - 1, y + h - 1, c->r, c->g, c->b); /* right  */
+            }
+            continue;
+        }
+        if (c->type == USER_GUI_CMD_CHAR) {
+            int x = content_x + c->x;
+            int y = content_y + c->y;
+            drawCharAt_font(e->font_handle, x, y, c->w, c->r, c->g, c->b);
+            continue;
+        }
+        if (c->type == USER_GUI_CMD_ICON) {
+            /* Render a named file icon from the kernel-side icon cache. */
+            int x = content_x + c->x;
+            int y = content_y + c->y;
+            tile_draw_file_icon(c->text, x, y);
+            continue;
+        }
     }
 }
 
 static void user_gui_key_cb(int tile_idx, int key, void* userdata) {
     int handle = (int)(uint32)userdata;
     user_gui_t* e = user_gui_get(handle);
-    if (!e || e->tile_idx != tile_idx) return;
+    if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return;
     user_gui_event_t ev;
     ev.type = USER_GUI_EVENT_KEY;
     ev.a = (int32)key;
@@ -719,14 +803,39 @@ static void user_gui_key_cb(int tile_idx, int key, void* userdata) {
     user_gui_push_event(e, &ev);
 }
 
+/*
+ * Close-request callback registered with the tiling manager.
+ * Instead of directly closing, push a CLOSE event into the userland
+ * event queue so the ring3 program can save state / confirm / clean up.
+ * Returns 0 (veto) to prevent the tiler from destroying the tile —
+ * the user program is expected to call exit() when ready.
+ */
+static int user_gui_close_cb(int tile_idx, void* userdata) {
+    int handle = (int)(uint32)userdata;
+    user_gui_t* e = user_gui_get(handle);
+    if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return 1; /* not ours — allow close */
+    user_gui_event_t ev;
+    ev.type = USER_GUI_EVENT_CLOSE;
+    ev.a = 0;
+    ev.b = 0;
+    ev.c = 0;
+    ev.d = 0;
+    user_gui_push_event(e, &ev);
+    return 0; /* veto: let the user program handle it */
+}
+
 static void user_gui_mouse_cb(int tile_idx, const mouse_event_t* me, void* userdata) {
     if (!me) return;
     int handle = (int)(uint32)userdata;
     user_gui_t* e = user_gui_get(handle);
-    if (!e || e->tile_idx != tile_idx) return;
+    if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return;
 
     int cx = 0, cy = 0, cw = 0, ch = 0;
-    tile_get_content_rect(tile_idx, &cx, &cy, &cw, &ch);
+    if (e->is_floating) {
+        wm_get_content_rect(e->win_id, &cx, &cy, &cw, &ch);
+    } else {
+        tile_get_content_rect(tile_idx, &cx, &cy, &cw, &ch);
+    }
     int rx = me->x - cx;
     int ry = me->y - cy;
 
@@ -743,6 +852,17 @@ static user_gui_t* user_gui_get(int handle) {
     if (handle < 0 || handle >= USER_GUI_MAX) return NULL;
     if (!g_user_guis[handle].used) return NULL;
     return &g_user_guis[handle];
+}
+
+/*
+ * Returns non-zero when a GUI handle has an active backing resource.
+ * Floating-window handles are live when win_id >= 0; tile-backed handles
+ * are live when tile_idx >= 0.  Use this instead of (e->tile_idx < 0)
+ * so all GUI syscall validation is floating-window-aware.
+ */
+static inline int user_gui_active(const user_gui_t* e) {
+    if (!e || !e->used) return 0;
+    return e->is_floating ? (e->win_id >= 0) : (e->tile_idx >= 0);
 }
 
 void syscall_reset_user_guis(void) {
@@ -777,6 +897,8 @@ void syscall_reset_user_guis(void) {
         if (g_user_guis[0].status_left) { free(g_user_guis[0].status_left); g_user_guis[0].status_left = NULL; }
         g_user_guis[0].used = 0;
         g_user_guis[0].tile_idx = -1;
+        g_user_guis[0].win_id = -1;
+        g_user_guis[0].is_floating = 0;
         g_user_guis[0].cmd_count = 0;
         g_user_guis[0].frame_pending = 0;
         g_user_guis[0].ev_head = 0;
@@ -1994,26 +2116,6 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = 0;
             break;
         }
-        case SYSCALL_WRITE_EDITOR: {
-            if (!syscall_ctx_allow(CAP_READ_FS | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
-            const char* user_path = (const char*)arg1;
-            if (!user_path) { regs->eax = (uint32)-1; break; }
-
-            char path[128];
-            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
-
-            const char* cwd = "/";
-            if (g_user_task_active) {
-                const char* t = vterm_get_cwd(g_user_task_term);
-                if (t && t[0] == '/') cwd = t;
-            }
-
-            char abspath[128];
-            resolve_path(path, cwd, abspath, sizeof(abspath));
-            write_editor(abspath, g_current_drive);
-            regs->eax = 0;
-            break;
-        }
         case SYSCALL_MMAP: {
             int read_only = ((int)arg3 != 0) ? 1 : 0;
             uint32 caps = read_only ? (CAP_READ_FS | CAP_ALLOC_MEMORY) : (CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY);
@@ -2684,19 +2786,22 @@ uint32 syscall_dispatch(regs_t* regs) {
                 break;
             }
 
-            int tile_idx = tile_create_gui_tile(e->title, e->status_left);
-            if (tile_idx < 0) {
+            int new_win = wm_create_window(e->title, 100 + (handle - 1) * 24,
+                                           60  + (handle - 1) * 24, 700, 480,
+                                           e->status_left);
+            if (new_win < 0) {
                 user_gui_free_entry(e);
                 regs->eax = (uint32)-1;
                 break;
             }
-            e->tile_idx = tile_idx;
+            e->win_id = new_win;
+            e->is_floating = 1;
             e->cmd_count = 0;
             e->ev_head = 0;
             e->ev_tail = 0;
-            tile_register_gui_client2(tile_idx, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)handle);
-            tile_invalidate_decorations(tile_idx);
-            tile_invalidate_gui(tile_idx);
+            wm_register_gui_client2(new_win, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)handle);
+            wm_register_gui_close_cb(new_win, user_gui_close_cb);
+            wm_invalidate_window(new_win);
             regs->eax = (uint32)handle;
             break;
         }
@@ -2736,19 +2841,22 @@ uint32 syscall_dispatch(regs_t* regs) {
                 break;
             }
 
-            int tile_idx = tile_create_gui_tile(e->title, e->status_left);
-            if (tile_idx < 0) {
+            int cap_win = wm_create_window(e->title, 100 + (handle - 1) * 24,
+                                            60  + (handle - 1) * 24, 700, 480,
+                                            e->status_left);
+            if (cap_win < 0) {
                 user_gui_free_entry(e);
                 regs->eax = (uint32)-1;
                 break;
             }
-            e->tile_idx = tile_idx;
+            e->win_id = cap_win;
+            e->is_floating = 1;
             e->cmd_count = 0;
             e->ev_head = 0;
             e->ev_tail = 0;
-            tile_register_gui_client2(tile_idx, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)handle);
-            tile_invalidate_decorations(tile_idx);
-            tile_invalidate_gui(tile_idx);
+            wm_register_gui_client2(cap_win, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)handle);
+            wm_register_gui_close_cb(cap_win, user_gui_close_cb);
+            wm_invalidate_window(cap_win);
 
             uint32 rights = CAP_R_READ | CAP_R_WRITE | CAP_R_CLOSE;
             cap_t cap;
@@ -2820,13 +2928,17 @@ uint32 syscall_dispatch(regs_t* regs) {
             }
 
             user_gui_t* e = user_gui_get(handle);
-            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
             char* new_title = kstrdup_bounded(title_tmp, sizeof(title_tmp) - 1);
             if (!new_title) { regs->eax = (uint32)-1; break; }
             if (e->title) free(e->title);
             e->title = new_title;
-            tile_set_title_status(e->tile_idx, e->title, e->status_left, NULL);
-            tile_invalidate_decorations(e->tile_idx);
+            if (e->is_floating) {
+                wm_set_title_status(e->win_id, e->title, e->status_left, NULL);
+            } else {
+                tile_set_title_status(e->tile_idx, e->title, e->status_left, NULL);
+                tile_invalidate_decorations(e->tile_idx);
+            }
             regs->eax = 0;
             break;
         }
@@ -2892,6 +3004,7 @@ uint32 syscall_dispatch(regs_t* regs) {
 
             tile_set_title_status(tile_idx, e->title, e->status_left, NULL);
             tile_register_gui_client2(tile_idx, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)0);
+            tile_register_gui_close_cb(tile_idx, user_gui_close_cb);
             tile_invalidate_decorations(tile_idx);
             tile_invalidate_gui(tile_idx);
             regs->eax = 0;
@@ -2954,6 +3067,7 @@ uint32 syscall_dispatch(regs_t* regs) {
 
             tile_set_title_status(tile_idx, e->title, e->status_left, NULL);
             tile_register_gui_client2(tile_idx, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)0);
+            tile_register_gui_close_cb(tile_idx, user_gui_close_cb);
             tile_invalidate_decorations(tile_idx);
             tile_invalidate_gui(tile_idx);
 
@@ -2977,7 +3091,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             // gui_begin(handle)
             int handle = (int)arg1;
             user_gui_t* e = user_gui_get(handle);
-            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
             e->cmd_count = 0;
             e->frame_pending = 1;
             regs->eax = 0;
@@ -2990,7 +3104,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             int handle = (int)arg1;
             const void* user_rgb = (const void*)arg2;
             user_gui_t* e = user_gui_get(handle);
-            if (!e || e->tile_idx < 0 || !user_rgb) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_rgb) { regs->eax = (uint32)-1; break; }
             typedef struct { uint8 r, g, b, _pad; } rgb_t;
             rgb_t rgb;
             if (copyin(&rgb, user_rgb, sizeof(rgb)) != 0) { regs->eax = (uint32)-1; break; }
@@ -3012,7 +3126,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             int handle = (int)arg1;
             const void* user_rect = (const void*)arg2;
             user_gui_t* e = user_gui_get(handle);
-            if (!e || e->tile_idx < 0 || !user_rect) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_rect) { regs->eax = (uint32)-1; break; }
             typedef struct { int32 x, y, w, h; uint8 r, g, b, _pad; } rect_t;
             rect_t rect;
             if (copyin(&rect, user_rect, sizeof(rect)) != 0) { regs->eax = (uint32)-1; break; }
@@ -3038,7 +3152,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             int handle = (int)arg1;
             const void* user_cmd = (const void*)arg2;
             user_gui_t* e = user_gui_get(handle);
-            if (!e || e->tile_idx < 0 || !user_cmd) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_cmd) { regs->eax = (uint32)-1; break; }
             typedef struct { int32 x, y; uint8 r, g, b, _pad; const char* text; } textcmd_t;
             textcmd_t t;
             if (copyin(&t, user_cmd, sizeof(t)) != 0) { regs->eax = (uint32)-1; break; }
@@ -3067,7 +3181,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             int handle = (int)arg1;
             const void* user_cmd = (const void*)arg2;
             user_gui_t* e = user_gui_get(handle);
-            if (!e || e->tile_idx < 0 || !user_cmd) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_cmd) { regs->eax = (uint32)-1; break; }
             typedef struct { int32 x1, y1, x2, y2; uint8 r, g, b, _pad; } linecmd_t;
             linecmd_t l;
             if (copyin(&l, user_cmd, sizeof(l)) != 0) { regs->eax = (uint32)-1; break; }
@@ -3086,17 +3200,157 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = 0;
             break;
         }
+        case SYSCALL_GUI_DRAW_ICON: {
+            /*
+             * gui_draw_icon(handle, icon_cmd_ptr)
+             *
+             * Appends a USER_GUI_CMD_ICON to the command buffer.
+             * The icon name (e.g. "file_c", "dir_empty") is copied into
+             * the text[64] field; x,y give the draw position.
+             */
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE))
+                { regs->eax = (uint32)-1; break; }
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            const void* user_cmd = (const void*)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!user_gui_active(e) || !user_cmd)
+                { regs->eax = (uint32)-1; break; }
+            typedef struct { int32 x, y; const char* icon_name; } iconcmd_t;
+            iconcmd_t ic;
+            if (copyin(&ic, user_cmd, sizeof(ic)) != 0)
+                { regs->eax = (uint32)-1; break; }
+            if (!ic.icon_name)
+                { regs->eax = (uint32)-1; break; }
+            if (e->cmd_count >= (int)(sizeof(e->cmds) / sizeof(e->cmds[0])))
+                { regs->eax = (uint32)-1; break; }
+            user_gui_cmd_t* c = &e->cmds[e->cmd_count++];
+            memset(c, 0, sizeof(*c));
+            c->type = USER_GUI_CMD_ICON;
+            c->x = (int)ic.x;
+            c->y = (int)ic.y;
+            if (copyin_cstr(c->text, sizeof(c->text), ic.icon_name) != 0)
+                c->text[0] = '\0';
+            e->frame_pending = 1;
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_GUI_OUTLINE_RECT: {
+            /*
+             * gui_outline_rect(handle, rect_ptr)
+             *
+             * Draws a 1-pixel outlined rectangle (no fill).
+             * Uses the same rect_t layout as FILL_RECT.
+             */
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE))
+                { regs->eax = (uint32)-1; break; }
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            const void* user_rect = (const void*)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!user_gui_active(e) || !user_rect)
+                { regs->eax = (uint32)-1; break; }
+            typedef struct { int32 x, y, w, h; uint8 r, g, b, _pad; } rect_t;
+            rect_t rect;
+            if (copyin(&rect, user_rect, sizeof(rect)) != 0)
+                { regs->eax = (uint32)-1; break; }
+            if (e->cmd_count >= (int)(sizeof(e->cmds) / sizeof(e->cmds[0])))
+                { regs->eax = (uint32)-1; break; }
+            user_gui_cmd_t* c = &e->cmds[e->cmd_count++];
+            memset(c, 0, sizeof(*c));
+            c->type = USER_GUI_CMD_OUTLINE_RECT;
+            c->x = (int)rect.x;
+            c->y = (int)rect.y;
+            c->w = (int)rect.w;
+            c->h = (int)rect.h;
+            c->r = rect.r;
+            c->g = rect.g;
+            c->b = rect.b;
+            e->frame_pending = 1;
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_GUI_DRAW_CHAR: {
+            /*
+             * gui_draw_char(handle, charcmd_ptr)
+             *
+             * Draws a single character at pixel position (x,y) with the GUI's
+             * current font. More efficient than gui_draw_text for single chars
+             * because it avoids string copy overhead.
+             * charcmd_t: { int32 x, y, ch; uint8 r, g, b, _pad; }
+             */
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE))
+                { regs->eax = (uint32)-1; break; }
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            const void* user_cmd = (const void*)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!user_gui_active(e) || !user_cmd)
+                { regs->eax = (uint32)-1; break; }
+            typedef struct { int32 x, y, ch; uint8 r, g, b, _pad; } charcmd_t;
+            charcmd_t cc;
+            if (copyin(&cc, user_cmd, sizeof(cc)) != 0)
+                { regs->eax = (uint32)-1; break; }
+            if (e->cmd_count >= (int)(sizeof(e->cmds) / sizeof(e->cmds[0])))
+                { regs->eax = (uint32)-1; break; }
+            user_gui_cmd_t* c = &e->cmds[e->cmd_count++];
+            memset(c, 0, sizeof(*c));
+            c->type = USER_GUI_CMD_CHAR;
+            c->x = (int)cc.x;
+            c->y = (int)cc.y;
+            c->w = (int)cc.ch;   /* reuse w field for character codepoint */
+            c->r = cc.r;
+            c->g = cc.g;
+            c->b = cc.b;
+            e->frame_pending = 1;
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_GUI_GET_FONT_METRICS: {
+            /*
+             * gui_get_font_metrics(handle, out_metrics_ptr)
+             *
+             * Returns the cell width and height (in pixels) of the GUI's current
+             * font, enabling userland to perform accurate text layout.
+             * metrics_t: { int32 char_w, char_h; }
+             */
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE))
+                { regs->eax = (uint32)-1; break; }
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            void* user_out = (void*)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!user_gui_active(e) || !user_out)
+                { regs->eax = (uint32)-1; break; }
+            typedef struct { int32 char_w, char_h; } font_metrics_t;
+            font_metrics_t m;
+            /*
+             * The font system uses 8px-wide glyphs. Height depends on the
+             * loaded .hex font: 8 for built-in or 8x8 .hex, 16 for 8x16 .hex.
+             * vga_font_glyph_height() returns the active height for a handle.
+             */
+            m.char_w = 8;
+            m.char_h = (int32)vga_font_glyph_height(e->font_handle);
+            if (m.char_h <= 0) m.char_h = 8; /* fallback for built-in */
+            if (copyout(user_out, &m, sizeof(m)) != 0)
+                { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
         case SYSCALL_GUI_PRESENT: {
             if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
             // gui_present(handle)
             int handle = (int)arg1;
             user_gui_t* e = user_gui_get(handle);
-            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
-            tile_invalidate_gui(e->tile_idx);
-            // If the main tiler loop is blocked by a running ring3 task, render
-            // a single frame now so GUI updates appear without input events.
-            tile_render_once();
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
+            if (e->is_floating) {
+                wm_invalidate_window(e->win_id);
+            } else {
+                tile_invalidate_gui(e->tile_idx);
+                /* Render a single frame now so GUI updates appear without input events. */
+                tile_render_once();
+            }
             e->frame_pending = 0;
             regs->eax = 0;
             break;
@@ -3109,10 +3363,14 @@ uint32 syscall_dispatch(regs_t* regs) {
             int handle = (int)arg1;
             void* user_out = (void*)arg2;
             user_gui_t* e = user_gui_get(handle);
-            if (!e || e->tile_idx < 0 || !user_out) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_out) { regs->eax = (uint32)-1; break; }
 
             int cx = 0, cy = 0, cw = 0, ch = 0;
-            tile_get_content_rect(e->tile_idx, &cx, &cy, &cw, &ch);
+            if (e->is_floating) {
+                wm_get_content_rect(e->win_id, &cx, &cy, &cw, &ch);
+            } else {
+                tile_get_content_rect(e->tile_idx, &cx, &cy, &cw, &ch);
+            }
             typedef struct { int32 w, h; } gui_size_t;
             gui_size_t s;
             s.w = (int32)cw;
@@ -3128,7 +3386,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             int handle = (int)arg1;
             const char* user_path = (const char*)arg2;
             user_gui_t* e = user_gui_get(handle);
-            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
 
             int new_font = vga_system_font_acquire();
             if (user_path) {
@@ -3161,8 +3419,12 @@ uint32 syscall_dispatch(regs_t* regs) {
             int handle = (int)arg1;
             int enabled = (int)arg2;
             user_gui_t* e = user_gui_get(handle);
-            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
-            tile_set_gui_continuous_redraw(e->tile_idx, enabled ? 1 : 0);
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
+            if (e->is_floating) {
+                wm_set_continuous_redraw(e->win_id, enabled ? 1 : 0);
+            } else {
+                tile_set_gui_continuous_redraw(e->tile_idx, enabled ? 1 : 0);
+            }
             regs->eax = 0;
             break;
         }
@@ -3173,7 +3435,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             int handle = (int)arg1;
             const void* user_cmd = (const void*)arg2;
             user_gui_t* e = user_gui_get(handle);
-            if (!e || e->tile_idx < 0 || !user_cmd) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_cmd) { regs->eax = (uint32)-1; break; }
 
             typedef struct {
                 int32 src_w;
@@ -3251,7 +3513,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
-            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
             e->cmd_count = 0;
             e->frame_pending = 1;
             regs->eax = 0;
@@ -3264,7 +3526,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
-            if (!e || e->tile_idx < 0 || !user_rgb) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_rgb) { regs->eax = (uint32)-1; break; }
             typedef struct { uint8 r, g, b, _pad; } rgb_t;
             rgb_t rgb;
             if (copyin(&rgb, user_rgb, sizeof(rgb)) != 0) { regs->eax = (uint32)-1; break; }
@@ -3286,7 +3548,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
-            if (!e || e->tile_idx < 0 || !user_rect) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_rect) { regs->eax = (uint32)-1; break; }
             typedef struct { int32 x, y, w, h; uint8 r, g, b, _pad; } rect_t;
             rect_t rect;
             if (copyin(&rect, user_rect, sizeof(rect)) != 0) { regs->eax = (uint32)-1; break; }
@@ -3312,7 +3574,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
-            if (!e || e->tile_idx < 0 || !user_cmd) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_cmd) { regs->eax = (uint32)-1; break; }
             typedef struct { int32 x, y; uint8 r, g, b, _pad; const char* text; } textcmd_t;
             textcmd_t t;
             if (copyin(&t, user_cmd, sizeof(t)) != 0) { regs->eax = (uint32)-1; break; }
@@ -3340,7 +3602,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
-            if (!e || e->tile_idx < 0 || !user_cmd) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_cmd) { regs->eax = (uint32)-1; break; }
             typedef struct { int32 x1, y1, x2, y2; uint8 r, g, b, _pad; } linecmd_t;
             linecmd_t l;
             if (copyin(&l, user_cmd, sizeof(l)) != 0) { regs->eax = (uint32)-1; break; }
@@ -3365,9 +3627,13 @@ uint32 syscall_dispatch(regs_t* regs) {
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
-            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
-            tile_invalidate_gui(e->tile_idx);
-            tile_render_once();
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
+            if (e->is_floating) {
+                wm_invalidate_window(e->win_id);
+            } else {
+                tile_invalidate_gui(e->tile_idx);
+                tile_render_once();
+            }
             e->frame_pending = 0;
             regs->eax = 0;
             break;
@@ -3379,10 +3645,14 @@ uint32 syscall_dispatch(regs_t* regs) {
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_READ, NULL);
-            if (!e || e->tile_idx < 0 || !user_out) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_out) { regs->eax = (uint32)-1; break; }
 
             int cx = 0, cy = 0, cw = 0, ch = 0;
-            tile_get_content_rect(e->tile_idx, &cx, &cy, &cw, &ch);
+            if (e->is_floating) {
+                wm_get_content_rect(e->win_id, &cx, &cy, &cw, &ch);
+            } else {
+                tile_get_content_rect(e->tile_idx, &cx, &cy, &cw, &ch);
+            }
             typedef struct { int32 w, h; } gui_size_t;
             gui_size_t s;
             s.w = (int32)cw;
@@ -3402,7 +3672,7 @@ uint32 syscall_dispatch(regs_t* regs) {
 
             int handle = -1;
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, &handle);
-            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
 
             char title_tmp[96];
             if (copyin_cstr(title_tmp, sizeof(title_tmp), user_title) != 0) { regs->eax = (uint32)-1; break; }
@@ -3428,8 +3698,12 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (!new_title) { regs->eax = (uint32)-1; break; }
             if (e->title) free(e->title);
             e->title = new_title;
-            tile_set_title_status(e->tile_idx, e->title, e->status_left, NULL);
-            tile_invalidate_decorations(e->tile_idx);
+            if (e->is_floating) {
+                wm_set_title_status(e->win_id, e->title, e->status_left, NULL);
+            } else {
+                tile_set_title_status(e->tile_idx, e->title, e->status_left, NULL);
+                tile_invalidate_decorations(e->tile_idx);
+            }
             regs->eax = 0;
             break;
         }
@@ -3440,7 +3714,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
-            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
 
             int new_font = vga_system_font_acquire();
             if (user_path) {
@@ -3473,8 +3747,12 @@ uint32 syscall_dispatch(regs_t* regs) {
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
-            if (!e || e->tile_idx < 0) { regs->eax = (uint32)-1; break; }
-            tile_set_gui_continuous_redraw(e->tile_idx, enabled ? 1 : 0);
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
+            if (e->is_floating) {
+                wm_set_continuous_redraw(e->win_id, enabled ? 1 : 0);
+            } else {
+                tile_set_gui_continuous_redraw(e->tile_idx, enabled ? 1 : 0);
+            }
             regs->eax = 0;
             break;
         }
@@ -3485,7 +3763,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             cap_t cap;
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
-            if (!e || e->tile_idx < 0 || !user_cmd) { regs->eax = (uint32)-1; break; }
+            if (!user_gui_active(e) || !user_cmd) { regs->eax = (uint32)-1; break; }
 
             typedef struct {
                 int32 src_w;

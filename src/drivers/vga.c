@@ -90,6 +90,10 @@ static uint8 vga_font_glyph_h_or_builtin(int handle) {
 	return (uint8)VGA_FONT_GLYPH_H_16;
 }
 
+int vga_font_glyph_height(int font_handle) {
+	return (int)vga_font_glyph_h_or_builtin(font_handle);
+}
+
 static void vga_try_init_system_font(void) {
 	if (g_vga_system_font_attempted) return;
 	if (g_vga_system_font_path[0] == '\0') return;

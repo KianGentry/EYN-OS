@@ -26,6 +26,8 @@ int fflush(FILE* f);
 int vfprintf(FILE* f, const char* fmt, va_list ap);
 int fprintf(FILE* f, const char* fmt, ...);
 int printf(const char* fmt, ...);
+int vsnprintf(char* buf, size_t sz, const char* fmt, va_list ap);
+int snprintf(char* buf, size_t sz, const char* fmt, ...);
 
 // GNU-style; used by chibicc for buffering.
 FILE* open_memstream(char** bufp, size_t* sizep);

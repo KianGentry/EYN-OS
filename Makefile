@@ -54,7 +54,7 @@ QEMU_DISPLAY ?= gtk,grab-on-hover=on
 QEMU_ENV ?= GDK_BACKEND=x11
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/mem386.o obj/slab.o obj/shell.o obj/shell_args.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/write_editor.o obj/tui.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/alias.o obj/predictive_memory.o obj/zero_copy.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/vfs.o obj/panic.o obj/watchdog.o obj/capabilities.o obj/segdom.o obj/crashlog.o obj/context.o obj/fs_txn.o obj/linux_syscalls.o
+OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/mem386.o obj/slab.o obj/shell.o obj/shell_args.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/tui.o obj/run_command.o obj/shell_script.o obj/history.o obj/alias.o obj/predictive_memory.o obj/zero_copy.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/vfs.o obj/panic.o obj/watchdog.o obj/capabilities.o obj/segdom.o obj/crashlog.o obj/context.o obj/fs_txn.o obj/linux_syscalls.o
 
 OBJS += obj/tiling_manager.o obj/ui_prefs.o
 OBJS += obj/terminals.o
@@ -201,12 +201,6 @@ obj/rei.o:src/drivers/rei.c
 obj/reiv.o:src/drivers/reiv.c
 	$(COMPILER) $(CFLAGS) src/drivers/reiv.c -o obj/reiv.o
 
-#obj/fs_commands.o:src/utilities/shell/fs_commands.c
-#	$(COMPILER) $(CFLAGS) src/utilities/shell/fs_commands.c -o obj/fs_commands.o
-
-obj/write_editor.o:src/utilities/shell/write_editor.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/write_editor.c -o obj/write_editor.o
-
 obj/run_command.o:src/utilities/shell/run_command.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/run_command.c -o obj/run_command.o
 
@@ -238,9 +232,6 @@ obj/vfs.o:src/fs/vfs.c
 
 obj/linux_syscalls.o:src/cpu/linux_syscalls.c
 	$(COMPILER) $(CFLAGS) src/cpu/linux_syscalls.c -o obj/linux_syscalls.o
-
-obj/subcommands.o:src/utilities/shell/subcommands.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/subcommands.c -o obj/subcommands.o
 
 obj/predictive_memory.o:src/utilities/predictive_memory.c
 	$(COMPILER) $(CFLAGS) src/utilities/predictive_memory.c -o obj/predictive_memory.o
@@ -299,6 +290,18 @@ eynfsimg:
 	python3 devtools/create_partitioned_disk.py eynfs.img
 	python3 devtools/copy_testdir_to_eynfs.py testdir/
 
+# Rebuild all userland C programs from source in testdir/code/.
+# Run this after editing any *_uelf.c file, then run 'make build'.
+# Usage: make userland
+.PHONY: userland
+userland:
+	@for src in testdir/code/*_uelf.c; do \
+		name=$$(basename "$$src" _uelf.c); \
+		out="testdir/binaries/$$name"; \
+		echo "Building $$name ..."; \
+		bash devtools/build_user_c.sh "$$src" "$$out" || true; \
+	done
+
 # Legacy non-partitioned disk image (for testing/compatibility)
 eynfsimg-legacy:
 	rm -f eynfs.img
@@ -354,11 +357,16 @@ qemu-gdb: build
 # Just runs the OS, no rebuilding.
 
 test: testimg
-	qemu-system-i386 -cdrom EYNOS.iso \
-	-hda eynfs.img \
-	-hdb testimg.img \
+	$(QEMU_ENV) qemu-system-i386 -cdrom EYNOS.iso \
+	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
-	-m 64M
+	-display $(QEMU_DISPLAY) \
+	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
+	-device e1000,netdev=net0 \
+	-serial stdio \
+	-d int,cpu_reset -D tmp/qemu-debug.log \
+	-no-reboot -no-shutdown \
+	-m 9M
 
 # Create a FAT32 disk image for testing (requires mkfs.vfat from dosfstools)
 fat32img:

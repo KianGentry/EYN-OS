@@ -708,7 +708,7 @@ static void handle_main_key(app_t* app, int key) {
     if (!app) return;
     unsigned ch = (unsigned)key & 0xFFu;
 
-    if (ch == 19u) {
+    if (ch == 19u || key == 0x2001) {
         (void)save_canvas_rei(app);
         return;
     }
@@ -817,6 +817,10 @@ int main(int argc, char** argv) {
                     handle_exit_confirm_key(&app, ev.a);
                 } else {
                     handle_main_key(&app, ev.a);
+                }
+            } else if (ev.type == GUI_EVENT_CLOSE) {
+                if (app.modal == MODAL_NONE) {
+                    request_exit(&app);
                 }
             } else if (ev.type == GUI_EVENT_MOUSE) {
                 if (app.modal == MODAL_NONE) {

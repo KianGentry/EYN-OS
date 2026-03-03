@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-01 12:05:17
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-03 14:29:59
 
-**Total Commands:** 76
+**Total Commands:** 78
 
 ## Table of Contents
 
@@ -272,22 +272,6 @@ tail -n 10 /test.txt
 
 ---
 
-### write
-
-**Binary:** `testdir/binaries/write`
-
-**Metadata Source:** `testdir/code/write_uelf.c`
-
-**Description:**
-Open GUI text editor.
-
-**Example:**
-```bash
-write <filename>
-```
-
----
-
 ## System Commands
 
 ### clear
@@ -340,7 +324,7 @@ exit
 
 ### help
 
-**Binary:** `testdir/binaries/help.uelf`
+**Binary:** `testdir/binaries/help`
 
 **Metadata Source:** `testdir/code/help_uelf.c`
 
@@ -1036,6 +1020,22 @@ echo hello world
 
 ---
 
+### edit
+
+**Binary:** `testdir/binaries/edit`
+
+**Metadata Source:** `testdir/code/edit_uelf.c`
+
+**Description:**
+Graphical text editor.
+
+**Example:**
+```bash
+edit [/path/to/file]
+```
+
+---
+
 ### fdisk
 
 **Binary:** `testdir/binaries/fdisk`
@@ -1056,14 +1056,14 @@ fdisk
 
 **Binary:** `testdir/binaries/files`
 
-**Metadata Source:** `testdir/code/(metadata not found)`
+**Metadata Source:** `testdir/code/files_uelf.c`
 
 **Description:**
-Run the files command.
+Graphical file explorer.
 
 **Example:**
 ```bash
-files
+files [/path]
 ```
 
 ---
@@ -1080,6 +1080,22 @@ Run the format command.
 **Example:**
 ```bash
 format
+```
+
+---
+
+### gui_demo
+
+**Binary:** `testdir/binaries/gui_demo`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the gui_demo command.
+
+**Example:**
+```bash
+gui_demo
 ```
 
 ---
@@ -1128,6 +1144,22 @@ List background jobs.
 **Example:**
 ```bash
 jobs
+```
+
+---
+
+### list
+
+**Binary:** `testdir/binaries/list`
+
+**Metadata Source:** `testdir/code/list_uelf.c`
+
+**Description:**
+List directory entries with terminal icons.
+
+**Example:**
+```bash
+list [path]
 ```
 
 ---
@@ -1248,11 +1280,11 @@ tiling
 
 | Category | Count |
 |----------|-------|
-| Filesystem Commands | 17 |
+| Filesystem Commands | 16 |
 | System Commands | 9 |
 | Network Commands | 6 |
 | Memory Commands | 7 |
 | GUI/Window Commands | 10 |
 | Development Commands | 10 |
-| Utility Commands | 17 |
+| Utility Commands | 20 |
 

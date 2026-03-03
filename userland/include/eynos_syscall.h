@@ -150,6 +150,18 @@ enum {
     EYN_SYSCALL_PANIC = 102,
     EYN_SYSCALL_PF = 103,
     EYN_SYSCALL_RING3 = 104,
+
+    // GUI icon drawing — renders a named icon from the kernel-side icon cache
+    EYN_SYSCALL_GUI_DRAW_ICON = 105,
+
+    // GUI outlined rectangle (1px border, no fill)
+    EYN_SYSCALL_GUI_OUTLINE_RECT = 106,
+
+    // GUI single-character draw (more efficient than draw_text for per-char rendering)
+    EYN_SYSCALL_GUI_DRAW_CHAR = 107,
+
+    // GUI font metrics query (returns char width and height in pixels)
+    EYN_SYSCALL_GUI_GET_FONT_METRICS = 108,
 };
 
 typedef struct {

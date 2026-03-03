@@ -314,6 +314,10 @@ int mouse_read_event(mouse_event_t* event) {
     event->buttons = g_mouse_state.buttons;
     event->button_changes = g_mouse_state.buttons ^ g_mouse_state.prev_buttons;
     
+    // Consume the button transition so that subsequent reads within the
+    // same hardware-interrupt cycle see button_changes == 0 (no repeat).
+    g_mouse_state.prev_buttons = g_mouse_state.buttons;
+
     // Clear deltas after reading
     g_mouse_state.delta_x = 0;
     g_mouse_state.delta_y = 0;

@@ -825,6 +825,11 @@ int main(int argc, char** argv) {
 
         gui_event_t ev;
         while (gui_poll_event(app.handle, &ev) > 0) {
+            if (ev.type == GUI_EVENT_CLOSE) {
+                app.running = 0;
+                break;
+            }
+
             if (ev.type == GUI_EVENT_KEY) {
                 int base = ev.a & 0x0FFF;
                 unsigned ch = (unsigned)ev.a & 0xFFu;

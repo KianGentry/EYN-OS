@@ -83,11 +83,23 @@ void wm_register_gui_client2(int win_id,
 	void* userdata);
 void wm_unregister_gui_client(int win_id);
 
+/*
+ * Register an optional close-request callback for a floating window.
+ * If the callback returns 0, the close is vetoed (the user program should
+ * call exit() when ready). If it returns non-zero (or is NULL), the window
+ * closes immediately. Mirrors tile_register_gui_close_cb semantics.
+ */
+void wm_register_gui_close_cb(int win_id, tile_gui_close_cb close_cb);
+
 // Update window title/status
 void wm_set_title_status(int win_id, const char* title, const char* status_left, const char* status_right);
 
 // Mark window content dirty to force redraw next frame
 void wm_invalidate_window(int win_id);
+
+// Get the content rectangle (inside decoration chrome) for a floating window.
+// Output coordinates are in screen pixels; all outputs default to 0 on invalid win_id.
+void wm_get_content_rect(int win_id, int* cx, int* cy, int* cw, int* ch);
 
 // When enabled, the tiler will redraw this window every frame (subject to global FPS cap).
 void wm_set_continuous_redraw(int win_id, int enabled);
@@ -115,6 +127,15 @@ int tile_begin_set_background_from_rei(int tile_idx, rei_image_t* image);
 
 // Clear any configured background image for the given tile (no-op if none).
 void tile_clear_background(int tile_idx);
+
+/*
+ * Draw a file-type icon by name at pixel position (x, y).
+ *
+ * icon_name: base name of the icon, e.g. "file_c", "dir_empty", "file_none".
+ * Icons are loaded from /icons16/ (or /icons/ as fallback) and cached.
+ * If the icon is not found, nothing is drawn.
+ */
+void tile_draw_file_icon(const char* icon_name, int x, int y);
 
 // --- Theme (window/tile chrome) ---
 typedef struct {

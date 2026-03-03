@@ -40,6 +40,11 @@ int vga_font_acquire_hex(uint8 drive, const char* path);
 // Release a previously-acquired font handle (safe no-op for handle <= 0).
 void vga_font_release(int font_handle);
 
+// Return the glyph height (in pixels) of a font handle.
+// Returns 8 for built-in/8x8 fonts, 16 for 8x16 fonts.
+// Safe for handle <= 0 (returns 8).
+int vga_font_glyph_height(int font_handle);
+
 // Acquire the system default font handle (refcounted). Returns >0 when the
 // configured system font is available; returns 0 to indicate the built-in
 // fallback should be used.

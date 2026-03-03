@@ -182,6 +182,7 @@ int main(int argc, char** argv) {
     while (running) {
         gui_event_t ev;
         while (gui_poll_event(h, &ev) > 0) {
+            if (ev.type == GUI_EVENT_CLOSE) { running = 0; break; }
             if (ev.type == GUI_EVENT_KEY && (ev.a == 27 || ev.a == 'q' || ev.a == 'Q')) running = 0;
         }
 

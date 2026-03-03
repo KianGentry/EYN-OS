@@ -1,3 +1,4 @@
+#include <system.h>
 // Allow safely re-entering the tiling-manager loop after aborting a user task.
 static int g_tm_initialized = 0;
 #include <misc/types.h>
@@ -18,6 +19,7 @@ static int g_tm_initialized = 0;
 #include <network/netstack.h>
 #include <drivers/e1000.h>
 #include <context.h>
+#include <utilities/shell/shell.h>
 
 extern uint8_t g_current_drive;
 
@@ -42,6 +44,7 @@ static void tm_ctx_account(uint32 cost) {
 
 #define MAX_TILES 4
 #define MAX_WINDOWS 8
+#define PROG_NAME_MAX 20
 
 // Provided by the bootloader; used for framebuffer size and memory totals
 extern multiboot_info_t* g_mbi;
@@ -67,6 +70,10 @@ typedef struct {
     const char* last_status_right_ptr;
     int last_focused;
     int last_show_status;
+    int minimized;
+    int maximized;
+    int prev_x, prev_y, prev_w, prev_h;
+    int desktop;             /* which virtual desktop this tile belongs to */
 } tile_t;
 
 static tile_t tiles[MAX_TILES];
@@ -80,6 +87,24 @@ static int g_tile_scroll_tick = 0;
 static int g_force_full_redraw = 1;
 // Fullscreen state: -1 means normal, otherwise index of tile that is fullscreened
 static int fullscreen_tile = -1;
+
+static int tile_find_first_visible(void) {
+    for (int i = 0; i < tile_count; ++i) {
+        if (tiles[i].type != TILE_EMPTY && !tiles[i].minimized) return i;
+    }
+    return -1;
+}
+
+static void tile_ensure_valid_focus(void) {
+    if (tile_count <= 0) {
+        focused = 0;
+        return;
+    }
+    if (focused < 0 || focused >= tile_count || tiles[focused].type == TILE_EMPTY || tiles[focused].minimized) {
+        int vis = tile_find_first_visible();
+        focused = (vis >= 0) ? vis : 0;
+    }
+}
 
 // --- Status bar overlay (Alt-held) ---
 static inline int status_bar_height_px(void) {
@@ -366,12 +391,12 @@ static rei_image_t g_max_icon_unf;
 static int g_max_icon_unf_loaded = 0;
 
 // --- Runtime theme (tile/window chrome colors) ---
+// Materia-inspired gray palette: neutral mid-grays for chrome, white text/icons.
 static wm_theme_t g_wm_theme = {
-    // Default: darker gray chrome
-    .title_focused_r = 96, .title_focused_g = 96, .title_focused_b = 96,
-    .title_unfocused_r = 64, .title_unfocused_g = 64, .title_unfocused_b = 64,
-    .status_r = 32, .status_g = 32, .status_b = 32,
-    .status_text_r = 255, .status_text_g = 255, .status_text_b = 255,
+    .title_focused_r = 66, .title_focused_g = 66, .title_focused_b = 66,
+    .title_unfocused_r = 48, .title_unfocused_g = 48, .title_unfocused_b = 48,
+    .status_r = 38, .status_g = 38, .status_b = 38,
+    .status_text_r = 222, .status_text_g = 222, .status_text_b = 222,
 };
 
 void wm_theme_get(wm_theme_t* out) {
@@ -387,10 +412,10 @@ void wm_theme_set(const wm_theme_t* in) {
 }
 
 void wm_theme_reset_defaults(void) {
-    g_wm_theme.title_focused_r = 96; g_wm_theme.title_focused_g = 96; g_wm_theme.title_focused_b = 96;
-    g_wm_theme.title_unfocused_r = 64; g_wm_theme.title_unfocused_g = 64; g_wm_theme.title_unfocused_b = 64;
-    g_wm_theme.status_r = 32; g_wm_theme.status_g = 32; g_wm_theme.status_b = 32;
-    g_wm_theme.status_text_r = 255; g_wm_theme.status_text_g = 255; g_wm_theme.status_text_b = 255;
+    g_wm_theme.title_focused_r = 66; g_wm_theme.title_focused_g = 66; g_wm_theme.title_focused_b = 66;
+    g_wm_theme.title_unfocused_r = 48; g_wm_theme.title_unfocused_g = 48; g_wm_theme.title_unfocused_b = 48;
+    g_wm_theme.status_r = 38; g_wm_theme.status_g = 38; g_wm_theme.status_b = 38;
+    g_wm_theme.status_text_r = 222; g_wm_theme.status_text_g = 222; g_wm_theme.status_text_b = 222;
     g_force_full_redraw = 1;
 }
 
@@ -502,6 +527,7 @@ typedef struct {
     tile_gui_draw_cb draw_cb;
     tile_gui_key_cb key_cb;
     tile_gui_mouse_cb mouse_cb;
+    tile_gui_close_cb close_cb;
     void* userdata;
     int needs_redraw;
     int continuous_redraw;
@@ -509,12 +535,32 @@ typedef struct {
     int minimized;
     int maximized;
     int prev_x, prev_y, prev_w, prev_h; // for restore after maximize
+    int desktop;             // which virtual desktop this window belongs to
 } window_t;
 
 static window_t g_windows[MAX_WINDOWS];
 static int g_window_order[MAX_WINDOWS]; // z-order back->front indices into g_windows
 static int g_window_count = 0;
 static int g_win_focused = -1; // index into g_windows, not order array
+
+/*
+ * Desktop switcher state (declared early so helper functions like
+ * wm_hit_test and tile_index_at can filter by the active desktop).
+ */
+#define MAX_DESKTOPS 4
+static int g_current_desktop = 0;
+static int g_desktop_count   = 2;  // start with 2 virtual desktops
+
+/*
+ * Right-click context menu state (declared early so draw_ctx_menu
+ * can reference it from its definition site near the other modals).
+ */
+static int  g_ctx_active = 0;
+static int  g_ctx_x = 0, g_ctx_y = 0;
+static int  g_ctx_kind = 0;
+static int  g_ctx_index = -1;
+static int  g_ctx_hover = -1;
+#define CTX_ITEM_COUNT 3
 
 static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -698,11 +744,6 @@ static rei_image_t* load_icon_for_ext_mode(const char* ext, int want16) {
     return NULL;
 }
 
-static rei_image_t* load_icon_for_ext(const char* ext) {
-    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
-    return load_icon_for_ext_mode(ext, want16);
-}
-
 // Draw an REI image into the backbuffer at (x,y). Honor alpha for RGBA and use blending.
 static void draw_rei_at(const rei_image_t* im, int x, int y) {
     if (!im || !im->data) return;
@@ -731,6 +772,21 @@ static void draw_rei_at(const rei_image_t* im, int x, int y) {
     vga_mark_dirty_rect(x, y, w, h);
 }
 
+/*
+ * Draw a file-type icon at (x, y) by looking up the icon name
+ * (e.g. "file_c", "dir_empty") in the icon cache. If not cached,
+ * attempts to load from /icons16/ or /icons/.
+ * Called from user_gui_draw_cb (isr.c) for USER_GUI_CMD_ICON commands.
+ */
+void tile_draw_file_icon(const char* icon_name, int x, int y) {
+    if (!icon_name || !icon_name[0]) return;
+    int want16 = (vga_text_cell_h() >= 16) ? 1 : 0;
+    rei_image_t* im = load_icon_for_ext_mode(icon_name, want16);
+    if (im) {
+        draw_rei_at(im, x, y);
+    }
+}
+
 static void wm_draw_decor(window_t* w, int is_focused) {
     int cw = vga_text_cell_w();
     int fh = vga_text_cell_h();
@@ -746,21 +802,21 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         int title_color_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
         drawRect(w->x, w->y, w->w, th, title_color_r, title_color_g, title_color_b);
         if (w->title && w->title[0]) {
-            int len = strlen(w->title);
-            int max_chars = (w->w / cw) - 2; if (max_chars < 0) max_chars = 0;
-            int color_r = is_focused ? 255 : 0, color_g = is_focused ? 255 : 0, color_b = is_focused ? 255 : 0;
+            int len = (int)strlen(w->title);
+            int max_chars = (w->w - 12) / cw; if (max_chars < 0) max_chars = 0;
+            int color_r = is_focused ? 230 : 160, color_g = is_focused ? 230 : 160, color_b = is_focused ? 230 : 160;
             int text_y = w->y + (th - fh) / 2;
             if (len > max_chars) len = max_chars;
-            int start_x = w->x + 4;
+            int start_x = w->x + 6;
             for (int i = 0; i < len; ++i) drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], color_r, color_g, color_b);
         }
         (void)sh;
-        // border
-        int br = is_focused ? 120 : 60, bg = is_focused ? 120 : 60, bb = is_focused ? 80 : 60;
-        drawRect(w->x, w->y, w->w, 1, br, bg, bb);
-        drawRect(w->x, w->y + w->h - 1, w->w, 1, br, bg, bb);
-        drawRect(w->x, w->y, 1, w->h, br, bg, bb);
-        drawRect(w->x + w->w - 1, w->y, 1, w->h, br, bg, bb);
+        // border — Materia gray
+        int br = is_focused ? 80 : 56, bg2 = is_focused ? 80 : 56, bb = is_focused ? 80 : 56;
+        drawRect(w->x, w->y, w->w, 1, br, bg2, bb);
+        drawRect(w->x, w->y + w->h - 1, w->w, 1, br, bg2, bb);
+        drawRect(w->x, w->y, 1, w->h, br, bg2, bb);
+        drawRect(w->x + w->w - 1, w->y, 1, w->h, br, bg2, bb);
         return;
     }
     int th = win_title_height(w);
@@ -773,28 +829,21 @@ static void wm_draw_decor(window_t* w, int is_focused) {
     int title_color_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
     drawRect(w->x, w->y, w->w, th, title_color_r, title_color_g, title_color_b);
     if (w->title && w->title[0]) {
-        int len = strlen(w->title);
-        // Try to avoid drawing under the close button by shrinking max chars by ~2
-        int max_chars = (w->w / cw) - 2;
-        if (max_chars < 0) max_chars = 0;
+        int len = (int)strlen(w->title);
+        // Reserve space for the three titlebar buttons on the right
+        int btn_zone = 3 * 14 + 8; // approximate width for min+max+close
+        int avail_chars = (w->w - 8 - btn_zone) / cw;
+        if (avail_chars < 0) avail_chars = 0;
         int text_y = w->y + (th - fh) / 2;
-        int color_r = is_focused ? 255 : 0;
-        int color_g = is_focused ? 255 : 0;
-        int color_b = is_focused ? 255 : 0;
-        if (len <= max_chars) {
-            int start_x = w->x + (w->w - len * cw) / 2;
-            for (int i = 0; i < len; ++i) drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], color_r, color_g, color_b);
-        } else {
-            int window = max_chars;
-            int speed = 6;
-            int period = len + window;
-            int pos = (g_tile_scroll_tick / speed) % period;
-            for (int i = 0; i < window; ++i) {
-                int idx = pos + i; char ch = ' ';
-                if (idx < len) ch = w->title[idx]; else { int wrap = idx - len; if (wrap < len) ch = w->title[wrap]; }
-                drawCharAt(w->x + i * cw, text_y, (unsigned char)ch, color_r, color_g, color_b);
-            }
-        }
+        int color_r = is_focused ? 230 : 160;
+        int color_g = is_focused ? 230 : 160;
+        int color_b = is_focused ? 230 : 160;
+        // Left-aligned title (with small left padding)
+        int draw_len = len;
+        if (draw_len > avail_chars) draw_len = avail_chars;
+        int start_x = w->x + 6;
+        for (int i = 0; i < draw_len; ++i)
+            drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], color_r, color_g, color_b);
     }
     // Titlebar buttons (minimize, maximize, close) on the right
     if (th >= 12) {
@@ -861,12 +910,12 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         }
     }
     (void)sh;
-    // border
-    int br = is_focused ? 140 : 60, bg = is_focused ? 140 : 60, bb = is_focused ? 90 : 60;
-    drawRect(w->x, w->y, w->w, 1, br, bg, bb);
-    drawRect(w->x, w->y + w->h - 1, w->w, 1, br, bg, bb);
-    drawRect(w->x, w->y, 1, w->h, br, bg, bb);
-    drawRect(w->x + w->w - 1, w->y, 1, w->h, br, bg, bb);
+    // border — subtle gray, slightly brighter when focused
+    int br = is_focused ? 80 : 56, wbg = is_focused ? 80 : 56, bb = is_focused ? 80 : 56;
+    drawRect(w->x, w->y, w->w, 1, br, wbg, bb);
+    drawRect(w->x, w->y + w->h - 1, w->w, 1, br, wbg, bb);
+    drawRect(w->x, w->y, 1, w->h, br, wbg, bb);
+    drawRect(w->x + w->w - 1, w->y, 1, w->h, br, wbg, bb);
 }
 
 static void wm_get_close_rect(const window_t* w, int* rx, int* ry, int* rw, int* rh) {
@@ -1007,7 +1056,7 @@ static void wm_draw_content(window_t* w) {
     if (cw > 0 && ch > 0) {
         drawRect(cx, cy, cw, ch, 0, 0, 0);
         if (!w->minimized) {
-            if (w->draw_cb) w->draw_cb(-1, cx, cy, cw, ch, w->userdata);
+            if (w->draw_cb) w->draw_cb((int)(w - g_windows), cx, cy, cw, ch, w->userdata);
         }
         vga_mark_dirty_rect(cx, cy, cw, ch);
     }
@@ -1033,6 +1082,7 @@ static int wm_hit_test(int x, int y) {
     for (int oi = g_window_count - 1; oi >= 0; --oi) {
         int wi = g_window_order[oi];
         if (!g_windows[wi].used) continue;
+        if (g_windows[wi].desktop != g_current_desktop) continue;
         if (point_in_rect(x, y, g_windows[wi].x, g_windows[wi].y, g_windows[wi].w, g_windows[wi].h)) return wi;
     }
     return -1;
@@ -1072,6 +1122,37 @@ static int wm_resize_hit_test_edges(const window_t* w, int x, int y) {
     if (y < w->y + m) edges |= RESIZE_EDGE_T;
     if (y >= w->y + w->h - m) edges |= RESIZE_EDGE_B;
 
+    return edges;
+}
+
+/*
+ * tile_border_resize_hit_test — hit-test the edge/corner grab zones of a tile
+ * window, mirroring wm_resize_hit_test_edges() for floating windows.
+ *
+ * Returns a bitmask of RESIZE_EDGE_* flags, or 0 if the point is not inside
+ * any grab zone.  Only fires for non-maximized, non-minimized tiles; maximized
+ * tiles use the maximize-toggle button rather than border drag.
+ *
+ * Grab-zone geometry:
+ *   m      = 4 px band along each edge (single-axis resize)
+ *   corner = 10 px square at each corner (diagonal resize, larger target)
+ */
+static int tile_border_resize_hit_test(const tile_t* t, int x, int y) {
+    if (!t || t->type == TILE_EMPTY || t->minimized || t->maximized) return 0;
+    const int m = 4;
+    const int corner = 10;
+    if (!point_in_rect(x, y, t->x, t->y, t->width, t->height)) return 0;
+    /* Prefer diagonal corners — they give a larger, easier grab target. */
+    if (x < t->x + corner && y < t->y + corner) return RESIZE_EDGE_L | RESIZE_EDGE_T;
+    if (x >= t->x + t->width - corner && y < t->y + corner) return RESIZE_EDGE_R | RESIZE_EDGE_T;
+    if (x < t->x + corner && y >= t->y + t->height - corner) return RESIZE_EDGE_L | RESIZE_EDGE_B;
+    if (x >= t->x + t->width - corner && y >= t->y + t->height - corner) return RESIZE_EDGE_R | RESIZE_EDGE_B;
+    /* Single-axis edge strips */
+    int edges = 0;
+    if (x < t->x + m)               edges |= RESIZE_EDGE_L;
+    if (x >= t->x + t->width - m)   edges |= RESIZE_EDGE_R;
+    if (y < t->y + m)               edges |= RESIZE_EDGE_T;
+    if (y >= t->y + t->height - m)  edges |= RESIZE_EDGE_B;
     return edges;
 }
 
@@ -1132,13 +1213,40 @@ static int drag_active = 0;
 static int drag_win = -1;
 static int drag_off_x = 0, drag_off_y = 0;
 
+/*
+ * Tile titlebar drag: move an individual tile window by dragging its title bar.
+ *
+ * Invariant: tile.x/y are updated directly; layout_tiles() will not clobber
+ * them because it guards on (width==0 || height==0 || width==screen_w).
+ * Dragging is disallowed on maximized tiles (they use restore/unmaximize instead).
+ */
+static int tile_drag_active = 0;
+static int tile_drag_idx = -1;
+static int tile_drag_off_x = 0, tile_drag_off_y = 0;
+
+/*
+ * Tile border resize: resize an individual tile window by dragging an edge or
+ * corner grab zone.
+ *
+ * Invariant: operates on tile.width/height, which layout_tiles() leaves alone
+ * once they are non-zero and not equal to screen_w.  Disallowed on maximized
+ * tiles (use the maximize toggle instead).
+ */
+static int tile_border_resize_active = 0;
+static int tile_border_resize_idx = -1;
+static int tile_border_resize_edges = 0;
+static int tile_border_resize_start_mx = 0, tile_border_resize_start_my = 0;
+static int tile_border_resize_start_x = 0, tile_border_resize_start_y = 0;
+static int tile_border_resize_start_w = 0, tile_border_resize_start_h = 0;
+
 // Public APIs
 int wm_create_window(const char* title, int x, int y, int w, int h, const char* status_left) {
     for (int i = 0; i < MAX_WINDOWS; ++i) {
         if (!g_windows[i].used) {
             g_windows[i].used = 1;
+            int tb_h_clamp = vga_text_cell_h() + 6;
             g_windows[i].x = clampi(x, 0, screen_w - 32);
-            g_windows[i].y = clampi(y, 0, screen_h - 32);
+            g_windows[i].y = clampi(y, tb_h_clamp, screen_h - 32);
             g_windows[i].w = clampi(w, 64, screen_w);
             g_windows[i].h = clampi(h, 48, screen_h);
             g_windows[i].title = title ? title : "";
@@ -1147,6 +1255,7 @@ int wm_create_window(const char* title, int x, int y, int w, int h, const char* 
             g_windows[i].draw_cb = NULL;
             g_windows[i].key_cb = NULL;
             g_windows[i].mouse_cb = NULL;
+            g_windows[i].close_cb = NULL;
             g_windows[i].userdata = NULL;
             g_windows[i].needs_redraw = 1;
             g_windows[i].continuous_redraw = 0;
@@ -1156,6 +1265,7 @@ int wm_create_window(const char* title, int x, int y, int w, int h, const char* 
             g_windows[i].maximized = 0;
             g_windows[i].prev_x = g_windows[i].x; g_windows[i].prev_y = g_windows[i].y;
             g_windows[i].prev_w = g_windows[i].w; g_windows[i].prev_h = g_windows[i].h;
+            g_windows[i].desktop = g_current_desktop;
             g_window_order[g_window_count++] = i;
             g_win_focused = i;
             g_force_full_redraw = 1;
@@ -1180,9 +1290,21 @@ void wm_unregister_gui_client(int win_id) {
     g_windows[win_id].draw_cb = NULL;
     g_windows[win_id].key_cb = NULL;
     g_windows[win_id].mouse_cb = NULL;
+    g_windows[win_id].close_cb = NULL;
     g_windows[win_id].userdata = NULL;
     g_windows[win_id].needs_redraw = 0;
     g_windows[win_id].continuous_redraw = 0;
+}
+
+/*
+ * Register an optional close-request callback for a floating window.
+ * Semantics mirror tile_register_gui_close_cb: if the callback returns 0,
+ * the close is vetoed (the user program is expected to call exit() when ready).
+ * If the callback returns non-zero (or is NULL), the window closes immediately.
+ */
+void wm_register_gui_close_cb(int win_id, tile_gui_close_cb close_cb) {
+    if (win_id < 0 || win_id >= MAX_WINDOWS || !g_windows[win_id].used) return;
+    g_windows[win_id].close_cb = close_cb;
 }
 
 void wm_set_title_status(int win_id, const char* title, const char* status_left, const char* status_right) {
@@ -1198,14 +1320,54 @@ void wm_invalidate_window(int win_id) {
     g_windows[win_id].needs_redraw = 1;
 }
 
+/*
+ * Returns the content area (inside decorations) for a floating window.
+ * Matches the layout computed in wm_draw_content: the title bar consumes
+ * win_title_height(w) pixels at the top; an optional status overlay may
+ * consume status_bar_height_px() pixels immediately below; a 1-pixel border
+ * surrounds the remaining area on all four sides.
+ *
+ * ABI-INVARIANT: The content rect is kernel-internal; the same geometry is
+ * used by draw_cb, mouse coordinate translation, and GET_CONTENT_SIZE.
+ */
+void wm_get_content_rect(int win_id, int* cx, int* cy, int* cw, int* ch) {
+    if (cx) *cx = 0;
+    if (cy) *cy = 0;
+    if (cw) *cw = 0;
+    if (ch) *ch = 0;
+    if (win_id < 0 || win_id >= MAX_WINDOWS || !g_windows[win_id].used) return;
+    const window_t* w = &g_windows[win_id];
+    int th = win_title_height(w);
+    int sh = status_overlay_visible() ? status_bar_height_px() : 0;
+    if (cx) *cx = w->x + 1;
+    if (cy) *cy = w->y + th + sh + 1;
+    if (cw) *cw = w->w - 2;
+    if (ch) *ch = w->h - (th + sh) - 2;
+}
+
 void wm_set_continuous_redraw(int win_id, int enabled) {
     if (win_id < 0 || win_id >= MAX_WINDOWS || !g_windows[win_id].used) return;
     g_windows[win_id].continuous_redraw = enabled ? 1 : 0;
     if (g_windows[win_id].continuous_redraw) g_windows[win_id].needs_redraw = 1;
 }
 
+/* Forward declaration: clean up GUI windows on close */
+static void gui_window_closed(int win_id);
+
 void wm_close_window(int win_id) {
     if (win_id < 0 || win_id >= MAX_WINDOWS || !g_windows[win_id].used) return;
+    /*
+     * If a close callback is registered, give it a chance to veto the close.
+     * Zero return from the callback means "veto" — the user program is expected
+     * to eventually call exit() which will re-invoke wm_close_window().
+     * Clear close_cb before invoking it to prevent infinite recursion on re-close.
+     */
+    if (g_windows[win_id].close_cb) {
+        tile_gui_close_cb cb = g_windows[win_id].close_cb;
+        void* ud = g_windows[win_id].userdata;
+        g_windows[win_id].close_cb = NULL;
+        if (cb(win_id, ud) == 0) return; /* vetoed */
+    }
     // remove from order
     int pos = -1;
     for (int i = 0; i < g_window_count; ++i) if (g_window_order[i] == win_id) { pos = i; break; }
@@ -1215,6 +1377,7 @@ void wm_close_window(int win_id) {
     }
     g_windows[win_id].used = 0;
     if (g_win_focused == win_id) g_win_focused = -1;
+    gui_window_closed(win_id);
     g_force_full_redraw = 1;
     g_tiles_full_content_redraw = 1;
 }
@@ -1360,12 +1523,16 @@ static void draw_cursor_overlay(int x, int y) {
 static int tile_index_at(int x, int y) {
     if (fullscreen_tile >= 0 && fullscreen_tile < tile_count) {
         tile_t* t = &tiles[fullscreen_tile];
+        if (t->minimized) return -1;
+        if (t->desktop != g_current_desktop) return -1;
         if (x >= t->x && x < t->x + t->width && y >= t->y && y < t->y + t->height) return fullscreen_tile;
         return -1;
     }
-    for (int i = 0; i < tile_count; ++i) {
+    for (int i = tile_count - 1; i >= 0; --i) {
         tile_t* t = &tiles[i];
         if (t->type == TILE_EMPTY) continue;
+        if (t->minimized) continue;
+        if (t->desktop != g_current_desktop) continue;
         if (x >= t->x && x < t->x + t->width && y >= t->y && y < t->y + t->height) return i;
     }
     return -1;
@@ -1616,47 +1783,27 @@ static void load_max_icon_unf_try_paths(uint8 disk) {
 }
 
 static void layout_tiles() {
-    // Convert layout rules into pixel rectangles
+    int th = vga_text_cell_h() + 6;  // taskbar height
+    int maxw = screen_w - 60;
+    int maxh = screen_h - th - 60;
     if (tile_count <= 0) return;
-
-    // Initialize splits when tile count changes
-    if (g_tile_split_inited_for_count != tile_count) {
-        g_tile_split_inited_for_count = tile_count;
-        g_tile_split_x = screen_w / 2;
-        g_tile_split_y = screen_h / 2;
-    }
-
-    // Clamp splits to keep tiles usable
-    int minw = 64;
-    int minh = 48;
-    if (g_tile_split_x < minw) g_tile_split_x = minw;
-    if (g_tile_split_x > screen_w - minw) g_tile_split_x = screen_w - minw;
-    if (g_tile_split_y < minh) g_tile_split_y = minh;
-    if (g_tile_split_y > screen_h - minh) g_tile_split_y = screen_h - minh;
-
-    if (tile_count == 1) {
-        tiles[0].x = 0; tiles[0].y = 0; tiles[0].width = screen_w; tiles[0].height = screen_h;
-    } else if (tile_count == 2) {
-        int w = g_tile_split_x;
-        tiles[0].x = 0; tiles[0].y = 0; tiles[0].width = w; tiles[0].height = screen_h;
-        tiles[1].x = w; tiles[1].y = 0; tiles[1].width = screen_w - w; tiles[1].height = screen_h;
-    } else if (tile_count == 3) {
-        int w = g_tile_split_x;
-        int h = g_tile_split_y;
-        tiles[0].x = 0; tiles[0].y = 0; tiles[0].width = w; tiles[0].height = screen_h;
-        tiles[1].x = w; tiles[1].y = 0; tiles[1].width = screen_w - w; tiles[1].height = h;
-        tiles[2].x = w; tiles[2].y = h; tiles[2].width = screen_w - w; tiles[2].height = screen_h - h;
-    } else {
-        int w = g_tile_split_x;
-        int h = g_tile_split_y;
-        tiles[0].x = 0; tiles[0].y = 0; tiles[0].width = w; tiles[0].height = h;
-        tiles[1].x = w; tiles[1].y = 0; tiles[1].width = screen_w - w; tiles[1].height = h;
-        tiles[2].x = 0; tiles[2].y = h; tiles[2].width = w; tiles[2].height = screen_h - h;
-        tiles[3].x = w; tiles[3].y = h; tiles[3].width = screen_w - w; tiles[3].height = screen_h - h;
+    
+    // Instead of tiling, we do stacking positions
+    for (int i = 0; i < tile_count; ++i) {
+        // If not initialized yet or was reset
+        if (tiles[i].width == 0 || tiles[i].height == 0 || tiles[i].width == screen_w) {
+            int w = 640;
+            int h = 400;
+            if (w > maxw) w = maxw;
+            if (h > maxh) h = maxh;
+            int offset = (i * 30) % 200;
+            tiles[i].x = 30 + offset;
+            tiles[i].y = th + 30 + offset;
+            tiles[i].width = w;
+            tiles[i].height = h;
+        }
     }
 }
-
-// Draw the static (rarely-changing) parts of a tile: background, titlebar, status bar, borders.
 // Draw only the decorations (title bar, status bar and borders). This is cheap and
 // safe to call every frame into the backbuffer so that decoration pixels are
 // freshly present for the partial blit, while the large background fill can stay
@@ -1674,6 +1821,29 @@ static void draw_decorations(tile_t* t, int is_focused) {
     int cw = vga_text_cell_w();
     int fh = vga_text_cell_h();
     int title_h = get_title_height(t);
+
+    /* --- Helper: compute tile button rects (close, max, min) --- */
+    /* These mirror the layout used by wm_get_close/max/min_rect for floating windows. */
+    int btn_side = 12;
+    if (g_close_icon_loaded) {
+        int iw = g_close_icon.header.width;
+        int ih = g_close_icon.header.height;
+        int m2 = (iw > ih) ? iw : ih;
+        if (m2 > btn_side) btn_side = m2;
+    }
+    if (btn_side > title_h) btn_side = title_h;
+    int btn_margin = 2;
+    int btn_pad_y = (title_h - btn_side) / 2;
+    int btn_gap   = 2;
+    int close_bx = t->x + t->width - btn_side - btn_margin;
+    int close_by = t->y + btn_pad_y;
+    int max_bx   = close_bx - btn_side - btn_gap;
+    int max_by   = close_by;
+    int min_bx   = max_bx - btn_side - btn_gap;
+    int min_by   = close_by;
+
+    /* Reserve right side for buttons so title text doesn't overlap */
+    int btn_zone = 3 * (btn_side + btn_gap) + btn_margin;
     // In low mode, draw simpler title/borders (status is an Alt-held overlay drawn later)
     if (g_gui_low_mode) {
         if (title_h > 0) {
@@ -1684,42 +1854,35 @@ static void draw_decorations(tile_t* t, int is_focused) {
             drawRect(t->x, title_y, t->width, title_h, title_color_r, title_color_g, title_color_b);
             if (t->title && t->title[0]) {
                 int title_len = (int)strlen(t->title);
-                int max_chars = t->width / cw; if (max_chars < 0) max_chars = 0;
+                int avail_chars = (t->width - 8 - btn_zone) / cw;
+                if (avail_chars < 0) avail_chars = 0;
                 int text_y = title_y + (title_h - fh) / 2;
-                int cr = is_focused ? 255 : 0, cg = is_focused ? 255 : 0, cb = is_focused ? 255 : 0;
-                if (title_len <= max_chars) {
-                    int start_x = t->x + (t->width - (cw * title_len)) / 2;
-                    for (int i = 0; i < title_len; ++i) {
-                        int cx = start_x + i * cw;
-                        int clip_left = t->x + 4;
-                        int clip_right = t->x + t->width - 4;
-                        if (cx < clip_left) continue;
-                        if (cx + cw > clip_right) break;
-                        if (cx < 0 || cx + cw > screen_w) break;
-                        drawCharAt(cx, text_y, (int)(unsigned char)t->title[i], cr, cg, cb);
-                    }
-                } else {
-                    int window = max_chars;
-                    int speed = 6;
-                    int period = title_len + window;
-                    int pos = (g_tile_scroll_tick / speed) % period;
-                    for (int i = 0; i < window; ++i) {
-                        int idx = pos + i; char ch = ' ';
-                        if (idx < title_len) ch = t->title[idx];
-                        else { int wrap_idx = idx - title_len; if (wrap_idx < title_len) ch = t->title[wrap_idx]; }
-                        int cx = t->x + i * cw;
-                        int clip_left = t->x + 4;
-                        int clip_right = t->x + t->width - 4;
-                        if (cx < clip_left) continue;
-                        if (cx + cw > clip_right) break;
-                        if (cx < 0 || cx + cw > screen_w) break;
-                        drawCharAt(cx, text_y, (int)(unsigned char)ch, cr, cg, cb);
-                    }
+                int cr = is_focused ? 230 : 160, cg = is_focused ? 230 : 160, cb = is_focused ? 230 : 160;
+                /* Left-aligned title */
+                int draw_len = title_len;
+                if (draw_len > avail_chars) draw_len = avail_chars;
+                int start_x = t->x + 6;
+                for (int i = 0; i < draw_len; ++i) {
+                    int cx = start_x + i * cw;
+                    if (cx < 0 || cx + cw > screen_w) break;
+                    drawCharAt(cx, text_y, (int)(unsigned char)t->title[i], cr, cg, cb);
                 }
+            }
+            /* Low-mode tile buttons: simple fallback glyphs */
+            if (title_h >= 12) {
+                /* Close: X */
+                drawCharAt(close_bx + 2, close_by + 1, (unsigned char)'X', 255, 255, 255);
+                /* Maximize: square outline */
+                drawRect(max_bx + 3, max_by + 3, btn_side - 6, 1, 255, 255, 255);
+                drawRect(max_bx + 3, max_by + btn_side - 4, btn_side - 6, 1, 255, 255, 255);
+                drawRect(max_bx + 3, max_by + 3, 1, btn_side - 6, 255, 255, 255);
+                drawRect(max_bx + btn_side - 4, max_by + 3, 1, btn_side - 6, 255, 255, 255);
+                /* Minimize: horizontal line */
+                drawRect(min_bx + 3, min_by + btn_side / 2, btn_side - 6, 1, 255, 255, 255);
             }
         }
         // status overlay is drawn after content
-        int border_r = is_focused ? 255 : 48, border_g = is_focused ? 255 : 48, border_b = is_focused ? 255 : 48;
+        int border_r = is_focused ? 80 : 50, border_g = is_focused ? 80 : 50, border_b = is_focused ? 80 : 50;
         drawRect(t->x, t->y, t->width, 1, border_r, border_g, border_b);
         drawRect(t->x, t->y + t->height - 1, t->width, 1, border_r, border_g, border_b);
         drawRect(t->x, t->y, 1, t->height, border_r, border_g, border_b);
@@ -1734,51 +1897,76 @@ static void draw_decorations(tile_t* t, int is_focused) {
         drawRect(t->x, title_y, t->width, title_h, title_color_r, title_color_g, title_color_b);
         if (t->title && t->title[0]) {
             int title_len = (int)strlen(t->title);
-            int max_chars = t->width / cw;
+            int avail_chars = (t->width - 8 - btn_zone) / cw;
+            if (avail_chars < 0) avail_chars = 0;
             int text_y = title_y + (title_h - fh) / 2;
-            int color_r = is_focused ? 255 : 0;
-            int color_g = is_focused ? 255 : 0;
-            int color_b = is_focused ? 255 : 0;
-            if (title_len <= max_chars) {
-                int start_x = t->x + (t->width - (cw * title_len)) / 2;
-                for (int i = 0; i < title_len; ++i) {
-                    int cx = start_x + i * cw;
-                    int clip_left = t->x + 4;
-                    int clip_right = t->x + t->width - 4;
-                    if (cx < clip_left) continue;
-                    if (cx + cw > clip_right) break;
-                    if (cx < 0 || cx + cw > screen_w) break;
-                    drawCharAt(cx, text_y, (int)(unsigned char)t->title[i], color_r, color_g, color_b);
+            int color_r = is_focused ? 230 : 160;
+            int color_g = is_focused ? 230 : 160;
+            int color_b = is_focused ? 230 : 160;
+            /* Left-aligned title (modern desktop style) */
+            int draw_len = title_len;
+            if (draw_len > avail_chars) draw_len = avail_chars;
+            int start_x = t->x + 6;
+            for (int i = 0; i < draw_len; ++i) {
+                int cx = start_x + i * cw;
+                if (cx < 0 || cx + cw > screen_w) break;
+                drawCharAt(cx, text_y, (int)(unsigned char)t->title[i], color_r, color_g, color_b);
+            }
+        }
+        /* Tile title bar buttons (close, maximize, minimize) — same icons as floating windows */
+        if (title_h >= 12) {
+            /* Close */
+            if (g_close_icon_loaded && g_close_icon.data) {
+                if (is_focused) {
+                    wm_draw_icon_into_button(&g_close_icon, g_close_icon_loaded, close_bx, close_by, btn_side, btn_side);
+                } else {
+                    if (g_close_icon_unf_loaded)
+                        wm_draw_icon_into_button(&g_close_icon_unf, g_close_icon_unf_loaded, close_bx, close_by, btn_side, btn_side);
+                    else
+                        wm_draw_icon_into_button(&g_close_icon, g_close_icon_loaded, close_bx, close_by, btn_side, btn_side);
                 }
             } else {
-                int window = max_chars;
-                int speed = 6;
-                int period = title_len + window;
-                int pos = (g_tile_scroll_tick / speed) % period;
-                for (int i = 0; i < window; ++i) {
-                    int idx = pos + i;
-                    char ch = ' ';
-                    if (idx < title_len) ch = t->title[idx];
-                    else {
-                        int wrap_idx = idx - title_len;
-                        if (wrap_idx < title_len) ch = t->title[wrap_idx];
-                    }
-                    int cx = t->x + i * cw;
-                    int clip_left = t->x + 4;
-                    int clip_right = t->x + t->width - 4;
-                    if (cx < clip_left) continue;
-                    if (cx + cw > clip_right) break;
-                    if (cx < 0 || cx + cw > screen_w) break;
-                    drawCharAt(cx, text_y, (int)(unsigned char)ch, color_r, color_g, color_b);
+                for (int fi = 0; fi < 6; ++fi) {
+                    drawRect(close_bx + 3 + fi, close_by + 3 + fi, 1, 1, 255, 255, 255);
+                    drawRect(close_bx + btn_side - 4 - fi, close_by + 3 + fi, 1, 1, 255, 255, 255);
                 }
+            }
+            /* Maximize */
+            if (g_max_icon_loaded && g_max_icon.data) {
+                if (is_focused) {
+                    wm_draw_icon_into_button(&g_max_icon, g_max_icon_loaded, max_bx, max_by, btn_side, btn_side);
+                } else {
+                    if (g_max_icon_unf_loaded)
+                        wm_draw_icon_into_button(&g_max_icon_unf, g_max_icon_unf_loaded, max_bx, max_by, btn_side, btn_side);
+                    else
+                        wm_draw_icon_into_button(&g_max_icon, g_max_icon_loaded, max_bx, max_by, btn_side, btn_side);
+                }
+            } else {
+                drawRect(max_bx + 3, max_by + 3, btn_side - 6, 1, 255, 255, 255);
+                drawRect(max_bx + 3, max_by + btn_side - 4, btn_side - 6, 1, 255, 255, 255);
+                drawRect(max_bx + 3, max_by + 3, 1, btn_side - 6, 255, 255, 255);
+                drawRect(max_bx + btn_side - 4, max_by + 3, 1, btn_side - 6, 255, 255, 255);
+            }
+            /* Minimize */
+            if (g_min_icon_loaded && g_min_icon.data) {
+                if (is_focused) {
+                    wm_draw_icon_into_button(&g_min_icon, g_min_icon_loaded, min_bx, min_by, btn_side, btn_side);
+                } else {
+                    if (g_min_icon_unf_loaded)
+                        wm_draw_icon_into_button(&g_min_icon_unf, g_min_icon_unf_loaded, min_bx, min_by, btn_side, btn_side);
+                    else
+                        wm_draw_icon_into_button(&g_min_icon, g_min_icon_loaded, min_bx, min_by, btn_side, btn_side);
+                }
+            } else {
+                drawRect(min_bx + 3, min_by + btn_side / 2, btn_side - 6, 1, 255, 255, 255);
             }
         }
     }
     // status overlay is drawn after content
-    // borders
-    int border_r = is_focused ? 225 : 40;
-    int border_g = is_focused ? 225 : 40;
-    int border_b = is_focused ? 225 : 40;
+    // borders — subtle Materia gray
+    int border_r = is_focused ? 80 : 50;
+    int border_g = is_focused ? 80 : 50;
+    int border_b = is_focused ? 80 : 50;
     drawRect(t->x, t->y, t->width, 1, border_r, border_g, border_b);
     drawRect(t->x, t->y + t->height - 1, t->width, 1, border_r, border_g, border_b);
     drawRect(t->x, t->y, 1, t->height, border_r, border_g, border_b);
@@ -2065,6 +2253,122 @@ void tile_set_title_status(int tile_idx, const char* title, const char* status_l
     tiles[tile_idx].last_status_right_ptr = NULL;
 }
 
+static int create_shell_tile_for_launch(void) {
+    if (tile_count >= 4) return -1;
+
+    int idx = tile_count++;
+    tiles[idx].type = TILE_SHELL;
+    tiles[idx].title = "EYN-OS Shell";
+    tiles[idx].status_left = NULL;
+    tiles[idx].status_right = NULL;
+    tiles[idx].term_idx = idx;
+    tiles[idx].active = 1;
+    tiles[idx].static_drawn = 0;
+    tiles[idx].minimized = 0;
+    tiles[idx].maximized = 0;
+    tiles[idx].prev_x = 0;
+    tiles[idx].prev_y = 0;
+    tiles[idx].prev_w = 0;
+    tiles[idx].prev_h = 0;
+    tiles[idx].desktop = g_current_desktop;
+    vterm_clear(idx);
+    vterm_set_active(idx, 1);
+    vterm_print_prompt(idx);
+    focused = idx;
+    g_force_full_redraw = 1;
+    layout_tiles();
+    if (gui_draw_cb[tiles[idx].term_idx]) gui_needs_redraw[tiles[idx].term_idx] = 1;
+    return idx;
+}
+
+static int find_launch_term(void) {
+    if (tile_count <= 0) {
+        int created = create_shell_tile_for_launch();
+        return (created >= 0) ? tiles[created].term_idx : -1;
+    }
+
+    if (focused >= 0 && focused < tile_count) {
+        int term = tiles[focused].term_idx;
+        if (term >= 0 && term < MAX_TILES && gui_draw_cb[term] == NULL) return term;
+    }
+
+    for (int i = 0; i < tile_count; ++i) {
+        int term = tiles[i].term_idx;
+        if (term >= 0 && term < MAX_TILES && gui_draw_cb[term] == NULL) return term;
+    }
+
+    for (int i = 0; i < tile_count; ++i) {
+        int term = tiles[i].term_idx;
+        if (term >= 0 && term < MAX_TILES) return term;
+    }
+
+    if (tile_count < 4) {
+        int created = create_shell_tile_for_launch();
+        return (created >= 0) ? tiles[created].term_idx : -1;
+    }
+    return -1;
+}
+
+static void launch_shell_tile(void) {
+    if (tile_count < 4) {
+        (void)create_shell_tile_for_launch();
+        return;
+    }
+
+    for (int i = 0; i < tile_count; ++i) {
+        int term = tiles[i].term_idx;
+        if (term >= 0 && term < MAX_TILES && gui_draw_cb[term] == NULL) {
+            if (tiles[i].minimized) {
+                tiles[i].minimized = 0;
+                tiles[i].static_drawn = 0;
+            }
+            focused = i;
+            g_force_full_redraw = 1;
+            return;
+        }
+    }
+
+    focused = 0;
+    g_force_full_redraw = 1;
+}
+
+/*
+ * Launch a program from the Programs submenu.
+ *
+ * All /binaries programs are userland UELFs. They write to stdout via
+ * write(1,...) which goes through the vterm, so the command wrapper
+ * (which captures kernel printf) cannot intercept their output.
+ * Therefore we always type the command into the focused shell tile.
+ *
+ * GUI-aware programs (gui_attach/gui_create) will open their own
+ * window automatically once the shell tile executes them.
+ */
+static void launch_program(const char* name) {
+    if (g_user_task_active) return;
+
+    int term = find_launch_term();
+    if (term >= 0) {
+        for (int ci = 0; name[ci]; ++ci)
+            vterm_handle_key(term, (int)(unsigned char)name[ci]);
+        vterm_handle_key(term, '\n');
+    }
+}
+
+/*
+ * Command wrapper UI was removed; program launch now routes through shell tiles.
+ * Keep this hook for wm_close_window() callers.
+ */
+static void gui_window_closed(int win_id) {
+    if (win_id < 0 || win_id >= MAX_WINDOWS) return;
+    /* Clear stale callbacks to prevent zombie rendering / input routing */
+    g_windows[win_id].draw_cb = NULL;
+    g_windows[win_id].key_cb = NULL;
+    g_windows[win_id].mouse_cb = NULL;
+    g_windows[win_id].close_cb = NULL;
+    g_windows[win_id].userdata = NULL;
+    if (g_win_focused == win_id) g_win_focused = -1;
+}
+
 // Modal state for background choice
 static struct { int active; int tile; rei_image_t* img; int selected; int only_scale; } g_bg_modal = {0, -1, NULL, 0, 0};
 
@@ -2099,6 +2403,486 @@ static void draw_bg_modal() {
     }
     // mark only the modal region dirty to keep the blit minimal
     vga_mark_dirty_rect(dbx, dby, dbw, dbh);
+}
+
+// Right-click context menu drawing
+static void draw_ctx_menu(void) {
+    if (!g_ctx_active) return;
+
+    int cw = vga_text_cell_w();
+    int ch = vga_text_cell_h();
+    int item_h = ch + 6;
+    int menu_w = 14 * cw;  /* wide enough for "Desktop 1" etc. */
+    int menu_h = CTX_ITEM_COUNT * item_h + 4;
+
+    /* Clamp to screen */
+    int mx = g_ctx_x;
+    int my = g_ctx_y;
+    if (mx + menu_w > screen_w) mx = screen_w - menu_w;
+    if (my + menu_h > screen_h) my = screen_h - menu_h;
+    if (mx < 0) mx = 0;
+    if (my < 0) my = 0;
+
+    /* Background */
+    drawRect(mx, my, menu_w, menu_h, 42, 42, 42);
+    /* Top accent line */
+    drawRect(mx, my, menu_w, 1, 90, 90, 90);
+
+    const char* items[CTX_ITEM_COUNT] = {"Desktop 1", "Desktop 2", "Kill"};
+    int fg = 230;
+
+    int dy = my + 2;
+    for (int i = 0; i < CTX_ITEM_COUNT; ++i) {
+        if (i == g_ctx_hover)
+            drawRect(mx, dy, menu_w, item_h, 60, 60, 60);
+
+        /* Checkmark for current desktop assignment */
+        if (i < g_desktop_count) {
+            int assigned_desktop = -1;
+            if (g_ctx_kind == 0 && g_ctx_index >= 0 && g_ctx_index < tile_count)
+                assigned_desktop = tiles[g_ctx_index].desktop;
+            else if (g_ctx_kind == 1 && g_ctx_index >= 0 && g_ctx_index < MAX_WINDOWS && g_windows[g_ctx_index].used)
+                assigned_desktop = g_windows[g_ctx_index].desktop;
+            if (assigned_desktop == i)
+                drawCharAt(mx + 4, dy + (item_h - ch) / 2, (unsigned char)'>', fg, fg, fg);
+        }
+
+        int len = (int)strlen(items[i]);
+        for (int j = 0; j < len; ++j)
+            drawCharAt(mx + 14 + j * cw, dy + (item_h - ch) / 2,
+                       (unsigned char)items[i][j], fg, fg, fg);
+        dy += item_h;
+    }
+
+    vga_mark_dirty_rect(mx, my, menu_w, menu_h);
+}
+
+static int g_start_active = 0;
+static int g_dropdown_active = 0;
+static int g_start_hover = -1;     // hovered start menu item (-1 = none)
+static int g_dropdown_hover = -1;  // hovered overflow item (-1 = none)
+static int g_programs_active = 0;  // Programs submenu open
+static int g_programs_hover = -1;  // hovered program index
+
+/* (Context menu state declared near top of file with other globals.) */
+
+/*
+ * Cached list of program names from /binaries.
+ * Scanned once on first open; refreshed on each start-menu toggle.
+ */
+#define PROGRAMS_MAX 96
+static char  g_program_names[PROGRAMS_MAX][PROG_NAME_MAX];
+static int   g_program_count = 0;
+static int   g_programs_scanned = 0;
+static int   g_programs_scroll = 0; /* scroll offset for the programs submenu */
+
+static void scan_programs(void) {
+    g_program_count = 0;
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(0, 2048, &sb) != 0 || sb.magic != EYNFS_MAGIC) return;
+    eynfs_dir_entry_t bin_entry;
+    /* Try /binaries first, then /testdir/binaries */
+    const char* dirs[] = { "/binaries", "/testdir/binaries", NULL };
+    uint32_t dir_block = 0;
+    int found = 0;
+    for (int di = 0; dirs[di]; ++di) {
+        if (eynfs_traverse_path(0, &sb, dirs[di], &bin_entry, NULL, NULL) == 0 &&
+            bin_entry.type == EYNFS_TYPE_DIR) {
+            dir_block = bin_entry.first_block;
+            found = 1;
+            break;
+        }
+    }
+    if (!found) return;
+    /* Read directory entries (cap stack usage: 64 * ~52 = ~3.3KB) */
+    eynfs_dir_entry_t entries[64];
+    int count = eynfs_read_dir_table(0, dir_block, entries, 64);
+    if (count <= 0) return;
+    for (int i = 0; i < count && g_program_count < PROGRAMS_MAX; ++i) {
+        if (entries[i].type != EYNFS_TYPE_FILE) continue;
+        if (entries[i].name[0] == '\0' || entries[i].name[0] == '.') continue;
+        /* Skip .uelf suffix variants if an extensionless version exists */
+        int nlen = (int)strlen(entries[i].name);
+        if (nlen >= PROG_NAME_MAX) nlen = PROG_NAME_MAX - 1;
+        for (int c = 0; c < nlen; ++c) g_program_names[g_program_count][c] = entries[i].name[c];
+        g_program_names[g_program_count][nlen] = '\0';
+        g_program_count++;
+    }
+
+    for (int i = 1; i < g_program_count; ++i) {
+        char key[PROG_NAME_MAX];
+        for (int c = 0; c < PROG_NAME_MAX; ++c) key[c] = g_program_names[i][c];
+        int j = i - 1;
+        while (j >= 0 && strcmp(g_program_names[j], key) > 0) {
+            for (int c = 0; c < PROG_NAME_MAX; ++c) g_program_names[j + 1][c] = g_program_names[j][c];
+            --j;
+        }
+        for (int c = 0; c < PROG_NAME_MAX; ++c) g_program_names[j + 1][c] = key[c];
+    }
+
+    g_programs_scanned = 1;
+}
+
+/* (Desktop switcher state declared near top of file with other globals.) */
+
+/* Per-taskbar-button hit rectangles (rebuilt every frame by draw_taskbar). */
+#define TB_MAX_BUTTONS 16
+typedef struct {
+    int x, w;         // pixel rect (y/h = 0..taskbar_height implicitly)
+    int kind;         // 0=tile, 1=window
+    int index;        // tile index or window index
+} tb_button_t;
+static tb_button_t g_tb_buttons[TB_MAX_BUTTONS];
+static int         g_tb_button_count = 0;
+static int         g_tb_overflow_x   = 0;  // x of the overflow icon (0 = hidden)
+static int         g_tb_overflow_w   = 0;
+
+/* Overflow list: items that did not fit on the main taskbar row. */
+#define TB_OVERFLOW_MAX 12
+typedef struct {
+    int kind;   // 0=tile, 1=window
+    int index;
+} tb_overflow_t;
+static tb_overflow_t g_tb_overflow[TB_OVERFLOW_MAX];
+static int           g_tb_overflow_count = 0;
+
+static int get_rtc_reg(int reg) {
+    outportb(0x70, reg);
+    return inportb(0x71);
+}
+
+/* Day-of-week names (Mon..Sun).  RTC register 6 returns 1-7 (Sun=1 in
+ * most BIOSes, but some return Mon=1).  We handle both by just indexing
+ * modulo 7 and accepting minor mismatch on exotic hardware. */
+static const char* g_dow_names[7] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+
+static void draw_taskbar(void) {
+    int cw   = vga_text_cell_w();
+    int ch   = vga_text_cell_h();
+    int th   = ch + 6;                    // slightly taller for padding
+    int text_y = (th - ch) / 2;
+
+    /* ---- Materia palette ---- */
+    int bar_r = 48, bar_g = 48, bar_b = 48;   // taskbar background
+    int fg    = 230;                           // default icon/text
+    int accent_r = 72, accent_g = 72, accent_b = 72; // focused button bg
+    int hover_r  = 58, hover_g  = 58, hover_b  = 58; // hovered button bg
+    (void)hover_r; (void)hover_g; (void)hover_b;
+
+    /* Background fill */
+    drawRect(0, 0, screen_w, th, bar_r, bar_g, bar_b);
+
+    /* --- Left: Start button "!" --- */
+    int start_w = cw + 10;
+    drawRect(2, 1, start_w, th - 2, accent_r, accent_g, accent_b);
+    drawCharAt(2 + (start_w - cw) / 2, text_y, '!', fg, fg, fg);
+    int tx = start_w + 6;  // running x cursor for app buttons
+
+    // App buttons (tiles + windows)
+    
+    /* We reserve the right portion for clock + desktop switcher.
+     * Available width = screen_w - right_zone - tx
+     */
+    int desk_zone_w = g_desktop_count * (cw + 8) + 8;  // desktop pills
+    int clock_chars = 14;   // "Tue 12:46" max ~14 chars
+    int right_reserved = desk_zone_w + clock_chars * cw + 24;
+    int avail_w = screen_w - right_reserved - tx;
+    int btn_pad = 6;     // horizontal padding inside each button
+    int btn_gap = 2;     // gap between buttons
+
+    g_tb_button_count   = 0;
+    g_tb_overflow_count = 0;
+    g_tb_overflow_x     = 0;
+    g_tb_overflow_w     = 0;
+
+    /* Collect all open apps: tiles first, then windows.
+     * Only include entries belonging to the current desktop. */
+    typedef struct { int kind; int idx; const char* title; } app_entry_t;
+    app_entry_t apps[MAX_TILES + MAX_WINDOWS];
+    int app_count = 0;
+    for (int i = 0; i < tile_count; ++i) {
+        if (tiles[i].type == TILE_EMPTY) continue;
+        if (tiles[i].desktop != g_current_desktop) continue;
+        apps[app_count].kind  = 0;
+        apps[app_count].idx   = i;
+        apps[app_count].title = tiles[i].title ? tiles[i].title : "Shell";
+        app_count++;
+    }
+    for (int i = 0; i < MAX_WINDOWS; ++i) {
+        if (!g_windows[i].used) continue;
+        if (g_windows[i].desktop != g_current_desktop) continue;
+        apps[app_count].kind  = 1;
+        apps[app_count].idx   = i;
+        apps[app_count].title = g_windows[i].title ? g_windows[i].title : "Window";
+        app_count++;
+    }
+
+    /* Measure how many fit; leave room for an overflow arrow if needed */
+    int overflow_icon_w = cw + btn_pad * 2;  // the downward-arrow button
+    int used_w = 0;
+    int fits   = 0;
+    for (int i = 0; i < app_count; ++i) {
+        int title_len = (int)strlen(apps[i].title);
+        if (title_len > 12) title_len = 12; // truncate long names
+        int bw = title_len * cw + btn_pad * 2;
+        if (bw < cw + btn_pad * 2) bw = cw + btn_pad * 2; // minimum 1-char
+        int future = used_w + bw + btn_gap;
+        int space  = avail_w;
+        if (i < app_count - 1) space -= overflow_icon_w + btn_gap; // need overflow
+        if (future > space && i > 0) break;
+        used_w = future;
+        fits++;
+    }
+    int need_overflow = (fits < app_count);
+
+    /* Draw visible app buttons */
+    for (int i = 0; i < fits; ++i) {
+        int title_len = (int)strlen(apps[i].title);
+        if (title_len > 12) title_len = 12;
+        int bw = title_len * cw + btn_pad * 2;
+        if (bw < cw + btn_pad * 2) bw = cw + btn_pad * 2;
+
+        /* Determine if this app is focused */
+        int is_active = 0;
+        if (apps[i].kind == 0 && apps[i].idx == focused && g_win_focused < 0) is_active = 1;
+        if (apps[i].kind == 1 && apps[i].idx == g_win_focused) is_active = 1;
+
+        /* Button background */
+        if (is_active)
+            drawRect(tx, 1, bw, th - 2, accent_r, accent_g, accent_b);
+
+        /* Icon: first letter of title */
+        char icon_ch = apps[i].title[0];
+        drawCharAt(tx + 3, text_y, (unsigned char)icon_ch, fg, fg, fg);
+
+        /* Title text (after icon) */
+        int text_start = tx + 3 + cw + 2;
+        for (int c = 1; c < title_len; ++c) {
+            int px = text_start + (c - 1) * cw;
+            if (px + cw > tx + bw - 2) break;
+            drawCharAt(px, text_y, (unsigned char)apps[i].title[c], fg, fg, fg);
+        }
+
+        /* Active indicator: thin line at bottom */
+        if (is_active)
+            drawRect(tx, th - 2, bw, 2, 180, 180, 180);
+
+        /* Record hit rect */
+        if (g_tb_button_count < TB_MAX_BUTTONS) {
+            g_tb_buttons[g_tb_button_count].x     = tx;
+            g_tb_buttons[g_tb_button_count].w     = bw;
+            g_tb_buttons[g_tb_button_count].kind  = apps[i].kind;
+            g_tb_buttons[g_tb_button_count].index = apps[i].idx;
+            g_tb_button_count++;
+        }
+        tx += bw + btn_gap;
+    }
+
+    /* Overflow arrow button (downward arrow) */
+    if (need_overflow) {
+        drawRect(tx, 1, overflow_icon_w, th - 2, accent_r, accent_g, accent_b);
+        /* draw a small downward arrow glyph */
+        int ax = tx + overflow_icon_w / 2;
+        int ay = text_y + ch / 2 - 2;
+        for (int row = 0; row < 4; ++row) {
+            drawRect(ax - row, ay + row, row * 2 + 1, 1, fg, fg, fg);
+        }
+        g_tb_overflow_x = tx;
+        g_tb_overflow_w = overflow_icon_w;
+
+        /* Build overflow list */
+        for (int i = fits; i < app_count && g_tb_overflow_count < TB_OVERFLOW_MAX; ++i) {
+            g_tb_overflow[g_tb_overflow_count].kind  = apps[i].kind;
+            g_tb_overflow[g_tb_overflow_count].index = apps[i].idx;
+            g_tb_overflow_count++;
+        }
+    }
+
+    /* --- Centre: Date and Time --- */
+    int rtc_h = get_rtc_reg(4);
+    int rtc_m = get_rtc_reg(2);
+    int rtc_dow = get_rtc_reg(6);  // day of week (1-7)
+    int rtc_day = get_rtc_reg(7);  // day of month
+    int rtc_mon = get_rtc_reg(8);  // month
+    rtc_h   = (rtc_h   & 0x0F) + ((rtc_h   >> 4) * 10);
+    rtc_m   = (rtc_m   & 0x0F) + ((rtc_m   >> 4) * 10);
+    rtc_dow = (rtc_dow  & 0x0F) + ((rtc_dow >> 4) * 10);
+    rtc_day = (rtc_day  & 0x0F) + ((rtc_day >> 4) * 10);
+    rtc_mon = (rtc_mon  & 0x0F) + ((rtc_mon >> 4) * 10);
+    if (rtc_dow < 1) rtc_dow = 1;
+    if (rtc_dow > 7) rtc_dow = 7;
+    const char* dow_str = g_dow_names[(rtc_dow - 1) % 7];
+
+    /* Build date/time string manually (kernel snprintf lacks %02d). */
+    char ts[32];
+    {
+        int p = 0;
+        for (int i = 0; dow_str[i]; ++i) ts[p++] = dow_str[i];
+        ts[p++] = ' ';
+        ts[p++] = '0' + (rtc_day / 10);
+        ts[p++] = '0' + (rtc_day % 10);
+        ts[p++] = '/';
+        ts[p++] = '0' + (rtc_mon / 10);
+        ts[p++] = '0' + (rtc_mon % 10);
+        ts[p++] = ' '; ts[p++] = ' ';
+        ts[p++] = '0' + (rtc_h / 10);
+        ts[p++] = '0' + (rtc_h % 10);
+        ts[p++] = ':';
+        ts[p++] = '0' + (rtc_m / 10);
+        ts[p++] = '0' + (rtc_m % 10);
+        ts[p] = '\0';
+    }
+    int ts_len = (int)strlen(ts);
+    int time_x = (screen_w - ts_len * cw) / 2;
+    for (int i = 0; i < ts_len; ++i)
+        drawCharAt(time_x + i * cw, text_y, (unsigned char)ts[i], fg, fg, fg);
+
+    /* --- Right: Desktop switcher pills --- */
+    int pill_w = cw + 6;
+    int pill_gap = 3;
+    int desk_total_w = g_desktop_count * (pill_w + pill_gap) - pill_gap;
+    int ds_x = screen_w - desk_total_w - 8;
+    for (int d = 0; d < g_desktop_count; ++d) {
+        int px = ds_x + d * (pill_w + pill_gap);
+        int is_cur = (d == g_current_desktop);
+        /* Pill background */
+        drawRect(px, 2, pill_w, th - 4,
+                 is_cur ? 90 : 56,
+                 is_cur ? 90 : 56,
+                 is_cur ? 90 : 56);
+        char digit = '1' + (char)d;
+        int dx = px + (pill_w - cw) / 2;
+        drawCharAt(dx, text_y, digit,
+                   is_cur ? 255 : 160,
+                   is_cur ? 255 : 160,
+                   is_cur ? 255 : 160);
+    }
+
+    /* --- Dropdown: Start menu --- */
+    if (g_start_active) {
+        int menu_w = 150;
+        int item_h = ch + 6;
+        const char* items[] = {"Programs", "Shell", "Files", "Settings", "Reboot", "Shutdown"};
+        int item_count = 6;
+        int menu_h = item_count * item_h + 4;
+        drawRect(0, th, menu_w, menu_h, 42, 42, 42);
+        /* thin top accent line */
+        drawRect(0, th, menu_w, 1, 90, 90, 90);
+        int dy = th + 2;
+        for (int i = 0; i < item_count; ++i) {
+            if (i == g_start_hover)
+                drawRect(0, dy, menu_w, item_h, 60, 60, 60);
+            int len = (int)strlen(items[i]);
+            for (int j = 0; j < len; ++j)
+                drawCharAt(12 + j * cw, dy + (item_h - ch) / 2,
+                           (unsigned char)items[i][j], fg, fg, fg);
+            /* Right-arrow indicator for Programs submenu */
+            if (i == 0)
+                drawCharAt(menu_w - cw - 4, dy + (item_h - ch) / 2, (unsigned char)'>', fg, fg, fg);
+            dy += item_h;
+        }
+        vga_mark_dirty_rect(0, th, menu_w, menu_h);
+
+        /* --- Programs submenu (shown when Programs item is hovered) --- */
+        if (g_programs_active || g_start_hover == 0) {
+            g_programs_active = 1;
+            if (!g_programs_scanned) scan_programs();
+            if (g_program_count > 0) {
+                int sub_w = 160;
+                int sub_x = menu_w;
+                int sub_top = th;
+                int avail_h = screen_h - sub_top;
+                int max_vis = (avail_h - 4) / item_h;
+                if (max_vis < 1) max_vis = 1;
+                if (max_vis > g_program_count) max_vis = g_program_count;
+                /* Clamp scroll offset */
+                int max_scroll = g_program_count - max_vis;
+                if (max_scroll < 0) max_scroll = 0;
+                if (g_programs_scroll > max_scroll) g_programs_scroll = max_scroll;
+                if (g_programs_scroll < 0) g_programs_scroll = 0;
+                int sub_h = max_vis * item_h + 4;
+                int need_scroll = (g_program_count > max_vis);
+                /* Up scroll arrow row */
+                int arrow_h = need_scroll ? item_h : 0;
+                if (need_scroll) sub_h += arrow_h * 2; /* top + bottom arrow rows */
+                drawRect(sub_x, sub_top, sub_w, sub_h, 42, 42, 42);
+                drawRect(sub_x, sub_top, sub_w, 1, 90, 90, 90);
+                int sy = sub_top + 2;
+                /* Draw scroll-up indicator */
+                if (need_scroll) {
+                    int arrow_fg = (g_programs_scroll > 0) ? fg : 80;
+                    int ax_center = sub_x + sub_w / 2;
+                    /* Upward triangle */
+                    for (int row = 0; row < 3; ++row)
+                        drawRect(ax_center - row, sy + (arrow_h - ch) / 2 + (2 - row), row * 2 + 1, 1, arrow_fg, arrow_fg, arrow_fg);
+                    sy += arrow_h;
+                }
+                /* Draw visible program items */
+                for (int vi = 0; vi < max_vis; ++vi) {
+                    int pi = vi + g_programs_scroll;
+                    if (pi >= g_program_count) break;
+                    if (vi == g_programs_hover)
+                        drawRect(sub_x, sy, sub_w, item_h, 60, 60, 60);
+                    int nlen = (int)strlen(g_program_names[pi]);
+                    int max_ch_sub = (sub_w - 12) / cw;
+                    if (nlen > max_ch_sub) nlen = max_ch_sub;
+                    for (int j = 0; j < nlen; ++j)
+                        drawCharAt(sub_x + 8 + j * cw, sy + (item_h - ch) / 2,
+                                   (unsigned char)g_program_names[pi][j], fg, fg, fg);
+                    sy += item_h;
+                }
+                /* Draw scroll-down indicator */
+                if (need_scroll) {
+                    int arrow_fg = (g_programs_scroll < max_scroll) ? fg : 80;
+                    int ax_center = sub_x + sub_w / 2;
+                    for (int row = 0; row < 3; ++row)
+                        drawRect(ax_center - row, sy + (arrow_h - ch) / 2 + row, row * 2 + 1, 1, arrow_fg, arrow_fg, arrow_fg);
+                    sy += arrow_h;
+                }
+                vga_mark_dirty_rect(sub_x, sub_top, sub_w, sub_h);
+            }
+        }
+    } else {
+        g_programs_active = 0;
+        g_programs_hover = -1;
+    }
+
+    /* --- Dropdown: Overflow list --- */
+    if (g_dropdown_active && g_tb_overflow_count > 0) {
+        int menu_w = 180;
+        int item_h = ch + 6;
+        int menu_h = g_tb_overflow_count * item_h + 4;
+        int menu_x = g_tb_overflow_x;
+        if (menu_x + menu_w > screen_w) menu_x = screen_w - menu_w;
+        drawRect(menu_x, th, menu_w, menu_h, 42, 42, 42);
+        drawRect(menu_x, th, menu_w, 1, 90, 90, 90);
+        int dy = th + 2;
+        for (int i = 0; i < g_tb_overflow_count; ++i) {
+            const char* name = NULL;
+            if (g_tb_overflow[i].kind == 0) {
+                int ti = g_tb_overflow[i].index;
+                name = (ti >= 0 && ti < tile_count && tiles[ti].title) ? tiles[ti].title : "Shell";
+            } else {
+                int wi = g_tb_overflow[i].index;
+                name = (wi >= 0 && wi < MAX_WINDOWS && g_windows[wi].title) ? g_windows[wi].title : "Window";
+            }
+            if (i == g_dropdown_hover)
+                drawRect(menu_x, dy, menu_w, item_h, 60, 60, 60);
+            /* icon: first letter */
+            char ic = (name && name[0]) ? name[0] : '?';
+            drawCharAt(menu_x + 6, dy + (item_h - ch) / 2, (unsigned char)ic, fg, fg, fg);
+            /* title */
+            int name_len = name ? (int)strlen(name) : 0;
+            if (name_len > 18) name_len = 18;
+            for (int j = 0; j < name_len; ++j)
+                drawCharAt(menu_x + 6 + cw + 4 + j * cw, dy + (item_h - ch) / 2,
+                           (unsigned char)name[j], fg, fg, fg);
+            dy += item_h;
+        }
+        vga_mark_dirty_rect(menu_x, th, menu_w, menu_h);
+    }
+
+    vga_mark_dirty_rect(0, 0, screen_w, th);
 }
 
 // Handle keys for the modal; return 1 if consumed
@@ -2231,6 +3015,8 @@ void tile_close(int tile_idx) {
     for (int i = 0; i < n; ++i) tiles[i] = tmp[i];
     for (int i = n; i < MAX_TILES; ++i) {
         tiles[i].type = TILE_EMPTY; tiles[i].title = ""; tiles[i].status_left = NULL; tiles[i].status_right = NULL; tiles[i].term_idx = i; tiles[i].active = 0;
+        tiles[i].minimized = 0; tiles[i].maximized = 0;
+        tiles[i].prev_x = 0; tiles[i].prev_y = 0; tiles[i].prev_w = 0; tiles[i].prev_h = 0;
     }
     // Reassign term_idx for compacted tiles. Do NOT clear vterm buffers here - keep terminal content intact.
     for (int i = 0; i < n; ++i) {
@@ -2254,8 +3040,14 @@ void tile_close(int tile_idx) {
             gui_needs_redraw[old_idx] = 0;
         }
     }
-    tile_count = n > 0 ? n : 1; // ensure at least one tile exists
-    if (focused >= tile_count) focused = tile_count - 1;
+    if (n <= 0) {
+        tile_count = 0;
+        focused = 0;
+        return;
+    }
+
+    tile_count = n;
+    tile_ensure_valid_focus();
     layout_tiles();
 }
 
@@ -2341,6 +3133,13 @@ int tile_create_gui_tile(const char* title, const char* status_left) {
     tiles[idx].term_idx = idx;
     tiles[idx].active = 1;
     tiles[idx].static_drawn = 0;
+    tiles[idx].minimized = 0;
+    tiles[idx].maximized = 0;
+    tiles[idx].prev_x = 0;
+    tiles[idx].prev_y = 0;
+    tiles[idx].prev_w = 0;
+    tiles[idx].prev_h = 0;
+    tiles[idx].desktop = g_current_desktop;
     vterm_clear(idx);
     vterm_set_active(idx, 1);
     layout_tiles();
@@ -2379,6 +3178,8 @@ void tile_unregister_gui_client(int tile_idx) {
 
     // Force an immediate redraw so the terminal content replaces the last GUI frame
     g_force_full_redraw = 1;
+    g_tiles_full_content_redraw = 1;
+    tiles[tile_idx].static_drawn = 0;
 }
 
 void tile_invalidate_gui(int tile_idx) {
@@ -2397,14 +3198,10 @@ void tile_set_gui_continuous_redraw(int tile_idx, int enabled) {
 }
 
 void tile_render_once(void) {
-    // This is intentionally a minimal subset of the main tiler loop: it only
-    // redraws tiles and swaps buffers. It does not poll keyboard/mouse or run
-    // modal/window interaction logic.
     static volatile int g_in_render_once = 0;
     if (g_in_render_once) return;
     g_in_render_once = 1;
     if (!g_tm_initialized) { g_in_render_once = 0; return; }
-    if (tile_count <= 0) { g_in_render_once = 0; return; }
 
     // Best-effort: if framebuffer dimensions are unknown, avoid drawing.
     if (screen_w <= 0 || screen_h <= 0) { g_in_render_once = 0; return; }
@@ -2417,11 +3214,19 @@ void tile_render_once(void) {
 
     vga_begin_frame();
 
-    // Conservatively force a full redraw so the on-screen output is guaranteed
-    // to reflect vterm content changes while the main loop is paused.
+    // While the main WM loop is paused (ring3 task active), render a full
+    // compositor frame so taskbar, menus, windows, and tile content remain in sync.
     g_force_full_redraw = 1;
+    g_tiles_full_content_redraw = 1;
 
+    // Paint desktop background first so exposed regions never leave trails.
+    drawRect(0, 0, screen_w, screen_h, 38, 38, 38);
+    vga_mark_dirty_rect(0, 0, screen_w, screen_h);
+
+    // Draw tiles.
     for (int i = 0; i < tile_count; ++i) {
+        if (tiles[i].type == TILE_EMPTY || tiles[i].minimized) continue;
+        if (tiles[i].desktop != g_current_desktop) continue;
         if (g_force_full_redraw) tiles[i].static_drawn = 0;
         if (!tiles[i].static_drawn) {
             draw_static_tile(&tiles[i], i == focused);
@@ -2431,6 +3236,41 @@ void tile_render_once(void) {
         tiles[i].last_drawn_version = vterm_get_version(tiles[i].term_idx);
     }
 
+    // Draw floating windows on top of tiles.
+    if (g_window_count > 0) {
+        for (int oi = 0; oi < g_window_count; ++oi) {
+            int wi = g_window_order[oi];
+            if (wi < 0 || wi >= MAX_WINDOWS) continue;
+            window_t* w = &g_windows[wi];
+            if (!w->used || w->minimized) continue;
+            if (w->desktop != g_current_desktop) continue;
+
+            int is_focused_win = (wi == g_win_focused);
+            if (!w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw) {
+                wm_draw_decor(w, is_focused_win);
+                wm_mark_decor_dirty(w);
+                w->static_drawn = 1;
+                w->last_focused = is_focused_win;
+            }
+
+            if (w->needs_redraw || w->continuous_redraw || g_force_full_redraw) {
+                wm_draw_content(w);
+                if (!w->continuous_redraw) w->needs_redraw = 0;
+            }
+
+            if (status_overlay_visible()) {
+                wm_draw_status_overlay(w);
+            }
+        }
+    }
+
+    if (g_bg_modal.active) draw_bg_modal();
+    if (g_ctx_active) draw_ctx_menu();
+    draw_taskbar();
+
+    if (g_force_full_redraw) g_force_full_redraw = 0;
+    if (g_tiles_full_content_redraw) g_tiles_full_content_redraw = 0;
+
     // Ensure the swap copies something even if dirty tracking is disabled.
     vga_mark_dirty_rect(0, 0, screen_w, screen_h);
 
@@ -2439,8 +3279,17 @@ void tile_render_once(void) {
     // don’t depend on dirty-rect bookkeeping in this one-shot path.
     if (vga_get_vsync_enabled()) vga_wait_vblank();
     vga_blit_backbuffer_region_to_fb(0, 0, screen_w, screen_h);
-    // Fallback when backbuffer is unavailable: drawing helpers already wrote
-    // directly to the framebuffer.
+
+    // Draw mouse cursor overlay so user-task GUI apps have a visible cursor.
+    {
+        int cur_mx = -1000, cur_my = -1000;
+        mouse_get_position(&cur_mx, &cur_my);
+        if (cur_mx > -100 && cur_my > -100) {
+            int draw_x = cur_mx, draw_y = cur_my;
+            cursor_get_draw_pos_for_kind(cur_mx, cur_my, &draw_x, &draw_y);
+            draw_cursor_overlay(draw_x, draw_y);
+        }
+    }
 
     g_in_render_once = 0;
 }
@@ -2465,11 +3314,402 @@ int tile_pump_input_once(void) {
 
         mouse_event_t me;
         if (have_mouse && mouse_read_event(&me) == 0) {
+            uint8 changes = me.button_changes;
+            int left_press = (changes & MOUSE_BUTTON_LEFT) && (me.buttons & MOUSE_BUTTON_LEFT);
+            int right_press = (changes & MOUSE_BUTTON_RIGHT) && (me.buttons & MOUSE_BUTTON_RIGHT);
+
+            int task_tile = focused;
+            if (g_user_task_term >= 0) {
+                int tt = tile_find_by_term(g_user_task_term);
+                if (tt >= 0 && tt < tile_count) task_tile = tt;
+            }
+
+            /* While ring3 is active, emulate WM close affordances for the running app:
+             * - titlebar close button click
+             * - right-click taskbar button (kill shortcut)
+             */
+            if (task_tile >= 0 && task_tile < tile_count) {
+                if (left_press) {
+                    int t_th = get_title_height(&tiles[task_tile]);
+                    if (t_th >= 12 && me.y >= tiles[task_tile].y && me.y < tiles[task_tile].y + t_th) {
+                        /* Button layout matches draw_decorations exactly */
+                        int t_btn_side = 12;
+                        if (g_close_icon_loaded) {
+                            int iw2 = g_close_icon.header.width;
+                            int ih2 = g_close_icon.header.height;
+                            int m2 = (iw2 > ih2) ? iw2 : ih2;
+                            if (m2 > t_btn_side) t_btn_side = m2;
+                        }
+                        if (t_btn_side > t_th) t_btn_side = t_th;
+                        int t_btn_margin = 2;
+                        int t_btn_gap    = 2;
+                        int t_btn_pad_y = (t_th - t_btn_side) / 2;
+                        int t_close_bx = tiles[task_tile].x + tiles[task_tile].width - t_btn_side - t_btn_margin;
+                        int t_close_by = tiles[task_tile].y + t_btn_pad_y;
+                        int t_max_bx   = t_close_bx - t_btn_side - t_btn_gap;
+                        int t_max_by   = t_close_by;
+                        int t_min_bx   = t_max_bx - t_btn_side - t_btn_gap;
+                        int t_min_by   = t_close_by;
+
+                        /* Close button: send close event or interrupt */
+                        if (point_in_rect(me.x, me.y, t_close_bx, t_close_by, t_btn_side, t_btn_side)) {
+                            /* Invoke close callback if registered; only force-kill if allowed */
+                            int term_c = tiles[task_tile].term_idx;
+                            if (term_c >= 0 && term_c < MAX_TILES && gui_close_cb[term_c]) {
+                                int allow = gui_close_cb[term_c](task_tile, gui_userdata[term_c]);
+                                if (allow) g_user_interrupt = 1;
+                                /* If vetoed (allow==0), the callback pushed a CLOSE event to the app */
+                            } else {
+                                g_user_interrupt = 1;
+                            }
+                            return 1;
+                        }
+                        /* Maximize button: toggle tile between full-screen and natural size */
+                        if (point_in_rect(me.x, me.y, t_max_bx, t_max_by, t_btn_side, t_btn_side)) {
+                            fullscreen_tile = -1;
+                            int taskbar_h_tile = vga_text_cell_h() + 6;
+                            if (taskbar_h_tile < 0) taskbar_h_tile = 0;
+                            if (taskbar_h_tile > screen_h - 32) taskbar_h_tile = screen_h - 32;
+                            if (!tiles[task_tile].maximized) {
+                                tiles[task_tile].prev_x = tiles[task_tile].x;
+                                tiles[task_tile].prev_y = tiles[task_tile].y;
+                                tiles[task_tile].prev_w = tiles[task_tile].width;
+                                tiles[task_tile].prev_h = tiles[task_tile].height;
+                                tiles[task_tile].x = 0;
+                                tiles[task_tile].y = taskbar_h_tile;
+                                tiles[task_tile].width  = screen_w;
+                                tiles[task_tile].height = screen_h - taskbar_h_tile;
+                                tiles[task_tile].maximized = 1;
+                                tiles[task_tile].minimized = 0;
+                            } else {
+                                if (tiles[task_tile].prev_w > 0 && tiles[task_tile].prev_h > 0) {
+                                    tiles[task_tile].x      = tiles[task_tile].prev_x;
+                                    tiles[task_tile].y      = tiles[task_tile].prev_y;
+                                    tiles[task_tile].width  = tiles[task_tile].prev_w;
+                                    tiles[task_tile].height = tiles[task_tile].prev_h;
+                                }
+                                tiles[task_tile].maximized = 0;
+                            }
+                            tiles[task_tile].static_drawn = 0;
+                            focused = task_tile;
+                            g_force_full_redraw = 1;
+                            return 1;
+                        }
+                        /* Minimize button: hide tile (collapses to taskbar entry) */
+                        if (point_in_rect(me.x, me.y, t_min_bx, t_min_by, t_btn_side, t_btn_side)) {
+                            fullscreen_tile = -1;
+                            tiles[task_tile].minimized = 1;
+                            tiles[task_tile].maximized = 0;
+                            tiles[task_tile].static_drawn = 0;
+                            tile_ensure_valid_focus();
+                            g_force_full_redraw = 1;
+                            return 1;
+                        }
+                    }
+                }
+
+                if (right_press) {
+                    int taskbar_h_r = vga_text_cell_h() + 6;
+                    if (me.y < taskbar_h_r) {
+                        for (int bi = 0; bi < g_tb_button_count; ++bi) {
+                            if (me.x >= g_tb_buttons[bi].x && me.x < g_tb_buttons[bi].x + g_tb_buttons[bi].w) {
+                                if (g_tb_buttons[bi].kind == 0 && g_tb_buttons[bi].index == task_tile) {
+                                    g_user_interrupt = 1;
+                                    return 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            int left_down = (me.buttons & MOUSE_BUTTON_LEFT) ? 1 : 0;
+            int left_release = (changes & MOUSE_BUTTON_LEFT) && !left_down;
+
+            if (left_release) {
+                drag_active = 0; drag_win = -1;
+                resize_active = 0; resize_win = -1; resize_edges = 0;
+                tile_drag_active = 0; tile_drag_idx = -1;
+                tile_border_resize_active = 0; tile_border_resize_idx = -1; tile_border_resize_edges = 0;
+            }
+
+            /*
+             * Update cursor style on every mouse event while ring3 is active.
+             *
+             * The main tiler loop (which normally drives cursor changes) is paused whenever
+             * a user task is running.  This block mirrors the cursor-selection logic in the
+             * main loop so that resize/drag feedback reaches the user during app execution.
+             *
+             * Priority order mirrors the main loop:
+             *   1. Active border-resize: show the matching resize cursor.
+             *   2. Active titlebar-drag: keep the normal cursor (no special drag cursor).
+             *   3. Hover over a window border: show the matching resize cursor.
+             *   4. Otherwise: restore the normal cursor.
+             */
+            {
+                cursor_set_style(CURSOR_NORMAL, 0);
+                if (resize_active) {
+                    if ((resize_edges & (RESIZE_EDGE_L | RESIZE_EDGE_R)) && (resize_edges & (RESIZE_EDGE_T | RESIZE_EDGE_B))) {
+                        int xform = 0;
+                        if ((resize_edges & RESIZE_EDGE_L) && (resize_edges & RESIZE_EDGE_T)) xform |= CURSOR_XFORM_FLIP_X;
+                        if ((resize_edges & RESIZE_EDGE_R) && (resize_edges & RESIZE_EDGE_B)) xform |= CURSOR_XFORM_FLIP_X;
+                        cursor_set_style(CURSOR_RES_DIAG, xform);
+                    } else if (resize_edges & (RESIZE_EDGE_T | RESIZE_EDGE_B)) {
+                        cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
+                    } else if (resize_edges & (RESIZE_EDGE_L | RESIZE_EDGE_R)) {
+                        cursor_set_style(CURSOR_RES_HOR, 0);
+                    }
+                } else if (tile_border_resize_active) {
+                    if ((tile_border_resize_edges & (RESIZE_EDGE_L | RESIZE_EDGE_R)) && (tile_border_resize_edges & (RESIZE_EDGE_T | RESIZE_EDGE_B))) {
+                        int xform = 0;
+                        if ((tile_border_resize_edges & RESIZE_EDGE_L) && (tile_border_resize_edges & RESIZE_EDGE_T)) xform |= CURSOR_XFORM_FLIP_X;
+                        if ((tile_border_resize_edges & RESIZE_EDGE_R) && (tile_border_resize_edges & RESIZE_EDGE_B)) xform |= CURSOR_XFORM_FLIP_X;
+                        cursor_set_style(CURSOR_RES_DIAG, xform);
+                    } else if (tile_border_resize_edges & (RESIZE_EDGE_T | RESIZE_EDGE_B)) {
+                        cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
+                    } else if (tile_border_resize_edges & (RESIZE_EDGE_L | RESIZE_EDGE_R)) {
+                        cursor_set_style(CURSOR_RES_HOR, 0);
+                    }
+                } else if (!drag_active && !tile_drag_active) {
+                    /* Hover: check floating window borders then tile borders */
+                    int w_hit = wm_hit_test(me.x, me.y);
+                    if (w_hit >= 0) {
+                        int e = wm_resize_hit_test_edges(&g_windows[w_hit], me.x, me.y);
+                        if (e) {
+                            if ((e & (RESIZE_EDGE_L | RESIZE_EDGE_R)) && (e & (RESIZE_EDGE_T | RESIZE_EDGE_B))) {
+                                int xform = 0;
+                                if ((e & RESIZE_EDGE_L) && (e & RESIZE_EDGE_T)) xform |= CURSOR_XFORM_FLIP_X;
+                                if ((e & RESIZE_EDGE_R) && (e & RESIZE_EDGE_B)) xform |= CURSOR_XFORM_FLIP_X;
+                                cursor_set_style(CURSOR_RES_DIAG, xform);
+                            } else if (e & (RESIZE_EDGE_T | RESIZE_EDGE_B)) {
+                                cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
+                            } else if (e & (RESIZE_EDGE_L | RESIZE_EDGE_R)) {
+                                cursor_set_style(CURSOR_RES_HOR, 0);
+                            }
+                        }
+                    } else {
+                        /* No floating window hit: check individual tile borders */
+                        int t_hit_c = tile_index_at(me.x, me.y);
+                        if (t_hit_c >= 0 && t_hit_c < tile_count) {
+                            int te = tile_border_resize_hit_test(&tiles[t_hit_c], me.x, me.y);
+                            if (te) {
+                                if ((te & (RESIZE_EDGE_L | RESIZE_EDGE_R)) && (te & (RESIZE_EDGE_T | RESIZE_EDGE_B))) {
+                                    int xform = 0;
+                                    if ((te & RESIZE_EDGE_L) && (te & RESIZE_EDGE_T)) xform |= CURSOR_XFORM_FLIP_X;
+                                    if ((te & RESIZE_EDGE_R) && (te & RESIZE_EDGE_B)) xform |= CURSOR_XFORM_FLIP_X;
+                                    cursor_set_style(CURSOR_RES_DIAG, xform);
+                                } else if (te & (RESIZE_EDGE_T | RESIZE_EDGE_B)) {
+                                    cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
+                                } else if (te & (RESIZE_EDGE_L | RESIZE_EDGE_R)) {
+                                    cursor_set_style(CURSOR_RES_HOR, 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (resize_active && resize_win >= 0 && g_windows[resize_win].used) {
+                window_t* w = &g_windows[resize_win];
+                int dx = me.x - resize_start_mx;
+                int dy = me.y - resize_start_my;
+
+                int new_x = resize_start_x;
+                int new_y = resize_start_y;
+                int new_w = resize_start_w;
+                int new_h = resize_start_h;
+
+                if (resize_edges & RESIZE_EDGE_L) { new_x = resize_start_x + dx; new_w = resize_start_w - dx; }
+                if (resize_edges & RESIZE_EDGE_R) { new_w = resize_start_w + dx; }
+                if (resize_edges & RESIZE_EDGE_T) { new_y = resize_start_y + dy; new_h = resize_start_h - dy; }
+                if (resize_edges & RESIZE_EDGE_B) { new_h = resize_start_h + dy; }
+
+                if (new_w < 64) {
+                    if (resize_edges & RESIZE_EDGE_L) new_x -= (64 - new_w);
+                    new_w = 64;
+                }
+                if (new_h < 48) {
+                    if (resize_edges & RESIZE_EDGE_T) new_y -= (48 - new_h);
+                    new_h = 48;
+                }
+                if (new_x < 0) { if (resize_edges & RESIZE_EDGE_L) new_w += new_x; new_x = 0; }
+                if (new_y < 0) { if (resize_edges & RESIZE_EDGE_T) new_h += new_y; new_y = 0; }
+                if (new_x + new_w > screen_w) new_w = screen_w - new_x;
+                if (new_y + new_h > screen_h) new_h = screen_h - new_y;
+                if (new_w < 64) new_w = 64;
+                if (new_h < 48) new_h = 48;
+
+                w->x = new_x;
+                w->y = new_y;
+                w->w = new_w;
+                w->h = new_h;
+                w->static_drawn = 0;
+                w->needs_redraw = 1;
+                g_tiles_full_content_redraw = 1;
+                return 1;
+            }
+
+            if (drag_active && drag_win >= 0 && g_windows[drag_win].used) {
+                window_t* w = &g_windows[drag_win];
+                int taskbar_h_drag = vga_text_cell_h() + 6;
+                if (taskbar_h_drag < 0) taskbar_h_drag = 0;
+                w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
+                w->y = clampi(me.y - drag_off_y, taskbar_h_drag, screen_h - w->h);
+                w->static_drawn = 0;
+                w->needs_redraw = 1;
+                g_tiles_full_content_redraw = 1;
+                return 1;
+            }
+
+            if (tile_border_resize_active && tile_border_resize_idx >= 0 && tile_border_resize_idx < tile_count) {
+                tile_t* t = &tiles[tile_border_resize_idx];
+                int dx = me.x - tile_border_resize_start_mx;
+                int dy = me.y - tile_border_resize_start_my;
+                int new_x = tile_border_resize_start_x;
+                int new_y = tile_border_resize_start_y;
+                int new_w = tile_border_resize_start_w;
+                int new_h = tile_border_resize_start_h;
+                if (tile_border_resize_edges & RESIZE_EDGE_L) { new_x = tile_border_resize_start_x + dx; new_w = tile_border_resize_start_w - dx; }
+                if (tile_border_resize_edges & RESIZE_EDGE_R) { new_w = tile_border_resize_start_w + dx; }
+                if (tile_border_resize_edges & RESIZE_EDGE_T) { new_y = tile_border_resize_start_y + dy; new_h = tile_border_resize_start_h - dy; }
+                if (tile_border_resize_edges & RESIZE_EDGE_B) { new_h = tile_border_resize_start_h + dy; }
+                const int t_minw2 = 200, t_minh2 = 120;
+                if (new_w < t_minw2) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_x -= (t_minw2 - new_w); new_w = t_minw2; }
+                if (new_h < t_minh2) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_y -= (t_minh2 - new_h); new_h = t_minh2; }
+                int tbh_p = vga_text_cell_h() + 6;
+                if (new_x < 0) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_w += new_x; new_x = 0; }
+                if (new_y < tbh_p) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_h += (new_y - tbh_p); new_y = tbh_p; }
+                if (new_x + new_w > screen_w) new_w = screen_w - new_x;
+                if (new_y + new_h > screen_h) new_h = screen_h - new_y;
+                if (new_w < t_minw2) new_w = t_minw2;
+                if (new_h < t_minh2) new_h = t_minh2;
+                t->x = new_x; t->y = new_y; t->width = new_w; t->height = new_h;
+                t->static_drawn = 0;
+                g_force_full_redraw = 1;
+                g_tiles_full_content_redraw = 1;
+                return 1;
+            }
+
+            if (tile_drag_active && tile_drag_idx >= 0 && tile_drag_idx < tile_count) {
+                tile_t* t = &tiles[tile_drag_idx];
+                int tbh_tdp = vga_text_cell_h() + 6;
+                t->x = clampi(me.x - tile_drag_off_x, 0, screen_w - t->width);
+                t->y = clampi(me.y - tile_drag_off_y, tbh_tdp, screen_h - t->height);
+                t->static_drawn = 0;
+                g_force_full_redraw = 1;
+                g_tiles_full_content_redraw = 1;
+                return 1;
+            }
+
+            if (left_press) {
+                int w_hit = wm_hit_test(me.x, me.y);
+                if (w_hit >= 0) {
+                    wm_bring_to_front(w_hit);
+                    g_win_focused = w_hit;
+
+                    /* Check close / maximize / minimize buttons before drag/resize */
+                    int did_btn = 0;
+                    {
+                        int bx, by, bw, bh;
+                        wm_get_close_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
+                        if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
+                            wm_close_window(w_hit);
+                            g_force_full_redraw = 1;
+                            g_tiles_full_content_redraw = 1;
+                            did_btn = 1;
+                        }
+                    }
+                    if (!did_btn) {
+                        int bx, by, bw, bh;
+                        wm_get_max_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
+                        if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
+                            window_t* w = &g_windows[w_hit];
+                            int taskbar_h_win = vga_text_cell_h() + 6;
+                            if (taskbar_h_win < 0) taskbar_h_win = 0;
+                            if (taskbar_h_win > screen_h - 32) taskbar_h_win = screen_h - 32;
+                            if (!w->maximized) {
+                                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
+                                w->prev_x = w->x; w->prev_y = w->y; w->prev_w = w->w; w->prev_h = w->h;
+                                w->x = 0; w->y = taskbar_h_win; w->w = screen_w; w->h = screen_h - taskbar_h_win;
+                                w->maximized = 1; w->minimized = 0;
+                            } else {
+                                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
+                                w->x = w->prev_x; w->y = w->prev_y; w->w = w->prev_w; w->h = w->prev_h;
+                                w->maximized = 0;
+                            }
+                            w->static_drawn = 0; w->needs_redraw = 1;
+                            g_tiles_full_content_redraw = 1;
+                            did_btn = 1;
+                        }
+                    }
+                    if (!did_btn) {
+                        int bx, by, bw, bh;
+                        wm_get_min_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
+                        if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
+                            window_t* w = &g_windows[w_hit];
+                            w->minimized = !w->minimized; w->needs_redraw = 1; w->static_drawn = 0;
+                            g_tiles_full_content_redraw = 1;
+                            did_btn = 1;
+                        }
+                    }
+                    if (!did_btn) {
+                        int e = wm_resize_hit_test_edges(&g_windows[w_hit], me.x, me.y);
+                        if (e) {
+                            resize_active = 1;
+                            resize_win = w_hit;
+                            resize_edges = e;
+                            resize_start_mx = me.x;
+                            resize_start_my = me.y;
+                            resize_start_x = g_windows[w_hit].x;
+                            resize_start_y = g_windows[w_hit].y;
+                            resize_start_w = g_windows[w_hit].w;
+                            resize_start_h = g_windows[w_hit].h;
+                        } else {
+                            int th = win_title_height(&g_windows[w_hit]);
+                            if (point_in_rect(me.x, me.y, g_windows[w_hit].x, g_windows[w_hit].y, g_windows[w_hit].w, th)) {
+                                drag_active = 1;
+                                drag_win = w_hit;
+                                drag_off_x = me.x - g_windows[w_hit].x;
+                                drag_off_y = me.y - g_windows[w_hit].y;
+                            }
+                        }
+                    }
+                    return 1;
+                }
+                /* No floating window hit: check tile border resize and titlebar drag. */
+                {
+                    int t_hit_p = tile_index_at(me.x, me.y);
+                    if (t_hit_p >= 0 && t_hit_p < tile_count && !tiles[t_hit_p].maximized) {
+                        int te = tile_border_resize_hit_test(&tiles[t_hit_p], me.x, me.y);
+                        if (te) {
+                            tile_border_resize_active = 1;
+                            tile_border_resize_idx = t_hit_p;
+                            tile_border_resize_edges = te;
+                            tile_border_resize_start_mx = me.x;
+                            tile_border_resize_start_my = me.y;
+                            tile_border_resize_start_x = tiles[t_hit_p].x;
+                            tile_border_resize_start_y = tiles[t_hit_p].y;
+                            tile_border_resize_start_w = tiles[t_hit_p].width;
+                            tile_border_resize_start_h = tiles[t_hit_p].height;
+                            return 1;
+                        }
+                        int th_p = get_title_height(&tiles[t_hit_p]);
+                        if (th_p > 0 && point_in_rect(me.x, me.y, tiles[t_hit_p].x, tiles[t_hit_p].y, tiles[t_hit_p].width, th_p)) {
+                            tile_drag_active = 1;
+                            tile_drag_idx = t_hit_p;
+                            tile_drag_off_x = me.x - tiles[t_hit_p].x;
+                            tile_drag_off_y = me.y - tiles[t_hit_p].y;
+                            return 1;
+                        }
+                    }
+                }
+            }
+
             // Route to focused window if any; else to the active user task's tile.
             if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
                 window_t* wfocus = &g_windows[g_win_focused];
                 if (wfocus->mouse_cb) {
-                    wfocus->mouse_cb(-1, (const mouse_event_t*)&me, wfocus->userdata);
+                    wfocus->mouse_cb(g_win_focused, (const mouse_event_t*)&me, wfocus->userdata);
                     wfocus->needs_redraw = 1;
                 }
                 return 1;
@@ -2540,11 +3780,16 @@ int tile_pump_input_once(void) {
         }
     }
 
-    // While a ring3 task is running, Ctrl+C is reserved as the user-task abort.
-    // Important: do NOT have a separate poller consume scancodes concurrently.
+    // While a ring3 task is running, Ctrl+C is reserved as the user-task abort
+    // UNLESS the task has a GUI key handler (e.g. text editor wants Ctrl+C for copy).
     if (g_user_task_active && key == 0x2206) {
-        g_user_interrupt = 1;
-        return 1;
+        int term = g_user_task_term;
+        if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
+            /* GUI app: deliver Ctrl+C as keypress, not interrupt */
+        } else {
+            g_user_interrupt = 1;
+            return 1;
+        }
     }
 
     // When a ring3 user task is active and waiting for stdin input,
@@ -2595,6 +3840,120 @@ int tile_pump_input_once(void) {
         return 1;
     }
 
+    /* ── Super-alone (0x6001): toggle start menu ── */
+    if (key == 0x6001) {
+        g_start_active = !g_start_active;
+        g_dropdown_active = 0;
+        g_ctx_active = 0;
+        g_start_hover = -1;
+        g_programs_active = 0;
+        g_programs_hover = -1;
+        g_programs_scanned = 0;
+        g_force_full_redraw = 1;
+        return 1;
+    }
+
+    /* ── Start menu keyboard navigation ── */
+    if (g_start_active) {
+        int base_nav = key & 0x1FFF;
+        if (base_nav == 0x1001) { /* Up */
+            if (g_programs_active && g_programs_hover >= 0) {
+                if (g_programs_hover > 0) {
+                    g_programs_hover--;
+                } else if (g_programs_scroll > 0) {
+                    g_programs_scroll--;
+                }
+            } else {
+                if (g_start_hover <= 0) g_start_hover = 5;
+                else g_start_hover--;
+            }
+            g_force_full_redraw = 1;
+            return 1;
+        }
+        if (base_nav == 0x1002) { /* Down */
+            if (g_programs_active && g_programs_hover >= 0) {
+                int item_h_nav = vga_text_cell_h() + 6;
+                int avail_h_nav = screen_h - (vga_text_cell_h() + 6);
+                int max_vis_nav = (avail_h_nav - 4) / item_h_nav;
+                if (max_vis_nav < 1) max_vis_nav = 1;
+                if (max_vis_nav > g_program_count) max_vis_nav = g_program_count;
+                if (g_programs_hover < max_vis_nav - 1) {
+                    g_programs_hover++;
+                } else {
+                    int max_scroll_nav = g_program_count - max_vis_nav;
+                    if (max_scroll_nav < 0) max_scroll_nav = 0;
+                    if (g_programs_scroll < max_scroll_nav) g_programs_scroll++;
+                }
+            } else {
+                if (g_start_hover >= 5) g_start_hover = 0;
+                else g_start_hover++;
+            }
+            g_force_full_redraw = 1;
+            return 1;
+        }
+        if (base_nav == 0x1004) { /* Right: enter Programs submenu */
+            if (g_start_hover == 0) {
+                g_programs_active = 1;
+                if (!g_programs_scanned) scan_programs();
+                g_programs_hover = 0;
+                g_force_full_redraw = 1;
+            }
+            return 1;
+        }
+        if (base_nav == 0x1003) { /* Left: leave Programs submenu */
+            if (g_programs_active) {
+                g_programs_active = 0;
+                g_programs_hover = -1;
+                g_force_full_redraw = 1;
+            }
+            return 1;
+        }
+        if ((key & 0xFF) == '\n' || (key & 0xFF) == '\r') { /* Enter: activate item */
+            if (g_programs_active && g_programs_hover >= 0) {
+                int pidx_nav = g_programs_hover + g_programs_scroll;
+                if (pidx_nav >= 0 && pidx_nav < g_program_count) {
+                    launch_program(g_program_names[pidx_nav]);
+                }
+                g_start_active = 0; g_programs_active = 0;
+                g_force_full_redraw = 1;
+                return 1;
+            }
+            if (g_start_hover >= 0 && g_start_hover < 6) {
+                if (g_start_hover == 0) { /* Programs */
+                    g_programs_active = 1;
+                    if (!g_programs_scanned) scan_programs();
+                    g_programs_hover = 0;
+                } else if (g_start_hover == 1) { /* Shell */
+                    g_start_active = 0; g_programs_active = 0;
+                    launch_shell_tile();
+                } else if (g_start_hover == 2) { /* Files */
+                    g_start_active = 0; g_programs_active = 0;
+                    launch_program("files");
+                } else if (g_start_hover == 3) { /* Settings */
+                    g_start_active = 0;
+                } else if (g_start_hover == 4) { /* Reboot */
+                    g_start_active = 0;
+                    outportb(0x64, 0xFE);
+                } else if (g_start_hover == 5) { /* Shutdown */
+                    g_start_active = 0;
+                    Shutdown();
+                }
+                g_force_full_redraw = 1;
+                return 1;
+            }
+        }
+        if ((key & 0xFF) == 27) { /* Escape: close menu */
+            if (g_programs_active) {
+                g_programs_active = 0;
+                g_programs_hover = -1;
+            } else {
+                g_start_active = 0;
+            }
+            g_force_full_redraw = 1;
+            return 1;
+        }
+    }
+
     // Note: when a ring3 task is running, we rely on this pump path (invoked
     // from the PIT IRQ) to keep the UI responsive; it must therefore implement
     // the same global hotkeys as the full tiler loop.
@@ -2611,6 +3970,7 @@ int tile_pump_input_once(void) {
                 tiles[idx].status_right = NULL;
                 tiles[idx].term_idx = idx;
                 tiles[idx].active = 1;
+                tiles[idx].desktop = g_current_desktop;
                 // ensure a fresh vterm buffer so prompt isn't duplicated
                 vterm_clear(idx);
                 vterm_set_active(idx, 1);
@@ -2652,17 +4012,9 @@ int tile_pump_input_once(void) {
                 return 1;
             }
 
-            if (tile_count > 1) {
-                tile_close(focused);
-                g_force_full_redraw = 1;
-                layout_tiles();
-            } else {
-                static char last_tile_msg[64];
-                snprintf(last_tile_msg, sizeof(last_tile_msg), "Last tile cannot be closed");
-                tiles[focused].status_left = last_tile_msg;
-                tiles[focused].status_visible = 1;
-                g_force_full_redraw = 1;
-            }
+            tile_close(focused);
+            g_force_full_redraw = 1;
+            layout_tiles();
             return 1;
         }
 
@@ -2710,7 +4062,7 @@ int tile_pump_input_once(void) {
     if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
         window_t* wfocus = &g_windows[g_win_focused];
         if (wfocus->key_cb) {
-            wfocus->key_cb(-1, key & 0xFFFF, wfocus->userdata);
+            wfocus->key_cb(g_win_focused, key & 0xFFFF, wfocus->userdata);
             wfocus->needs_redraw = 1;
         }
         return 1;
@@ -2810,10 +4162,18 @@ void start_tiling_manager() {
             tiles[i].last_cx = tiles[i].last_cy = tiles[i].last_cw = tiles[i].last_ch = -1;
             tiles[i].term_idx = i;
             tiles[i].active = 0;
+            tiles[i].minimized = 0;
+            tiles[i].maximized = 0;
+            tiles[i].prev_x = 0;
+            tiles[i].prev_y = 0;
+            tiles[i].prev_w = 0;
+            tiles[i].prev_h = 0;
+            tiles[i].desktop = 0;
             gui_needs_redraw[i] = 0;
         }
         tiles[0].type = TILE_SHELL;
         tiles[0].title = "EYN-OS Shell";
+        tiles[0].desktop = 0;
         static char status_buf[64];
         snprintf(status_buf, sizeof(status_buf), "Fb: %dx%d", screen_w, screen_h);
         tiles[0].status_left = status_buf; // show framebuffer size for debug
@@ -2827,8 +4187,11 @@ void start_tiling_manager() {
     } else {
         // Re-entry path (e.g. aborting a ring3 task): keep all UI state, just ensure
         // a prompt is visible and force redraw so VGA updates immediately.
-        if (tile_count <= 0) tile_count = 1;
-        if (focused < 0 || focused >= tile_count) focused = 0;
+        if (tile_count <= 0) {
+            tile_count = 0;
+            (void)create_shell_tile_for_launch();
+        }
+        tile_ensure_valid_focus();
         int ti = focused;
         int term = tiles[ti].term_idx;
         if (term < 0 || term >= MAX_TILES) term = 0;
@@ -2841,6 +4204,11 @@ void start_tiling_manager() {
 
     int running = 1;
     while (running) {
+        if (tile_count <= 0) {
+            tile_count = 0;
+        }
+        tile_ensure_valid_focus();
+
         // UI loop heartbeat for the watchdog
         watchdog_kick("wm-loop");
 
@@ -2917,10 +4285,17 @@ void start_tiling_manager() {
         vga_begin_frame();
     g_dirty_hits_prev_cursor = 0;
     g_any_tile_content_redrew = 0;
+    // On full redraws, paint the desktop background so exposed areas are not garbage.
+    if (g_force_full_redraw) {
+        drawRect(0, 0, screen_w, screen_h, 38, 38, 38);
+        vga_mark_dirty_rect(0, 0, screen_w, screen_h);
+    }
     // draw all tiles
     // Avoid clearing the entire screen each frame to reduce flicker. Only clear the regions we will redraw (each tile).
     // Quick heuristic: clear each tile's rectangle before drawing it.
     for (int i = 0; i < tile_count; ++i) {
+        if (tiles[i].type == TILE_EMPTY || tiles[i].minimized) continue;
+        if (tiles[i].desktop != g_current_desktop) continue;
         if (g_force_full_redraw) tiles[i].static_drawn = 0; // force static re-render
         int decor_fresh = 0;
         if (!tiles[i].static_drawn) { draw_static_tile(&tiles[i], i == focused); decor_fresh = 1; }
@@ -3025,6 +4400,7 @@ void start_tiling_manager() {
                 if (wi < 0 || wi >= MAX_WINDOWS) continue;
                 window_t* w = &g_windows[wi];
                 if (!w->used) continue;
+                if (w->desktop != g_current_desktop) continue;
                 int is_focused_win = (wi == g_win_focused);
                 // Redraw decorations if first time, focus changed, forced, or underlying tiles changed
                 if (!w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw || g_any_tile_content_redrew) {
@@ -3047,6 +4423,8 @@ void start_tiling_manager() {
         }
         // If a modal is active, draw it now on top of everything
         if (g_bg_modal.active) { draw_bg_modal(); }
+        if (g_ctx_active) { draw_ctx_menu(); }
+        draw_taskbar();
     if (g_force_full_redraw) g_force_full_redraw = 0;
     if (g_tiles_full_content_redraw) g_tiles_full_content_redraw = 0;
         tui_refresh();
@@ -3141,6 +4519,17 @@ void start_tiling_manager() {
             }
             else if (resize_edges & (RESIZE_EDGE_T | RESIZE_EDGE_B)) cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
             else if (resize_edges & (RESIZE_EDGE_L | RESIZE_EDGE_R)) cursor_set_style(CURSOR_RES_HOR, 0);
+        } else if (tile_border_resize_active) {
+            if ((tile_border_resize_edges & (RESIZE_EDGE_L | RESIZE_EDGE_R)) && (tile_border_resize_edges & (RESIZE_EDGE_T | RESIZE_EDGE_B))) {
+                int xform = 0;
+                if ((tile_border_resize_edges & RESIZE_EDGE_L) && (tile_border_resize_edges & RESIZE_EDGE_T)) xform |= CURSOR_XFORM_FLIP_X;
+                if ((tile_border_resize_edges & RESIZE_EDGE_R) && (tile_border_resize_edges & RESIZE_EDGE_B)) xform |= CURSOR_XFORM_FLIP_X;
+                cursor_set_style(CURSOR_RES_DIAG, xform);
+            } else if (tile_border_resize_edges & (RESIZE_EDGE_T | RESIZE_EDGE_B)) {
+                cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
+            } else if (tile_border_resize_edges & (RESIZE_EDGE_L | RESIZE_EDGE_R)) {
+                cursor_set_style(CURSOR_RES_HOR, 0);
+            }
         } else if (tile_resize_active) {
             if (tile_resize_mode == 3) cursor_set_style(CURSOR_RES_DIAG, 0);
             else if (tile_resize_mode == 2) cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
@@ -3164,6 +4553,25 @@ void start_tiling_manager() {
                 if (m == 3) cursor_set_style(CURSOR_RES_DIAG, 0);
                 else if (m == 2) cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
                 else if (m == 1) cursor_set_style(CURSOR_RES_HOR, 0);
+                if (!m) {
+                    /* Hover over an individual tile border → show resize cursor */
+                    int t_hit_h = tile_index_at(cur_mx, cur_my);
+                    if (t_hit_h >= 0 && t_hit_h < tile_count) {
+                        int te = tile_border_resize_hit_test(&tiles[t_hit_h], cur_mx, cur_my);
+                        if (te) {
+                            if ((te & (RESIZE_EDGE_L | RESIZE_EDGE_R)) && (te & (RESIZE_EDGE_T | RESIZE_EDGE_B))) {
+                                int xform = 0;
+                                if ((te & RESIZE_EDGE_L) && (te & RESIZE_EDGE_T)) xform |= CURSOR_XFORM_FLIP_X;
+                                if ((te & RESIZE_EDGE_R) && (te & RESIZE_EDGE_B)) xform |= CURSOR_XFORM_FLIP_X;
+                                cursor_set_style(CURSOR_RES_DIAG, xform);
+                            } else if (te & (RESIZE_EDGE_T | RESIZE_EDGE_B)) {
+                                cursor_set_style(CURSOR_RES_VERT, CURSOR_XFORM_ROT_90);
+                            } else if (te & (RESIZE_EDGE_L | RESIZE_EDGE_R)) {
+                                cursor_set_style(CURSOR_RES_HOR, 0);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -3244,10 +4652,350 @@ void start_tiling_manager() {
             // On left button press edge, set focus to the tile under cursor
             uint8 changes = me.button_changes;
             uint8 downMask = (me.buttons & MOUSE_BUTTON_LEFT);
-            uint8 prevWasDown = (g_mouse_state.prev_buttons & MOUSE_BUTTON_LEFT);
-            int press_edge = (changes & MOUSE_BUTTON_LEFT) && downMask && !prevWasDown;
-            int release_edge = (changes & MOUSE_BUTTON_LEFT) && !downMask && prevWasDown;
+            int press_edge = (changes & MOUSE_BUTTON_LEFT) && downMask;
+            int release_edge = (changes & MOUSE_BUTTON_LEFT) && !downMask;
+
+            /* Right-click detection for context menu */
+            int right_press = (changes & MOUSE_BUTTON_RIGHT) && (me.buttons & MOUSE_BUTTON_RIGHT);
+
+            /* --- Handle left-click on an active context menu --- */
+            if (press_edge && g_ctx_active) {
+                int cw_ctx = vga_text_cell_w();
+                int ch_ctx = vga_text_cell_h();
+                int item_h_ctx = ch_ctx + 6;
+                int menu_w_ctx = 14 * cw_ctx;
+                int menu_h_ctx = CTX_ITEM_COUNT * item_h_ctx + 4;
+                int cmx = g_ctx_x; int cmy = g_ctx_y;
+                if (cmx + menu_w_ctx > screen_w) cmx = screen_w - menu_w_ctx;
+                if (cmy + menu_h_ctx > screen_h) cmy = screen_h - menu_h_ctx;
+                if (cmx < 0) cmx = 0;
+                if (cmy < 0) cmy = 0;
+
+                if (me.x >= cmx && me.x < cmx + menu_w_ctx &&
+                    me.y >= cmy && me.y < cmy + menu_h_ctx) {
+                    int item = (me.y - cmy - 2) / item_h_ctx;
+                    if (item >= 0 && item < CTX_ITEM_COUNT) {
+                        if (item < g_desktop_count) {
+                            /* Move to Desktop item */
+                            if (g_ctx_kind == 0 && g_ctx_index >= 0 && g_ctx_index < tile_count) {
+                                tiles[g_ctx_index].desktop = item;
+                            } else if (g_ctx_kind == 1 && g_ctx_index >= 0 && g_ctx_index < MAX_WINDOWS && g_windows[g_ctx_index].used) {
+                                g_windows[g_ctx_index].desktop = item;
+                            }
+                            g_force_full_redraw = 1;
+                            layout_tiles();
+                        } else if (item == CTX_ITEM_COUNT - 1) {
+                            /* Kill */
+                            if (g_ctx_kind == 0 && g_ctx_index >= 0 && g_ctx_index < tile_count) {
+                                tile_close(g_ctx_index);
+                                g_force_full_redraw = 1;
+                                layout_tiles();
+                            } else if (g_ctx_kind == 1 && g_ctx_index >= 0 && g_ctx_index < MAX_WINDOWS && g_windows[g_ctx_index].used) {
+                                wm_close_window(g_ctx_index);
+                                g_force_full_redraw = 1;
+                                g_tiles_full_content_redraw = 1;
+                            }
+                        }
+                    }
+                }
+                g_ctx_active = 0;
+                g_ctx_index = -1;
+                g_force_full_redraw = 1;
+                goto after_mouse_handling;
+            }
+
+            /* --- Right-click: open context menu --- */
+            if (right_press) {
+                /* Right-click on a window titlebar */
+                int w_hit_r = wm_hit_test(me.x, me.y);
+                if (w_hit_r >= 0) {
+                    int th_r = win_title_height(&g_windows[w_hit_r]);
+                    if (me.y >= g_windows[w_hit_r].y && me.y < g_windows[w_hit_r].y + th_r) {
+                        g_ctx_active = 1;
+                        g_ctx_x = me.x; g_ctx_y = me.y;
+                        g_ctx_kind = 1; g_ctx_index = w_hit_r;
+                        g_ctx_hover = -1;
+                        g_force_full_redraw = 1;
+                        goto after_mouse_handling;
+                    }
+                }
+                /* Right-click on a tile titlebar */
+                int t_hit_r = tile_index_at(me.x, me.y);
+                if (t_hit_r >= 0 && t_hit_r < tile_count) {
+                    int th_r = get_title_height(&tiles[t_hit_r]);
+                    if (me.y >= tiles[t_hit_r].y && me.y < tiles[t_hit_r].y + th_r) {
+                        g_ctx_active = 1;
+                        g_ctx_x = me.x; g_ctx_y = me.y;
+                        g_ctx_kind = 0; g_ctx_index = t_hit_r;
+                        g_ctx_hover = -1;
+                        g_force_full_redraw = 1;
+                        goto after_mouse_handling;
+                    }
+                }
+                /* Right-click on a taskbar entry */
+                int taskbar_h_r = vga_text_cell_h() + 6;
+                if (me.y < taskbar_h_r) {
+                    for (int bi = 0; bi < g_tb_button_count; ++bi) {
+                        if (me.x >= g_tb_buttons[bi].x && me.x < g_tb_buttons[bi].x + g_tb_buttons[bi].w) {
+                            g_ctx_active = 1;
+                            g_ctx_x = me.x; g_ctx_y = taskbar_h_r;
+                            g_ctx_kind = g_tb_buttons[bi].kind;
+                            g_ctx_index = g_tb_buttons[bi].index;
+                            g_ctx_hover = -1;
+                            g_force_full_redraw = 1;
+                            goto after_mouse_handling;
+                        }
+                    }
+                }
+                /* Right-click elsewhere: dismiss any open context menu */
+                if (g_ctx_active) {
+                    g_ctx_active = 0;
+                    g_force_full_redraw = 1;
+                    goto after_mouse_handling;
+                }
+            }
             if (press_edge) {
+                int taskbar_h = vga_text_cell_h() + 6;
+                int tb_cw = vga_text_cell_w();
+                int start_btn_w = tb_cw + 10;
+                if (me.y < taskbar_h) {
+                    /* --- Clicks on the taskbar --- */
+
+                    /* Start button */
+                    if (me.x >= 2 && me.x < 2 + start_btn_w) {
+                        g_start_active = !g_start_active;
+                        g_dropdown_active = 0;
+                        g_ctx_active = 0;
+                        g_start_hover = -1;
+                        g_programs_active = 0;
+                        g_programs_hover  = -1;
+                        g_programs_scanned = 0; /* rescan /binaries on next open */
+                        g_force_full_redraw = 1;
+                        goto after_mouse_handling;
+                    }
+
+                    /* Overflow arrow button */
+                    if (g_tb_overflow_w > 0 && me.x >= g_tb_overflow_x && me.x < g_tb_overflow_x + g_tb_overflow_w) {
+                        g_dropdown_active = !g_dropdown_active;
+                        g_start_active = 0;
+                        g_dropdown_hover = -1;
+                        g_force_full_redraw = 1;
+                        goto after_mouse_handling;
+                    }
+
+                    /* App buttons — click to focus/raise */
+                    for (int bi = 0; bi < g_tb_button_count; ++bi) {
+                        if (me.x >= g_tb_buttons[bi].x && me.x < g_tb_buttons[bi].x + g_tb_buttons[bi].w) {
+                            if (g_tb_buttons[bi].kind == 0) {
+                                /* Tile: switch focus */
+                                int ti2 = g_tb_buttons[bi].index;
+                                if (ti2 >= 0 && ti2 < tile_count) {
+                                    if (tiles[ti2].minimized) {
+                                        tiles[ti2].minimized = 0;
+                                        tiles[ti2].static_drawn = 0;
+                                    }
+                                    focused = ti2;
+                                    g_win_focused = -1;
+                                    g_force_full_redraw = 1;
+                                }
+                            } else {
+                                /* Window: bring to front + focus */
+                                int wi2 = g_tb_buttons[bi].index;
+                                if (wi2 >= 0 && wi2 < MAX_WINDOWS && g_windows[wi2].used) {
+                                    wm_bring_to_front(wi2);
+                                    g_win_focused = wi2;
+                                    if (g_windows[wi2].minimized) {
+                                        g_windows[wi2].minimized = 0;
+                                        g_windows[wi2].needs_redraw = 1;
+                                        g_windows[wi2].static_drawn = 0;
+                                    }
+                                    g_force_full_redraw = 1;
+                                }
+                            }
+                            g_start_active = 0;
+                            g_dropdown_active = 0;
+                            goto after_mouse_handling;
+                        }
+                    }
+
+                    /* Desktop switcher pills */
+                    {
+                        int pill_w2 = tb_cw + 6;
+                        int pill_gap2 = 3;
+                        int desk_total_w2 = g_desktop_count * (pill_w2 + pill_gap2) - pill_gap2;
+                        int ds_x2 = screen_w - desk_total_w2 - 8;
+                        for (int d = 0; d < g_desktop_count; ++d) {
+                            int px2 = ds_x2 + d * (pill_w2 + pill_gap2);
+                            if (me.x >= px2 && me.x < px2 + pill_w2) {
+                                g_current_desktop = d;
+                                /* Unfocus windows not on the new desktop */
+                                if (g_win_focused >= 0 && g_windows[g_win_focused].desktop != d)
+                                    g_win_focused = -1;
+                                /* Move tile focus to a tile on the new desktop */
+                                if (focused >= 0 && focused < tile_count &&
+                                    tiles[focused].desktop != d) {
+                                    int found_tile = -1;
+                                    for (int t = 0; t < tile_count; ++t) {
+                                        if (tiles[t].type != TILE_EMPTY &&
+                                            !tiles[t].minimized &&
+                                            tiles[t].desktop == d) {
+                                            found_tile = t;
+                                            break;
+                                        }
+                                    }
+                                    if (found_tile >= 0) focused = found_tile;
+                                }
+                                g_force_full_redraw = 1;
+                                layout_tiles();
+                                goto after_mouse_handling;
+                            }
+                        }
+                    }
+
+                    /* Clicked elsewhere on taskbar — dismiss menus */
+                    g_start_active = 0;
+                    g_dropdown_active = 0;
+                    g_force_full_redraw = 1;
+                    goto after_mouse_handling;
+
+                } else if (g_start_active) {
+                    /* Check clicks inside the Programs submenu first */
+                    if (g_programs_active && g_program_count > 0) {
+                        int sub_w2 = 160;
+                        int sub_x2 = 150; /* menu_w */
+                        int item_h2 = vga_text_cell_h() + 6;
+                        int sub_top2 = taskbar_h;
+                        int avail_h2 = screen_h - sub_top2;
+                        int max_vis2 = (avail_h2 - 4) / item_h2;
+                        if (max_vis2 < 1) max_vis2 = 1;
+                        if (max_vis2 > g_program_count) max_vis2 = g_program_count;
+                        int need_scroll2 = (g_program_count > max_vis2);
+                        int sub_h2 = max_vis2 * item_h2 + 4;
+                        if (need_scroll2) sub_h2 += item_h2 * 2; /* arrow rows */
+                        if (me.x >= sub_x2 && me.x < sub_x2 + sub_w2 &&
+                            me.y >= sub_top2 && me.y < sub_top2 + sub_h2) {
+                            int rel_y = me.y - sub_top2 - 2;
+                            if (need_scroll2) {
+                                /* Click on scroll-up arrow */
+                                if (rel_y < item_h2) {
+                                    if (g_programs_scroll > 0) g_programs_scroll--;
+                                    g_force_full_redraw = 1;
+                                    goto after_mouse_handling;
+                                }
+                                rel_y -= item_h2;
+                                /* Click on scroll-down arrow (after items) */
+                                if (rel_y >= max_vis2 * item_h2) {
+                                    int max_scroll2 = g_program_count - max_vis2;
+                                    if (g_programs_scroll < max_scroll2) g_programs_scroll++;
+                                    g_force_full_redraw = 1;
+                                    goto after_mouse_handling;
+                                }
+                            }
+                            int pidx = rel_y / item_h2 + g_programs_scroll;
+                            if (pidx >= 0 && pidx < g_program_count) {
+                                /* GUI programs open their own window; others use the wrapper */
+                                launch_program(g_program_names[pidx]);
+                            }
+                            g_start_active = 0;
+                            g_programs_active = 0;
+                            g_force_full_redraw = 1;
+                            goto after_mouse_handling;
+                        }
+                    }
+                    /* Check clicks inside the start menu dropdown */
+                    int menu_w2 = 150;
+                    int item_h2 = vga_text_cell_h() + 6;
+                    int menu_top = taskbar_h;
+                    if (me.x >= 0 && me.x < menu_w2 && me.y >= menu_top && me.y < menu_top + 6 * item_h2 + 4) {
+                        int idx2 = (me.y - menu_top - 2) / item_h2;
+                        if (idx2 >= 0 && idx2 < 6) {
+                            g_start_hover = idx2;
+                            if (idx2 == 0) {
+                                /* Programs: toggle submenu (handled by hover in draw) */
+                                g_programs_active = !g_programs_active;
+                                if (g_programs_active && !g_programs_scanned) scan_programs();
+                                g_force_full_redraw = 1;
+                            } else if (idx2 == 1) {
+                                /* Shell: create/focus an EYN-OS shell tile */
+                                g_start_active = 0;
+                                g_programs_active = 0;
+                                g_force_full_redraw = 1;
+                                launch_shell_tile();
+                            } else if (idx2 == 2) {
+                                /* Files: run userland file explorer */
+                                g_start_active = 0;
+                                g_programs_active = 0;
+                                g_force_full_redraw = 1;
+                                launch_program("files");
+                            } else if (idx2 == 3) {
+                                /* Settings: close menu (placeholder) */
+                                g_start_active = 0;
+                                g_force_full_redraw = 1;
+                            } else if (idx2 == 4) {
+                                /* Reboot: triple-fault via keyboard controller reset */
+                                g_start_active = 0;
+                                g_force_full_redraw = 1;
+                                outportb(0x64, 0xFE); /* pulse CPU reset line */
+                            } else if (idx2 == 5) {
+                                /* Shutdown: use the system Shutdown() helper */
+                                g_start_active = 0;
+                                g_force_full_redraw = 1;
+                                Shutdown();
+                            }
+                        }
+                        goto after_mouse_handling;
+                    }
+                    g_start_active = 0;
+                    g_programs_active = 0;
+                    g_force_full_redraw = 1;
+
+                } else if (g_dropdown_active && g_tb_overflow_count > 0) {
+                    /* Check clicks inside the overflow dropdown */
+                    int menu_w3 = 180;
+                    int item_h3 = vga_text_cell_h() + 6;
+                    int menu_h3 = g_tb_overflow_count * item_h3 + 4;
+                    int menu_x3 = g_tb_overflow_x;
+                    if (menu_x3 + menu_w3 > screen_w) menu_x3 = screen_w - menu_w3;
+                    if (me.x >= menu_x3 && me.x < menu_x3 + menu_w3 &&
+                        me.y >= taskbar_h && me.y < taskbar_h + menu_h3) {
+                        int idx3 = (me.y - taskbar_h - 2) / item_h3;
+                        if (idx3 >= 0 && idx3 < g_tb_overflow_count) {
+                            /* Focus the chosen overflow app */
+                            if (g_tb_overflow[idx3].kind == 0) {
+                                int ti3 = g_tb_overflow[idx3].index;
+                                if (ti3 >= 0 && ti3 < tile_count) {
+                                    if (tiles[ti3].minimized) {
+                                        tiles[ti3].minimized = 0;
+                                        tiles[ti3].static_drawn = 0;
+                                    }
+                                    focused = ti3;
+                                    g_win_focused = -1;
+                                }
+                            } else {
+                                int wi3 = g_tb_overflow[idx3].index;
+                                if (wi3 >= 0 && wi3 < MAX_WINDOWS && g_windows[wi3].used) {
+                                    wm_bring_to_front(wi3);
+                                    g_win_focused = wi3;
+                                    if (g_windows[wi3].minimized) {
+                                        g_windows[wi3].minimized = 0;
+                                        g_windows[wi3].needs_redraw = 1;
+                                        g_windows[wi3].static_drawn = 0;
+                                    }
+                                }
+                            }
+                            g_dropdown_active = 0;
+                            g_force_full_redraw = 1;
+                        }
+                        goto after_mouse_handling;
+                    }
+                    g_dropdown_active = 0;
+                    g_force_full_redraw = 1;
+
+                } else {
+                    if (g_start_active || g_dropdown_active) {
+                        g_start_active = 0; g_dropdown_active = 0; g_force_full_redraw = 1;
+                    }
+                }
                 int w_hit = wm_hit_test(me.x, me.y);
                 if (w_hit >= 0) {
                     wm_bring_to_front(w_hit);
@@ -3274,10 +5022,13 @@ void start_tiling_manager() {
                         int bx, by, bw, bh; wm_get_max_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
                         if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
                             window_t* w = &g_windows[w_hit];
+                            int taskbar_h_win = vga_text_cell_h() + 6;
+                            if (taskbar_h_win < 0) taskbar_h_win = 0;
+                            if (taskbar_h_win > screen_h - 32) taskbar_h_win = screen_h - 32;
                             if (!w->maximized) {
                                 vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
                                 w->prev_x = w->x; w->prev_y = w->y; w->prev_w = w->w; w->prev_h = w->h;
-                                w->x = 0; w->y = 0; w->w = screen_w; w->h = screen_h;
+                                w->x = 0; w->y = taskbar_h_win; w->w = screen_w; w->h = screen_h - taskbar_h_win;
                                 w->maximized = 1; w->minimized = 0;
                                 w->static_drawn = 0; w->needs_redraw = 1;
                                 vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
@@ -3334,6 +5085,108 @@ void start_tiling_manager() {
                         tile_resize_mode = m;
                     }
                     int hit = tile_index_at(me.x, me.y);
+                    /* Check tile title bar button clicks (close/max/min) */
+                    if (hit >= 0 && hit < tile_count) {
+                        int t_th = get_title_height(&tiles[hit]);
+                        if (t_th >= 12 && me.y >= tiles[hit].y && me.y < tiles[hit].y + t_th) {
+                            /* Compute button rects for this tile (same layout as draw_decorations) */
+                            int t_btn_side = 12;
+                            if (g_close_icon_loaded) {
+                                int iw2 = g_close_icon.header.width;
+                                int ih2 = g_close_icon.header.height;
+                                int m2 = (iw2 > ih2) ? iw2 : ih2;
+                                if (m2 > t_btn_side) t_btn_side = m2;
+                            }
+                            if (t_btn_side > t_th) t_btn_side = t_th;
+                            int t_btn_margin = 2, t_btn_gap = 2;
+                            int t_btn_pad_y = (t_th - t_btn_side) / 2;
+                            int t_close_bx = tiles[hit].x + tiles[hit].width - t_btn_side - t_btn_margin;
+                            int t_close_by = tiles[hit].y + t_btn_pad_y;
+                            int t_max_bx   = t_close_bx - t_btn_side - t_btn_gap;
+                            int t_max_by   = t_close_by;
+                            int t_min_bx   = t_max_bx - t_btn_side - t_btn_gap;
+                            int t_min_by   = t_close_by;
+                            /* Close button */
+                            if (point_in_rect(me.x, me.y, t_close_bx, t_close_by, t_btn_side, t_btn_side)) {
+                                tile_close(hit);
+                                g_force_full_redraw = 1;
+                                layout_tiles();
+                                goto after_mouse_handling;
+                            }
+                            /* Maximize button: toggle fullscreen */
+                            if (point_in_rect(me.x, me.y, t_max_bx, t_max_by, t_btn_side, t_btn_side)) {
+                                fullscreen_tile = -1;
+                                int taskbar_h_tile = vga_text_cell_h() + 6;
+                                if (taskbar_h_tile < 0) taskbar_h_tile = 0;
+                                if (taskbar_h_tile > screen_h - 32) taskbar_h_tile = screen_h - 32;
+                                if (!tiles[hit].maximized) {
+                                    tiles[hit].prev_x = tiles[hit].x;
+                                    tiles[hit].prev_y = tiles[hit].y;
+                                    tiles[hit].prev_w = tiles[hit].width;
+                                    tiles[hit].prev_h = tiles[hit].height;
+                                    tiles[hit].x = 0;
+                                    tiles[hit].y = taskbar_h_tile;
+                                    tiles[hit].width = screen_w;
+                                    tiles[hit].height = screen_h - taskbar_h_tile;
+                                    tiles[hit].maximized = 1;
+                                    tiles[hit].minimized = 0;
+                                } else {
+                                    if (tiles[hit].prev_w > 0 && tiles[hit].prev_h > 0) {
+                                        tiles[hit].x = tiles[hit].prev_x;
+                                        tiles[hit].y = tiles[hit].prev_y;
+                                        tiles[hit].width = tiles[hit].prev_w;
+                                        tiles[hit].height = tiles[hit].prev_h;
+                                    }
+                                    tiles[hit].maximized = 0;
+                                }
+                                tiles[hit].static_drawn = 0;
+                                focused = hit;
+                                g_force_full_redraw = 1;
+                                goto after_mouse_handling;
+                            }
+                            /* Minimize button: hide tile (collapse to just a taskbar entry) */
+                            if (point_in_rect(me.x, me.y, t_min_bx, t_min_by, t_btn_side, t_btn_side)) {
+                                fullscreen_tile = -1;
+                                tiles[hit].minimized = 1;
+                                tiles[hit].maximized = 0;
+                                tiles[hit].static_drawn = 0;
+                                tile_ensure_valid_focus();
+                                g_force_full_redraw = 1;
+                                goto after_mouse_handling;
+                            }
+                        }
+                        /* Tile border resize: grab an edge or corner to resize the tile. */
+                        if (!tiles[hit].maximized) {
+                            int te = tile_border_resize_hit_test(&tiles[hit], me.x, me.y);
+                            if (te) {
+                                focused = hit;
+                                g_win_focused = -1;
+                                tile_border_resize_active = 1;
+                                tile_border_resize_idx = hit;
+                                tile_border_resize_edges = te;
+                                tile_border_resize_start_mx = me.x;
+                                tile_border_resize_start_my = me.y;
+                                tile_border_resize_start_x = tiles[hit].x;
+                                tile_border_resize_start_y = tiles[hit].y;
+                                tile_border_resize_start_w = tiles[hit].width;
+                                tile_border_resize_start_h = tiles[hit].height;
+                                g_force_full_redraw = 1;
+                                goto after_mouse_handling;
+                            }
+                            /* Tile titlebar drag: grab titlebar outside button cluster. */
+                            int th_drag = get_title_height(&tiles[hit]);
+                            if (th_drag > 0 && point_in_rect(me.x, me.y, tiles[hit].x, tiles[hit].y, tiles[hit].width, th_drag)) {
+                                focused = hit;
+                                g_win_focused = -1;
+                                tile_drag_active = 1;
+                                tile_drag_idx = hit;
+                                tile_drag_off_x = me.x - tiles[hit].x;
+                                tile_drag_off_y = me.y - tiles[hit].y;
+                                g_force_full_redraw = 1;
+                                goto after_mouse_handling;
+                            }
+                        }
+                    }
                     if (hit >= 0 && hit < tile_count && hit != focused) {
                         focused = hit;
                         g_force_full_redraw = 1;
@@ -3361,6 +5214,8 @@ void start_tiling_manager() {
                 drag_active = 0; drag_win = -1;
                 resize_active = 0; resize_win = -1; resize_edges = 0;
                 tile_resize_active = 0; tile_resize_mode = 0;
+                tile_drag_active = 0; tile_drag_idx = -1;
+                tile_border_resize_active = 0; tile_border_resize_idx = -1; tile_border_resize_edges = 0;
                 // On drag end in low mode, force a full reconcile since we only drew wireframes
                 if (g_gui_low_mode) { 
                     if (prev_outline_w > 0 && prev_outline_h > 0) {
@@ -3466,8 +5321,9 @@ void start_tiling_manager() {
                         // skip updating geom this loop
                     } else {
                         g_last_drag_tick = nowt;
+                        int tb_h_drag = vga_text_cell_h() + 6;
                         w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
-                        w->y = clampi(me.y - drag_off_y, 0, screen_h - w->h);
+                        w->y = clampi(me.y - drag_off_y, tb_h_drag, screen_h - w->h);
                     }
                     // Do not mark tiles/windows dirty per-move; wireframe overlay handles visuals
                     w->static_drawn = 0; // so final commit repaints decor at new spot
@@ -3475,8 +5331,9 @@ void start_tiling_manager() {
                     // Normal mode: full overlay + underlying refresh
                     vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
                     int old_x = w->x, old_y = w->y, old_w = w->w, old_h = w->h;
+                    int tb_h_drag2 = vga_text_cell_h() + 6;
                     w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
-                    w->y = clampi(me.y - drag_off_y, 0, screen_h - w->h);
+                    w->y = clampi(me.y - drag_off_y, tb_h_drag2, screen_h - w->h);
                     vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
                     w->static_drawn = 0;
                     w->needs_redraw = 1;
@@ -3493,15 +5350,64 @@ void start_tiling_manager() {
                     }
                 }
             }
+            /* Tile border resize: update an individual tile's geometry via edge/corner drag */
+            if (tile_border_resize_active && tile_border_resize_idx >= 0 && tile_border_resize_idx < tile_count) {
+                tile_t* t = &tiles[tile_border_resize_idx];
+                int dx = me.x - tile_border_resize_start_mx;
+                int dy = me.y - tile_border_resize_start_my;
+                int new_x = tile_border_resize_start_x;
+                int new_y = tile_border_resize_start_y;
+                int new_w = tile_border_resize_start_w;
+                int new_h = tile_border_resize_start_h;
+                if (tile_border_resize_edges & RESIZE_EDGE_L) { new_x = tile_border_resize_start_x + dx; new_w = tile_border_resize_start_w - dx; }
+                if (tile_border_resize_edges & RESIZE_EDGE_R) { new_w = tile_border_resize_start_w + dx; }
+                if (tile_border_resize_edges & RESIZE_EDGE_T) { new_y = tile_border_resize_start_y + dy; new_h = tile_border_resize_start_h - dy; }
+                if (tile_border_resize_edges & RESIZE_EDGE_B) { new_h = tile_border_resize_start_h + dy; }
+                const int t_minw = 200, t_minh = 120;
+                if (new_w < t_minw) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_x -= (t_minw - new_w); new_w = t_minw; }
+                if (new_h < t_minh) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_y -= (t_minh - new_h); new_h = t_minh; }
+                int tbh_tbr = vga_text_cell_h() + 6;
+                if (new_x < 0) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_w += new_x; new_x = 0; }
+                if (new_y < tbh_tbr) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_h += (new_y - tbh_tbr); new_y = tbh_tbr; }
+                if (new_x + new_w > screen_w) new_w = screen_w - new_x;
+                if (new_y + new_h > screen_h) new_h = screen_h - new_y;
+                if (new_w < t_minw) new_w = t_minw;
+                if (new_h < t_minh) new_h = t_minh;
+                t->x = new_x; t->y = new_y; t->width = new_w; t->height = new_h;
+                t->static_drawn = 0;
+                g_force_full_redraw = 1;
+                g_tiles_full_content_redraw = 1;
+            }
+            /* Tile titlebar drag: move an individual tile by dragging its titlebar */
+            if (tile_drag_active && tile_drag_idx >= 0 && tile_drag_idx < tile_count) {
+                tile_t* t = &tiles[tile_drag_idx];
+                int tbh_td = vga_text_cell_h() + 6;
+                t->x = clampi(me.x - tile_drag_off_x, 0, screen_w - t->width);
+                t->y = clampi(me.y - tile_drag_off_y, tbh_td, screen_h - t->height);
+                t->static_drawn = 0;
+                g_force_full_redraw = 1;
+                g_tiles_full_content_redraw = 1;
+            }
+            /* Scroll wheel: scroll the Programs submenu if it is open and cursor is inside it */
+            if (me.wheel_delta != 0 && g_start_active && g_programs_active && g_program_count > 0) {
+                int sub_x_sc = 150; /* menu_w */
+                int sub_w_sc = 160;
+                int taskbar_h_sc = vga_text_cell_h() + 6;
+                if (me.x >= sub_x_sc && me.x < sub_x_sc + sub_w_sc && me.y >= taskbar_h_sc) {
+                    g_programs_scroll -= me.wheel_delta;
+                    if (g_programs_scroll < 0) g_programs_scroll = 0;
+                    g_force_full_redraw = 1;
+                }
+            }
             // Mouse routing: deliver to top window iff mouse is inside its rect (or dragging)
             if (g_window_count > 0) {
                 int topwi = g_window_order[g_window_count - 1];
                 window_t* wtop = &g_windows[topwi];
                 int inside_top = point_in_rect(me.x, me.y, wtop->x, wtop->y, wtop->w, wtop->h);
                 if (!wtop->minimized && (inside_top || drag_active) && wtop->mouse_cb) {
-                    if (!drag_active) wtop->mouse_cb(-1, &me, wtop->userdata);
+                    if (!drag_active) wtop->mouse_cb(topwi, &me, wtop->userdata);
                     wtop->needs_redraw = 1;
-                } else {
+                } else if (tile_count > 0 && focused >= 0 && focused < tile_count) {
                     // Forward to tile if not interacting with window
                     int fterm = tiles[focused].term_idx;
                     if (fterm >= 0 && fterm < MAX_TILES && gui_mouse_cb[fterm]) {
@@ -3520,7 +5426,7 @@ void start_tiling_manager() {
                         g_tiles_full_content_redraw = 1;
                     }
                 }
-            } else {
+            } else if (tile_count > 0 && focused >= 0 && focused < tile_count) {
                 // No windows: forward to focused GUI client if it registered a mouse callback
                 int fterm = tiles[focused].term_idx;
                 if (fterm >= 0 && fterm < MAX_TILES && gui_mouse_cb[fterm]) {
@@ -3549,6 +5455,104 @@ void start_tiling_manager() {
                     if (me.y >= sy && me.y < sy + sh2) {
                         vga_mark_dirty_rect(tt->x, sy, tt->width, sh2);
                     }
+                }
+            }
+
+            /* --- Hover tracking for context menu --- */
+            if (g_ctx_active) {
+                int cw_ctxh = vga_text_cell_w();
+                int ch_ctxh = vga_text_cell_h();
+                int item_h_ctxh = ch_ctxh + 6;
+                int menu_w_ctxh = 14 * cw_ctxh;
+                int menu_h_ctxh = CTX_ITEM_COUNT * item_h_ctxh + 4;
+                int cmxh = g_ctx_x; int cmyh = g_ctx_y;
+                if (cmxh + menu_w_ctxh > screen_w) cmxh = screen_w - menu_w_ctxh;
+                if (cmyh + menu_h_ctxh > screen_h) cmyh = screen_h - menu_h_ctxh;
+                if (cmxh < 0) cmxh = 0;
+                if (cmyh < 0) cmyh = 0;
+                int old_ctx_hover = g_ctx_hover;
+                if (me.x >= cmxh && me.x < cmxh + menu_w_ctxh &&
+                    me.y >= cmyh && me.y < cmyh + menu_h_ctxh) {
+                    g_ctx_hover = (me.y - cmyh - 2) / item_h_ctxh;
+                    if (g_ctx_hover < 0) g_ctx_hover = 0;
+                    if (g_ctx_hover >= CTX_ITEM_COUNT) g_ctx_hover = CTX_ITEM_COUNT - 1;
+                } else {
+                    g_ctx_hover = -1;
+                }
+                if (g_ctx_hover != old_ctx_hover) g_force_full_redraw = 1;
+            }
+
+            /* --- Hover tracking for dropdown menus --- */
+            {
+                int taskbar_h2 = vga_text_cell_h() + 6;
+                int item_h2 = vga_text_cell_h() + 6;
+                if (g_start_active) {
+                    int menu_w2 = 150;
+                    int menu_top2 = taskbar_h2;
+                    int old_hover = g_start_hover;
+                    /* Check Programs submenu hover first */
+                    if (g_programs_active && g_program_count > 0) {
+                        int sub_w2 = 160;
+                        int sub_x2 = menu_w2;
+                        int sub_top2 = taskbar_h2;
+                        int avail_hv = screen_h - sub_top2;
+                        int max_vis_hv = (avail_hv - 4) / item_h2;
+                        if (max_vis_hv < 1) max_vis_hv = 1;
+                        if (max_vis_hv > g_program_count) max_vis_hv = g_program_count;
+                        int need_scroll_hv = (g_program_count > max_vis_hv);
+                        int sub_h2 = max_vis_hv * item_h2 + 4;
+                        if (need_scroll_hv) sub_h2 += item_h2 * 2;
+                        int old_ph = g_programs_hover;
+                        if (me.x >= sub_x2 && me.x < sub_x2 + sub_w2 &&
+                            me.y >= sub_top2 && me.y < sub_top2 + sub_h2) {
+                            int rel_yh = me.y - sub_top2 - 2;
+                            if (need_scroll_hv) rel_yh -= item_h2; /* skip arrow row */
+                            int vi_hv = rel_yh / item_h2;
+                            if (vi_hv < 0) vi_hv = -1;
+                            else if (vi_hv >= max_vis_hv) vi_hv = -1;
+                            g_programs_hover = vi_hv;
+                        } else {
+                            g_programs_hover = -1;
+                        }
+                        if (g_programs_hover != old_ph) g_force_full_redraw = 1;
+                    }
+                    if (me.x >= 0 && me.x < menu_w2 && me.y >= menu_top2 && me.y < menu_top2 + 5 * item_h2 + 4) {
+                        g_start_hover = (me.y - menu_top2 - 2) / item_h2;
+                        if (g_start_hover < 0) g_start_hover = 0;
+                        if (g_start_hover > 4) g_start_hover = 4;
+                        /* Hovering over "Programs" (index 0) opens its submenu */
+                        if (g_start_hover == 0 && !g_programs_active) {
+                            g_programs_active = 1;
+                            if (!g_programs_scanned) scan_programs();
+                            g_force_full_redraw = 1;
+                        } else if (g_start_hover != 0) {
+                            g_programs_active = 0;
+                            g_programs_hover  = -1;
+                        }
+                    } else if (!(g_programs_active && g_program_count > 0 &&
+                                 me.x >= menu_w2 && me.x < menu_w2 + 160 &&
+                                 me.y >= taskbar_h2)) {
+                        g_start_hover = -1;
+                        g_programs_active = 0;
+                        g_programs_hover  = -1;
+                    }
+                    if (g_start_hover != old_hover) g_force_full_redraw = 1;
+                }
+                if (g_dropdown_active && g_tb_overflow_count > 0) {
+                    int menu_w3 = 180;
+                    int menu_x3 = g_tb_overflow_x;
+                    if (menu_x3 + menu_w3 > screen_w) menu_x3 = screen_w - menu_w3;
+                    int menu_top3 = taskbar_h2;
+                    int menu_h3 = g_tb_overflow_count * item_h2 + 4;
+                    int old_hover2 = g_dropdown_hover;
+                    if (me.x >= menu_x3 && me.x < menu_x3 + menu_w3 && me.y >= menu_top3 && me.y < menu_top3 + menu_h3) {
+                        g_dropdown_hover = (me.y - menu_top3 - 2) / item_h2;
+                        if (g_dropdown_hover < 0) g_dropdown_hover = 0;
+                        if (g_dropdown_hover >= g_tb_overflow_count) g_dropdown_hover = g_tb_overflow_count - 1;
+                    } else {
+                        g_dropdown_hover = -1;
+                    }
+                    if (g_dropdown_hover != old_hover2) g_force_full_redraw = 1;
                 }
             }
         }
@@ -3591,6 +5595,107 @@ after_mouse_handling:
         if (g_bg_modal.active) {
             if (handle_bg_modal_key(key)) { continue; }
         }
+
+        /* ── Super-alone (0x6001): toggle start menu ── */
+        if (key == 0x6001) {
+            g_start_active = !g_start_active;
+            g_dropdown_active = 0;
+            g_ctx_active = 0;
+            g_start_hover = -1;
+            g_programs_active = 0;
+            g_programs_hover = -1;
+            g_programs_scanned = 0;
+            g_force_full_redraw = 1;
+            continue;
+        }
+
+        /* ── Start menu keyboard navigation ── */
+        if (g_start_active && key) {
+            int base_nav = key & 0x1FFF;
+            int handled_menu = 0;
+            if (base_nav == 0x1001) { /* Up */
+                if (g_programs_active && g_programs_hover >= 0) {
+                    if (g_programs_hover > 0) g_programs_hover--;
+                    else if (g_programs_scroll > 0) g_programs_scroll--;
+                } else {
+                    if (g_start_hover <= 0) g_start_hover = 5;
+                    else g_start_hover--;
+                }
+                handled_menu = 1;
+            } else if (base_nav == 0x1002) { /* Down */
+                if (g_programs_active && g_programs_hover >= 0) {
+                    int item_h_nav = vga_text_cell_h() + 6;
+                    int avail_h_nav = screen_h - (vga_text_cell_h() + 6);
+                    int max_vis_nav = (avail_h_nav - 4) / item_h_nav;
+                    if (max_vis_nav < 1) max_vis_nav = 1;
+                    if (max_vis_nav > g_program_count) max_vis_nav = g_program_count;
+                    if (g_programs_hover < max_vis_nav - 1) g_programs_hover++;
+                    else {
+                        int max_scroll_nav = g_program_count - max_vis_nav;
+                        if (max_scroll_nav < 0) max_scroll_nav = 0;
+                        if (g_programs_scroll < max_scroll_nav) g_programs_scroll++;
+                    }
+                } else {
+                    if (g_start_hover >= 5) g_start_hover = 0;
+                    else g_start_hover++;
+                }
+                handled_menu = 1;
+            } else if (base_nav == 0x1004) { /* Right: enter Programs submenu */
+                if (g_start_hover == 0) {
+                    g_programs_active = 1;
+                    if (!g_programs_scanned) scan_programs();
+                    g_programs_hover = 0;
+                }
+                handled_menu = 1;
+            } else if (base_nav == 0x1003) { /* Left: leave Programs submenu */
+                if (g_programs_active) {
+                    g_programs_active = 0;
+                    g_programs_hover = -1;
+                }
+                handled_menu = 1;
+            } else if ((key & 0xFF) == '\n' || (key & 0xFF) == '\r') { /* Enter */
+                if (g_programs_active && g_programs_hover >= 0) {
+                    int pidx_nav = g_programs_hover + g_programs_scroll;
+                    if (pidx_nav >= 0 && pidx_nav < g_program_count)
+                        launch_program(g_program_names[pidx_nav]);
+                    g_start_active = 0; g_programs_active = 0;
+                } else if (g_start_hover >= 0 && g_start_hover < 6) {
+                    if (g_start_hover == 0) {
+                        g_programs_active = 1;
+                        if (!g_programs_scanned) scan_programs();
+                        g_programs_hover = 0;
+                    } else if (g_start_hover == 1) {
+                        g_start_active = 0; g_programs_active = 0;
+                        launch_shell_tile();
+                    } else if (g_start_hover == 2) {
+                        g_start_active = 0; g_programs_active = 0;
+                        launch_program("files");
+                    } else if (g_start_hover == 3) {
+                        g_start_active = 0;
+                    } else if (g_start_hover == 4) {
+                        g_start_active = 0;
+                        outportb(0x64, 0xFE);
+                    } else if (g_start_hover == 5) {
+                        g_start_active = 0;
+                        Shutdown();
+                    }
+                }
+                handled_menu = 1;
+            } else if ((key & 0xFF) == 27) { /* Escape */
+                if (g_programs_active) {
+                    g_programs_active = 0;
+                    g_programs_hover = -1;
+                } else {
+                    g_start_active = 0;
+                }
+                handled_menu = 1;
+            }
+            if (handled_menu) {
+                g_force_full_redraw = 1;
+                continue;
+            }
+        }
+
         // Super+n -> new shell
         if ((key & 0x4000) && (key & 0xFF) == 'n') {
             if (tile_count < 4) {
@@ -3601,6 +5706,7 @@ after_mouse_handling:
                 tiles[idx].status_right = NULL;
                 tiles[idx].term_idx = idx;
                 tiles[idx].active = 1;
+                tiles[idx].desktop = g_current_desktop;
                     // ensure a fresh vterm buffer so prompt isn't duplicated
                     vterm_clear(idx);
                     vterm_set_active(idx, 1);
@@ -3671,26 +5777,17 @@ after_mouse_handling:
             }
             // Super+Q to close focused tile or focused window
             if ((base & 0xFF) == 'q') {
-                // If a window is focused, close it; otherwise, close tile or exit
+                // If a window is focused, close it; otherwise close the focused tile.
                 if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
                     // Allow closing focused floating window regardless of tile count
                     wm_close_window(g_win_focused);
                     g_win_focused = -1;
                     g_force_full_redraw = 1;
                 } else {
-                    // If more than one tile, close the focused tile.
-                    // If only one tile remains, DO NOT close/exit - keep at least one tile to avoid OS instability.
-                    if (tile_count > 1) {
+                    if (tile_count > 0 && focused >= 0 && focused < tile_count) {
                         tile_close(focused);
                         g_force_full_redraw = 1;
                         layout_tiles();
-                    } else {
-                        // Refuse to close the final tile; surface a brief status hint.
-                        static char last_tile_msg[64];
-                        snprintf(last_tile_msg, sizeof(last_tile_msg), "Last tile cannot be closed");
-                        tiles[focused].status_left = last_tile_msg;
-                        tiles[focused].status_visible = 1;
-                        g_force_full_redraw = 1;
                     }
                 }
                 continue;
@@ -3702,7 +5799,10 @@ after_mouse_handling:
         if (key == 27) {
             if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
                 window_t* wfocus = &g_windows[g_win_focused];
-                if (wfocus->key_cb) { wfocus->key_cb(-1, key & 0xFFFF, wfocus->userdata); wfocus->needs_redraw = 1; }
+                if (wfocus->key_cb) { wfocus->key_cb(g_win_focused, key & 0xFFFF, wfocus->userdata); wfocus->needs_redraw = 1; }
+                continue;
+            }
+            if (tile_count <= 0 || focused < 0 || focused >= tile_count) {
                 continue;
             }
             int term = tiles[focused].term_idx;
@@ -3712,9 +5812,8 @@ after_mouse_handling:
                 g_any_tile_content_redrew = 1;
                 continue;
             }
-            // No GUI/window focused: Esc exits WM
-            running = 0;
-            break;
+            // Desktop safety: ignore Esc when no GUI/window wants it.
+            continue;
         }
 
         // Ctrl+Q: close focused window (global) or default-exit focused GUI tile
@@ -3726,6 +5825,9 @@ after_mouse_handling:
                 continue;
             } else {
                 // Default for GUI tiles: give the app a chance to handle Ctrl+X; if still registered, unregister
+                if (tile_count <= 0 || focused < 0 || focused >= tile_count) {
+                    continue;
+                }
                 int term = tiles[focused].term_idx;
                 if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
                     tile_gui_key_cb cb = gui_key_cb[term];
@@ -3750,8 +5852,11 @@ after_mouse_handling:
         // Input routing: if a window is focused, it gets keys; else focused tile
         if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
             window_t* wfocus = &g_windows[g_win_focused];
-            if (wfocus->key_cb) { wfocus->key_cb(-1, key & 0xFFFF, wfocus->userdata); wfocus->needs_redraw = 1; }
+            if (wfocus->key_cb) { wfocus->key_cb(g_win_focused, key & 0xFFFF, wfocus->userdata); wfocus->needs_redraw = 1; }
         } else {
+            if (tile_count <= 0 || focused < 0 || focused >= tile_count) {
+                continue;
+            }
             // Route input to focused vterm or GUI client
             int term = tiles[focused].term_idx;
             if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {

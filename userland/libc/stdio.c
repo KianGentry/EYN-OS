@@ -210,6 +210,152 @@ static int write_padding(FILE* f, int count) {
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* vsnprintf / snprintf – format into a bounded char buffer.          */
+/* ------------------------------------------------------------------ */
+
+/* Helper: append a single character to the snprintf output buffer.   */
+static void snbuf_putc(char* buf, size_t sz, size_t* pos, char c) {
+    if (*pos + 1 < sz) buf[*pos] = c;
+    (*pos)++;
+}
+
+/* Helper: append a NUL-terminated string, honoring precision.        */
+static void snbuf_puts(char* buf, size_t sz, size_t* pos,
+                        const char* s, int width, int precision) {
+    if (!s) s = "(null)";
+    int len = 0;
+    while (s[len]) len++;
+    if (precision >= 0 && len > precision) len = precision;
+    int pad = (width > len) ? width - len : 0;
+    while (pad-- > 0) snbuf_putc(buf, sz, pos, ' ');
+    for (int i = 0; i < len; i++) snbuf_putc(buf, sz, pos, s[i]);
+}
+
+/* Helper: render an unsigned value into a small stack buffer.        */
+static void snbuf_render_unsigned(char tmp[24], int* len, unsigned long val, int base, int uppercase) {
+    const char* digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+    *len = 0;
+    if (val == 0) { tmp[(*len)++] = '0'; return; }
+    while (val) {
+        tmp[(*len)++] = digits[val % (unsigned)base];
+        val /= (unsigned)base;
+    }
+    /* reverse */
+    for (int i = 0, j = *len - 1; i < j; i++, j--) {
+        char t = tmp[i]; tmp[i] = tmp[j]; tmp[j] = t;
+    }
+}
+
+int vsnprintf(char* buf, size_t sz, const char* fmt, va_list ap) {
+    if (!fmt) { if (buf && sz) buf[0] = '\0'; return 0; }
+    size_t pos = 0;
+
+    for (const char* p = fmt; *p; p++) {
+        if (*p != '%') { snbuf_putc(buf, sz, &pos, *p); continue; }
+        p++;
+        if (!*p) break;
+
+        /* Flags */
+        int left_align = 0, zero_pad = 0, force_sign = 0;
+        for (;;) {
+            if (*p == '-')       { left_align = 1; p++; }
+            else if (*p == '0') { zero_pad = 1;   p++; }
+            else if (*p == '+') { force_sign = 1;  p++; }
+            else break;
+        }
+
+        /* Width */
+        int width = 0;
+        if (*p == '*') { width = va_arg(ap, int); p++; }
+        else while (*p >= '0' && *p <= '9') { width = width * 10 + (*p - '0'); p++; }
+
+        /* Precision */
+        int precision = -1;
+        if (*p == '.') {
+            p++; precision = 0;
+            if (*p == '*') { precision = va_arg(ap, int); p++; }
+            else while (*p >= '0' && *p <= '9') { precision = precision * 10 + (*p - '0'); p++; }
+        }
+
+        /* Length modifier */
+        int is_long = 0;
+        if (*p == 'l') { is_long = 1; p++; if (*p == 'l') { p++; } }
+        else if (*p == 'z') { is_long = 1; p++; }
+
+        if (!*p) break;
+
+        if (*p == '%') {
+            snbuf_putc(buf, sz, &pos, '%');
+        } else if (*p == 'c') {
+            char ch = (char)va_arg(ap, int);
+            snbuf_putc(buf, sz, &pos, ch);
+        } else if (*p == 's') {
+            const char* s = va_arg(ap, const char*);
+            snbuf_puts(buf, sz, &pos, s, left_align ? -width : width, precision);
+        } else if (*p == 'd' || *p == 'i') {
+            long val = is_long ? va_arg(ap, long) : (long)va_arg(ap, int);
+            char tmp[24]; int tlen = 0;
+            int neg = 0;
+            unsigned long uv;
+            if (val < 0) { neg = 1; uv = (unsigned long)(-(val + 1)) + 1; } else { uv = (unsigned long)val; }
+            snbuf_render_unsigned(tmp, &tlen, uv, 10, 0);
+            int numw = tlen + neg + (force_sign && !neg ? 1 : 0);
+            int pad = (width > numw) ? width - numw : 0;
+            char padch = (zero_pad && !left_align) ? '0' : ' ';
+            if (!left_align && padch == ' ') while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
+            if (neg) snbuf_putc(buf, sz, &pos, '-');
+            else if (force_sign) snbuf_putc(buf, sz, &pos, '+');
+            if (!left_align && padch == '0') while (pad-- > 0) snbuf_putc(buf, sz, &pos, '0');
+            for (int i = 0; i < tlen; i++) snbuf_putc(buf, sz, &pos, tmp[i]);
+            if (left_align) while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
+        } else if (*p == 'u') {
+            unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
+            char tmp[24]; int tlen = 0;
+            snbuf_render_unsigned(tmp, &tlen, val, 10, 0);
+            int pad = (width > tlen) ? width - tlen : 0;
+            char padch = (zero_pad && !left_align) ? '0' : ' ';
+            if (!left_align && padch == ' ') while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
+            if (!left_align && padch == '0') while (pad-- > 0) snbuf_putc(buf, sz, &pos, '0');
+            for (int i = 0; i < tlen; i++) snbuf_putc(buf, sz, &pos, tmp[i]);
+            if (left_align) while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
+        } else if (*p == 'x' || *p == 'X') {
+            unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
+            char tmp[24]; int tlen = 0;
+            snbuf_render_unsigned(tmp, &tlen, val, 16, (*p == 'X'));
+            int pad = (width > tlen) ? width - tlen : 0;
+            char padch = (zero_pad && !left_align) ? '0' : ' ';
+            if (!left_align && padch == ' ') while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
+            if (!left_align && padch == '0') while (pad-- > 0) snbuf_putc(buf, sz, &pos, '0');
+            for (int i = 0; i < tlen; i++) snbuf_putc(buf, sz, &pos, tmp[i]);
+            if (left_align) while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
+        } else if (*p == 'p') {
+            unsigned long val = (unsigned long)(uintptr_t)va_arg(ap, void*);
+            snbuf_putc(buf, sz, &pos, '0');
+            snbuf_putc(buf, sz, &pos, 'x');
+            char tmp[24]; int tlen = 0;
+            snbuf_render_unsigned(tmp, &tlen, val, 16, 0);
+            for (int i = 0; i < tlen; i++) snbuf_putc(buf, sz, &pos, tmp[i]);
+        } else {
+            /* Unknown specifier — emit literally */
+            snbuf_putc(buf, sz, &pos, '%');
+            snbuf_putc(buf, sz, &pos, *p);
+        }
+    }
+
+    /* NUL-terminate */
+    if (buf && sz > 0) buf[pos < sz ? pos : sz - 1] = '\0';
+    return (int)pos;
+}
+
+int snprintf(char* buf, size_t sz, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int rc = vsnprintf(buf, sz, fmt, ap);
+    va_end(ap);
+    return rc;
+}
+
 int vfprintf(FILE* f, const char* fmt, va_list ap) {
     if (!f || !fmt) return -1;
     int total = 0;

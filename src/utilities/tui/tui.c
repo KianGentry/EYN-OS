@@ -193,6 +193,7 @@ int tui_read_key() {
     static uint8_t ctrl_pressed = 0;
     static uint8_t shift_pressed = 0;
     static uint8_t super_pressed = 0;
+    static uint8_t super_used = 0; /* set when another key is pressed while Super is held */
     static uint8_t caps_lock = 0;
 
     // Check controller status (non-blocking)
@@ -211,7 +212,11 @@ int tui_read_key() {
         uint8_t realcode = scancode & 0x7F;
         if (realcode == 42 || realcode == 54) { shift_pressed = 0; tui_shift_pressed = 0; }
         if (realcode == 29) ctrl_pressed = 0;
-        if (realcode == 91) super_pressed = 0;
+        if (realcode == 91) {
+            int was_clean = super_pressed && !super_used;
+            super_pressed = 0;
+            if (was_clean) return 0x6001; /* Super alone: toggle start menu */
+        }
         if (realcode == 56) tui_alt_pressed = 0; // left Alt release
         return 0;
     }
@@ -219,9 +224,12 @@ int tui_read_key() {
     // Modifiers and toggles
     if (scancode == 42 || scancode == 54) { shift_pressed = 1; tui_shift_pressed = 1; return 0; }
     if (scancode == 29) { ctrl_pressed = 1; return 0; }
-    if (scancode == 91) { super_pressed = 1; return 0; }
+    if (scancode == 91) { super_pressed = 1; super_used = 0; return 0; }
     if (scancode == 56) { tui_alt_pressed = 1; return 0; } // left Alt press
     if (scancode == 58) { caps_lock = !caps_lock; return 0; } // Caps Lock toggle
+
+    /* Any non-modifier key while Super is held marks it as "used" (not a solo tap) */
+    if (super_pressed) super_used = 1;
 
     // Ctrl combos
     if (ctrl_pressed) {
@@ -240,7 +248,16 @@ int tui_read_key() {
         if (scancode == 34) return 0x2108; // Ctrl+G (go to line)
         if (scancode == 44) return 0x2109; // Ctrl+Z (undo)
         if (scancode == 21) return 0x210A; // Ctrl+Y (redo)
+        if (scancode == 35) return 0x210C; // Ctrl+H (replace / help)
+        if (scancode == 49) return 0x210D; // Ctrl+N (new)
+        if (scancode == 32) return 0x210E; // Ctrl+D (duplicate line / delete)
     }
+
+    // Function keys F1-F12 (scancodes 59-68 for F1-F10, 87-88 for F11-F12)
+    // Encoded as 0x5001..0x500C
+    if (scancode >= 59 && scancode <= 68) return 0x5001 + (scancode - 59); // F1..F10
+    if (scancode == 87) return 0x500B; // F11
+    if (scancode == 88) return 0x500C; // F12
 
     // Letters with Shift/Caps
     int is_letter = 0; char base = 0;
@@ -268,10 +285,10 @@ int tui_read_key() {
 
     // Non-letter keys
     switch (scancode) {
-    case 72: return (shift_pressed ? 0x3000 : 0) | (super_pressed ? (0x4000 | 0x1001) : 0x1001); // Up (0x3000 flag for Shift)
-    case 80: return (shift_pressed ? 0x3000 : 0) | (super_pressed ? (0x4000 | 0x1002) : 0x1002); // Down
-    case 75: return (shift_pressed ? 0x3000 : 0) | (super_pressed ? (0x4000 | 0x1003) : 0x1003); // Left
-    case 77: return (shift_pressed ? 0x3000 : 0) | (super_pressed ? (0x4000 | 0x1004) : 0x1004); // Right
+    case 72: return (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1001; // Up
+    case 80: return (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1002; // Down
+    case 75: return (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1003; // Left
+    case 77: return (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1004; // Right
         case 15: return '\t';
         case 14: return '\b';
         case 28: return '\n';

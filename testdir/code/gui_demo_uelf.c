@@ -116,9 +116,8 @@ static void redraw(int h, int mx, int my, int buttons, int last_key) {
 }
 
 int main(void) {
-    int h = 0;
-    int rc = gui_attach("GUI Demo", "q quits");
-    if (rc < 0) {
+    int h = gui_attach("GUI Demo", "q quits");
+    if (h < 0) {
         puts("gui_attach failed");
         return 1;
     }
@@ -138,6 +137,10 @@ int main(void) {
         }
         if (rc == 0) {
             continue;
+        }
+
+        if (ev.type == GUI_EVENT_CLOSE) {
+            break;
         }
 
         if (ev.type == GUI_EVENT_KEY) {

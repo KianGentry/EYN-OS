@@ -9,6 +9,7 @@
 #include <cpu/user_elf.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <fs/vfs.h>
 
 extern uint8 g_current_drive;
 
@@ -71,8 +72,21 @@ void run_command(string arg) {
         // execute as ring3 ELF using the EYN-OS syscall ABI
         (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
         return;
-    } else if ((ext && strcmp(ext, ".eyn") == 0) || (ext && strcmp(ext, ".bin") == 0) || (ext && strcmp(ext, ".flat") == 0) || !ext) {
-        // execute as native program
+    } else if ((ext && strcmp(ext, ".eyn") == 0) || (ext && strcmp(ext, ".bin") == 0) || (ext && strcmp(ext, ".flat") == 0)) {
+        // execute as native program (explicit native extension)
+        result = native_execute_program(abspath);
+    } else if (!ext) {
+        /*
+         * No extension: auto-detect by reading the first 4 bytes (ELF magic).
+         * Most /binaries entries are extensionless UELFs.  If the file starts
+         * with "\x7fELF", run as ring3 UELF; otherwise fall back to native.
+         */
+        uint8 magic[4] = {0, 0, 0, 0};
+        vfs_read_file(g_current_drive, abspath, magic, 4);
+        if (magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
+            (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
+            return;
+        }
         result = native_execute_program(abspath);
     } else {
         printf("Error: Unsupported file format. Use .eyn/.bin/.flat for native programs, .uelf for ring3 ELF, or .shell for scripts\n");

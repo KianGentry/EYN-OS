@@ -19,7 +19,6 @@ Filesystem Commands:
   read            - Run the read command.
   size            - Show the size of a file in bytes.
   tail            - Print the last lines of a file.
-  write           - Open GUI text editor.
 
 System Commands:
 ---------------
@@ -84,12 +83,15 @@ Utility Commands:
   calc            - Integer calculator supporting + - * /.
   diskmgr         - Manage logical drives from userland.
   echo            - Print arguments to stdout.
+  edit            - Graphical text editor.
   fdisk           - Run the fdisk command.
-  files           - Run the files command.
+  files           - Graphical file explorer.
   format          - Run the format command.
+  gui_demo        - Run the gui_demo command.
   hello           - Run the hello command.
   history         - Show or clear command history.
   jobs            - List background jobs.
+  list            - List directory entries with terminal icons.
   metadata        - Show metadata for a file or directory.
   pipe            - Run a command pipeline from userspace command launcher.
   random          - Generate random numbers.
