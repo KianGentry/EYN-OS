@@ -27,6 +27,7 @@ obj_libc_gui="$tmp_root/user_libc_gui.o"
 obj_libc_time="$tmp_root/user_libc_time.o"
 obj_libc_stdlib="$tmp_root/user_libc_stdlib.o"
 obj_libc_errno="$tmp_root/user_libc_errno.o"
+obj_libc_x11="$tmp_root/user_libc_x11.o"
 lib_archive="$tmp_root/libeync.a"
 
 # Prefer a cross-compiler if available.
@@ -75,13 +76,16 @@ fi
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/time.c" -o "$obj_libc_time"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/stdlib.c" -o "$obj_libc_stdlib"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/errno.c" -o "$obj_libc_errno"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/x11.c" -o "$obj_libc_x11"
 
 rm -f "$lib_archive"
-ar rcs "$lib_archive" "$obj_libc_unistd" "$obj_libc_string" "$obj_libc_stdio" "$obj_libc_fcntl" "$obj_libc_dirent" "$obj_libc_gui" "$obj_libc_time" "$obj_libc_stdlib" "$obj_libc_errno"
+ar rcs "$lib_archive" "$obj_libc_x11" "$obj_libc_unistd" "$obj_libc_string" "$obj_libc_stdio" "$obj_libc_fcntl" "$obj_libc_dirent" "$obj_libc_gui" "$obj_libc_time" "$obj_libc_stdlib" "$obj_libc_errno"
 
 "$CC" "${CFLAGS[@]}" -c "$src" -o "$obj_app"
 
 # Link a simple ELF32 ET_EXEC at 0x00400000.
-"$CC" -m32 -nostdlib -nostartfiles -Wl,-m,elf_i386 -Wl,-nostdlib -Wl,-e,_start -Wl,-T,"$ldscript" -o "$out" "$obj_crt" "$obj_app" "$lib_archive" -lgcc
+# --start-group/--end-group ensures cross-object references within the
+# archive resolve regardless of insertion order (needed for x11.c → gui.c).
+"$CC" -m32 -nostdlib -nostartfiles -Wl,-m,elf_i386 -Wl,-nostdlib -Wl,-e,_start -Wl,-T,"$ldscript" -o "$out" "$obj_crt" "$obj_app" -Wl,--start-group "$lib_archive" -lgcc -Wl,--end-group
 
 echo "Built $out"

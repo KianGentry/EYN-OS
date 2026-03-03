@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-03 15:11:59
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-03 16:54:27
 
-**Total Commands:** 78
+**Total Commands:** 80
 
 ## Table of Contents
 
@@ -1276,6 +1276,38 @@ tiling
 
 ---
 
+### xeyes
+
+**Binary:** `testdir/binaries/xeyes`
+
+**Metadata Source:** `testdir/code/xeyes_uelf.c`
+
+**Description:**
+X11 xeyes - eyes that follow the mouse pointer
+
+**Example:**
+```bash
+xeyes
+```
+
+---
+
+### xeyes2
+
+**Binary:** `testdir/binaries/xeyes2`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the xeyes2 command.
+
+**Example:**
+```bash
+xeyes2
+```
+
+---
+
 ## Command Statistics
 
 | Category | Count |
@@ -1286,5 +1318,5 @@ tiling
 | Memory Commands | 7 |
 | GUI/Window Commands | 10 |
 | Development Commands | 10 |
-| Utility Commands | 20 |
+| Utility Commands | 22 |
 

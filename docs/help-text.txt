@@ -99,4 +99,6 @@ Utility Commands:
   sort            - Sort strings alphabetically.
   spam            - Spam 'EYN-OS' to stdout 100 times.
   tiling          - Launch the tiling manager.
+  xeyes           - X11 xeyes - eyes that follow the mouse pointer.
+  xeyes2          - Run the xeyes2 command.
 
