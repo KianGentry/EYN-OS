@@ -232,21 +232,123 @@ run hello.eyn
 - Memory management syscalls
 - Network syscalls 
 
-## Command parity syscalls (56-68)
+## Command parity syscalls (56–68)
 
-These syscalls support no-compromise userland ports for shell commands that
-need kernel-owned state.
+These syscalls support userland ports of shell commands that need kernel-owned state.
 
-- `56` `DRIVE_SET_LOGICAL`: set current logical drive.
-- `57` `DRIVE_GET_LOGICAL`: get current logical drive.
-- `58` `DRIVE_GET_COUNT`: get number of logical drives.
-- `59` `DRIVE_IS_PRESENT`: test whether a logical drive is present.
-- `60` `INIT_SERVICES`: run core init services (ATA init + netcfg autoload).
-- `61` `SERIAL_WRITE_COM1`: write bytes to COM1.
-- `62` `SHELL_LOG_SET`: enable/disable shell logging.
-- `63` `SHELL_LOG_GET`: query shell logging state.
-- `64` `CRASHLOG_COUNT`: get crashlog record count.
-- `65` `CRASHLOG_INFO`: get record metadata by index.
-- `66` `CRASHLOG_DATA`: get record payload by index.
-- `67` `CRASHLOG_CLEAR`: clear all crashlog records.
-- `68` `SHELL_MIGRATED_DISPATCH`: run migrated shell command handlers from userland wrappers.
+| # | Name | Description |
+|---|---|---|
+| 56 | `DRIVE_SET_LOGICAL` | Set current logical drive |
+| 57 | `DRIVE_GET_LOGICAL` | Get current logical drive |
+| 58 | `DRIVE_GET_COUNT` | Number of logical drives |
+| 59 | `DRIVE_IS_PRESENT` | Test whether a logical drive is present |
+| 60 | `INIT_SERVICES` | Run core init services (ATA init + netcfg autoload) |
+| 61 | `SERIAL_WRITE_COM1` | Write bytes to COM1 |
+| 62 | `SHELL_LOG_SET` | Enable/disable shell logging |
+| 63 | `SHELL_LOG_GET` | Query shell logging state |
+| 64 | `CRASHLOG_COUNT` | Get crashlog record count |
+| 65 | `CRASHLOG_INFO` | Get record metadata by index |
+| 66 | `CRASHLOG_DATA` | Get record payload by index |
+| 67 | `CRASHLOG_CLEAR` | Clear all crashlog records |
+| 68 | `SHELL_MIGRATED_DISPATCH` | Run a migrated shell command handler from userland |
+
+## Networking and system utility syscalls (69–104)
+
+| # | Name | Description |
+|---|---|---|
+| 69 | `PCI_GET_COUNT` | Number of PCI devices (optionally network-only) |
+| 70 | `PCI_GET_ENTRY` | Get PCI entry by index |
+| 71 | `E1000_PROBE` | Probe for an e1000 NIC and return info |
+| 72 | `E1000_INIT` | Initialise the e1000 NIC |
+| 73 | `NETCFG_GET` | Get current network config (IP, gateway, …) |
+| 74 | `NETCFG_SET` | Set network config |
+| 75 | `NETCFG_DEFAULTS` | Reset network config to defaults |
+| 76 | `NET_IS_INITED` | Returns 1 if the network stack is running |
+| 77 | `NET_GET_MAC` | Get the current MAC address |
+| 78 | `NET_GET_ARP` | Copy ARP cache entries into user buffer |
+| 79 | `NET_GET_UDP_STATS` | UDP packet/drop counters |
+| 80 | `NET_GET_IP_STATS` | IPv4 fragment and ICMP counters |
+| 81 | `NET_GET_SOCKETS` | Enumerate open sockets |
+| 82 | `NET_PING` | Send ICMP echo requests |
+| 83 | `FS_CHECK_INTEGRITY` | Run filesystem integrity check |
+| 84 | `FS_FATFIX` | Fix FAT-style directory entries at path |
+| 85 | `VTERM_CLEAR` | Clear the active virtual terminal |
+| 86 | `HISTORY_COUNT` | Number of history entries |
+| 87 | `HISTORY_ENTRY` | Read a history entry by index |
+| 88 | `HISTORY_CLEAR` | Clear all history entries |
+| 89 | `BG_JOB_COUNT` | Number of background jobs |
+| 90 | `BG_JOB_INFO` | Get info for a background job by index |
+| 91 | `TILING_START` | Start the tiling manager (GUI entry point) |
+| 92 | `SETBG_PATH` | Set tile background from a REI file path |
+| 93 | `CLEARBG_FOCUSED` | Clear background for the focused tile |
+| 94 | `SETFONT_PATH` | Load a `.hex` bitmap font system-wide |
+| 95 | `CHDIR` | Change working directory |
+| 96 | `RUN` | Execute a UELF binary by path |
+| 97 | `WRITE_EDITOR` | Open the text editor on a file |
+| 98 | `MMAP` | Map a region of memory |
+| 99 | `MUNMAP` | Unmap a region |
+| 100 | `MSYNC` | Sync a mapped region to disk |
+| 101 | `PAGING_GUARDS` | Enable/disable paging guard pages |
+| 102 | `PANIC` | Trigger a kernel panic (diagnostic/test) |
+| 103 | `PF` | Trigger a test page fault |
+| 104 | `RING3` | Run code in ring 3 (internal loader path) |
+
+## Additional GUI draw syscalls (105–108)
+
+These extend the immediate-mode drawing API with per-character and icon rendering.
+
+#### GUI draw icon (syscall 105)
+Draw a named icon from the kernel icon cache at pixel position `(x, y)`.
+
+**Arguments:**
+- EBX: GUI handle
+- ECX: Pointer to `gui_icon_t { int x, y; const char* icon_name; }`
+
+Icons are loaded from `/icons16/` with `/icons/` as fallback. If the icon is not found, nothing is drawn.
+
+#### GUI outline rectangle (syscall 106)
+Draw a 1-pixel border rectangle with no fill. Uses the same `gui_rect_t` layout as `gui_fill_rect`.
+
+**Arguments:**
+- EBX: GUI handle
+- ECX: Pointer to `gui_rect_t`
+
+#### GUI draw character (syscall 107)
+Draw a single character at a pixel position. More efficient than `gui_draw_text` for per-character rendering (e.g. text editors).
+
+**Arguments:**
+- EBX: GUI handle
+- ECX: Pointer to `gui_char_t { int x, y, ch; unsigned char r, g, b, _pad; }`
+
+#### GUI font metrics (syscall 108)
+Query the character cell size for the active font on a GUI handle.
+
+**Arguments:**
+- EBX: GUI handle
+- ECX: Pointer to output `gui_font_metrics_t { int char_w, char_h; }`
+
+**Returns:**
+- EAX: 0 on success, -1 on invalid handle
+
+## Capability-based GUI syscalls (28–46)
+
+The capability syscalls mirror the plain GUI calls but accept a capability token instead of a raw handle. They are intended for programs that have been given access to a GUI surface through a capability rather than creating one themselves.
+
+| # | Name | Mirrors |
+|---|---|---|
+| 28 | `CAP_MINT_FD` | — (mint a file-descriptor capability) |
+| 29–41 | `CAP_GUI_*` | `GUI_BEGIN` … `GUI_BLIT_RGB565` |
+| 42 | `CAP_GUI_CLOSE` | `wm_close_window` |
+| 43 | `CAP_FD_WRITE` | file write via capability |
+| 44 | `CAP_FD_SEEK` | file seek via capability |
+| 45 | `CAP_GUI_CREATE` | `gui_create` (returns capability) |
+| 46 | `CAP_GUI_ATTACH` | `gui_attach` (returns capability) |
+
+## Deterministic execution mode (47–48)
+
+| # | Name | Description |
+|---|---|---|
+| 47 | `DET_ENABLE` | Enable/disable deterministic scheduling for the current task |
+| 48 | `DET_STEP` | Advance by at most N scheduler events while in deterministic mode |
+
+Deterministic mode is used by test harnesses that need reproducible event ordering.and wrappers.

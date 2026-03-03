@@ -218,8 +218,8 @@ obj/compile_command.o:src/utilities/shell/compile_command.c
 
 obj/tui.o:src/utilities/tui/tui.c
 	$(COMPILER) $(GUI_CFLAGS) src/utilities/tui/tui.c -o obj/tui.o
-obj/tiling_manager.o:src/utilities/tui/tiling_manager.c
-	$(COMPILER) $(GUI_CFLAGS) src/utilities/tui/tiling_manager.c -o obj/tiling_manager.o
+obj/tiling_manager.o:src/gui/tiling_manager.c src/gui/gui_state.c src/gui/gui_wm.c src/gui/gui_tiles.c src/gui/gui_taskbar.c src/gui/gui_input.c
+	$(COMPILER) $(GUI_CFLAGS) src/gui/tiling_manager.c -o obj/tiling_manager.o
 
 obj/terminals.o:src/utilities/tui/terminals.c
 	$(COMPILER) $(GUI_CFLAGS) src/utilities/tui/terminals.c -o obj/terminals.o
