@@ -1,6 +1,5 @@
 #include <run_command.h>
 #include <native_exec.h>
-#include <shell_script.h>
 #include <util.h>
 #include <misc/types.h>
 #include <vga.h>
@@ -10,6 +9,7 @@
 #include <context.h>
 #include <misc/sched.h>
 #include <fs/vfs.h>
+#include <utilities/shell/shell_script.h>
 
 extern uint8 g_current_drive;
 
@@ -66,8 +66,9 @@ void run_command(string arg) {
     resolve_path(filename, shell_current_path, abspath, sizeof(abspath));
     
     if (ext && strcmp(ext, ".shell") == 0) {
-        // execute as shell script
-        result = execute_shell_script(abspath);
+        // execute as shell script via the script interpreter
+        (void)shell_script_run(g_current_drive, abspath, argc, argv);
+        return;
     } else if (ext && strcmp(ext, ".uelf") == 0) {
         // execute as ring3 ELF using the EYN-OS syscall ABI
         (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
@@ -77,14 +78,19 @@ void run_command(string arg) {
         result = native_execute_program(abspath);
     } else if (!ext) {
         /*
-         * No extension: auto-detect by reading the first 4 bytes (ELF magic).
+         * No extension: auto-detect by reading the first 4 bytes.
          * Most /binaries entries are extensionless UELFs.  If the file starts
-         * with "\x7fELF", run as ring3 UELF; otherwise fall back to native.
+         * with "\x7fELF", run as ring3 UELF; if it starts with '#' (script
+         * comment/shebang), run as a shell script; otherwise fall back to native.
          */
         uint8 magic[4] = {0, 0, 0, 0};
         vfs_read_file(g_current_drive, abspath, magic, 4);
         if (magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
             (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
+            return;
+        }
+        if (magic[0] == '#') {
+            (void)shell_script_run(g_current_drive, abspath, argc, argv);
             return;
         }
         result = native_execute_program(abspath);

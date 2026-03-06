@@ -9,6 +9,8 @@ extern g_user_task_active
 extern g_user_segdom_ds
 extern stack_space
 extern stack_bottom
+extern isr_abort_stack_top
+extern isr_abort_stack_bottom
 extern ui_return_from_user_task
 
 section .text
@@ -29,8 +31,11 @@ syscall_entry:
     push dword 0x80         ; int_no
     pusha
 
-    ; Stack overflow tripwire: if the kernel stack underflowed, bail out
-    ; to the shell immediately on a known-good stack.
+    ; Stack overflow tripwire: if the kernel C call stack underflowed (ESP below
+    ; stack_bottom), bail out to a known-good stack.
+    ; NOTE: isr_abort_stack_top is only used as the re-entry point in the abort
+    ; path below; the overflow check must guard the MAIN kernel stack which runs
+    ; between stack_bottom (low) and stack_space (high, = TSS.esp0).
     cmp esp, stack_bottom
     jae .stack_ok
     mov dword [g_abort_to_shell], 1
@@ -55,7 +60,7 @@ syscall_entry:
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov esp, stack_space
+    mov esp, isr_abort_stack_top
     sti
     call ui_return_from_user_task
 .halt:

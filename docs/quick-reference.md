@@ -90,11 +90,22 @@ status          # Check which commands are loaded
 | Command | Description | Example |
 |---------|-------------|---------|
 | `game` | Launch game | `game snake` |
+| `doom` | Run the prebuilt DOOM port | `doom -iwad /DOOM1.WAD` |
+| `build_doom` | Build `doom_chibicc` inside EYN-OS | `build_doom` |
+| `xeyes` | Run the X11 compatibility demo | `xeyes` |
 | `write` | Text editor | `write file.txt` |
 | `draw` | Draw rectangle | `draw 10 20 100 50 255 0 0` |
 | `run` | Second Reality demo (WIP) | `run /testdir/demo.uelf` |
 
 Second Reality demo controls: `Q` quits, Space pauses, Left/Right arrows switch scenes.
+
+DOOM quick start:
+
+```bash
+doom -iwad /DOOM1.WAD   # run the host-built port
+build_doom             # compile the in-OS chibicc build
+doom_chibicc           # run the in-OS build output
+```
 
 ## Utility Commands
 

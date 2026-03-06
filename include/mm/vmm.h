@@ -286,6 +286,18 @@ int vmm_munmap(address_space_t* as, uint32 va, uint32 size);
 /* Page fault handling (called from ISR 14) */
 void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip);
 
+/*
+ * vmm_fault_in_user_write — pre-fault user pages before a kernel copyout.
+ *
+ * Allocates any demand-zero, swap-backed, or un-faulted stack/heap pages
+ * in [va_start, va_start+len) so that user_access_ok() can confirm they
+ * are present and writable.  Must be called before copyout() when the
+ * destination might be a freshly alloca'd or brk-grown buffer.
+ *
+ * Returns 0 if all pages were resolved successfully, -1 otherwise.
+ */
+int vmm_fault_in_user_write(uint32 va_start, size_t len);
+
 /* Swap operations */
 uint32 swap_out_page(pte_t* pte, uint32 va, address_space_t* as);
 int swap_in_page(address_space_t* as, uint32 va, uint32 swap_slot);

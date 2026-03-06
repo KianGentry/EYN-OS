@@ -54,7 +54,7 @@ QEMU_DISPLAY ?= gtk,grab-on-hover=on
 QEMU_ENV ?= GDK_BACKEND=x11
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/mem386.o obj/slab.o obj/shell.o obj/shell_args.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/tui.o obj/run_command.o obj/shell_script.o obj/history.o obj/alias.o obj/predictive_memory.o obj/zero_copy.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/vfs.o obj/panic.o obj/watchdog.o obj/capabilities.o obj/segdom.o obj/crashlog.o obj/context.o obj/fs_txn.o obj/linux_syscalls.o
+OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/mem386.o obj/slab.o obj/shell.o obj/shell_args.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/tui.o obj/run_command.o obj/history.o obj/alias.o obj/predictive_memory.o obj/zero_copy.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/vfs.o obj/panic.o obj/watchdog.o obj/capabilities.o obj/segdom.o obj/crashlog.o obj/context.o obj/fs_txn.o obj/linux_syscalls.o
 
 OBJS += obj/tiling_manager.o obj/ui_prefs.o
 OBJS += obj/terminals.o
@@ -62,6 +62,7 @@ OBJS += obj/partition.o
 OBJS += obj/pci.o
 OBJS += obj/e1000.o
 OBJS += obj/netstack.o
+OBJS += obj/shell_script.o
 OUTPUT = $(BOOTDIR)/kernel.bin
 
 # Source files to object files
@@ -140,6 +141,9 @@ obj/slab.o:src/mm/slab.c
 obj/shell.o:src/utilities/shell/shell.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/shell.c -o obj/shell.o
 
+obj/shell_script.o:src/utilities/shell/shell_script.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/shell_script.c -o obj/shell_script.o
+
 obj/math.o:src/utilities/basic/math.c
 	$(COMPILER) $(CFLAGS) src/utilities/basic/math.c -o obj/math.o
 
@@ -203,9 +207,6 @@ obj/reiv.o:src/drivers/reiv.c
 
 obj/run_command.o:src/utilities/shell/run_command.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/run_command.c -o obj/run_command.o
-
-obj/shell_script.o:src/utilities/shell/shell_script.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/shell_script.c -o obj/shell_script.o
 
 obj/alias.o:src/utilities/shell/alias.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/alias.c -o obj/alias.o
@@ -328,7 +329,7 @@ run: build
 	-display $(QEMU_DISPLAY) \
 	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
 	-device e1000,netdev=net0 \
-	-m 9M
+	-m 128M
 
 # Debug run with serial logging and detailed CPU/interrupt logs
 .PHONY: qemu-debug
@@ -366,7 +367,7 @@ test: testimg
 	-serial stdio \
 	-d int,cpu_reset -D tmp/qemu-debug.log \
 	-no-reboot -no-shutdown \
-	-m 9M
+	-m 24M
 
 # Create a FAT32 disk image for testing (requires mkfs.vfat from dosfstools)
 fat32img:

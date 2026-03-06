@@ -82,6 +82,30 @@ int eynfs_traverse_path(uint8 drive, const eynfs_superblock_t *sb, const char *p
 int eynfs_create_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_block, const char *name, uint8_t type);
 int eynfs_delete_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_block, const char *name);
 int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_entry_t *entry, void *buf, size_t bufsize, size_t offset);
+
+/*
+ * ABI-INVARIANT: cursor-aware EYNFS file read.
+ *
+ * Replaces repeated eynfs_read_file() calls for sequential streaming by
+ * caching the last reached block pair so the next read need not re-traverse
+ * from first_block.
+ *
+ * first_block      — entry->first_block of the target file.
+ * file_size        — entry->size (used for EOF clamping).
+ * buf/bufsize      — kernel-side destination buffer.
+ * offset           — logical byte offset within the file.
+ * p_cur_block      — in/out: 0 = uninitialized (restart from first_block).
+ *                    Updated to the block where the read ended.
+ * p_cur_block_off  — in/out: file byte offset at start of *p_cur_block's
+ *                    data payload.  Updated in tandem with p_cur_block.
+ *
+ * Returns number of bytes read, 0 at EOF, -1 on error.
+ * Both cursor fields are updated on success.
+ */
+int eynfs_read_file_fast(uint8 drive, uint32_t first_block, uint32_t file_size,
+                         void *buf, size_t bufsize, size_t offset,
+                         uint32_t *p_cur_block, uint32_t *p_cur_block_off);
+
 int eynfs_write_file(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *entry, const void *buf, size_t size, uint32_t parent_block, uint32_t entry_index);
 int eynfs_alloc_block(uint8 drive, eynfs_superblock_t *sb);
 int eynfs_free_block(uint8 drive, eynfs_superblock_t *sb, uint32_t block);

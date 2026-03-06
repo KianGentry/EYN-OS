@@ -92,6 +92,19 @@ int copyout(void* user_dst, const void* src, size_t len) {
     if (!src) {
         return -1;
     }
+    /*
+     * Pre-fault any demand-zero or unmapped stack/heap pages before checking.
+     * alloca() and brk()-grown buffers are demand-paged: their PTEs exist but
+     * PTE_PRESENT is not set until a hardware #PF occurs.  user_access_ok()
+     * rejects not-present pages, so without this every write to an alloca'd
+     * buffer (e.g. DOOM's lump-directory read into a 41 KB stack buffer)
+     * silently fails and the caller reads garbage.
+     *
+     * vmm_fault_in_user_write is a no-op for already-present pages and only
+     * touches pages in the validated user range, so it adds no security risk.
+     * user_access_ok remains the authoritative gate and is called afterwards.
+     */
+    vmm_fault_in_user_write((uint32)user_dst, len);
     if (!user_access_ok(user_dst, len, 1)) {
         return -1;
     }

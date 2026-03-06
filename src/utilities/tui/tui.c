@@ -196,6 +196,22 @@ int tui_read_key() {
     static uint8_t super_used = 0; /* set when another key is pressed while Super is held */
     static uint8_t caps_lock = 0;
 
+    /*
+     * Scancode-to-translated-key lookup table.
+     *
+     * On each key *press*, the translated key code is stored here indexed by
+     * scancode (0–83).  On the matching key *release*, the stored value is
+     * returned negated so that callers can distinguish press (>0) from
+     * release (<0) without re-translating the scancode (which would require
+     * knowing the modifier state at press time).
+     *
+     * Modifier keys (Shift, Ctrl, Super, Alt, CapsLock) are still handled
+     * purely via the static flag variables; their releases return 0 as
+     * before so existing callers (shell, tiling manager, etc.) are
+     * unaffected by this change.
+     */
+    static int g_scancode_to_key[128];
+
     // Check controller status (non-blocking)
     uint8_t status = inportb(0x64);
     if (!(status & 0x1)) return 0; // no data waiting
@@ -218,6 +234,12 @@ int tui_read_key() {
             if (was_clean) return 0x6001; /* Super alone: toggle start menu */
         }
         if (realcode == 56) tui_alt_pressed = 0; // left Alt release
+        /* Return the negated translated key so callers can detect releases. */
+        if (realcode < 128 && g_scancode_to_key[realcode]) {
+            int released = g_scancode_to_key[realcode];
+            g_scancode_to_key[realcode] = 0;
+            return -released;
+        }
         return 0;
     }
 
@@ -280,47 +302,56 @@ int tui_read_key() {
     if (is_letter) {
         int upper = (caps_lock && !shift_pressed) || (!caps_lock && shift_pressed);
         int ret = upper ? (base - 32) : base;
-        return super_pressed ? (0x4000 | ret) : ret;
+        int key = super_pressed ? (0x4000 | ret) : ret;
+        if (scancode < 128) g_scancode_to_key[scancode] = key;
+        return key;
     }
 
     // Non-letter keys
+    {
+    int nk = 0;
     switch (scancode) {
-    case 72: return (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1001; // Up
-    case 80: return (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1002; // Down
-    case 75: return (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1003; // Left
-    case 77: return (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1004; // Right
-        case 15: return '\t';
-        case 14: return '\b';
-        case 28: return '\n';
-        case 1:  return 27; // Esc
-        case 83: return 0x1005; // Del
-        case 71: return 0x1006; // Home
-        case 73: return 0x1008; // PgUp
-        case 79: return 0x1007; // End
-        case 81: return 0x1009; // PgDn
-        case 2: return shift_pressed ? '!' : '1';
-        case 3: return shift_pressed ? '@' : '2';
-        case 4: return shift_pressed ? '#' : '3';
-        case 5: return shift_pressed ? '$' : '4';
-        case 6: return shift_pressed ? '%' : '5';
-        case 7: return shift_pressed ? '^' : '6';
-        case 8: return shift_pressed ? '&' : '7';
-        case 9: return shift_pressed ? '*' : '8';
-        case 10: return shift_pressed ? '(' : '9';
+    case 72: nk = (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1001; break; // Up
+    case 80: nk = (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1002; break; // Down
+    case 75: nk = (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1003; break; // Left
+    case 77: nk = (ctrl_pressed ? 0x8000 : 0) | (shift_pressed ? 0x3000 : 0) | (super_pressed ? 0x4000 : 0) | 0x1004; break; // Right
+        case 15: nk = '\t'; break;
+        case 14: nk = '\b'; break;
+        case 28: nk = '\n'; break;
+        case 1:  nk = 27; break; // Esc
+        case 83: nk = 0x1005; break; // Del
+        case 71: nk = 0x1006; break; // Home
+        case 73: nk = 0x1008; break; // PgUp
+        case 79: nk = 0x1007; break; // End
+        case 81: nk = 0x1009; break; // PgDn
+        case 2: nk = shift_pressed ? '!' : '1'; break;
+        case 3: nk = shift_pressed ? '@' : '2'; break;
+        case 4: nk = shift_pressed ? '#' : '3'; break;
+        case 5: nk = shift_pressed ? '$' : '4'; break;
+        case 6: nk = shift_pressed ? '%' : '5'; break;
+        case 7: nk = shift_pressed ? '^' : '6'; break;
+        case 8: nk = shift_pressed ? '&' : '7'; break;
+        case 9: nk = shift_pressed ? '*' : '8'; break;
+        case 10: nk = shift_pressed ? '(' : '9'; break;
+        case 11: nk = shift_pressed ? ')' : '0'; break;
+        case 12: nk = shift_pressed ? '_' : '-'; break;
+        case 13: nk = shift_pressed ? '+' : '='; break;
+        case 26: nk = shift_pressed ? '{' : '['; break;
+        case 27: nk = shift_pressed ? '}' : ']'; break;
+        case 39: nk = shift_pressed ? ':' : ';'; break;
+        case 40: nk = shift_pressed ? '"' : '\''; break;
+        case 41: nk = shift_pressed ? '~' : '`'; break;
+        case 43: nk = shift_pressed ? '|' : '\\'; break;
+        case 51: nk = shift_pressed ? '<' : ','; break;
+        case 52: nk = shift_pressed ? '>' : '.'; break;
+        case 53: nk = shift_pressed ? '?' : '/'; break;
+        case 57: nk = ' '; break;
         default: break;
-        case 11: return shift_pressed ? ')' : '0';
-        case 12: return shift_pressed ? '_' : '-';
-        case 13: return shift_pressed ? '+' : '=';
-        case 26: return shift_pressed ? '{' : '[';
-        case 27: return shift_pressed ? '}' : ']';
-        case 39: return shift_pressed ? ':' : ';';
-        case 40: return shift_pressed ? '"' : '\'';
-        case 41: return shift_pressed ? '~' : '`';
-        case 43: return shift_pressed ? '|' : '\\';
-        case 51: return shift_pressed ? '<' : ',';
-        case 52: return shift_pressed ? '>' : '.';
-        case 53: return shift_pressed ? '?' : '/';
-        case 57: return ' ';
+    }
+    if (nk) {
+        if (scancode < 128) g_scancode_to_key[scancode] = nk;
+        return nk;
+    }
     }
 
     return 0;

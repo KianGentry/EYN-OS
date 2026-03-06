@@ -39,6 +39,26 @@ address_space_t* vmm_current_as = &vmm_kernel_as;
 static uint32 early_heap_ptr = 0;
 static int paging_enabled = 0;
 
+/*
+ * ABI-INVARIANT: Physical RAM covered by the KERNEL_BASE alias.
+ *
+ * Why: vmm_walk_page_tables (and create_address_space) access physical frames
+ *   for page tables via (KERNEL_BASE + pt_phys). This alias must cover every
+ *   frame that frame_alloc() can return, otherwise a write to a newly-allocated
+ *   page-table frame above the alias limit causes a kernel-mode #PF.
+ *
+ * The alias is extended at vmm_init time to span all detected RAM. The default
+ *   here (16 MB) is only ever used if vmm_init has not yet run, which should
+ *   never happen in normal operation.
+ *
+ * Breakage if too small: kernel panics with PAGE FAULT (kernel) targeting
+ *   KERNEL_BASE + first_unaliased_frame when a large-BSS user program (e.g.
+ *   chibicc with 32 MB heap) causes the PT frame pool to exceed the old limit.
+ * Breakage if too large: no functional issue; wastes a few early_alloc page
+ *   tables at boot (4 KB per extra 4 MB of covered RAM).
+ */
+static uint32 g_kernel_phys_alias_bytes = 16u * 1024u * 1024u;
+
 // LOW-LEVEL CR REGISTER ACCESS
 
 static inline uint32 read_cr0(void) {
@@ -420,7 +440,7 @@ pte_t* vmm_walk_page_tables(address_space_t* as, uint32 va, int create) {
          * the KERNEL_BASE alias to avoid recursive-map faults while PDEs
          * are being created on-demand.
          */
-        if (pt_phys < (16u * 1024u * 1024u)) {
+        if (pt_phys < g_kernel_phys_alias_bytes) {
             pt = (page_table_t*)(KERNEL_BASE + pt_phys);
         } else {
             pt = (page_table_t*)PT_VA(pdi);
@@ -756,19 +776,31 @@ void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
     /* CASE 3: Access in valid region but page not yet allocated
      * Check if address falls within heap or stack growth area */
     if (!is_present) {
-        /* Stack growth: address between stack_bottom and USER_STACK_TOP */
-        if (fault_addr >= as->stack_bottom - PAGE_SIZE && 
+        /* Stack growth: address anywhere between USER_STACK_BASE and the
+         * current stack_bottom.
+         *
+         * We allow the fault to land arbitrarily far below stack_bottom
+         * (not just one page) because programs can skip many pages in a
+         * single call if they allocate a large stack frame or use alloca().
+         * Constraining growth to one page at a time would cause a segfault
+         * whenever a function reserves more than 4 KB of locals in one shot.
+         *
+         * Security invariant: fault_addr must be at or above USER_STACK_BASE
+         * (0xB0000000) so a rogue program cannot silently map arbitrary
+         * pages below the intended stack region.
+         */
+        if (fault_addr >= USER_STACK_BASE &&
             fault_addr < USER_STACK_TOP) {
-            /* Grow stack down */
+            /* Grow stack down to cover the faulted page. */
             uint32 new_page = fault_addr & PAGE_MASK;
             uint32 frame = frame_alloc();
             if (frame == 0) {
                 goto segfault;
             }
-            
+
             memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
             vmm_map_page(as, new_page, frame, PTE_USER | PTE_RW);
-            
+
             if (new_page < as->stack_bottom) {
                 as->stack_bottom = new_page;
             }
@@ -809,6 +841,103 @@ segfault:
         printf("Kernel panic: page fault in kernel mode\n");
         arch_halt_forever();
     }
+}
+
+/*
+ * vmm_fault_in_user_write — pre-fault user pages for kernel-initiated writes.
+ *
+ * copyout() must not fail when writing to valid user memory that merely hasn't
+ * been physically mapped yet (demand-zero PTE_DEMAND pages, or stack/heap
+ * pages that would be allocated by the normal page-fault handler).
+ * user_access_ok() checks PTE_PRESENT which is always 0 for such pages, so
+ * without this helper every copyout to an alloca'd stack buffer silently
+ * returns -1 and the user program reads garbage.
+ *
+ * This function replicates the demand-fault resolution from
+ * vmm_page_fault_handler() but can be called from kernel context (CPL0)
+ * without a hardware #PF: for each 4KB page in [va_start, va_start+len):
+ *   - Already present + user + rw: skip.
+ *   - PTE_DEMAND: allocate a zeroed frame, mark present.
+ *   - PTE_SWAPPED: bring back from swap.
+ *   - In stack or heap growth area with no PTE: allocate a zeroed frame.
+ *   - Anything else: return -1 (access will be denied by user_access_ok).
+ *
+ * On success returns 0; all pages are present, user-accessible, and writable
+ * before user_access_ok is called.
+ *
+ * Security: only touches pages in the user range. The subsequent
+ * user_access_ok call remains the authoritative gate.
+ */
+int vmm_fault_in_user_write(uint32 va_start, size_t len) {
+    if (len == 0) return 0;
+    if (va_start < USER_CODE_BASE || va_start >= USER_STACK_TOP) return -1;
+
+    address_space_t* as = vmm_current_as ? vmm_current_as : &vmm_kernel_as;
+
+    uint32 page = va_start & PAGE_MASK;
+    uint32 end  = va_start + (uint32)len;
+    if (end < va_start) return -1;  /* overflow */
+    if (end > USER_STACK_TOP) return -1;
+
+    for (; page < end; page += PAGE_SIZE) {
+        pte_t* pte = vmm_walk_page_tables(as, page, 0);
+
+        if (pte) {
+            pte_t entry = *pte;
+
+            if (entry & PTE_PRESENT) {
+                /* Already physically present; check user + writable. */
+                if ((entry & PTE_USER) && (entry & PTE_RW)) continue;
+                return -1;  /* Present but not user-writable (text/ro page). */
+            }
+
+            /* Demand-zero: allocate and zero a frame now. */
+            if (entry & PTE_DEMAND) {
+                uint32 frame = frame_alloc();
+                if (frame == 0) return -1;
+                memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+                uint32 flags = (entry & 0xFFFu) & ~PTE_DEMAND;
+                flags |= PTE_PRESENT;
+                *pte = (frame & PTE_FRAME_MASK) | flags;
+                invalidate_tlb_entry(page);
+                continue;
+            }
+
+            /* Swapped page: restore from swap. */
+            if (entry & PTE_SWAPPED) {
+                uint32 swap_slot = (entry >> 12) & 0xFFFFF;
+                if (swap_in_page(as, page, swap_slot) != 0) return -1;
+                continue;
+            }
+
+            /* PTE exists but has no recognised state — deny. */
+            return -1;
+        }
+
+        /* No PTE: grow stack if in the stack region. */
+        if (page >= USER_STACK_BASE && page < USER_STACK_TOP) {
+            uint32 frame = frame_alloc();
+            if (frame == 0) return -1;
+            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+            vmm_map_page(as, page, frame, PTE_USER | PTE_RW);
+            if (page < as->stack_bottom) as->stack_bottom = page;
+            continue;
+        }
+
+        /* No PTE: grow heap if in the brk region. */
+        if (page >= USER_HEAP_BASE && page < as->heap_break) {
+            uint32 frame = frame_alloc();
+            if (frame == 0) return -1;
+            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+            vmm_map_page(as, page, frame, PTE_USER | PTE_RW);
+            continue;
+        }
+
+        /* Unmapped region — deny. */
+        return -1;
+    }
+
+    return 0;
 }
 
 // COPY-ON-WRITE HANDLING
@@ -1319,20 +1448,31 @@ void vmm_init(uint32 total_ram_bytes) {
     vmm_kernel_as.refcount = 1;
     
     /*
-     * IDENTITY MAP: Map first 16MB at both 0x00000000 and 0xC0000000
-     * This allows kernel to run at high addresses while still accessing
-     * low memory (BIOS, VGA, etc.) during transition.
-     */
-    
-    /*
-     * Create page tables for first 16MB identity mapped.
+     * Map all detected physical RAM at both 0x00000000 (low identity) and
+     * KERNEL_BASE (0xC0000000+), covering the full detected RAM range.
+     *
+     * IDENTITY MAP: Map physical RAM at 0x00000000 and 0xC0000000 so the
+     * kernel can run at its link address while still accessing low memory
+     * (BIOS, VGA, etc.) during the paging transition.
+     *
      * IMPORTANT: do NOT share the same PT between the low and high mappings.
      * User tasks are mapped into low user space (e.g. 0x00400000). If the low
-     * and high-half identity maps share a PT, those user mappings would
+     * and high-half identity maps shared a PT, those user mappings would
      * overwrite/unmap the kernel's high-half alias (0xC0400000 etc.), causing
      * kernel page faults when the kernel uses KERNEL_BASE + phys pointers.
+     *
+     * This alias must span all physical RAM so that (KERNEL_BASE + pt_phys)
+     * is always a valid kernel VA for any frame frame_alloc() returns, including
+     * page-table frames allocated for large-BSS programs (e.g. chibicc's 32 MB
+     * internal heap, which causes frame_alloc to return frames above 16 MB).
      */
-    for (uint32 pdi = 0; pdi < 4; pdi++) {  /* 4 PDEs = 16MB */
+    uint32 ram_pdes = (total_ram_bytes + (4u * 1024u * 1024u) - 1u)
+                      / (4u * 1024u * 1024u);
+    if (ram_pdes < 4u)   ram_pdes = 4u;    /* Always cover at least 16 MB */
+    if (ram_pdes > 254u) ram_pdes = 254u;  /* Kernel high-half has PDEs 768..1022 (254 slots) */
+    g_kernel_phys_alias_bytes = ram_pdes * (4u * 1024u * 1024u);
+
+    for (uint32 pdi = 0; pdi < ram_pdes; pdi++) {
         page_table_t* pt_low = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
         page_table_t* pt_high = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
         memset(pt_low, 0, sizeof(page_table_t));

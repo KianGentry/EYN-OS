@@ -1,9 +1,14 @@
 /*
  * math.h — Minimal math library for EYN-OS userland programs.
  *
- * Implements common math functions using x87 FPU instructions directly.
- * The kernel initializes the FPU during boot (see src/cpu/fpu.c), so
- * these instructions are available in ring-3.
+ * When compiled with GCC/i686-elf-gcc, functions are implemented as
+ * static inline using x87 FPU instructions (the kernel initialises the
+ * FPU during boot — see src/cpu/fpu.c).
+ *
+ * When compiled with chibicc (__chibicc__ defined), inline assembly is
+ * unavailable.  Functions are declared as external and implemented in
+ * userland/libc/math.c using portable C (Taylor series, Newton–Raphson,
+ * etc.).  The implementations are linked via libeync.a.
  *
  * ABI-INVARIANT: Function signatures match ISO C90/C99 <math.h>.
  * Only double-precision variants are provided; float/long-double
@@ -20,9 +25,72 @@
 #define M_LN10      2.30258509299404568402
 #define M_SQRT2     1.41421356237309504880
 #define M_SQRT1_2   0.70710678118654752440
+
+#ifdef __chibicc__
+/* chibicc does not support __builtin_huge_val etc.; use large literal. */
+#define HUGE_VAL    1e308
+#define INFINITY    (1e308 * 1e308)
+#define NAN         (0.0 / 0.0)
+#else
 #define HUGE_VAL    (__builtin_huge_val())
 #define INFINITY    (__builtin_inff())
 #define NAN         (__builtin_nanf(""))
+#endif
+
+#ifdef __chibicc__
+/* ------------------------------------------------------------------ */
+/*  chibicc path: external declarations (linked from math.c)           */
+/* ------------------------------------------------------------------ */
+double fabs(double x);
+float  fabsf(float x);
+double sqrt(double x);
+float  sqrtf(float x);
+double sin(double x);
+double cos(double x);
+double tan(double x);
+double atan2(double y, double x);
+double atan(double x);
+double asin(double x);
+double acos(double x);
+float  sinf(float x);
+float  cosf(float x);
+float  tanf(float x);
+float  atan2f(float y, float x);
+float  atanf(float x);
+float  asinf(float x);
+float  acosf(float x);
+double floor(double x);
+double ceil(double x);
+double round(double x);
+double trunc(double x);
+float  floorf(float x);
+float  ceilf(float x);
+float  roundf(float x);
+float  truncf(float x);
+double fmod(double x, double y);
+float  fmodf(float x, float y);
+double log2(double x);
+double log(double x);
+double log10(double x);
+double exp(double x);
+double pow(double base, double exponent);
+float  log2f(float x);
+float  logf(float x);
+float  log10f(float x);
+float  expf(float x);
+float  powf(float b, float e);
+double sinh(double x);
+double cosh(double x);
+double tanh(double x);
+double fmin(double x, double y);
+double fmax(double x, double y);
+float  fminf(float x, float y);
+float  fmaxf(float x, float y);
+int    isnan(double x);
+int    isinf(double x);
+int    isfinite(double x);
+
+#else /* GCC / inline-asm path */
 
 /* ------------------------------------------------------------------ */
 /*  Absolute value                                                     */
@@ -274,5 +342,7 @@ static inline float fmaxf(float x, float y) { return x > y ? x : y; }
 static inline int isnan(double x) { return x != x; }
 static inline int isinf(double x) { return !isnan(x) && isnan(x - x); }
 static inline int isfinite(double x) { return !isnan(x) && !isinf(x); }
+
+#endif /* !__chibicc__ (GCC inline-asm path) */
 
 #endif /* _MATH_H */

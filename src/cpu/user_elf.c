@@ -79,9 +79,26 @@ typedef struct {
 
 #define PT_LOAD 1
 
-// Keep the loader simple and memory-bounded: we currently read the full ELF into RAM.
-// This cap is intentionally conservative for low-memory QEMU configs.
-#define USER_ELF_MAX_FILE_BYTES (2u * 1024u * 1024u)
+/*
+ * ABI-INVARIANT: Maximum ELF file size the loader will read into kernel heap.
+ *
+ * Why: The loader reads the entire ELF into a malloc'd buffer before parsing.
+ *      This bounds the kernel heap spike during program loading.
+ *
+ * Value: 16 MB accommodates chibicc-compiled binaries that store BSS as zeros
+ *        in the data segment (e.g., chibicc-DOOM is ~8.5 MB).  With DOOM's
+ *        128 MB QEMU config, the transient heap usage is well within budget.
+ *
+ * Breakage if decreased: programs whose on-disk size exceeds the limit will
+ *   be rejected at load time ("ELF too large").
+ * Breakage if increased past physical RAM: malloc will fail and the loader
+ *   will report "out of memory" before doing any work.
+ *
+ * ABI-sensitive: No (internal loader policy, not exposed to user ABI).
+ * Security-critical: Yes — bounds worst-case kernel heap usage from untrusted
+ *   ELF files loaded from disk.
+ */
+#define USER_ELF_MAX_FILE_BYTES (16u * 1024u * 1024u)
 
 /*
  * ABI-INVARIANT: Initial user stack mapping size.
@@ -268,7 +285,33 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 
     uint32 map_size = map_end - map_start;
     uint32 pages = map_size / PAGE_SIZE;
-    if (pages == 0 || pages > 1024) {
+
+    /*
+     * ABI-INVARIANT: Maximum PT_LOAD virtual span (in pages) for a user ELF.
+     *
+     * Why: Bounds the number of page-table entries and physical frames the
+     *      loader may allocate up-front (file-backed pages) or register as
+     *      demand-zero (BSS) before jumping to ring 3.
+     *
+     * Value: 16384 pages = 64 MB virtual span.  Demand-zero BSS pages are
+     *        only backed by physical frames when written, so a large virtual
+     *        span does not imply physical RAM usage.  64 MB accommodates
+     *        programs with large static heap buffers (e.g., chibicc's 32 MB
+     *        internal allocator arena) while remaining well below
+     *        USER_STACK_BASE (0xB0000000) for ELFs loaded at 0x00400000.
+     *
+     * Breakage if decreased below a program's PT_LOAD span: that program
+     *   will be rejected at load time with "ELF mapping size too large".
+     * Breakage if increased beyond free virtual space: loader would attempt
+     *   to register PTEs past USER_STACK_BASE; the range check above catches
+     *   this before we reach here, so the guard is redundant but kept for
+     *   defence-in-depth.
+     *
+     * ABI-sensitive: Yes — this is the effective user-program BSS ceiling.
+     * Security-critical: Yes — prevents an untrusted ELF from exhausting the
+     *   page-table allocation budget or mapping into kernel space.
+     */
+    if (pages == 0 || pages > 16384) {
         printf("%cError: ELF mapping size too large.\n", 255, 0, 0);
         free(file);
         return -1;

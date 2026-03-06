@@ -43,8 +43,9 @@ CFLAGS=(
   -nostdlib
   -nostartfiles
   -I"$incdir"
-  -I"$repo_root/chibicc-main"
+  -I"$repo_root/chibicc-EYN-main"
   -DCHIBICC_EYNOS_USERLAND=1
+  "-DUSERLAND_HEAP_SIZE=(4*1024*1024)"
   -Wall -Wextra
   -O2
 )
@@ -98,7 +99,7 @@ ar rcs "$lib_archive" "${lib_objs[@]}"
 
 # Build chibicc sources
 chibicc_objs=()
-for src in chibicc-main/*.c; do
+for src in chibicc-EYN-main/*.c; do
   base="$(basename "$src" .c)"
   obj="$objdir/chibicc_${base}.o"
   chibicc_objs+=("$obj")

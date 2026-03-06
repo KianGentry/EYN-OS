@@ -40,6 +40,7 @@ enum {
 	GUI_EVENT_KEY = 1,
 	GUI_EVENT_MOUSE = 2,
 	GUI_EVENT_CLOSE = 3,  /* Window close request (user clicked X / Super+Q) */
+	GUI_EVENT_KEY_UP = 4, /* Key release (key code in .a, same as GUI_EVENT_KEY) */
 };
 
 typedef struct {
@@ -155,4 +156,16 @@ int gui_get_font_metrics(int handle, gui_font_metrics_t* out);
 // Returns 1 if an event was written into out_event, 0 if none available, -1 on error.
 int gui_poll_event(int handle, gui_event_t* out_event);
 // Like poll, but blocks (hlt) until an event arrives. Returns 1 on event, -1 on error/interrupt.
+
+// Warp the physical mouse cursor to (x, y) relative to the window content area.
+// Accumulated delta registers are zeroed so the warp does not generate a
+// spurious motion event.  Intended for use by games that re-centre the cursor
+// each tic to avoid hitting screen borders.
+int gui_warp_mouse(int handle, int x, int y);
+
+// Show (visible=1) or hide (visible=0) the mouse cursor sprite.
+// Games that grab the mouse via gui_warp_mouse should call this with 0
+// to suppress the REI cursor overlay.
+int gui_set_cursor_visible(int handle, int visible);
+
 int gui_wait_event(int handle, gui_event_t* out_event);

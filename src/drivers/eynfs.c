@@ -1314,6 +1314,133 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
     return (int)total_read;
 }
 
+/*
+ * eynfs_read_file_fast — cursor-aware file read for EYNFS.
+ *
+ * Like eynfs_read_file() but avoids re-traversing the full block chain from
+ * the beginning on every call.  A caller-supplied cursor (*p_cur_block,
+ * *p_cur_block_off) records the last block reached and the file byte offset
+ * where its data payload starts, so a subsequent read at a GREATER or EQUAL
+ * offset begins traversal from the cached block rather than first_block.
+ *
+ * For a 14 MB WAD file, the old path required O(28 000) block reads per
+ * 256-byte chunk; with the cursor a sequential read costs O(1) block reads
+ * after the initial traversal.
+ *
+ * Cursor semantics:
+ *   *p_cur_block     — EYNFS block number.  0 = uninitialized; restart from
+ *                      first_block at file offset 0.
+ *   *p_cur_block_off — file byte offset at which *p_cur_block's data payload
+ *                      begins (i.e., immediately after its 4-byte chain ptr).
+ *
+ * On return both fields are updated to the block reached after the skip
+ * phase, so the next call benefits even for non-contiguous forward reads.
+ *
+ * ABI-INVARIANT: Not exported to user space.  Internal kernel use only.
+ * Performance-critical: called on every SYSCALL_READ for EYNFS file FDs.
+ */
+int eynfs_read_file_fast(
+    uint8      drive,
+    uint32_t   first_block,
+    uint32_t   file_size,
+    void      *buf,
+    size_t     bufsize,
+    size_t     offset,
+    uint32_t  *p_cur_block,
+    uint32_t  *p_cur_block_off)
+{
+    if (!eynfs_ctx_check(CAP_READ_FS, SCHED_COST_FS)) return -1;
+    if (offset >= file_size) return 0;
+    if (current_command_context)
+        fs_txn_touch(drive, FS_TXN_TAG_FILE, (uint32)bufsize);
+
+    size_t   bytes_left = file_size - offset;
+    if (bufsize < bytes_left) bytes_left = bufsize;
+    size_t   total_read = 0;
+    uint8    block[EYNFS_BLOCK_SIZE];
+    uint32_t kick_ctr   = 0;
+
+    /* Choose starting point: cached cursor if it covers the target offset,
+     * otherwise restart from the beginning of the chain.               */
+    uint32_t block_num;
+    size_t   skip;
+    if (p_cur_block && *p_cur_block != 0 &&
+        p_cur_block_off && offset >= (size_t)*p_cur_block_off) {
+        block_num = *p_cur_block;
+        skip      = offset - (size_t)*p_cur_block_off;
+    } else {
+        block_num = first_block;
+        skip      = offset;
+    }
+
+    /* Advance through the chain until skip < one block's data payload. */
+    while (block_num && skip >= (EYNFS_BLOCK_SIZE - 4u)) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
+        if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-fast");
+        if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
+        block_num  = *(uint32_t *)block;
+        skip      -= (EYNFS_BLOCK_SIZE - 4u);
+    }
+
+    /* Update the cursor to the block we just landed on.
+     * *p_cur_block_off = the file byte offset at the START of this block. */
+    if (p_cur_block && p_cur_block_off) {
+        *p_cur_block     = block_num;
+        *p_cur_block_off = (uint32_t)(offset - skip);
+    }
+
+    /* Read the partial leading portion of the first data block. */
+    if (block_num && bytes_left > 0) {
+        if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-fast");
+        if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
+        uint32_t next_block = *(uint32_t *)block;
+        size_t   chunk      = (EYNFS_BLOCK_SIZE - 4u) - skip;
+        if (chunk > bytes_left) chunk = bytes_left;
+        memcpy((uint8_t *)buf, block + 4 + skip, chunk);
+        total_read += chunk;
+        bytes_left -= chunk;
+        if (p_cur_block && p_cur_block_off) {
+            *p_cur_block     = next_block;
+            /*
+             * Advance by a full block payload (508 bytes) regardless of skip.
+             * *p_cur_block_off tracks the file offset at the START of a block,
+             * so each block boundary is always +508, even if we started reading
+             * mid-block on this first chunk.
+             */
+            *p_cur_block_off += (uint32_t)(EYNFS_BLOCK_SIZE - 4u);
+        }
+        block_num = next_block;
+    }
+
+    /* Read remaining full blocks. */
+    while (block_num && bytes_left > 0) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
+        if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-fast");
+        if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
+        uint32_t next_block = *(uint32_t *)block;
+        size_t   chunk      = (EYNFS_BLOCK_SIZE - 4u);
+        if (chunk > bytes_left) chunk = bytes_left;
+        memcpy((uint8_t *)buf + total_read, block + 4, chunk);
+        total_read += chunk;
+        bytes_left -= chunk;
+        if (p_cur_block && p_cur_block_off) {
+            *p_cur_block_off += (uint32_t)(EYNFS_BLOCK_SIZE - 4u);
+            *p_cur_block      = next_block;
+        }
+        block_num = next_block;
+    }
+
+    return (int)total_read;
+}
+
 // Write data to a file, creating a chain of blocks as needed
 // Returns number of bytes written, or -1 on error
 int eynfs_write_file(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *entry, const void *buf, size_t size, uint32_t parent_block, uint32_t entry_index) {

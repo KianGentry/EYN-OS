@@ -30,6 +30,7 @@
 #include <predictive_memory.h>
 #include <run_command.h>
 #include <paging.h>
+#include <drivers/mouse.h>
 
 extern background_process_t g_background_processes[MAX_BACKGROUND_PROCESSES];
 
@@ -366,6 +367,69 @@ uint32 get_last_error_eip() {
 // GUI font metrics query (returns cell width and height)
 #define SYSCALL_GUI_GET_FONT_METRICS 108
 
+/*
+ * SYSCALL_GET_TICKS_MS (109): Return milliseconds elapsed since kernel boot.
+ *
+ * Why: Needed by time-sensitive userland programs (e.g. game engines) that
+ *      require a monotonic millisecond clock without needing a real-time source.
+ * Invariant: Derived from the scheduler's PIT tick counter and the configured
+ *            Hz rate.  Resolution is 1000/hz ms (10ms at the default 100Hz).
+ * Breakage if changed: Any program using I_GetTime() or gettimeofday() via the
+ *                      libc shim will get incorrect timing.
+ * ABI-sensitive: Yes (number 109 is locked once published).
+ * Security-critical: No (timing info is not privileged on bare-metal).
+ */
+#define SYSCALL_GET_TICKS_MS 109
+
+/*
+ * SYSCALL_LSEEK (110): Reposition the read/write offset of an open FD.
+ *
+ * Why: fseek/ftell/rewind in the C library require repositioning the kernel-
+ *      side file offset.  Without this, programs that seek within WAD/data
+ *      files (e.g. DOOM) cannot read non-sequential data.
+ * Invariant: whence encoding is POSIX: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END.
+ *            The offset stored in user_fd_t.offset is the authoritative
+ *            read position used by SYSCALL_READ.
+ * Breakage if changed: Breaks fseek/ftell and any program relying on
+ *                      seekable file I/O.
+ * ABI-sensitive: Yes (number 110 is locked once published).
+ */
+#define SYSCALL_LSEEK 110
+
+/*
+ * SYSCALL_GUI_WARP_MOUSE (111): Teleport the physical mouse cursor to a
+ * window-content-relative position.
+ *
+ * Why: Game ports (e.g. DOOM) need to re-centre the cursor each tic so
+ *      that there is always room for the mouse to move in every direction.
+ *      Without this, the cursor hits screen borders and generates zero
+ *      deltas, making mouse-look unusable.
+ * Invariant: The position is clamped to the same mouse_min/max_x/y that
+ *            the PS/2 driver applies to hardware packets.  The accumulated
+ *            delta registers are zeroed after the warp so the first real
+ *            motion event after a warp reports only post-warp movement.
+ * Breakage if changed:
+ *   Any user program that calls gui_warp_mouse would mis-position the cursor.
+ * ABI-sensitive: Yes (number 111 is locked once published).
+ * Security: Capability check matches the existing mouse-read path.
+ */
+#define SYSCALL_GUI_WARP_MOUSE 111
+
+/*
+ * SYSCALL_GUI_SET_CURSOR_VISIBLE (112): Show or hide the mouse cursor sprite.
+ *
+ * Why: Games that grab the mouse (via gui_warp_mouse) should hide the
+ *      cursor so the REI sprite does not jitter at the warp centre.
+ * Invariant: The visibility flag is kernel-global.  Hiding the cursor
+ *            suppresses the REI overlay in both the tiling manager
+ *            main loop and the ring-3 render-once path.
+ * Breakage if changed:
+ *   User programs relying on cursor visibility control would break.
+ * ABI-sensitive: Yes (number 112 is locked once published).
+ * Security: Same capability requirements as gui_warp_mouse.
+ */
+#define SYSCALL_GUI_SET_CURSOR_VISIBLE 112
+
 // Cooperative scheduling from userland
 #define SYSCALL_SLEEP_US 22
 
@@ -441,6 +505,7 @@ enum {
     USER_GUI_EVENT_KEY = 1,
     USER_GUI_EVENT_MOUSE = 2,
     USER_GUI_EVENT_CLOSE = 3,
+    USER_GUI_EVENT_KEY_UP = 4,
 };
 
 typedef struct {
@@ -476,6 +541,28 @@ typedef struct {
     uint32 size;
     uint8 drive;
     char path[128];
+
+    /*
+     * EYNFS streaming cursor — avoids re-traversing the full block chain from
+     * first_block on every read call.  O(28 000) block reads for a 14 MB WAD
+     * drops to O(1) for sequential reads once the cursor is primed.
+     *
+     * eynfs_first_block  — first_block from the dir entry, populated at open
+     *                      time.  0 = not an EYNFS file (FAT32 or directory);
+     *                      fall back to vfs_read_file_at() in that case.
+     * cur_block          — EYNFS block number where the cursor currently sits.
+     *                      0 = not yet initialised; eynfs_read_file_fast()
+     *                      will restart from eynfs_first_block.
+     * cur_block_off      — file byte offset at the START of cur_block's data
+     *                      payload (i.e. 4 bytes past the chain pointer).
+     *
+     * On any backwards seek that takes offset below cur_block_off, the fast
+     * reader automatically falls back to traversal from first_block and the
+     * cursor is updated to the new position.
+     */
+    uint32 eynfs_first_block;
+    uint32 cur_block;
+    uint32 cur_block_off;
 } user_fd_t;
 
 #define USER_FD_MAX 16
@@ -528,6 +615,9 @@ void syscall_reset_user_fds(void) {
         g_user_fds[i].size = 0;
         g_user_fds[i].drive = 0;
         g_user_fds[i].path[0] = '\0';
+        g_user_fds[i].eynfs_first_block = 0;
+        g_user_fds[i].cur_block = 0;
+        g_user_fds[i].cur_block_off = 0;
     }
 }
 
@@ -795,8 +885,17 @@ static void user_gui_key_cb(int tile_idx, int key, void* userdata) {
     user_gui_t* e = user_gui_get(handle);
     if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return;
     user_gui_event_t ev;
-    ev.type = USER_GUI_EVENT_KEY;
-    ev.a = (int32)key;
+    /*
+     * Negative key values indicate key releases (from tui_read_key).
+     * Translate to a KEY_UP event with the positive key code.
+     */
+    if (key < 0) {
+        ev.type = USER_GUI_EVENT_KEY_UP;
+        ev.a = (int32)(-key);
+    } else {
+        ev.type = USER_GUI_EVENT_KEY;
+        ev.a = (int32)key;
+    }
     ev.b = 0;
     ev.c = 0;
     ev.d = 0;
@@ -1263,40 +1362,65 @@ static void syscall_maybe_render_ui(void) {
 #define GUI_HANDLE_SYSCALLS_DISABLED 0
 #endif
 
+/*
+ * syscall_read_file — kernel-side handler for SYSCALL_READ on a regular file.
+ *
+ * Replaced the old 256-byte inner loop that called vfs_read_file_at() for
+ * each tiny chunk, re-traversing the EYNFS block chain from first_block every
+ * 256 bytes.  For a 14 MB WAD that loop caused ~2.24 million block reads just
+ * to stream the lump directory.
+ *
+ * New approach:
+ *   1. Allocate a single kernel buffer of exactly maxlen bytes.
+ *   2. For EYNFS files (eynfs_first_block != 0): call eynfs_read_file_fast()
+ *      which uses the per-FD block cursor for O(1) continuation on sequential
+ *      reads and only re-traverses on backwards seeks.
+ *   3. For FAT32 / other files (eynfs_first_block == 0): single
+ *      vfs_read_file_at() call — still eliminates the inner loop that was
+ *      previously O(maxlen/256) re-traversals.
+ *   4. copyout the full result, update offset, free kernel buffer.
+ */
 static int syscall_read_file(user_fd_t* ufd, char* user_dst, int maxlen) {
     if (!ufd || !user_dst || maxlen <= 0) return 0;
     if (ufd->is_dir) return -1;
 
-    if (ufd->offset == 0) {
-        if (SYSCALL_DEBUG) {
-            printf("[SYSCALL:READ file] drive=%d path='%s' size=%d max=%d\n",
-                   (int)ufd->drive, ufd->path, (int)ufd->size, maxlen);
-        }
+    if (ufd->offset == 0 && SYSCALL_DEBUG) {
+        printf("[SYSCALL:READ file] drive=%d path='%s' size=%d max=%d\n",
+               (int)ufd->drive, ufd->path, (int)ufd->size, maxlen);
     }
 
-    char tmp[256];
-    int remaining = maxlen;
-    int total = 0;
-    while (remaining > 0) {
-        int chunk = remaining;
-        if (chunk > (int)sizeof(tmp)) chunk = (int)sizeof(tmp);
-        int n = vfs_read_file_at(ufd->drive, ufd->path, tmp, chunk, ufd->offset);
-        if (n < 0) return -1;
-        if (n == 0) {
-            if (total == 0 && SYSCALL_DEBUG) {
-                printf("[SYSCALL:READ file] EOF at off=%d (size=%d)\n",
-                       (int)ufd->offset, (int)ufd->size);
-            }
-            break;
+    uint8 *kbuf = (uint8 *)malloc((size_t)maxlen);
+    if (!kbuf) return -1;
+
+    int n;
+    if (ufd->eynfs_first_block != 0) {
+        /* EYNFS fast path: cursor-aware read, zero traversal for sequential. */
+        n = eynfs_read_file_fast(ufd->drive,
+                                 ufd->eynfs_first_block,
+                                 ufd->size,
+                                 kbuf,
+                                 (size_t)maxlen,
+                                 (size_t)ufd->offset,
+                                 &ufd->cur_block,
+                                 &ufd->cur_block_off);
+    } else {
+        /* Fallback for FAT32 or any non-EYNFS filesystem. */
+        n = vfs_read_file_at(ufd->drive, ufd->path, kbuf, maxlen, ufd->offset);
+    }
+
+    if (n > 0) {
+        if (copyout(user_dst, kbuf, (size_t)n) != 0) {
+            free(kbuf);
+            return -1;
         }
-        if (copyout(user_dst + total, tmp, (size_t)n) != 0) return -1;
         ufd->offset += (uint32)n;
-        total += n;
-        remaining -= n;
-        if (n < chunk) break;
+    } else if (n == 0 && SYSCALL_DEBUG) {
+        printf("[SYSCALL:READ file] EOF at off=%d (size=%d)\n",
+               (int)ufd->offset, (int)ufd->size);
     }
 
-    return total;
+    free(kbuf);
+    return (n < 0) ? -1 : n;
 }
 
 static int syscall_write_file_from_fd(user_fd_t* ufd, const void* user_src, int len) {
@@ -1347,6 +1471,19 @@ static int syscall_seek_fd(user_fd_t* ufd, int32 offset, int whence) {
         next = (int64)ufd->size;
     }
     ufd->offset = (uint32)next;
+    /*
+     * Reset the EYNFS block cursor on any seek.  eynfs_read_file_fast() will
+     * re-traverse from first_block when cur_block == 0, so an explicit reset
+     * here avoids any stale cursor pointing past the new offset causing the
+     * cursor-continuation path to use the wrong starting block.  Backward
+     * seeks already fall back correctly (offset < cur_block_off), but forward
+     * seeks to a position that happens to land exactly on cur_block_off could
+     * re-use a cursor that has accumulated rounding drift.  Resetting on every
+     * seek is the safest choice; the traversal cost for WAD lump reads is
+     * amortised across sequential reads within each lump.
+     */
+    ufd->cur_block     = 0;
+    ufd->cur_block_off = 0;
     return (int)ufd->offset;
 }
 
@@ -2409,6 +2546,23 @@ uint32 syscall_dispatch(regs_t* regs) {
             ufd->dir_pos = 0;
             ufd->is_dir = (st.type == VFS_NODE_DIR);
             ufd->size = st.size;
+
+            /* Pre-populate the EYNFS block cursor so sequential reads pay
+             * zero traversal overhead after the first call.              */
+            ufd->eynfs_first_block = 0;
+            ufd->cur_block = 0;
+            ufd->cur_block_off = 0;
+            if (!ufd->is_dir) {
+                eynfs_superblock_t sb_tmp;
+                eynfs_dir_entry_t ent_tmp;
+                uint32_t pb_tmp = 0, ei_tmp = 0;
+                if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb_tmp) == 0 &&
+                    sb_tmp.magic == EYNFS_MAGIC &&
+                    eynfs_traverse_path(drive, &sb_tmp, abspath, &ent_tmp, &pb_tmp, &ei_tmp) == 0 &&
+                    ent_tmp.type == EYNFS_TYPE_FILE) {
+                    ufd->eynfs_first_block = ent_tmp.first_block;
+                }
+            }
 
                      if (SYSCALL_DEBUG) {
                       printf("[SYSCALL:OPEN] path='%s' cwd='%s' => '%s' drive=%d fd=%d type=%d size=%d\n",
@@ -3863,6 +4017,107 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = (uint32)kb_getchar_nonblocking();
             break;
         }
+        case SYSCALL_GET_TICKS_MS: {
+            /*
+             * get_ticks_ms() — return milliseconds elapsed since kernel boot.
+             *
+             * Computes ticks * 1000 / hz avoiding 32-bit overflow by splitting
+             * into whole seconds and the fractional millisecond remainder.
+             * Wraps at ~49.7 days (uint32 rollover), which is sufficient for
+             * interactive userland timing.
+             *
+             * No capability required — wall-clock time is not privileged.
+             */
+            uint32 ticks = sched_get_tick_count();
+            uint32 hz    = sched_get_tick_hz();
+            if (hz == 0) hz = 100;
+            regs->eax = (ticks / hz) * 1000u + (ticks % hz) * 1000u / hz;
+            break;
+        }
+
+        case SYSCALL_LSEEK: {
+            /*
+             * lseek(fd, offset, whence) — reposition an open file descriptor.
+             *
+             * SECURITY-INVARIANT: fd is validated through user_fd_get() which
+             * checks bounds and the 'used' flag; the file offset is clamped to
+             * [0, ufd->size] by syscall_seek_fd() so no out-of-bounds kernel
+             * reads can result from a malformed seek.
+             *
+             * args:  arg1 = int fd
+             *        arg2 = int32 offset
+             *        arg3 = int whence  (0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END)
+             * returns: new file offset ≥ 0, or (uint32)-1 on error.
+             */
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            int fd     = (int)arg1;
+            int32 off  = (int32)arg2;
+            int whence = (int)arg3;
+            user_fd_t* ufd = user_fd_get(fd);
+            if (!ufd) { regs->eax = (uint32)-1; break; }
+            int result = syscall_seek_fd(ufd, off, whence);
+            regs->eax = (result < 0) ? (uint32)-1 : (uint32)result;
+            break;
+        }
+
+        case SYSCALL_GUI_WARP_MOUSE: {
+            /*
+             * gui_warp_mouse(handle, x, y) — move the physical cursor to
+             * (x, y) relative to the window content area.
+             *
+             * SECURITY-INVARIANT: The caller must own the GUI handle and hold
+             * CAP_DEV_INPUT so only the focused game process can move the
+             * cursor.  Kernel-side clamping prevents out-of-screen warps.
+             * The accumulated delta registers are zeroed after the warp to
+             * suppress spurious motion events caused by the position jump.
+             */
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE | CAP_DEV_INPUT, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            int wx     = (int)arg2;   /* window-content-relative x */
+            int wy     = (int)arg3;   /* window-content-relative y */
+            user_gui_t* e = user_gui_get(handle);
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
+            int cx = 0, cy = 0, cw = 0, ch = 0;
+            if (e->is_floating) {
+                wm_get_content_rect(e->win_id, &cx, &cy, &cw, &ch);
+            } else {
+                tile_get_content_rect(e->tile_idx, &cx, &cy, &cw, &ch);
+            }
+            int abs_x = cx + wx;
+            int abs_y = cy + wy;
+            mouse_set_position(abs_x, abs_y);
+            /* Zero accumulated deltas so this warp doesn't trigger a
+             * spurious motion event on the next gui_poll_event call. */
+            g_mouse_state.delta_x = 0;
+            g_mouse_state.delta_y = 0;
+            regs->eax = 0;
+            break;
+        }
+
+        case SYSCALL_GUI_SET_CURSOR_VISIBLE: {
+            /*
+             * gui_set_cursor_visible(handle, visible) — show or hide the
+             * mouse cursor sprite.
+             *
+             * SECURITY-INVARIANT: Same capability gate as gui_warp_mouse.
+             * The caller must own the GUI handle.
+             */
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE | CAP_DEV_INPUT, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (GUI_HANDLE_SYSCALLS_DISABLED) { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            int visible = (int)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
+            extern void gui_cursor_set_hidden(int hidden);
+            gui_cursor_set_hidden(visible ? 0 : 1);
+            regs->eax = 0;
+            break;
+        }
+
         default: {
             printf("%c[SYSCALL] Unknown syscall: %d\n", 255, 0, 0, syscall_num);
             regs->eax = (uint32)-1;

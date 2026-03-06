@@ -1,264 +1,204 @@
-# EYN-OS Shell Scripts
+# Shell Scripts
 
-EYN-OS supports shell script execution through `.shell` files, similar to how bash supports `.sh` files. Shell scripts allow you to automate tasks by combining multiple EYN-OS commands into executable files.
+EYN-OS includes a built-in shell script interpreter for `.shell` files.  Scripts
+are line-oriented text files that are read from the filesystem and executed
+line-by-line through the normal shell command dispatch path.  This means every
+program in `/binaries/`, every alias, and pipeline syntax all work transparently
+inside scripts.
 
-## Overview
+## Running a Script
 
-Shell scripts in EYN-OS provide:
-- **Command Automation**: Execute multiple commands in sequence
-- **Comment Support**: Use `#` for comments
-- **Error Handling**: Track successful and failed commands
-- **Variables and Control Flow**: Simple variables, conditionals, and loops
-- **Integration**: Works seamlessly with the existing `run` command
+Scripts can be executed in several ways:
 
-## File Format
+```
+# By name — if the file lives in /binaries/ and starts with '#' it is
+# auto-detected as a script (no extension needed):
+build_doom
 
-### File Extension
-Shell scripts must use the `.shell` extension to be recognized by the system.
+# By explicit path:
+run /shell/myscript.shell
 
-### Syntax
-- **Commands**: Each non-directive line contains a single EYN-OS command
-- **Comments**: Lines starting with `#` are ignored
-- **Empty Lines**: Blank lines are ignored
-- **Whitespace**: Leading and trailing whitespace is trimmed
-- **Variables**: Use `set KEY=VALUE`, reference with `$KEY` or `${KEY}`
-	- You can capture command output with `$(command ...)` inside VALUE
-- **Conditionals**: `ifeq A B` / `ifneq A B` with `else` and `endif`
-- **Loops**: `loop N` ... `endloop` to repeat N times (integer N or variable)
+# With arguments:
+build_doom arg1 arg2
+```
 
-### Example Shell Script
-```bash
+Scripts stored as extensionless files in `/binaries/` are auto-detected by
+checking the first byte of the file.  If it is `#` (comment / shebang), the
+file is run through the script interpreter instead of as a UELF binary.
+
+Files with an explicit `.shell` extension are always dispatched to the
+interpreter.
+
+## Language Reference
+
+### Comments
+
+Lines beginning with `#` (after optional whitespace) are comments and are
+ignored.  Inline comments are **not** supported — the `#` must be the first
+non-whitespace character on the line.
+
+```shell
 # This is a comment
-echo "Hello from EYN-OS shell script!"
+echo hello   # this is NOT a comment — the '#' is passed to the command
+```
 
-# Variables
-set NAME=EYN-OS
-echo "Running on ${NAME}"
+### Variables
 
-# Capture command output into a variable
-set FILES=$(ls)
-echo "Files: $FILES"
+Variables are defined with `set` and referenced with `$NAME` or `${NAME}`:
 
-# Conditionals
-set MODE=prod
-ifeq $MODE dev
-	echo "Development mode"
+```shell
+set GREETING=hello
+set SUBJECT=world
+echo $GREETING $SUBJECT        # prints: hello world
+echo ${GREETING}_${SUBJECT}    # prints: hello_world
+```
+
+Variable names may contain letters, digits, and underscores.  Values are
+everything after the `=` to the end of the line (no quoting needed).
+
+**Script arguments** are available as `$0` (the script path), `$1`, `$2`, ...
+up to `$9`:
+
+```shell
+# If invoked as:  myscript foo bar
+echo Script: $0    # /binaries/myscript
+echo First: $1     # foo
+echo Second: $2    # bar
+```
+
+### Command Substitution
+
+`$(command args)` captures the standard output of a command and substitutes it
+inline:
+
+```shell
+set FILES=$(ls /binaries)
+echo Available commands: $FILES
+```
+
+Nested substitution is supported: `$(echo $(cat /config/name))`.
+
+### Conditionals
+
+```shell
+if CONDITION
+    # commands when true
+elif CONDITION
+    # alternative
 else
-	echo "Production mode"
+    # fallback
 endif
-
-# Loop
-set TIMES=3
-loop $TIMES
-	echo "Loop iteration"
-endloop
-
-# Show system information
-ver
-ls
-memory stats
-
-echo "Script completed!"
 ```
 
-## Usage
+`elif` and `else` are optional.  Nesting is supported up to 16 levels.
 
-### Running Shell Scripts
-Use the `run` command to execute shell scripts:
+**Condition syntax:**
 
-```bash
-run demo.shell
-run system_info.shell
-run my_script.shell
-run scripts/tools/build.shell      # scripts in subdirectories are supported
+| Form | Meaning |
+|------|---------|
+| `A == B` | String equality (after variable expansion) |
+| `A != B` | String inequality |
+| `-e PATH` | File or directory exists |
+| `-f PATH` | File exists (not a directory) |
+| `WORD` | True if non-empty and not `"0"` |
+
+Example:
+
+```shell
+if -f /binaries/doom
+    echo DOOM binary exists
+else
+    echo DOOM binary not found — building...
+    build_doom
+endif
 ```
 
-### Creating Shell Scripts
-1. Create a text file with `.shell` extension
-2. Write EYN-OS commands, one per line
-3. Add comments with `#` as needed
-4. Save the file to your EYNFS filesystem
-5. Execute with `run filename.shell`
+### While Loops
 
-## Supported Commands
-
-Shell scripts can execute any available EYN-OS command, including:
-
-### Essential Commands
-- `init` - Initialize system services
-- `ls` - List directory contents
-- `clear` - Clear screen
-- `help` - Show help information
-- `memory` - Memory management
-- `portable` - Portability information
-- `status` - Command system status
-
-### Filesystem Commands
-- `cd` - Change directory
-- `makedir` - Create directory
-- `deldir` - Delete directory
-- `copy` - Copy files
-- `move` - Move files
-- `del` - Delete files
-- `read` - Read files
-- `write` - Edit files
-
-### Utility Commands
-- `echo` - Print text
-- `calc` - Calculator
-- `search` - Search files
-- `random` - Random number generator
-- `sort` - Sort data
-- `game` - Games
-
-### System Commands
-- `ver` - Version information
-- `drive` - Change drive
-- `lsata` - List ATA devices
-- `format` - Format drive
-- `fdisk` - Partition management
-
-## Execution Flow
-
-When a shell script is executed:
-
-1. **File Validation**: System checks for `.shell` extension
-2. **File Reading**: Script content is loaded from EYNFS
-3. **Line Processing**: Each line is processed sequentially
-4. **Command Execution**: Commands are executed using the standard command system
-5. **Result Tracking**: Success and error counts are maintained
-6. **Summary**: Execution summary is displayed
-
-## Error Handling
-
-### Command Errors
-- Individual command failures don't stop script execution
-- Error count is tracked and displayed
-- Failed commands are logged with line numbers
-
-### File Errors
-- Missing files show clear error messages
-- Invalid file extensions are rejected
-- Memory allocation failures are handled gracefully
-
-## Best Practices
-
-### Script Organization
-- Use comments to document script purpose
-- Group related commands together
-- Add descriptive echo statements for clarity
-
-### Error Prevention
-- Test commands individually before scripting
-- Use simple, reliable commands
-- Avoid complex command combinations
-
-### Performance
-- Keep scripts focused and concise
-- Avoid unnecessary commands
-- Use appropriate command types (essential vs streaming)
-
-## Examples
-
-### System Information Script
-```bash
-# System Information Script
-echo "=== EYN-OS System Information ==="
-ver
-ls
-memory stats
-portable stats
-status
-echo "Information gathering complete!"
+```shell
+set COUNT=3
+while $COUNT != 0
+    echo Countdown: $COUNT
+    # (no arithmetic yet — decrement manually or use an external tool)
+    set COUNT=$(decrement $COUNT)
+endwhile
 ```
 
-### File Management Script
-```bash
-# File Management Script
-echo "Creating backup directory..."
-makedir backup
+The condition is re-evaluated on each iteration.  Use `exit` inside when
+needed to break out early.
 
-echo "Copying important files..."
-copy config.txt backup/
-copy data.txt backup/
+### Echo
 
-echo "Backup completed!"
-ls backup/
+`echo` is a built-in that prints its arguments followed by a newline:
+
+```shell
+echo Hello, world!
+echo Build starting for $TARGET...
 ```
 
-### System Maintenance Script
-```bash
-# System Maintenance Script
-echo "Starting system maintenance..."
+### Exit
 
-# Check filesystem
-fscheck
+`exit` terminates the script immediately:
 
-# Show memory status
-memory stats
-
-# Clean up temporary files
-del temp_*.txt
-
-echo "Maintenance completed!"
+```shell
+if -f /error.flag
+    echo Aborting due to error flag
+    exit
+endif
 ```
 
-## Integration with Native Programs
+### Commands
 
-Shell scripts complement native `.eyn` programs:
+Any line that is not a keyword (`set`, `echo`, `exit`, `if`, `elif`, `else`,
+`endif`, `while`, `endwhile`) is dispatched through the shell's normal command
+handler.  This means:
 
-- **Shell Scripts**: For command automation and system administration
-- **Native Programs**: For complex applications and system utilities
-- **Both**: Can be executed with the same `run` command
+- All programs in `/binaries/` work: `chibicc`, `doom`, `ls`, `cat`, etc.
+- Aliases are expanded.
+- Pipelines work: `ls | grep doom`.
+- File redirection: commands using `>` behave the same as in interactive mode.
 
-## Limitations
-
-### Current Limitations
-- No function definitions
-- No parameter passing to scripts (use `set` inside)
-- No input/output redirection within scripts
-- Command substitution uses the shell's redirect buffer (4KB). Long outputs are truncated.
-
-### Future Enhancements
-- Function definitions
-- Parameter passing
-- Input/output redirection
-
-## Troubleshooting
-
-### Common Issues
-
-**Script not found**
+```shell
+# Compile and run
+chibicc -m32 -I/DOOM -S -o /tmp.s /DOOM/doom_unity.c
+chibicc --as /tmp.s -o /binaries/doom_chibicc
+doom_chibicc
 ```
-Error: Shell script file not found: myscript.shell
+
+## Limits
+
+| Constant | Value | Notes |
+|----------|-------|-------|
+| Max variables | 64 | Per script invocation |
+| Max line length | 512 | After variable expansion |
+| Max nesting depth | 16 | Combined if/while depth |
+| Max script size | 64 KB | File size on disk |
+| Max lines | 2048 | Per script |
+| Max arguments | 10 | `$0` through `$9` |
+
+## Example: build_doom
+
+A complete example script that compiles DOOM from source using chibicc:
+
+```shell
+# build_doom — Compile DOOM from source using chibicc on EYN-OS
+set CC=chibicc
+set SRC=/DOOM/doom_unity.c
+set ASM=/doom_compiled.s
+set OUT=/binaries/doom_chibicc
+
+echo [1/2] Compiling C to assembly...
+$CC -m32 -I/DOOM -I/include -DNORMALUNIX -DLINUX -USNDSERV -S -o $ASM $SRC
+
+if -f $ASM
+    echo [2/2] Assembling and linking...
+    $CC --as $ASM -o $OUT
+    if -f $OUT
+        echo Build complete: $OUT
+    else
+        echo Error: Linking failed
+    endif
+else
+    echo Error: Compilation failed
+endif
 ```
-- Ensure file exists in current directory
-- Check filename spelling
-- Verify file has `.shell` extension
-
-**Invalid file format**
-```
-Error: File must have .shell extension
-```
-- Rename file to use `.shell` extension
-- Don't use other extensions like `.sh` or `.txt`
-
-**Command not found**
-```
-Unknown command: invalidcmd
-```
-- Check command spelling
-- Ensure command is available (may need `load` first)
-- Verify command syntax
-
-### Debug Tips
-- Test commands individually before scripting
-- Use `echo` statements to track execution progress
-- Check command availability with `help`
-- Verify file permissions and location
-
-## Conclusion
-
-EYN-OS shell scripts provide a powerful way to automate system tasks and create reusable command sequences. While currently focused on simple command execution, they form the foundation for more advanced scripting capabilities in future versions.
-
-The integration with the existing `run` command makes shell scripts a natural extension of the EYN-OS command system, providing users with both interactive and automated ways to interact with the operating system.

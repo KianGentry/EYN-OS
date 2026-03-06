@@ -8,6 +8,7 @@ extern isr_dispatch
 extern g_abort_to_shell
 extern g_user_task_active
 extern stack_space
+extern isr_abort_stack_top
 extern ui_return_from_user_task
 
 section .text
@@ -47,7 +48,7 @@ isr_common_stub:
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov esp, stack_space
+    mov esp, isr_abort_stack_top
     sti
     call ui_return_from_user_task
 .halt:

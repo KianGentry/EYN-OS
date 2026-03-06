@@ -1,4 +1,7 @@
 // Low-level EYN-OS syscall ABI (int 0x80).
+#ifndef EYNOS_SYSCALL_H
+#define EYNOS_SYSCALL_H
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -162,6 +165,37 @@ enum {
 
     // GUI font metrics query (returns char width and height in pixels)
     EYN_SYSCALL_GUI_GET_FONT_METRICS = 108,
+
+    /*
+     * ABI-INVARIANT: GET_TICKS_MS (109) and LSEEK (110) are locked.
+     *
+     * GET_TICKS_MS: Returns uint32 milliseconds since kernel boot.
+     *   args: none
+     *   returns: ms elapsed (wraps at ~49.7 days)
+     *
+     * LSEEK: Reposition an open file descriptor's read offset.
+     *   args: (int fd, int32 offset, int whence)
+     *         whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END
+     *   returns: new offset >= 0, or -1 on error
+     */
+    EYN_SYSCALL_GET_TICKS_MS = 109,
+    EYN_SYSCALL_LSEEK        = 110,
+    /*
+     * EYN_SYSCALL_GUI_WARP_MOUSE (111)
+     * gui_warp_mouse(handle, content_x, content_y)
+     * Moves the physical cursor to (content_x, content_y) within the window
+     * content area.  Accumulated mouse deltas are zeroed after the warp.
+     * Returns 0 on success, -1 on error.
+     */
+    EYN_SYSCALL_GUI_WARP_MOUSE = 111,
+    /*
+     * EYN_SYSCALL_GUI_SET_CURSOR_VISIBLE (112)
+     * gui_set_cursor_visible(handle, visible)
+     * Shows (visible=1) or hides (visible=0) the mouse cursor sprite.
+     * Intended for games that grab the mouse via gui_warp_mouse.
+     * Returns 0 on success, -1 on error.
+     */
+    EYN_SYSCALL_GUI_SET_CURSOR_VISIBLE = 112,
 };
 
 typedef struct {
@@ -270,6 +304,26 @@ typedef struct {
     uint32_t tag_hi;
 } eyn_cap_t;
 
+#ifdef __chibicc__
+/*
+ * chibicc does not support inline assembly.  The syscall primitives are
+ * provided as assembly stubs by the chibicc UELF runtime.
+ */
+int eyn_syscall3(int n, int a1, const void* a2, int a3);
+int eyn_syscall3_pii(int n, const void* a1, int a2, int a3);
+int eyn_syscall3_ppi(int n, const void* a1, const void* a2, int a3);
+int eyn_syscall3_iip(int n, int a1, int a2, const void* a3);
+int eyn_syscall3_iii(int n, int a1, int a2, int a3);
+int eyn_syscall1(int n, int a1);
+int eyn_syscall0(int n);
+
+static void eyn_user_read_segments(uint16_t* out_cs, uint16_t* out_ds) {
+    if (out_cs) *out_cs = 0;
+    if (out_ds) *out_ds = 0;
+}
+
+#else /* GCC — inline assembly path */
+
 static inline int eyn_syscall3(int n, int a1, const void* a2, int a3) {
     int ret;
     __asm__ __volatile__(
@@ -304,6 +358,21 @@ static inline int eyn_syscall3_ppi(int n, const void* a1, const void* a2, int a3
 }
 
 static inline int eyn_syscall3_iip(int n, int a1, int a2, const void* a3) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(n), "b"(a1), "c"(a2), "d"(a3)
+        : "memory"
+    );
+    return ret;
+}
+
+/*
+ * Three-integer argument syscall variant.
+ * Used by SYSCALL_LSEEK (fd, offset, whence) where all args are integers.
+ */
+static inline int eyn_syscall3_iii(int n, int a1, int a2, int a3) {
     int ret;
     __asm__ __volatile__(
         "int $0x80"
@@ -611,6 +680,7 @@ static inline int eyn_sys_ring3_test(int confirmed_yes) {
     return eyn_syscall1(EYN_SYSCALL_RING3, confirmed_yes ? 1 : 0);
 }
 
+#ifndef __chibicc__
 static inline void eyn_user_read_segments(uint16_t* out_cs, uint16_t* out_ds) {
     uint16_t cs = 0;
     uint16_t ds = 0;
@@ -622,6 +692,7 @@ static inline void eyn_user_read_segments(uint16_t* out_cs, uint16_t* out_ds) {
     if (out_cs) *out_cs = cs;
     if (out_ds) *out_ds = ds;
 }
+#endif
 
 static inline int eyn_syscall1(int n, int a1) {
     int ret;
@@ -644,3 +715,7 @@ static inline int eyn_syscall0(int n) {
     );
     return ret;
 }
+
+#endif /* !__chibicc__ */
+
+#endif /* EYNOS_SYSCALL_H */

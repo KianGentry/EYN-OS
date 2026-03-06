@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <sys/types.h>  /* mode_t, off_t */
 
 typedef long ssize_t;
 
@@ -19,9 +20,17 @@ int close(int fd);
 int writefile(const char* path, const void* buf, size_t len);
 
 // Filesystem mutation helpers.
-int mkdir(const char* path);
+int mkdir(const char* path, mode_t mode);  /* mode is accepted but ignored on EYN-OS */
 int unlink(const char* path);
 int rmdir(const char* path);
+
+/* access() checks existence (F_OK) or basic read/exec permission (R_OK/X_OK).
+ * EYN-OS has no permission bits, so any accessible path returns 0. */
+#define F_OK 0
+#define R_OK 4
+#define W_OK 2
+#define X_OK 1
+int access(const char* path, int mode);
 
 void _exit(int code) EYN_ATTR_NORETURN;
 
@@ -39,6 +48,18 @@ int getcwd(char* buf, size_t size);
 // Change current working directory (shell/vterm cwd).
 // Returns 0 on success, -1 on error.
 int chdir(const char* path);
+
+/*
+ * ABI-INVARIANT: SEEK_* values match POSIX and SYSCALL_LSEEK whence (110).
+ */
+#ifndef SEEK_SET
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+#endif
+
+/* Reposition the offset of an open file descriptor. */
+long lseek(int fd, long offset, int whence);
 
 // Low-memory streaming file writer (EYNFS only today).
 int eynfs_stream_begin(const char* path);

@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-03 16:54:27
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-06 07:57:56
 
 **Total Commands:** 80
 
@@ -164,10 +164,10 @@ head -n 10 /test.txt
 
 **Binary:** `testdir/binaries/ls`
 
-**Metadata Source:** `testdir/code/ls_uelf.c`
+**Metadata Source:** `testdir/code/(metadata not found)`
 
 **Description:**
-List directory entries.
+Run the ls command.
 
 **Example:**
 ```bash
@@ -988,6 +988,22 @@ calc 2+3*4
 
 ---
 
+### chibicc
+
+**Binary:** `testdir/binaries/chibicc`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the chibicc command.
+
+**Example:**
+```bash
+chibicc
+```
+
+---
+
 ### diskmgr
 
 **Binary:** `testdir/binaries/diskmgr`
@@ -1288,22 +1304,6 @@ X11 xeyes - eyes that follow the mouse pointer
 **Example:**
 ```bash
 xeyes
-```
-
----
-
-### xeyes2
-
-**Binary:** `testdir/binaries/xeyes2`
-
-**Metadata Source:** `testdir/code/(metadata not found)`
-
-**Description:**
-Run the xeyes2 command.
-
-**Example:**
-```bash
-xeyes2
 ```
 
 ---

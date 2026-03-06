@@ -188,6 +188,19 @@ int strncasecmp(const char* a, const char* b, size_t n) {
     return 0;
 }
 
+int strcasecmp(const char* a, const char* b) {
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    while (*a && *b) {
+        unsigned char ca = tolower_ascii((unsigned char)*a);
+        unsigned char cb = tolower_ascii((unsigned char)*b);
+        if (ca != cb) return (int)ca - (int)cb;
+        a++; b++;
+    }
+    return tolower_ascii((unsigned char)*a) - tolower_ascii((unsigned char)*b);
+}
+
 static int is_delim(char c, const char* delim) {
     if (!delim) return 0;
     for (const char* p = delim; *p; p++) {

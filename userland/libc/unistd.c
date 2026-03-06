@@ -25,7 +25,8 @@ int writefile(const char* path, const void* buf, size_t len) {
     return eyn_syscall3_ppi(EYN_SYSCALL_WRITEFILE, path, buf, (int)len);
 }
 
-int mkdir(const char* path) {
+int mkdir(const char* path, mode_t mode) {
+    (void)mode;  /* EYN-OS VFS does not enforce permission bits */
     if (!path) return -1;
     return eyn_syscall1(EYN_SYSCALL_MKDIR, (int)(uintptr_t)path);
 }
@@ -40,12 +41,19 @@ int rmdir(const char* path) {
     return eyn_syscall1(EYN_SYSCALL_RMDIR, (int)(uintptr_t)path);
 }
 
+#ifdef __chibicc__
+void _exit(int code) {
+    (void)eyn_syscall1(EYN_SYSCALL_EXIT, code);
+    for (;;) {}
+}
+#else
 __attribute__((noreturn)) void _exit(int code) {
     (void)eyn_syscall1(EYN_SYSCALL_EXIT, code);
     for (;;) {
         __asm__ __volatile__("hlt");
     }
 }
+#endif
 
 int getkey(void) {
     return eyn_syscall0(EYN_SYSCALL_GETKEY);
@@ -88,4 +96,41 @@ ssize_t eynfs_stream_write(int handle, const void* buf, size_t len) {
 
 int eynfs_stream_end(int handle) {
     return eyn_syscall1(EYN_SYSCALL_EYNFS_STREAM_END, handle);
+}
+
+/*
+ * lseek() — reposition an open file descriptor's read offset.
+ *
+ * Wraps SYSCALL_LSEEK (110).  whence values match POSIX:
+ *   SEEK_SET (0): offset from start of file
+ *   SEEK_CUR (1): offset from current position
+ *   SEEK_END (2): offset from end of file
+ *
+ * Returns the new offset on success, or -1 on error.
+ */
+long lseek(int fd, long offset, int whence) {
+    return (long)eyn_syscall3_iii(
+        EYN_SYSCALL_LSEEK,
+        fd,
+        (int)offset,
+        whence
+    );
+}
+
+/*
+ * access() — check accessibility of a file path.
+ *
+ * EYN-OS has no permission model; any path that exists is considered
+ * accessible.  We attempt to open the file read-only; if it succeeds the
+ * path is accessible (return 0), otherwise it is not (return -1).
+ * The mode argument (F_OK / R_OK / X_OK) is accepted but ignored since
+ * all checks reduce to "does this path exist".
+ */
+int access(const char* path, int mode) {
+    (void)mode;
+    if (!path) return -1;
+    int fd = eyn_syscall1(EYN_SYSCALL_OPEN, (int)(uintptr_t)path);
+    if (fd < 0) return -1;
+    eyn_syscall1(EYN_SYSCALL_CLOSE, fd);
+    return 0;
 }

@@ -18,6 +18,16 @@ struct FILE {
     size_t* mem_lenp;
 
     int err;
+
+    /*
+     * pos: cached byte offset within the file, kept in sync with the kernel
+     *      user_fd_t.offset via SYSCALL_LSEEK.  Only meaningful for
+     *      FILE_KIND_FD with a real file fd (not stdin/stdout).
+     * eof_flag: set when fread() returns fewer bytes than requested due to
+     *           end-of-file; cleared by fseek()/rewind().
+     */
+    long pos;
+    int  eof_flag;
 };
 
 enum {
@@ -143,7 +153,13 @@ size_t fread(void* ptr, size_t size, size_t nmemb, FILE* f) {
     if (size != 0 && total / size != nmemb) return 0;
 
     ssize_t n = read(f->fd, ptr, total);
-    if (n <= 0) return 0;
+    if (n <= 0) {
+        f->eof_flag = 1;
+        return 0;
+    }
+    f->pos += n;
+    /* If we got fewer bytes than requested, we've hit EOF. */
+    if ((size_t)n < total) f->eof_flag = 1;
     return (size_t)n / size;
 }
 
@@ -159,6 +175,13 @@ size_t fwrite(const void* ptr, size_t size, size_t nmemb, FILE* f) {
 
 int fputc(int c, FILE* f) {
     return (file_putc(f, c) == 0) ? c : EOF;
+}
+
+int fgetc(FILE* f) {
+    if (!f) return EOF;
+    unsigned char ch;
+    if (fread(&ch, 1, 1, f) != 1) return EOF;
+    return (int)ch;
 }
 
 int fputs(const char* s, FILE* f) {
@@ -300,33 +323,42 @@ int vsnprintf(char* buf, size_t sz, const char* fmt, va_list ap) {
             unsigned long uv;
             if (val < 0) { neg = 1; uv = (unsigned long)(-(val + 1)) + 1; } else { uv = (unsigned long)val; }
             snbuf_render_unsigned(tmp, &tlen, uv, 10, 0);
-            int numw = tlen + neg + (force_sign && !neg ? 1 : 0);
+            /* precision for %d = minimum digit count; zero-pad between sign and digits */
+            int prec_zeros = (precision > tlen) ? precision - tlen : 0;
+            int numw = tlen + prec_zeros + neg + (force_sign && !neg ? 1 : 0);
             int pad = (width > numw) ? width - numw : 0;
-            char padch = (zero_pad && !left_align) ? '0' : ' ';
+            char padch = (zero_pad && !left_align && precision < 0) ? '0' : ' ';
             if (!left_align && padch == ' ') while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
             if (neg) snbuf_putc(buf, sz, &pos, '-');
             else if (force_sign) snbuf_putc(buf, sz, &pos, '+');
             if (!left_align && padch == '0') while (pad-- > 0) snbuf_putc(buf, sz, &pos, '0');
+            for (int i = 0; i < prec_zeros; i++) snbuf_putc(buf, sz, &pos, '0');
             for (int i = 0; i < tlen; i++) snbuf_putc(buf, sz, &pos, tmp[i]);
             if (left_align) while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
         } else if (*p == 'u') {
             unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
             char tmp[24]; int tlen = 0;
             snbuf_render_unsigned(tmp, &tlen, val, 10, 0);
-            int pad = (width > tlen) ? width - tlen : 0;
-            char padch = (zero_pad && !left_align) ? '0' : ' ';
+            int prec_zeros = (precision > tlen) ? precision - tlen : 0;
+            int numw = tlen + prec_zeros;
+            int pad = (width > numw) ? width - numw : 0;
+            char padch = (zero_pad && !left_align && precision < 0) ? '0' : ' ';
             if (!left_align && padch == ' ') while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
             if (!left_align && padch == '0') while (pad-- > 0) snbuf_putc(buf, sz, &pos, '0');
+            for (int i = 0; i < prec_zeros; i++) snbuf_putc(buf, sz, &pos, '0');
             for (int i = 0; i < tlen; i++) snbuf_putc(buf, sz, &pos, tmp[i]);
             if (left_align) while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
         } else if (*p == 'x' || *p == 'X') {
             unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
             char tmp[24]; int tlen = 0;
             snbuf_render_unsigned(tmp, &tlen, val, 16, (*p == 'X'));
-            int pad = (width > tlen) ? width - tlen : 0;
-            char padch = (zero_pad && !left_align) ? '0' : ' ';
+            int prec_zeros = (precision > tlen) ? precision - tlen : 0;
+            int numw = tlen + prec_zeros;
+            int pad = (width > numw) ? width - numw : 0;
+            char padch = (zero_pad && !left_align && precision < 0) ? '0' : ' ';
             if (!left_align && padch == ' ') while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
             if (!left_align && padch == '0') while (pad-- > 0) snbuf_putc(buf, sz, &pos, '0');
+            for (int i = 0; i < prec_zeros; i++) snbuf_putc(buf, sz, &pos, '0');
             for (int i = 0; i < tlen; i++) snbuf_putc(buf, sz, &pos, tmp[i]);
             if (left_align) while (pad-- > 0) snbuf_putc(buf, sz, &pos, ' ');
         } else if (*p == 'p') {
@@ -360,23 +392,26 @@ int vfprintf(FILE* f, const char* fmt, va_list ap) {
     if (!f || !fmt) return -1;
     int total = 0;
 
-    // Console color control: if the format starts with "%c", consume 3 ints
-    // (r,g,b) and emit a control sequence understood by the kernel's user
-    // console output path.
-    if (fmt[0] == '%' && fmt[1] == 'c') {
+    // Console color control: if writing to stdout AND the format starts with
+    // "%c", consume 3 ints (r,g,b) and emit a control sequence understood
+    // by the kernel's console output path.
+    //
+    // IMPORTANT: only apply this special handling when f is stdout (fd==1).
+    // For memstream / stderr / file output, %c must behave as standard C
+    // (write a single character).  Getting this wrong breaks any code that
+    // uses format("%c%s", ch, str) to build a plain string, because the
+    // branch would silently consume 3 va_args instead of 1.
+    if (f->kind == FILE_KIND_FD && f->fd == 1 &&
+        fmt[0] == '%' && fmt[1] == 'c') {
         int r = va_arg(ap, int);
         int g = va_arg(ap, int);
         int b = va_arg(ap, int);
-
-        if (f->kind == FILE_KIND_FD && f->fd == 1) {
-            unsigned char ctrl[4];
-            ctrl[0] = 0xFF;
-            ctrl[1] = (unsigned char)r;
-            ctrl[2] = (unsigned char)g;
-            ctrl[3] = (unsigned char)b;
-            if (file_write_bytes(f, ctrl, sizeof(ctrl)) != 0) return -1;
-        }
-
+        unsigned char ctrl[4];
+        ctrl[0] = 0xFF;
+        ctrl[1] = (unsigned char)r;
+        ctrl[2] = (unsigned char)g;
+        ctrl[3] = (unsigned char)b;
+        if (file_write_bytes(f, ctrl, sizeof(ctrl)) != 0) return -1;
         fmt += 2;
     }
 
@@ -461,9 +496,9 @@ int vfprintf(FILE* f, const char* fmt, va_list ap) {
             continue;
         }
 
-        if (*p == 'd' || *p == 'u' || *p == 'x' || *p == 'p') {
+        if (*p == 'd' || *p == 'i' || *p == 'u' || *p == 'x' || *p == 'p') {
             uint64_t uv = 0;
-            int is_signed = (*p == 'd');
+            int is_signed = (*p == 'd' || *p == 'i');
             int base = (*p == 'x' || *p == 'p') ? 16 : 10;
 
             int neg = 0;
@@ -482,8 +517,10 @@ int vfprintf(FILE* f, const char* fmt, va_list ap) {
                 // 0x prefix
                 extra = 2;
             }
+            /* precision for integers = minimum digit count; zero-pad if needed */
+            int prec_zeros = (precision >= 0 && precision > nlen) ? precision - nlen : 0;
             int sign = neg ? 1 : 0;
-            int totlen = sign + extra + nlen;
+            int totlen = sign + extra + prec_zeros + nlen;
             int pad = width - totlen;
             if (pad > 0) {
                 if (write_padding(f, pad) != 0) return -1;
@@ -492,6 +529,7 @@ int vfprintf(FILE* f, const char* fmt, va_list ap) {
 
             if (neg) { if (file_putc(f, '-') != 0) return -1; total++; }
             if (*p == 'p') { if (file_putc(f, '0') != 0) return -1; if (file_putc(f, 'x') != 0) return -1; total += 2; }
+            for (int zi = 0; zi < prec_zeros; zi++) { if (file_putc(f, '0') != 0) return -1; total++; }
             if (file_write_bytes(f, num, (size_t)nlen) != 0) return -1;
             total += nlen;
             continue;
@@ -522,6 +560,67 @@ int printf(const char* fmt, ...) {
     return rc;
 }
 
+int vsprintf(char* buf, const char* fmt, va_list ap) {
+    /* Use vsnprintf with an absurdly large limit.
+     * Callers are responsible for buffer sizing (this is the old C API). */
+    return vsnprintf(buf, 65536, fmt, ap);
+}
+
+int sprintf(char* buf, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsprintf(buf, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+/* fscanf — read one word/token from a FILE and parse it.
+ *
+ * Very minimal: reads a whitespace-delimited token into a local buffer and
+ * delegates to vsscanf.  Only needed for M_LoadDefaults (reads one token per
+ * call).  Does not support multi-field format strings well.
+ */
+int fscanf(FILE* f, const char* fmt, ...) {
+    if (!f || !fmt) return EOF;
+    /* Read a token (up to whitespace or end), then sscanf it. */
+    char tok[256];
+    int  pos = 0;
+    int  ch;
+
+    /* Skip leading whitespace. */
+    while ((ch = fgetc(f)) != EOF) {
+        if (ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r') {
+            tok[pos++] = (char)ch;
+            break;
+        }
+    }
+    if (pos == 0) return EOF;
+
+    /* Read until whitespace or EOF. */
+    while ((ch = fgetc(f)) != EOF) {
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') break;
+        if (pos < (int)(sizeof(tok) - 1)) tok[pos++] = (char)ch;
+    }
+    tok[pos] = '\0';
+
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsscanf(tok, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+/* setbuf — DOOM calls this to disable buffering on stderr.
+ * EYN-OS FILE is always write-through so this is a no-op. */
+void setbuf(FILE* f, char* buf) {
+    (void)f; (void)buf;
+}
+
+/* getchar — read a single character from stdin. */
+int getchar(void) {
+    return fgetc(stdin);
+}
+
 int putchar(int ch) {
     return fputc(ch, stdout);
 }
@@ -531,4 +630,163 @@ int puts(const char* s) {
     if (fputs(s, stdout) == EOF) return EOF;
     if (fputc('\n', stdout) == EOF) return EOF;
     return 0;
+}
+
+/*
+ * File-positioning functions backed by SYSCALL_LSEEK (110).
+ *
+ * Only FILE_KIND_FD files with actual file descriptors support seeking;
+ * stdin/stdout/pathwrite return errors or no-ops as appropriate.
+ *
+ * The pos field in struct FILE mirrors the kernel-side offset so that
+ * ftell() can return the position without an extra syscall.
+ */
+int fseek(FILE* f, long offset, int whence) {
+    if (!f) return -1;
+    if (f->kind != FILE_KIND_FD || f->fd <= 2) return -1;
+    int result = lseek(f->fd, (int)offset, whence);
+    if (result < 0) return -1;
+    f->pos = (long)result;
+    f->eof_flag = 0;  /* clear EOF on successful seek */
+    return 0;
+}
+
+long ftell(FILE* f) {
+    if (!f) return -1L;
+    /* For real file fds, return the cached position. */
+    if (f->kind == FILE_KIND_FD && f->fd > 2)
+        return f->pos;
+    return -1L;
+}
+
+void rewind(FILE* f) {
+    if (!f) return;
+    fseek(f, 0L, 0 /* SEEK_SET */);
+    f->err = 0;
+    f->eof_flag = 0;
+}
+
+int feof(FILE* f) {
+    if (!f) return 1;
+    return f->eof_flag;
+}
+
+int ferror(FILE* f) {
+    if (!f) return 1;
+    return f->err;
+}
+
+/*
+ * vsscanf / sscanf — minimal scanf implementation for reading from a string.
+ *
+ * Supports: %d %i %u %x %c %s and skips whitespace between conversions.
+ * Does not support width specifiers, floats, or *, which are not needed
+ * by the DOOM source code that exercises this path.
+ */
+int vsscanf(const char* str, const char* fmt, va_list ap) {
+    const char* p  = str;
+    const char* f  = fmt;
+    int         n  = 0;  /* number of successful assignments */
+
+    while (*f) {
+        /* Skip whitespace in format → skip whitespace in input. */
+        if (*f == ' ' || *f == '\t' || *f == '\n') {
+            while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+            while (*f == ' ' || *f == '\t' || *f == '\n') f++;
+            continue;
+        }
+
+        if (*f != '%') {
+            /* Literal match. */
+            if (*p != *f) break;
+            p++; f++;
+            continue;
+        }
+        f++;  /* skip '%' */
+
+        /* Skip '*' (suppress assignment) — basic support. */
+        int suppress = 0;
+        if (*f == '*') { suppress = 1; f++; }
+
+        /* Skip optional width (not used by callers). */
+        while (*f >= '0' && *f <= '9') f++;
+
+        int base = 10;
+        switch (*f) {
+            case 'x': case 'X': base = 16; /* fall through */
+            case 'i':
+            case 'd': {
+                /* Skip leading whitespace. */
+                while (*p == ' ' || *p == '\t') p++;
+                int neg = 0;
+                if (*p == '-') { neg = 1; p++; }
+                else if (*p == '+') p++;
+                /* Detect hex prefix for %i. */
+                if ((*f == 'i') && *p == '0' && (*(p+1)=='x'||*(p+1)=='X')) {
+                    base = 16; p += 2;
+                } else if ((*f == 'i') && *p == '0') {
+                    base = 8;
+                }
+                if (!*p) goto done;
+                long val = 0;
+                const char* start = p;
+                while (*p) {
+                    int dig;
+                    if (*p >= '0' && *p <= '9') dig = *p - '0';
+                    else if (base == 16 && *p >= 'a' && *p <= 'f') dig = *p - 'a' + 10;
+                    else if (base == 16 && *p >= 'A' && *p <= 'F') dig = *p - 'A' + 10;
+                    else break;
+                    if (dig >= base) break;
+                    val = val * base + dig;
+                    p++;
+                }
+                if (p == start) goto done;
+                if (!suppress) { *va_arg(ap, int*) = (int)(neg ? -val : val); n++; }
+                break;
+            }
+            case 'u': {
+                while (*p == ' ' || *p == '\t') p++;
+                unsigned long val = 0;
+                const char* start = p;
+                while (*p >= '0' && *p <= '9') { val = val * 10 + (*p - '0'); p++; }
+                if (p == start) goto done;
+                if (!suppress) { *va_arg(ap, unsigned int*) = (unsigned int)val; n++; }
+                break;
+            }
+            case 'c': {
+                if (!*p) goto done;
+                if (!suppress) { *va_arg(ap, char*) = *p; n++; }
+                p++;
+                break;
+            }
+            case 's': {
+                while (*p == ' ' || *p == '\t') p++;
+                if (!*p) goto done;
+                char* dst = suppress ? 0 : va_arg(ap, char*);
+                while (*p && *p != ' ' && *p != '\t' && *p != '\n') {
+                    if (dst) *dst++ = *p;
+                    p++;
+                }
+                if (dst) { *dst = '\0'; n++; }
+                break;
+            }
+            case '%': {
+                if (*p != '%') goto done;
+                p++;
+                break;
+            }
+            default: goto done;
+        }
+        f++;
+    }
+done:
+    return n;
+}
+
+int sscanf(const char* str, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsscanf(str, fmt, ap);
+    va_end(ap);
+    return n;
 }

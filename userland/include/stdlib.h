@@ -26,3 +26,11 @@ void srand(unsigned int seed);
 
 unsigned long strtoul(const char* nptr, char** endptr, int base);
 long double strtold(const char* nptr, char** endptr);
+long strtol(const char* nptr, char** endptr, int base);
+double strtod(const char* nptr, char** endptr);
+
+int atoi(const char* s);
+long atol(const char* s);
+
+int    abs(int x);
+long   labs(long x);

@@ -2,28 +2,43 @@
 #define SHELL_SCRIPT_H
 
 #include <misc/types.h>
-#include <native_exec.h>
 
-// shell script execution result
-typedef enum {
-    SHELL_SCRIPT_SUCCESS = 0,
-    SHELL_SCRIPT_ERROR_FILE_NOT_FOUND,
-    SHELL_SCRIPT_ERROR_INVALID_FORMAT,
-    SHELL_SCRIPT_ERROR_EXECUTION_FAILED,
-    SHELL_SCRIPT_ERROR_MEMORY_ALLOC
-} shell_script_result_t;
+/*
+ * EYN-OS Shell Script Interpreter
+ *
+ * Executes .shell script files from the EYNFS filesystem.  Scripts are
+ * line-oriented text files that support:
+ *
+ *   - Comments:            # this is a comment
+ *   - Variables:           set NAME=value   /   $NAME or ${NAME}
+ *   - Script arguments:    $0 (script name), $1, $2, ... $9
+ *   - Command substitution: $(command args)
+ *   - Conditionals:        if COND / elif COND / else / endif
+ *   - While loops:         while COND / endwhile
+ *   - Exit:                exit [code]
+ *
+ * Condition syntax (for if / elif / while):
+ *   STR1 == STR2           string equality
+ *   STR1 != STR2           string inequality
+ *   -e PATH                file/dir exists
+ *   -f PATH                file exists (not dir)
+ *   WORD                   true if non-empty and not "0"
+ *
+ * Commands are dispatched through the same path as interactive shell input
+ * (handle_shell_command), so all /binaries programs, aliases, and pipelines
+ * work transparently.
+ */
 
-// function declarations
-exec_result_t execute_shell_script(const char* filename);
+/*
+ * Run a .shell script from the filesystem.
+ *
+ * drive    -- physical drive number (e.g. g_current_drive)
+ * path     -- absolute path to the script file on EYNFS
+ * argc     -- number of extra arguments passed to the script
+ * argv     -- argument values ($1..$N); may be NULL if argc == 0
+ *
+ * Returns 0 on success, negative on error (file not found, parse error, etc.).
+ */
+int shell_script_run(uint8 drive, const char *path, int argc, const char *const *argv);
 
-// Script driver helpers for the interactive shell loop.
-// When a .shell script is started via execute_shell_script(), the main shell loop
-// should call shell_script_next_command() to retrieve the next command to execute.
-// This design allows scripts to continue after running ring3 programs (.uelf).
-int shell_script_is_active(void);
-
-// Writes the next executable command into out (NUL-terminated).
-// Returns 1 if a command was produced, 0 if the script has finished.
-int shell_script_next_command(char* out, uint32 outsz);
-
-#endif // SHELL_SCRIPT_H
+#endif /* SHELL_SCRIPT_H */

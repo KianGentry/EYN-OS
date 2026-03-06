@@ -564,7 +564,7 @@ static void vga_init_565_luts(void) {
 // Shell redirection globals
 int shell_redirect_active = 0;
 // Global capture mode to force capture during command substitution
-int g_shell_capture_mode = 0; // referenced from shell_script.c
+int g_shell_capture_mode = 0;
 char shell_redirect_buf[SHELL_REDIRECT_BUF_SIZE];
 int shell_redirect_pos = 0;
 // Color for redirected output

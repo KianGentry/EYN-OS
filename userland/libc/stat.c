@@ -4,6 +4,32 @@
 #include <dirent.h>
 #include <errno.h>
 
+/*
+ * fstat — query metadata for an open file descriptor.
+ *
+ * EYN-OS VFS does not expose extended metadata (ownership, timestamps) to
+ * ring-3 programs.  We fill in st_size by seeking to the end and back, and
+ * report st_mode as S_IFREG.  This is sufficient for DOOM's M_ReadFile(),
+ * which only needs st_size to determine allocation length.
+ */
+int fstat(int fd, struct stat* st) {
+    if (!st) { errno = EINVAL; return -1; }
+
+    /* Determine current position, seek to end for size, seek back. */
+    long cur = lseek(fd, 0, SEEK_CUR);
+    if (cur < 0) { errno = EBADF; return -1; }
+
+    long end = lseek(fd, 0, SEEK_END);
+    if (end < 0) { errno = EBADF; return -1; }
+
+    lseek(fd, cur, SEEK_SET);   /* restore position */
+
+    st->st_mode  = S_IFREG;
+    st->st_size  = end;
+    st->st_mtime = 0;
+    return 0;
+}
+
 int stat(const char* path, struct stat* st) {
     if (!path || !st) { errno = EINVAL; return -1; }
 

@@ -581,7 +581,8 @@ void start_tiling_manager() {
                     prev_saved_offx = prev_saved_offy = 0;
                 }
             }
-            draw_cursor_overlay(draw_x, draw_y);
+            if (!g_cursor_hidden)
+                draw_cursor_overlay(draw_x, draw_y);
             // Keep cursor_prev_* as the last mouse tip position.
             cursor_prev_x = cur_mx; cursor_prev_y = cur_my;
         } else {

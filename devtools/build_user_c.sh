@@ -28,6 +28,10 @@ obj_libc_time="$tmp_root/user_libc_time.o"
 obj_libc_stdlib="$tmp_root/user_libc_stdlib.o"
 obj_libc_errno="$tmp_root/user_libc_errno.o"
 obj_libc_x11="$tmp_root/user_libc_x11.o"
+obj_libc_setjmp="$tmp_root/user_libc_setjmp.o"
+obj_libc_stat="$tmp_root/user_libc_stat.o"
+obj_libc_ctype="$tmp_root/user_libc_ctype.o"
+obj_libc_libgen="$tmp_root/user_libc_libgen.o"
 lib_archive="$tmp_root/libeync.a"
 
 # Prefer a cross-compiler if available.
@@ -77,9 +81,13 @@ fi
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/stdlib.c" -o "$obj_libc_stdlib"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/errno.c" -o "$obj_libc_errno"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/x11.c" -o "$obj_libc_x11"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/setjmp.c" -o "$obj_libc_setjmp"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/stat.c" -o "$obj_libc_stat"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/ctype.c" -o "$obj_libc_ctype"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/libgen.c" -o "$obj_libc_libgen"
 
 rm -f "$lib_archive"
-ar rcs "$lib_archive" "$obj_libc_x11" "$obj_libc_unistd" "$obj_libc_string" "$obj_libc_stdio" "$obj_libc_fcntl" "$obj_libc_dirent" "$obj_libc_gui" "$obj_libc_time" "$obj_libc_stdlib" "$obj_libc_errno"
+ar rcs "$lib_archive" "$obj_libc_x11" "$obj_libc_setjmp" "$obj_libc_stat" "$obj_libc_ctype" "$obj_libc_libgen" "$obj_libc_unistd" "$obj_libc_string" "$obj_libc_stdio" "$obj_libc_fcntl" "$obj_libc_dirent" "$obj_libc_gui" "$obj_libc_time" "$obj_libc_stdlib" "$obj_libc_errno"
 
 "$CC" "${CFLAGS[@]}" -c "$src" -o "$obj_app"
 

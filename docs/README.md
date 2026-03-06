@@ -33,12 +33,14 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 ### Development Tools
 - **[Assembler](tools/assembler.md)** - Built-in NASM-compatible assembler
 - **[C Compiler](tools/chibicc.md)** - Integrated chibicc C compiler (C11 compliant)
+- **[X11 Compatibility](api/x11-compat.md)** - Source-level Xlib compatibility layer for GUI ports
 - **[UELF Format](api/userland-uelf-abi.md)** - Userland ELF executable format specification
 - **[Ring-3 Userspace](api/userland-uelf-abi.md#ring3)** - Privilege separation and protection
 - **[Program Loading](tools/loader.md)** - How user programs are loaded and executed
 
 ### Games & Applications
 - **[Game Engine](applications/game-engine.md)** - Built-in game framework
+- **[DOOM Port](applications/doom.md)** - Native DOOM port and in-OS `build_doom` workflow
 - **[Write Editor](ui/tui.md#write-editor)** - Text editor documentation
 - **[GUI Applications](ui/tiling-manager.md#gui-clients)** - Creating GUI applications
 - **[Second Reality](applications/second-reality.md)** - Second Reality demo port (visuals only)

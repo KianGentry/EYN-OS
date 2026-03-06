@@ -87,6 +87,7 @@ Think of EYN-OS as a custom-built house. Instead of buying pre-made rooms (libra
 - **Shell System**: Command-line interface with streaming command architecture
 - **Help System**: Interactive documentation viewer with dual-pane layout
 - **File Rendering**: Support for REI images and Markdown formatting
+- **GUI Compatibility**: Source-level X11/Xlib shim for lightweight desktop-style ports
 
 #### Fonts and text rendering
 
@@ -101,6 +102,7 @@ Important limitation: most UI/terminal code renders **bytes (0–255)** as glyph
 ### Development Tools
 - **Assembler**: Built-in NASM-compatible assembler for assembly development
 - **C Compiler**: Integrated chibicc compiler for C development (C11 compliant)
+- **In-OS Build Workflow**: Shell scripts and chibicc can compile sizeable userland programs from inside EYN-OS
 - **Executable Formats**: 
   - Native flat binaries (`.eyn`)
   - UELF format (`.uelf`) - ELF32-based ring-3 userspace programs
@@ -110,6 +112,8 @@ Important limitation: most UI/terminal code renders **bytes (0–255)** as glyph
 
 ### Applications
 - **Game Engine**: Framework for built-in games (Snake, Maze Runner)
+- **DOOM Port**: Native userland port with both host-built and in-OS chibicc-built workflows
+- **X11 Demo Apps**: Example compatibility ports such as `xeyes`
 - **Text Editor**: Write editor for file editing
 - **Utilities**: Math functions, search, sort, random number generation
 - **File Operations**: Copy, move, and advanced file management

@@ -12,7 +12,6 @@
 #include <utilities/shell/pipeline.h>
 #include <utilities/shell/fs_commands.h>
 #include <utilities/shell/run_command.h>
-#include <utilities/shell/shell_commands.h>
 #include <fs/vfs.h>
 #include <cpu/user_elf.h>
 #include <vga.h>
@@ -20,6 +19,7 @@
 #include <context.h>
 #include <misc/sched.h>
 #include <stdint.h>
+#include <utilities/shell/shell_script.h>
 #define COMMAND_HASH_SIZE 256
 typedef struct {
     const char* name;                 // command name key
@@ -83,6 +83,16 @@ static int try_run_uelf_at_path(uint8 drive, const char* abspath, int argc, cons
     if (!abspath || !abspath[0]) return 0;
     vfs_stat_t st;
     if (vfs_stat(drive, abspath, &st) == 0 && st.type == VFS_NODE_FILE) {
+        /*
+         * Auto-detect file type: ELF magic → run as UELF, '#' first byte
+         * → run as shell script, anything else → UELF (legacy behavior).
+         */
+        uint8 magic[4] = {0, 0, 0, 0};
+        vfs_read_file(drive, abspath, magic, 4);
+        if (magic[0] == '#') {
+            (void)shell_script_run(drive, abspath, argc, argv);
+            return 1;
+        }
         (void)user_elf_run_argv(drive, abspath, argc, argv);
         return 1;
     }

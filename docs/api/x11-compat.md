@@ -35,6 +35,21 @@ The shim maintains a **userland RGB565 framebuffer** (`320 × 200` max) and
 draws into it using software rasterisation.  On `XFlush()` / `XSync()` the
 buffer is pushed to the kernel via `gui_blit_rgb565` (syscall 24).
 
+## Current Status
+
+The X11 layer is best understood as a **source-compatibility layer**, not a
+full X server implementation.
+
+- Programs still run as normal EYN-OS userland binaries.
+- There is no external display server process and no X11 socket protocol.
+- Compatibility is focused on small, self-contained Xlib programs that draw
+   directly into a single top-level window.
+- The current reference port is `xeyes`, which builds against the same headers
+   and APIs that a small Xlib desktop demo would use on Unix.
+
+This makes the layer useful for portability experiments, GUI demos, and small
+legacy applications that only depend on core Xlib drawing and events.
+
 ## Constraints
 
 | Constraint | Limit | Reason |
@@ -51,6 +66,19 @@ buffer is pushed to the kernel via `gui_blit_rgb565` (syscall 24).
 
 Programs that use only core Xlib drawing (lines, rectangles, arcs, polygons,
 strings) and basic event handling (keyboard, mouse, close) will work.
+
+## What "X Windows compatibility" means in EYN-OS
+
+EYN-OS does **not** try to emulate the complete X Window System stack.
+Compatibility here means:
+
+1. Existing C sources that include `X11/Xlib.h` can often be rebuilt with
+   little or no source change.
+2. The same code calls into `userland/libc/x11.c` instead of `libX11.so`.
+3. Those calls are translated into EYN-OS GUI syscalls and software rendering.
+
+In practice, this is enough for classic teaching demos, small games, and
+simple desktop toys, but not for toolkit-heavy applications.
 
 ## Supported Xlib Functions
 

@@ -12,7 +12,7 @@ Filesystem Commands:
   fatfix          - Repair FAT32 directory entry flags.
   fscheck         - Check filesystem integrity.
   head            - Print the first lines of a file.
-  ls              - List directory entries.
+  ls              - Run the ls command.
   makedir         - Create a new directory.
   move            - Move a file from source to destination.
   pwd             - Print the current working directory.
@@ -81,6 +81,7 @@ Utility Commands:
 ----------------
   alias           - Create or remove command aliases.
   calc            - Integer calculator supporting + - * /.
+  chibicc         - Run the chibicc command.
   diskmgr         - Manage logical drives from userland.
   echo            - Print arguments to stdout.
   edit            - Graphical text editor.
@@ -100,5 +101,4 @@ Utility Commands:
   spam            - Spam 'EYN-OS' to stdout 100 times.
   tiling          - Launch the tiling manager.
   xeyes           - X11 xeyes - eyes that follow the mouse pointer.
-  xeyes2          - Run the xeyes2 command.
 

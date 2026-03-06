@@ -325,7 +325,7 @@ void tile_render_once(void) {
     vga_blit_backbuffer_region_to_fb(0, 0, screen_w, screen_h);
 
     // Draw mouse cursor overlay so user-task GUI apps have a visible cursor.
-    {
+    if (!g_cursor_hidden) {
         int cur_mx = -1000, cur_my = -1000;
         mouse_get_position(&cur_mx, &cur_my);
         if (cur_mx > -100 && cur_my > -100) {
@@ -807,6 +807,27 @@ int tile_pump_input_once(void) {
 
     // If there's no actual key event to route, we're done.
     if (!key) return 0;
+
+    /*
+     * Key release: tui_read_key() returns negative values for key releases.
+     * Route directly to the gui_key_cb (with the negative value preserved)
+     * bypassing all hotkey / stdin processing — release events should not
+     * trigger shortcuts or echo characters.
+     */
+    if (key < 0) {
+        int target_tile = focused;
+        if (g_user_task_active && g_user_task_term >= 0) {
+            int tt = tile_find_by_term(g_user_task_term);
+            if (tt >= 0 && tt < tile_count) target_tile = tt;
+        }
+        if (target_tile >= 0 && target_tile < tile_count) {
+            int term = tiles[target_tile].term_idx;
+            if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
+                gui_key_cb[term](target_tile, key, gui_userdata[term]);
+            }
+        }
+        return 1;
+    }
 
     // If status overlay visibility toggles, force redraw to restore any covered pixels.
     // This input pump path is called while ring3 tasks are running.

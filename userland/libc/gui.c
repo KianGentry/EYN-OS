@@ -76,3 +76,11 @@ int gui_poll_event(int handle, gui_event_t* out_event) {
 int gui_wait_event(int handle, gui_event_t* out_event) {
     return eyn_syscall3(EYN_SYSCALL_GUI_WAIT_EVENT, handle, out_event, (int)sizeof(*out_event));
 }
+
+int gui_warp_mouse(int handle, int x, int y) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_WARP_MOUSE, handle, (const void*)x, y);
+}
+
+int gui_set_cursor_visible(int handle, int visible) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_SET_CURSOR_VISIBLE, handle, (const void*)visible, 0);
+}

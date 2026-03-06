@@ -86,6 +86,13 @@ void user_task_cleanup_mappings(void) {
 void ui_return_from_user_task(void) {
     // Best-effort cleanup and clear state before re-entering the UI.
     command_context_clear();
+    // If a UELF task exited or crashed while a redirect was active (e.g. the
+    // tiling-manager terminal wraps commands in start/stop_shell_redirect and
+    // an abrupt exit bypasses stop_shell_redirect), shell_redirect_active can
+    // be left as 1.  Reset it here so subsequent kernel printf calls go to VGA
+    // instead of the capture buffer+serial.
+    stop_shell_redirect();
+    g_shell_capture_mode = 0;
     user_task_cleanup_mappings();
     g_abort_to_shell = 0;
     g_user_task_active = 0;

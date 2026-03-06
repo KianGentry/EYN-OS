@@ -136,6 +136,23 @@ int main() {
 }
 ```
 
+### Building DOOM inside EYN-OS
+
+EYN-OS also includes an in-OS build path for the DOOM port:
+
+```bash
+build_doom
+doom_chibicc
+```
+
+The `build_doom` script drives chibicc in two phases:
+
+1. Compile `/DOOM/doom_unity.c` to assembly.
+2. Assemble and link that assembly into `/binaries/doom_chibicc`.
+
+This is primarily a demonstration of the userland toolchain, shell scripting,
+filesystem integration, and low-memory process model working together.
+
 ## Limitations
 
 ### Compiler Limitations
@@ -149,6 +166,10 @@ int main() {
 - **No stdio files**: No `fopen`, `fread`, etc. (use syscalls)
 - **No malloc**: Heap allocation limited or unavailable
 - **Single process**: No fork, exec, threads
+
+For larger builds, remember that EYN-OS is still a low-RAM environment.
+Large translation units and macro-heavy code are supported, but compile times
+and paging pressure are materially higher than on a host machine.
 
 ### Platform Limitations
 - **32-bit only**: No 64-bit support
@@ -231,6 +252,11 @@ Run `load` to load streaming commands including chibicc.
 
 ### "Compilation failed"
 Check syntax errors. Chibicc provides basic error messages but not as detailed as GCC/Clang.
+
+### "Large builds stall or are slow"
+This is usually memory-pressure related rather than a parser bug.  EYN-OS now
+supports much larger chibicc workloads than before, but big unity builds such
+as DOOM still exercise demand paging, swap, and filesystem I/O heavily.
 
 ### "Program crashes on run"
 - Check stack usage (limited stack space)

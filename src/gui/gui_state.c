@@ -260,6 +260,23 @@ static uint32 g_last_drag_tick = 0;
 static rei_image_t g_cursor_img;
 static int g_cursor_loaded = 0;
 
+/*
+ * SECURITY-INVARIANT: Cursor visibility flag.
+ *
+ * When set to 1, the cursor REI sprite is suppressed in draw_cursor_overlay
+ * call sites (gui_input.c and tiling_manager.c).  Used by the gui_warp_mouse
+ * syscall to hide the cursor for applications that grab the mouse (e.g. games).
+ *
+ * Invariant: automatically cleared when the owning ring-3 task exits or when
+ *            gui_warp_mouse is not active for the focused tile.
+ * Breakage if removed: cursor would always be visible even in grabbed mode,
+ *                      causing distracting sprite jitter at the centre of the
+ *                      screen during gameplay.
+ * ABI-sensitive: No (kernel-internal only; userland controls it via
+ *                gui_set_cursor_visible syscall).
+ */
+static int g_cursor_hidden = 0;
+
 // Optional resize cursors (draw-time transforms used instead of multiple images)
 static rei_image_t g_cursor_res_img;
 static int g_cursor_res_loaded = 0;
@@ -752,6 +769,15 @@ static void draw_rei_at(const rei_image_t* im, int x, int y) {
         }
     }
     vga_mark_dirty_rect(x, y, w, h);
+}
+
+/*
+ * Non-static accessor so kernel code (isr.c syscall handlers) can control
+ * cursor visibility without reaching into the gui module's static state.
+ */
+void gui_cursor_set_hidden(int hidden)
+{
+    g_cursor_hidden = hidden;
 }
 
 /*

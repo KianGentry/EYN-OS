@@ -10,8 +10,10 @@ EYN-OS is a small, educational operating system for 32‑bit x86 built entirely 
 - Ring‑3 userspace: proper privilege separation with syscall interface (int 0x80)
 - Native EYNFS filesystem with MBR partitioning support, plus FAT32 compatibility
 - Text‑based shell and TUI framework with customizable tiling window manager
+- Source-level X11/Xlib compatibility layer for small GUI ports (`xeyes`, test apps)
 - Bitmap font loading (`.hex` format, 8×8 or 8×16) with runtime system-font switching
 - Built‑in C compiler (chibicc) for native development and userland ELF programs (`.uelf`)
+- Native DOOM support: prebuilt host-cross-compiled port plus in-OS `build_doom` script using chibicc
 - Developer tools: assembler, linker, program loader, debugger facilities
 - Robustness features: watchdog timer, panic recovery, memory protection
 - REIV video format support for playing MP4/GIF animations in the viewer
@@ -43,7 +45,9 @@ EYN-OS follows a “learnable core” approach:
 - **Filesystems:** Native EYNFS with MBR partitioning, FAT32 read/write support
 - **Userspace:** Ring-3 privilege separation with syscall API (int 0x80), ELF32-based UELF format
 - **Compiler:** Integrated chibicc C compiler for on-system development
+- **Compatibility:** X11/Xlib shim for source-level ports to the native GUI
 - **UI:** Shell with command streaming, customizable tiling manager, bitmap font rendering (8×8, 8×16)
+- **Applications:** Native GUI apps, X11 demo apps, and a userland DOOM port
 - **Robustness:** Watchdog timer for hang detection, panic recovery, memory integrity checks
 
 The codebase is organized by domain (CPU, drivers, misc, utilities, network) with public headers under `include/` and implementation in `src/`.
@@ -65,6 +69,9 @@ ls              # list files
 help            # interactive help system
 e1000 init      # initialize network (if e1000 NIC present)
 chibicc --help  # C compiler help (chibicc.uelf needs to be in root)
+xeyes           # run the X11 compatibility demo
+build_doom      # compile the unity-build DOOM source inside EYN-OS
+doom -iwad /DOOM1.WAD   # run the host-built DOOM port
 run hello.uelf  # run a userland program
 ```
 
@@ -94,8 +101,10 @@ The `docs/` directory contains comprehensive project documentation:
 Key topics:
 - **Debugging:** Quick debug card, stop codes, GDB integration, serial logging
 - **UI & Shell:** Tiling manager, TUI system, shell scripting, help system
+- **GUI Compatibility:** X11/Xlib source-compatibility layer for small ports
 - **Filesystems:** EYNFS specification, FAT32 support, partitioning
-- **Development:** Assembler, chibicc compiler, UELF format, syscalls
+- **Development:** Assembler, chibicc compiler, UELF format, syscalls, in-OS builds
+- **Applications:** DOOM port, Second Reality demo, GUI utilities
 - **Networking:** e1000 driver, UDP/IPv4 stack (docs/network/)
 - **Memory:** Paging, virtual memory, heap management
 - **Hardware:** Watchdog timer, PCI enumeration, device drivers
