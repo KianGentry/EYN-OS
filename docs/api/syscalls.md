@@ -176,6 +176,33 @@ typedef struct {
 } gui_blit_rgb565_t;
 ```
 
+#### DNS + TCP networking (syscalls 119–123)
+Minimal userland access to DNS resolution and TCP streams.
+
+**DNS resolve (syscall 119)**
+- EBX: `const char* name`
+- ECX: `uint8_t out_ip[4]`
+- Returns: 0 on success, <0 on error
+
+**TCP connect (syscall 120)**
+- EBX: `const uint8_t dst_ip[4]`
+- ECX: `uint16_t dst_port`
+- EDX: `uint16_t local_port` (0 = ephemeral)
+- Returns: 0 on success, <0 on error
+
+**TCP send (syscall 121)**
+- EBX: `const void* buf`
+- ECX: `uint32_t len` (<= 512)
+- Returns: bytes sent or <0 on error
+
+**TCP recv (syscall 122)**
+- EBX: `void* buf`
+- ECX: `uint32_t buflen`
+- Returns: bytes received, 0 if none, -2 if closed, or <0 on error
+
+**TCP close (syscall 123)**
+- Returns: 0 on success, <0 on error
+
 ## Implementation Details
 
 ### Syscall Handler

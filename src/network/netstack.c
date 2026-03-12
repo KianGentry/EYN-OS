@@ -9,6 +9,7 @@
 #include <watchdog.h>
 #include <misc/sched.h>
 #include <drivers/serial.h>
+#include <fs/vfs.h>
 
 // The shell command blocks the normal input pump, so we must poll Ctrl-C
 // ourselves while listening.
@@ -154,6 +155,56 @@ typedef struct net_timer_slot {
 #define TCP_RETX_INTERVAL_MS 400u
 #define TCP_RETX_MAX_ATTEMPTS 4u
 
+/*
+ * ABI-INVARIANT: DNS UDP payload cap for the resolver.
+ *
+ * Why: RFC 1035 limits UDP DNS messages to 512 bytes without EDNS.
+ * Invariant: The resolver uses fixed buffers sized to this limit.
+ * Breakage if changed:
+ *   - Increasing: raises stack usage in low-RAM paths.
+ *   - Decreasing: rejects valid replies and can break common lookups.
+ * ABI-sensitive: No (internal kernel API).
+ * Disk-format-sensitive: No.
+ * Security-critical: Yes (bounds all DNS parse operations).
+ */
+#define NET_DNS_MAX_MESSAGE 512u
+
+/*
+ * ABI-INVARIANT: Maximum DNS name length (RFC 1035).
+ *
+ * Why: DNS names are limited to 253 characters (labels + dots).
+ * Invariant: Encoded queries must fit within NET_DNS_MAX_MESSAGE.
+ * Breakage if changed: May allow malformed names to overflow buffers.
+ * ABI-sensitive: No (internal kernel API).
+ * Disk-format-sensitive: No.
+ * Security-critical: Yes (input validation boundary).
+ */
+#define NET_DNS_MAX_NAME 253u
+
+/*
+ * ABI-INVARIANT: Maximum DNS label length (RFC 1035).
+ *
+ * Why: A single label is limited to 63 bytes.
+ * Invariant: Resolver rejects labels longer than this.
+ * Breakage if changed: Risks encoding invalid queries.
+ * ABI-sensitive: No (internal kernel API).
+ * Disk-format-sensitive: No.
+ * Security-critical: Yes (input validation boundary).
+ */
+#define NET_DNS_MAX_LABEL 63u
+
+/*
+ * ABI-INVARIANT: DNS service port (UDP).
+ *
+ * Why: Standard DNS service port defined by RFC 1035.
+ * Invariant: Resolver emits queries to this port on the configured nameserver.
+ * Breakage if changed: Queries will target the wrong service.
+ * ABI-sensitive: No (internal kernel API).
+ * Disk-format-sensitive: No.
+ * Security-critical: Yes (limits protocol expectations).
+ */
+#define NET_DNS_PORT 53u
+
 typedef struct udp_socket {
     uint8 bound;
     uint16 port;
@@ -204,6 +255,9 @@ static int tcp_send_segment(const uint8 src_ip[4], uint16 src_port,
                             int arp_spins);
 static void tcp_retx_timer_cb(void* ctx);
 static void net_log(const char* msg);
+static int dns_get_server_ip(uint8 out_ip[4]);
+static int dns_encode_name(const char* name, uint8* out, uint32 out_cap, uint32* out_len);
+static int dns_skip_name(const uint8* msg, uint32 len, uint32* io_off);
 
 void net_config_get(net_config* out)
 {
@@ -636,11 +690,242 @@ static void ipv4_choose_next_hop(const uint8 src_ip[4], const uint8 dst_ip[4], u
     // If gateway is unset, fall back to direct ARP for dst.
     if (!src_ip || !dst_ip || !out_next_hop_ip) return;
 
+    /*
+     * ABI-INVARIANT: QEMU slirp DNS next-hop behavior.
+     *
+     * Why: In common slirp setups the synthetic DNS IP (10.0.2.3) is exposed
+     *      as a virtual service and may not answer ARP directly. Packets must
+     *      still be sent to the default gateway MAC at L2.
+     * Invariant: When destination equals configured dns_ip and a gateway is
+     *            configured, choose gateway as ARP target.
+     * Breakage if changed: DNS lookups can fail with repeated ARP retries even
+     *                     though IP configuration is correct.
+     * ABI-sensitive: No.
+     * Disk-format-sensitive: No.
+     * Security-critical: No.
+     */
+    if (!ipv4_is_zero(g_net.cfg.gateway_ip) && ipv4_eq(dst_ip, g_net.cfg.dns_ip)) {
+        for (int i = 0; i < 4; i++) out_next_hop_ip[i] = g_net.cfg.gateway_ip[i];
+        return;
+    }
+
     if (!ipv4_is_zero(g_net.cfg.gateway_ip) && !ipv4_is_same_subnet(src_ip, dst_ip, g_net.cfg.netmask)) {
         for (int i = 0; i < 4; i++) out_next_hop_ip[i] = g_net.cfg.gateway_ip[i];
         return;
     }
     for (int i = 0; i < 4; i++) out_next_hop_ip[i] = dst_ip[i];
+}
+
+static int parse_ipv4_str(const char* s, uint8 out[4])
+{
+    if (!s || !out) return -1;
+    for (int part = 0; part < 4; part++) {
+        if (*s < '0' || *s > '9') return -1;
+        int v = 0;
+        while (*s >= '0' && *s <= '9') {
+            v = (v * 10) + (*s - '0');
+            if (v > 255) return -1;
+            s++;
+        }
+        out[part] = (uint8)v;
+        if (part != 3) {
+            if (*s != '.') return -1;
+            s++;
+        }
+    }
+    return (*s == '\0') ? 0 : -1;
+}
+
+static int dns_get_server_ip(uint8 out_ip[4])
+{
+    if (!out_ip) return -1;
+
+    char buf[256];
+    int n = vfs_read_file(0, "/etc/resolv.conf", buf, (int)sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        char* line = buf;
+        while (line && *line) {
+            char* next = strchr(line, '\n');
+            if (next) {
+                *next = '\0';
+                next++;
+            }
+
+            while (*line == ' ' || *line == '\t' || *line == '\r') line++;
+            if (*line == '#' || *line == '\0') { line = next; continue; }
+
+            const char* key = "nameserver";
+            int match = 1;
+            for (int i = 0; key[i]; i++) {
+                if (line[i] != key[i]) { match = 0; break; }
+            }
+            if (match && (line[10] == ' ' || line[10] == '\t')) {
+                const char* ip_str = line + 10;
+                while (*ip_str == ' ' || *ip_str == '\t') ip_str++;
+                if (parse_ipv4_str(ip_str, out_ip) == 0) return 0;
+            }
+
+            line = next;
+        }
+    }
+
+    // Fallback to netcfg DNS if resolv.conf is missing or invalid.
+    if (g_net.cfg.dns_ip[0] || g_net.cfg.dns_ip[1] || g_net.cfg.dns_ip[2] || g_net.cfg.dns_ip[3]) {
+        for (int i = 0; i < 4; i++) out_ip[i] = g_net.cfg.dns_ip[i];
+        return 0;
+    }
+
+    return -1;
+}
+
+static int dns_encode_name(const char* name, uint8* out, uint32 out_cap, uint32* out_len)
+{
+    if (!name || !out || !out_len) return -1;
+
+    uint32 len = 0;
+    const char* p = name;
+    if (*p == '\0') return -2;
+    if (strlen(name) > NET_DNS_MAX_NAME) return -3;
+
+    while (*p) {
+        const char* label = p;
+        uint32 label_len = 0;
+        while (*p && *p != '.') {
+            label_len++;
+            p++;
+        }
+        if (label_len == 0 || label_len > NET_DNS_MAX_LABEL) return -4;
+        if (len + 1 + label_len + 1 > out_cap) return -5;
+        out[len++] = (uint8)label_len;
+        for (uint32 i = 0; i < label_len; i++) {
+            out[len++] = (uint8)label[i];
+        }
+        if (*p == '.') p++;
+    }
+    if (len + 1 > out_cap) return -6;
+    out[len++] = 0;
+    *out_len = len;
+    return 0;
+}
+
+static int dns_skip_name(const uint8* msg, uint32 len, uint32* io_off)
+{
+    if (!msg || !io_off) return -1;
+    uint32 off = *io_off;
+    while (off < len) {
+        uint8 b = msg[off];
+        if (b == 0) {
+            *io_off = off + 1u;
+            return 0;
+        }
+        if ((b & 0xC0u) == 0xC0u) {
+            if (off + 1u >= len) return -2;
+            *io_off = off + 2u;
+            return 0;
+        }
+        if (b > NET_DNS_MAX_LABEL) return -3;
+        off++;
+        if (off + b > len) return -4;
+        off += b;
+    }
+    return -5;
+}
+
+int net_dns_resolve(const char* name, uint8 out_ip[4], int timeout_spins)
+{
+    if (!name || !out_ip) return -1;
+    if (net_init_e1000_default() != 0) return -2;
+
+    uint8 dns_ip[4];
+    if (dns_get_server_ip(dns_ip) != 0) return -3;
+
+    uint8 local_ip[4];
+    net_get_local_ip(local_ip);
+
+    int socket_id = -1;
+    uint16 base_port = (uint16)(40000u + (net_get_ticks() % 20000u));
+    for (int attempt = 0; attempt < 16; attempt++) {
+        uint16 port = (uint16)(base_port + attempt);
+        socket_id = net_udp_bind(port);
+        if (socket_id >= 0) break;
+    }
+    if (socket_id < 0) return -4;
+
+    uint8 msg[NET_DNS_MAX_MESSAGE];
+    memset(msg, 0, sizeof(msg));
+
+    uint16 tx_id = (uint16)(net_get_ticks() & 0xFFFFu);
+    msg[0] = (uint8)(tx_id >> 8);
+    msg[1] = (uint8)(tx_id & 0xFFu);
+    msg[2] = 0x01; // recursion desired
+    msg[3] = 0x00;
+    msg[4] = 0x00;
+    msg[5] = 0x01; // QDCOUNT
+
+    uint32 off = 12u;
+    uint32 name_len = 0;
+    int rc = dns_encode_name(name, msg + off, (uint32)sizeof(msg) - off, &name_len);
+    if (rc != 0) { net_udp_close(socket_id); return -5; }
+    off += name_len;
+    if (off + 4u > (uint32)sizeof(msg)) { net_udp_close(socket_id); return -6; }
+    msg[off++] = 0x00; msg[off++] = 0x01; // QTYPE = A
+    msg[off++] = 0x00; msg[off++] = 0x01; // QCLASS = IN
+
+    rc = net_udp_send_socket(socket_id, local_ip, dns_ip, (uint16)NET_DNS_PORT, msg, off, 800000);
+    if (rc != 0) { net_udp_close(socket_id); return -7; }
+
+    if (timeout_spins <= 0) timeout_spins = 8000000;
+    for (int spin = 0; spin < timeout_spins; spin++) {
+        if ((spin & 0x1FFF) == 0) watchdog_kick("net-dns-wait");
+        (void)net_poll(local_ip, 32);
+
+        net_udp_rx_packet pkt;
+        int got = net_udp_recv_socket(socket_id, &pkt);
+        if (got <= 0) continue;
+
+        if (!ipv4_eq(pkt.src_ip, dns_ip) || pkt.payload_len < 12u) continue;
+
+        const uint8* rx = pkt.payload;
+        uint32 rx_len = pkt.payload_len;
+        uint16 rx_id = (uint16)((rx[0] << 8) | rx[1]);
+        if (rx_id != tx_id) continue;
+
+        uint16 flags = (uint16)((rx[2] << 8) | rx[3]);
+        if ((flags & 0x8000u) == 0) continue; // not a response
+        if ((flags & 0x000Fu) != 0) { net_udp_close(socket_id); return -8; }
+
+        uint16 qdcount = (uint16)((rx[4] << 8) | rx[5]);
+        uint16 ancount = (uint16)((rx[6] << 8) | rx[7]);
+
+        uint32 roff = 12u;
+        for (uint16 q = 0; q < qdcount; q++) {
+            if (dns_skip_name(rx, rx_len, &roff) != 0) { net_udp_close(socket_id); return -9; }
+            if (roff + 4u > rx_len) { net_udp_close(socket_id); return -9; }
+            roff += 4u;
+        }
+
+        for (uint16 a = 0; a < ancount; a++) {
+            if (dns_skip_name(rx, rx_len, &roff) != 0) { net_udp_close(socket_id); return -10; }
+            if (roff + 10u > rx_len) { net_udp_close(socket_id); return -10; }
+
+            uint16 type = (uint16)((rx[roff] << 8) | rx[roff + 1u]);
+            uint16 class = (uint16)((rx[roff + 2u] << 8) | rx[roff + 3u]);
+            uint16 rdlen = (uint16)((rx[roff + 8u] << 8) | rx[roff + 9u]);
+            roff += 10u;
+
+            if (roff + rdlen > rx_len) { net_udp_close(socket_id); return -11; }
+            if (type == 1u && class == 1u && rdlen == 4u) {
+                for (int i = 0; i < 4; i++) out_ip[i] = rx[roff + (uint32)i];
+                net_udp_close(socket_id);
+                return 0;
+            }
+            roff += rdlen;
+        }
+    }
+
+    net_udp_close(socket_id);
+    return -12;
 }
 
 static void udp_rxq_clear(void)
@@ -659,6 +944,13 @@ static int tcp_rxq_enqueue(const uint8 src_ip[4], uint16 src_port,
                            const uint8 dst_ip[4], uint16 dst_port,
                            const uint8* payload, uint32 payload_len)
 {
+    if (payload_len > NET_TCP_MAX_PAYLOAD) {
+        // Never truncate TCP payloads; caller keeps ACK unchanged on enqueue
+        // failure so the peer retransmits a segment we can fully buffer.
+        g_net.tcp_stats.tcp_rx_dropped++;
+        return -1;
+    }
+
     for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
         if (!g_net.tcp_rxq[i].valid) {
             tcp_rx_slot* s = &g_net.tcp_rxq[i];
@@ -668,14 +960,9 @@ static int tcp_rxq_enqueue(const uint8 src_ip[4], uint16 src_port,
             s->pkt.src_port = src_port;
             s->pkt.dst_port = dst_port;
 
-            uint32 copy_len = payload_len;
-            if (copy_len > NET_TCP_MAX_PAYLOAD) {
-                copy_len = NET_TCP_MAX_PAYLOAD;
-                g_net.tcp_stats.tcp_rx_dropped++;
-            }
-            s->pkt.payload_len = copy_len;
-            if (copy_len != 0u) {
-                memcpy(s->pkt.payload, payload, copy_len);
+            s->pkt.payload_len = payload_len;
+            if (payload_len != 0u) {
+                memcpy(s->pkt.payload, payload, payload_len);
             }
             g_net.tcp_stats.tcp_rx_enqueued++;
             return 0;
@@ -896,6 +1183,11 @@ int net_tcp_close(void)
     }
     g_net.tcp.listening = 0;
     return 0;
+}
+
+int net_tcp_is_closed(void)
+{
+    return (g_net.tcp.state == TCP_CLOSED) ? 1 : 0;
 }
 
 int net_tcp_recv(net_tcp_rx_packet* out)
@@ -1428,9 +1720,18 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
                     }
                     if (payload_len > 0) {
                         g_net.tcp_stats.tcp_data_rx++;
-                        (void)tcp_rxq_enqueue(ip->src, src_port, ip->dst, dst_port,
-                                              frame + payload_off, payload_len);
-                        g_net.tcp.ack = seq + payload_len;
+
+                        // Reliability invariant: only advance ACK for payload that is
+                        // in-order and successfully enqueued. If RX queue is full,
+                        // keep ACK unchanged so the peer retransmits.
+                        if (seq == g_net.tcp.ack) {
+                            int enq_rc = tcp_rxq_enqueue(ip->src, src_port, ip->dst, dst_port,
+                                                         frame + payload_off, payload_len);
+                            if (enq_rc == 0) {
+                                g_net.tcp.ack += payload_len;
+                            }
+                        }
+
                         (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
                                                g_net.tcp.remote_ip, g_net.tcp.remote_port,
                                                g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
@@ -1439,15 +1740,26 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
                     }
 
                     if (flags & TCP_FLAG_FIN) {
-                        g_net.tcp_stats.tcp_fin_rx++;
-                        g_net.tcp.ack = seq + 1;
-                        (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                                               g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                                               g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
-                                               NULL, 0, 800000);
-                        g_net.tcp_stats.tcp_ack_tx++;
-                        g_net.tcp.state = TCP_CLOSED;
-                        tcp_retx_cancel();
+                        // Accept FIN only when it is in-order relative to current ACK.
+                        uint32 fin_seq = seq + payload_len;
+                        if (fin_seq == g_net.tcp.ack) {
+                            g_net.tcp_stats.tcp_fin_rx++;
+                            g_net.tcp.ack += 1u;
+                            (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
+                                                   g_net.tcp.remote_ip, g_net.tcp.remote_port,
+                                                   g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                                                   NULL, 0, 800000);
+                            g_net.tcp_stats.tcp_ack_tx++;
+                            g_net.tcp.state = TCP_CLOSED;
+                            tcp_retx_cancel();
+                        } else {
+                            // Duplicate/out-of-order FIN: send current ACK only.
+                            (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
+                                                   g_net.tcp.remote_ip, g_net.tcp.remote_port,
+                                                   g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                                                   NULL, 0, 800000);
+                            g_net.tcp_stats.tcp_ack_tx++;
+                        }
                     } else if (g_net.tcp.state == TCP_FIN_WAIT && (flags & TCP_FLAG_ACK)) {
                         g_net.tcp.state = TCP_CLOSED;
                         tcp_retx_cancel();
@@ -1854,6 +2166,48 @@ int net_tcp_send(const uint8 local_ip[4], uint16 local_port,
     g_net.tcp_stats.tcp_fin_tx++;
 
     return (int)payload_len;
+}
+
+int net_tcp_connect(const uint8 local_ip[4], uint16 local_port,
+                    const uint8 dst_ip[4], uint16 dst_port,
+                    int timeout_spins)
+{
+    if (!local_ip || !dst_ip) return -1;
+    if (dst_port == 0) return -2;
+    if (net_init_e1000_default() != 0) return -3;
+
+    if (local_port == 0) {
+        local_port = (uint16)(40000u + (net_get_ticks() % 20000u));
+    }
+
+    // Initialize connection state.
+    memset(&g_net.tcp, 0, sizeof(g_net.tcp));
+    for (int i = 0; i < 4; i++) g_net.tcp.local_ip[i] = local_ip[i];
+    for (int i = 0; i < 4; i++) g_net.tcp.remote_ip[i] = dst_ip[i];
+    g_net.tcp.local_port = local_port;
+    g_net.tcp.remote_port = dst_port;
+    g_net.tcp.seq = net_get_ticks();
+    g_net.tcp.ack = 0;
+    g_net.tcp.state = TCP_SYN_SENT;
+    g_net.tcp.listening = 0;
+    tcp_retx_cancel();
+    tcp_rxq_clear();
+
+    g_net.tcp_stats.tcp_syn_sent++;
+    int rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
+                              g_net.tcp.seq, 0, TCP_FLAG_SYN, NULL, 0, timeout_spins);
+    tcp_retx_arm(TCP_FLAG_SYN, g_net.tcp.seq, 0, NULL, 0);
+    if (rc != 0) return rc;
+
+    if (timeout_spins <= 0) timeout_spins = 12000000;
+    for (int spin = 0; spin < timeout_spins; spin++) {
+        if ((spin & 0x1FFF) == 0) watchdog_kick("net-tcp-connect");
+        (void)net_poll(local_ip, 16);
+        if (g_net.tcp.state == TCP_ESTABLISHED) break;
+    }
+    if (g_net.tcp.state != TCP_ESTABLISHED) return -5;
+
+    return 0;
 }
 
 int net_tcp_send_current(const uint8* payload, uint32 payload_len)

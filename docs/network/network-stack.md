@@ -1,6 +1,6 @@
 # Network Stack
 
-EYN-OS implements a minimal but functional network stack supporting UDP over IPv4 with ARP.
+EYN-OS implements a minimal but functional network stack supporting UDP/TCP over IPv4 with ARP and a DNS resolver.
 
 ## Overview
 
@@ -12,6 +12,8 @@ The stack is built in layers:
 2. **ARP** - IP to MAC address resolution
 3. **IPv4** - Basic packet handling
 4. **UDP** - Datagram sockets
+5. **TCP** - Minimal client/server state machine
+6. **DNS** - UDP A-record resolver
 
 ## Architecture
 
@@ -34,7 +36,9 @@ Called after e1000 driver initialization. Sets up:
 Hardware → e1000_receive() → net_poll_rx() → Protocol handlers
                                                ├→ handle_arp()
                                                ├→ handle_ipv4()
-                                               │   └→ handle_udp()
+                                               │   ├→ handle_udp()
+                                               │   ├→ handle_tcp()
+                                               │   └→ handle_icmp()
 ```
 
 The `net_poll_rx()` function:
@@ -119,7 +123,7 @@ struct ipv4_hdr {
 **Features**:
 - Basic header parsing
 - Checksum verification
-- Protocol dispatch (UDP only)
+- Protocol dispatch (UDP/TCP/ICMP)
 - Drop IPv4 fragments (no reassembly)
 - DF (Don't Fragment) set on TX
 
@@ -210,6 +214,16 @@ struct net_tcp_stats {
     uint32 tcp_rx_dropped;
 };
 ```
+
+### DNS Resolver (Minimal)
+
+**Purpose**: Resolve hostnames to IPv4 addresses using UDP queries.
+
+**Features**:
+- RFC 1035 wire format, A-record queries only
+- Recursion desired (RD=1)
+- Nameserver from `/etc/resolv.conf`, fallback to runtime `netcfg` DNS
+- Fixed 512-byte UDP payload cap (no EDNS)
 
 ## API
 

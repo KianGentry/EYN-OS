@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-12 20:00:32
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-12 22:43:24
 
 **Total Commands:** 80
 
@@ -988,22 +988,6 @@ calc 2+3*4
 
 ---
 
-### chibicc
-
-**Binary:** `testdir/binaries/chibicc`
-
-**Metadata Source:** `testdir/code/(metadata not found)`
-
-**Description:**
-Run the chibicc command.
-
-**Example:**
-```bash
-chibicc
-```
-
----
-
 ### diskmgr
 
 **Binary:** `testdir/binaries/diskmgr`
@@ -1016,6 +1000,22 @@ Manage logical drives from userland.
 **Example:**
 ```bash
 diskmgr status
+```
+
+---
+
+### download
+
+**Binary:** `testdir/binaries/download`
+
+**Metadata Source:** `testdir/code/download_uelf.c`
+
+**Description:**
+Download a file over HTTP/1.1 (GET only) with DNS support.
+
+**Example:**
+```bash
+download http://example.com/index.html
 ```
 
 ---

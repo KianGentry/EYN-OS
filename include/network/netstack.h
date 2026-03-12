@@ -36,6 +36,11 @@ typedef struct net_config {
     uint8 dns_ip[4];
 } net_config;
 
+// --- DNS (UDP, minimal) ---
+// Resolve a hostname to an IPv4 address using the configured DNS server.
+// Returns 0 on success, <0 on error.
+int net_dns_resolve(const char* name, uint8 out_ip[4], int timeout_spins);
+
 // --- Netstack timer facility ---
 // Uses system tick counter for lightweight scheduling.
 typedef void (*net_timer_cb)(void* ctx);
@@ -113,8 +118,21 @@ typedef struct net_tcp_stats {
     uint32 tcp_rx_dropped;
 } net_tcp_stats;
 
-// TCP receive payload cap
-#define NET_TCP_MAX_PAYLOAD 512u
+/*
+ * ABI-INVARIANT: Per-segment TCP payload buffer cap.
+ *
+ * Why: Must be large enough to hold a typical Ethernet/TCP segment payload
+ *      (about 1460 bytes at MTU 1500) to avoid truncation-based data loss.
+ * Invariant: TCP RX queue stores complete in-order payload segments up to this
+ *            bound; segments larger than this are dropped (not truncated).
+ * Breakage if changed:
+ *   - Lowering below common MSS can reintroduce silent partial downloads.
+ *   - Raising increases fixed kernel memory footprint (8 RX slots + retx copy).
+ * ABI-sensitive: No.
+ * Disk-format-sensitive: No.
+ * Security-critical: Yes (bounds copies from NIC frame data).
+ */
+#define NET_TCP_MAX_PAYLOAD 1536u
 
 typedef struct net_tcp_rx_packet {
     uint8 src_ip[4];
@@ -260,6 +278,9 @@ int net_tcp_listen(uint16 local_port);
 // Close current TCP connection (if any).
 int net_tcp_close(void);
 
+// Returns non-zero if no TCP connection is active.
+int net_tcp_is_closed(void);
+
 // Non-blocking receive from TCP RX queue.
 // Returns 1 if packet returned, 0 if none, <0 on error.
 int net_tcp_recv(net_tcp_rx_packet* out);
@@ -270,6 +291,12 @@ uint32 net_tcp_queue_count(void);
 // Send payload on the current established TCP connection.
 // Returns bytes sent or <0 on error.
 int net_tcp_send_current(const uint8* payload, uint32 payload_len);
+
+// Establish a TCP connection without sending data or closing.
+// Returns 0 on success, <0 on error.
+int net_tcp_connect(const uint8 local_ip[4], uint16 local_port,
+                    const uint8 dst_ip[4], uint16 dst_port,
+                    int timeout_spins);
 
 // Sends ICMP echo request(s) and waits for reply.
 //

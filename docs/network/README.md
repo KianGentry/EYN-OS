@@ -1,6 +1,6 @@
 # EYN-OS Networking
 
-EYN-OS implements a basic but functional networking stack supporting UDP/IPv4 communication over Intel e1000-compatible NICs.
+EYN-OS implements a basic but functional networking stack supporting UDP/IPv4, minimal TCP, and DNS resolution over Intel e1000-compatible NICs.
 
 ## Architecture Overview
 
@@ -17,6 +17,9 @@ The networking implementation is separated into distinct layers:
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
 │  │   UDP    │  │   IPv4   │  │   ARP    │  │
 │  └──────────┘  └──────────┘  └──────────┘  │
+│  ┌──────────┐  ┌──────────┐               │
+│  │   TCP    │  │   DNS    │               │
+│  └──────────┘  └──────────┘               │
 └──────────────────┬──────────────────────────┘
                    │
 ┌──────────────────▼──────────────────────────┐
@@ -57,6 +60,7 @@ See [e1000-driver.md](e1000-driver.md) for details.
   - ICMP echo (ping) support
   - ICMP error tracking (unreachable, time exceeded, frag needed)
   - Packet statistics
+  - DNS resolver (reads `/etc/resolv.conf` or falls back to `netcfg` DNS)
 
 See [network-stack.md](network-stack.md) for protocol details.
 
@@ -66,6 +70,7 @@ Commands for network interaction:
 - `pciscan [net]` - PCI device enumeration
 - `e1000 udp-send|udp-listen|udp-echo|udp-stats|udp-drain` - UDP utilities
 - `e1000 tcp-send|tcp-listen|tcp-recv|tcp-sendcur|tcp-close` - Minimal TCP tools
+- `download <url> [out]` - HTTP/1.1 GET download client with DNS
 - `ping <dst_ip> [count] [local_ip]` - ICMP echo
 - `netstat` - Network status dump
 - `netcfg show|defaults|set|save|load ...` - Network configuration (runtime + persisted)
@@ -140,7 +145,7 @@ e1000 udp-listen 9999
 | File | Purpose |
 |------|---------|
 | `src/drivers/e1000.c` | E1000 NIC driver |
-| `src/network/netstack.c` | UDP/IPv4/ARP stack |
+| `src/network/netstack.c` | UDP/TCP/IPv4/ARP stack + DNS |
 | `include/drivers/e1000.h` | E1000 API |
 | `include/network/netstack.h` | Network stack API |
 | `src/utilities/shell/shell_commands.c` | Network commands |
@@ -148,15 +153,13 @@ e1000 udp-listen 9999
 ## Future Enhancements
 
 Potential improvements for networking:
-
-- TCP implementation
 - DHCP client for automatic IP configuration
 - Persisted network configuration (VFS-backed)
 - Multiple socket support
 - Interrupt-based packet reception
 - IPv4 fragmentation/reassembly
-- DNS client
 - Higher-level socket API for userland programs
+- HTTPS/TLS support
 
 ## References
 

@@ -243,6 +243,11 @@ enum {
      * Returns the number of 4 KB chunks queued (>= 0), or -1 on error.
      */
     EYN_SYSCALL_AUDIO_WRITE_BULK = 118,
+    EYN_SYSCALL_NET_DNS_RESOLVE = 119,
+    EYN_SYSCALL_NET_TCP_CONNECT = 120,
+    EYN_SYSCALL_NET_TCP_SEND = 121,
+    EYN_SYSCALL_NET_TCP_RECV = 122,
+    EYN_SYSCALL_NET_TCP_CLOSE = 123,
 };
 
 typedef struct {
@@ -635,6 +640,32 @@ static inline int eyn_sys_net_get_sockets(eyn_net_socket_info_t* out, int out_ca
 
 static inline int eyn_sys_net_ping(const uint8_t dst_ip[4], const uint8_t local_ip[4], int count) {
     return eyn_syscall3_ppi(EYN_SYSCALL_NET_PING, dst_ip, local_ip, count);
+}
+
+// Resolve hostname to IPv4 using kernel DNS resolver.
+static inline int eyn_sys_net_dns_resolve(const char* name, uint8_t out_ip[4]) {
+    return eyn_syscall3_ppi(EYN_SYSCALL_NET_DNS_RESOLVE, name, out_ip, 0);
+}
+
+// Establish a TCP connection to dst_ip:dst_port (local_port=0 for ephemeral).
+static inline int eyn_sys_net_tcp_connect(const uint8_t dst_ip[4], uint16_t dst_port, uint16_t local_port) {
+    return eyn_syscall3_pii(EYN_SYSCALL_NET_TCP_CONNECT, dst_ip, (int)dst_port, (int)local_port);
+}
+
+// Send payload on the current TCP connection.
+static inline int eyn_sys_net_tcp_send(const void* buf, uint32_t len) {
+    return eyn_syscall3_pii(EYN_SYSCALL_NET_TCP_SEND, buf, (int)len, 0);
+}
+
+// Receive payload from the current TCP connection.
+// Returns bytes received, 0 if none, -2 if closed, or <0 on error.
+static inline int eyn_sys_net_tcp_recv(void* buf, uint32_t buflen) {
+    return eyn_syscall3_pii(EYN_SYSCALL_NET_TCP_RECV, buf, (int)buflen, 0);
+}
+
+// Close the current TCP connection.
+static inline int eyn_sys_net_tcp_close(void) {
+    return eyn_syscall1(EYN_SYSCALL_NET_TCP_CLOSE, 0);
 }
 
 static inline int eyn_sys_fs_check_integrity(void) {

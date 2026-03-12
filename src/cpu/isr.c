@@ -499,6 +499,22 @@ uint32 get_last_error_eip() {
  */
 #define SYSCALL_AUDIO_WRITE_BULK 118
 
+/*
+ * ABI-INVARIANT: Networking syscalls for DNS + TCP (119-123).
+ *
+ * Why: Provide userland access to DNS resolution and minimal TCP streams.
+ * Invariant: Numbers are locked once published; userland headers must match.
+ * Breakage if changed: User binaries will invoke the wrong syscalls.
+ * ABI-sensitive: Yes.
+ * Disk-format-sensitive: No.
+ * Security-critical: Yes (controls network access surface).
+ */
+#define SYSCALL_NET_DNS_RESOLVE 119
+#define SYSCALL_NET_TCP_CONNECT 120
+#define SYSCALL_NET_TCP_SEND 121
+#define SYSCALL_NET_TCP_RECV 122
+#define SYSCALL_NET_TCP_CLOSE 123
+
 // Cooperative scheduling from userland
 #define SYSCALL_SLEEP_US 22
 
@@ -2148,6 +2164,74 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (copyin(dst_ip, user_dst, 4) != 0) { regs->eax = (uint32)-1; break; }
             if (copyin(local_ip, user_local, 4) != 0) { regs->eax = (uint32)-1; break; }
             regs->eax = (uint32)net_icmp_ping(local_ip, dst_ip, count, 0);
+            break;
+        }
+        case SYSCALL_NET_DNS_RESOLVE: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const char* user_name = (const char*)arg1;
+            void* user_out = (void*)arg2;
+            if (!user_name || !user_out) { regs->eax = (uint32)-1; break; }
+
+            char name[256];
+            if (copyin_cstr(name, sizeof(name), user_name) != 0) { regs->eax = (uint32)-1; break; }
+
+            uint8 ip[4];
+            int rc = net_dns_resolve(name, ip, 0);
+            if (rc != 0) { regs->eax = (uint32)rc; break; }
+            if (copyout(user_out, ip, 4) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_NET_TCP_CONNECT: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const void* user_dst = (const void*)arg1;
+            uint16 dst_port = (uint16)arg2;
+            uint16 local_port = (uint16)arg3;
+            if (!user_dst) { regs->eax = (uint32)-1; break; }
+
+            uint8 dst_ip[4];
+            if (copyin(dst_ip, user_dst, 4) != 0) { regs->eax = (uint32)-1; break; }
+
+            uint8 local_ip[4];
+            net_get_local_ip(local_ip);
+            regs->eax = (uint32)net_tcp_connect(local_ip, local_port, dst_ip, dst_port, 0);
+            break;
+        }
+        case SYSCALL_NET_TCP_SEND: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const void* user_buf = (const void*)arg1;
+            uint32 len = (uint32)arg2;
+            if (!user_buf) { regs->eax = (uint32)-1; break; }
+            if (len > NET_TCP_MAX_PAYLOAD) { regs->eax = (uint32)-2; break; }
+
+            uint8 buf[NET_TCP_MAX_PAYLOAD];
+            if (len != 0u && copyin(buf, user_buf, (size_t)len) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_send_current(buf, len);
+            break;
+        }
+        case SYSCALL_NET_TCP_RECV: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            void* user_buf = (void*)arg1;
+            uint32 buflen = (uint32)arg2;
+            if (!user_buf) { regs->eax = (uint32)-1; break; }
+
+            net_tcp_rx_packet pkt;
+            int rc = net_tcp_recv(&pkt);
+            if (rc <= 0) {
+                if (rc == 0 && net_tcp_is_closed()) { regs->eax = (uint32)-2; break; }
+                regs->eax = (uint32)rc;
+                break;
+            }
+
+            uint32 copy_len = pkt.payload_len;
+            if (copy_len > buflen) copy_len = buflen;
+            if (copy_len != 0u && copyout(user_buf, pkt.payload, (size_t)copy_len) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)copy_len;
+            break;
+        }
+        case SYSCALL_NET_TCP_CLOSE: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_close();
             break;
         }
         case SYSCALL_FS_CHECK_INTEGRITY: {
