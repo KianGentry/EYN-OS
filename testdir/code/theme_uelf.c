@@ -85,13 +85,13 @@ static void handle_key(theme_state_t* st, int key) {
 
 static void render(theme_state_t* st) {
     (void)gui_begin(st->handle);
-    gui_rgb_t bg = { 10, 10, 14, 0 };
+    gui_rgb_t bg = { GUI_PAL_BG_R, GUI_PAL_BG_G, GUI_PAL_BG_B, 0 };
     (void)gui_clear(st->handle, &bg);
 
-    gui_text_t t1 = { .x = 8, .y = 8, .r = 230, .g = 230, .b = 245, ._pad = 0, .text = "Theme (ring3): set font path" };
-    gui_text_t t2 = { .x = 8, .y = 24, .r = 180, .g = 190, .b = 210, ._pad = 0, .text = "Type path, Enter=Apply, R=Reset(builtin), Q=Quit" };
-    gui_text_t t3 = { .x = 8, .y = 46, .r = 210, .g = 220, .b = 235, ._pad = 0, .text = st->path };
-    gui_text_t t4 = { .x = 8, .y = 64, .r = 150, .g = 200, .b = 220, ._pad = 0, .text = st->status };
+    gui_text_t t1 = { .x = 8, .y = 8, .r = GUI_PAL_TEXT_R, .g = GUI_PAL_TEXT_G, .b = GUI_PAL_TEXT_B, ._pad = 0, .text = "Theme (ring3): set font path" };
+    gui_text_t t2 = { .x = 8, .y = 24, .r = GUI_PAL_DIM_R, .g = GUI_PAL_DIM_G, .b = GUI_PAL_DIM_B, ._pad = 0, .text = "Type path, Enter=Apply, R=Reset(builtin), Q=Quit" };
+    gui_text_t t3 = { .x = 8, .y = 46, .r = GUI_PAL_TEXT_R, .g = GUI_PAL_TEXT_G, .b = GUI_PAL_TEXT_B, ._pad = 0, .text = st->path };
+    gui_text_t t4 = { .x = 8, .y = 64, .r = GUI_PAL_ACCENT_R, .g = GUI_PAL_ACCENT_G, .b = GUI_PAL_ACCENT_B, ._pad = 0, .text = st->status };
     (void)gui_draw_text(st->handle, &t1);
     (void)gui_draw_text(st->handle, &t2);
     (void)gui_draw_text(st->handle, &t3);

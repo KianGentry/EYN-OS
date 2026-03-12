@@ -10,9 +10,9 @@ EYN_CMDMETA_V1("Open the draw canvas editor.", "draw /images/sketch.rei");
 
 #define REI_MAGIC 0x52454900u
 #define REI_DEPTH_RGB 3u
-#define DRAW_BG_R 14
-#define DRAW_BG_G 16
-#define DRAW_BG_B 22
+#define DRAW_BG_R GUI_PAL_BG_R
+#define DRAW_BG_G GUI_PAL_BG_G
+#define DRAW_BG_B GUI_PAL_BG_B
 #define STATUS_H 18
 #define PANEL_W 190
 

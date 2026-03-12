@@ -19,12 +19,12 @@ EYN_CMDMETA_V1("Graphical text editor.", "edit [/path/to/file]");
 #define FIND_BUF_MAX   64
 #define TAB_WIDTH      4
 
-// Colours
+// Colours — base palette from OS defaults, app-specific overrides follow.
 
 /* Background */
-#define BG_R  30
-#define BG_G  30
-#define BG_B  30
+#define BG_R  GUI_PAL_BG_R
+#define BG_G  GUI_PAL_BG_G
+#define BG_B  GUI_PAL_BG_B
 
 /* Gutter (line numbers) */
 #define GUT_BG_R  36
@@ -41,19 +41,19 @@ EYN_CMDMETA_V1("Graphical text editor.", "edit [/path/to/file]");
 #define GUT_CUR_B 100
 
 /* Text */
-#define TXT_R 220
-#define TXT_G 220
-#define TXT_B 220
+#define TXT_R GUI_PAL_TEXT_R
+#define TXT_G GUI_PAL_TEXT_G
+#define TXT_B GUI_PAL_TEXT_B
 
 /* Current line highlight */
-#define CUR_LINE_R  38
-#define CUR_LINE_G  38
+#define CUR_LINE_R  GUI_PAL_STATUS_R
+#define CUR_LINE_G  GUI_PAL_STATUS_G
 #define CUR_LINE_B  44
 
 /* Cursor */
-#define CUR_R 220
-#define CUR_G 220
-#define CUR_B 220
+#define CUR_R GUI_PAL_TEXT_R
+#define CUR_G GUI_PAL_TEXT_G
+#define CUR_B GUI_PAL_TEXT_B
 
 /* Selection */
 #define SEL_R  60
@@ -61,9 +61,9 @@ EYN_CMDMETA_V1("Graphical text editor.", "edit [/path/to/file]");
 #define SEL_B 150
 
 /* Status bar */
-#define STAT_BG_R  38
-#define STAT_BG_G  38
-#define STAT_BG_B  38
+#define STAT_BG_R  GUI_PAL_STATUS_R
+#define STAT_BG_G  GUI_PAL_STATUS_G
+#define STAT_BG_B  GUI_PAL_STATUS_B
 
 #define STAT_FG_R 180
 #define STAT_FG_G 180
@@ -80,14 +80,14 @@ EYN_CMDMETA_V1("Graphical text editor.", "edit [/path/to/file]");
 #define MATCH_BG_B  60
 
 /* Scrollbar */
-#define SBAR_R  80
-#define SBAR_G  80
-#define SBAR_B  80
+#define SBAR_R  GUI_PAL_BORDER_R
+#define SBAR_G  GUI_PAL_BORDER_G
+#define SBAR_B  GUI_PAL_BORDER_B
 
 /* Syntax: keywords */
-#define KW_R  130
+#define KW_R  GUI_PAL_ACCENT_R
 #define KW_G  170
-#define KW_B  255
+#define KW_B  GUI_PAL_ACCENT_B
 
 /* Syntax: strings */
 #define STR_R  200

@@ -57,17 +57,17 @@ static void redraw(int h, int mx, int my, int buttons, int last_key) {
     if (sz.w <= 0) sz.w = 320;
     if (sz.h <= 0) sz.h = 200;
 
-    gui_rgb_t bg = { .r = 0, .g = 0, .b = 0, ._pad = 0 };
+    gui_rgb_t bg = { .r = GUI_PAL_BG_R, .g = GUI_PAL_BG_G, .b = GUI_PAL_BG_B, ._pad = 0 };
     (void)gui_clear(h, &bg);
 
-    gui_rect_t bar = { .x = 0, .y = 0, .w = sz.w, .h = 14, .r = 32, .g = 32, .b = 32, ._pad = 0 };
+    gui_rect_t bar = { .x = 0, .y = 0, .w = sz.w, .h = 14, .r = GUI_PAL_STATUS_R, .g = GUI_PAL_STATUS_G, .b = GUI_PAL_STATUS_B, ._pad = 0 };
     (void)gui_fill_rect(h, &bar);
 
     // Border
-    gui_line_t top = { .x1 = 0, .y1 = 0, .x2 = sz.w - 1, .y2 = 0, .r = 96, .g = 96, .b = 96, ._pad = 0 };
-    gui_line_t bot = { .x1 = 0, .y1 = sz.h - 1, .x2 = sz.w - 1, .y2 = sz.h - 1, .r = 96, .g = 96, .b = 96, ._pad = 0 };
-    gui_line_t lef = { .x1 = 0, .y1 = 0, .x2 = 0, .y2 = sz.h - 1, .r = 96, .g = 96, .b = 96, ._pad = 0 };
-    gui_line_t rig = { .x1 = sz.w - 1, .y1 = 0, .x2 = sz.w - 1, .y2 = sz.h - 1, .r = 96, .g = 96, .b = 96, ._pad = 0 };
+    gui_line_t top = { .x1 = 0, .y1 = 0, .x2 = sz.w - 1, .y2 = 0, .r = GUI_PAL_BORDER_R, .g = GUI_PAL_BORDER_G, .b = GUI_PAL_BORDER_B, ._pad = 0 };
+    gui_line_t bot = { .x1 = 0, .y1 = sz.h - 1, .x2 = sz.w - 1, .y2 = sz.h - 1, .r = GUI_PAL_BORDER_R, .g = GUI_PAL_BORDER_G, .b = GUI_PAL_BORDER_B, ._pad = 0 };
+    gui_line_t lef = { .x1 = 0, .y1 = 0, .x2 = 0, .y2 = sz.h - 1, .r = GUI_PAL_BORDER_R, .g = GUI_PAL_BORDER_G, .b = GUI_PAL_BORDER_B, ._pad = 0 };
+    gui_line_t rig = { .x1 = sz.w - 1, .y1 = 0, .x2 = sz.w - 1, .y2 = sz.h - 1, .r = GUI_PAL_BORDER_R, .g = GUI_PAL_BORDER_G, .b = GUI_PAL_BORDER_B, ._pad = 0 };
     (void)gui_draw_line(h, &top);
     (void)gui_draw_line(h, &bot);
     (void)gui_draw_line(h, &lef);
@@ -80,8 +80,8 @@ static void redraw(int h, int mx, int my, int buttons, int last_key) {
     if (cy < 0) cy = 0;
     if (cx >= sz.w) cx = sz.w - 1;
     if (cy >= sz.h) cy = sz.h - 1;
-    gui_line_t hline = { .x1 = 0, .y1 = cy, .x2 = sz.w - 1, .y2 = cy, .r = 0, .g = 120, .b = 200, ._pad = 0 };
-    gui_line_t vline = { .x1 = cx, .y1 = 0, .x2 = cx, .y2 = sz.h - 1, .r = 0, .g = 120, .b = 200, ._pad = 0 };
+    gui_line_t hline = { .x1 = 0, .y1 = cy, .x2 = sz.w - 1, .y2 = cy, .r = GUI_PAL_ACCENT_R, .g = GUI_PAL_ACCENT_G, .b = GUI_PAL_ACCENT_B, ._pad = 0 };
+    gui_line_t vline = { .x1 = cx, .y1 = 0, .x2 = cx, .y2 = sz.h - 1, .r = GUI_PAL_ACCENT_R, .g = GUI_PAL_ACCENT_G, .b = GUI_PAL_ACCENT_B, ._pad = 0 };
     (void)gui_draw_line(h, &hline);
     (void)gui_draw_line(h, &vline);
 
@@ -105,9 +105,9 @@ static void redraw(int h, int mx, int my, int buttons, int last_key) {
         buf_append_str(line2, (int)sizeof(line2), &l2, "press q to quit");
     }
 
-    gui_text_t t1 = { .x = 8, .y = 3, .r = 220, .g = 220, .b = 220, ._pad = 0, .text = line1 };
-    gui_text_t t2 = { .x = 8, .y = 20, .r = 200, .g = 200, .b = 0, ._pad = 0, .text = line2 };
-    gui_text_t t3 = { .x = 8, .y = 32, .r = 180, .g = 180, .b = 180, ._pad = 0, .text = "demo: clear/rect/text/line + key/mouse events" };
+    gui_text_t t1 = { .x = 8, .y = 3, .r = GUI_PAL_TEXT_R, .g = GUI_PAL_TEXT_G, .b = GUI_PAL_TEXT_B, ._pad = 0, .text = line1 };
+    gui_text_t t2 = { .x = 8, .y = 20, .r = GUI_PAL_ACCENT_R, .g = GUI_PAL_ACCENT_G, .b = GUI_PAL_ACCENT_B, ._pad = 0, .text = line2 };
+    gui_text_t t3 = { .x = 8, .y = 32, .r = GUI_PAL_DIM_R, .g = GUI_PAL_DIM_G, .b = GUI_PAL_DIM_B, ._pad = 0, .text = "demo: clear/rect/text/line + key/mouse events" };
     (void)gui_draw_text(h, &t1);
     (void)gui_draw_text(h, &t2);
     (void)gui_draw_text(h, &t3);

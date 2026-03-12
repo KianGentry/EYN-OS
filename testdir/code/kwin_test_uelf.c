@@ -34,13 +34,13 @@ int main(int argc, char** argv) {
         x += dx;
 
         (void)gui_begin(h);
-        gui_rgb_t bg = { .r = 16, .g = 18, .b = 26, ._pad = 0 };
+        gui_rgb_t bg = { .r = GUI_PAL_BG_R, .g = GUI_PAL_BG_G, .b = GUI_PAL_BG_B, ._pad = 0 };
         (void)gui_clear(h, &bg);
 
-        gui_rect_t r = { .x = x, .y = 90, .w = 140, .h = 90, .r = 90, .g = 130, .b = 210, ._pad = 0 };
+        gui_rect_t r = { .x = x, .y = 90, .w = 140, .h = 90, .r = GUI_PAL_ACCENT_R, .g = GUI_PAL_ACCENT_G, .b = GUI_PAL_ACCENT_B, ._pad = 0 };
         (void)gui_fill_rect(h, &r);
 
-        gui_text_t t = { .x = 10, .y = 10, .r = 255, .g = 240, .b = 180, ._pad = 0, .text = "Legacy window test command" };
+        gui_text_t t = { .x = 10, .y = 10, .r = GUI_PAL_TEXT_R, .g = GUI_PAL_TEXT_G, .b = GUI_PAL_TEXT_B, ._pad = 0, .text = "Legacy window test command" };
         (void)gui_draw_text(h, &t);
 
         (void)gui_present(h);

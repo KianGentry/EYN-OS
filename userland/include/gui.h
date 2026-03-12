@@ -169,3 +169,73 @@ int gui_warp_mouse(int handle, int x, int y);
 int gui_set_cursor_visible(int handle, int visible);
 
 int gui_wait_event(int handle, gui_event_t* out_event);
+
+/* ====================================================================
+ * Default OS colour palette — Materia-inspired neutral grays.
+ *
+ * Applications that include <gui.h> get these constants automatically.
+ * Using them ensures visual consistency with the WM chrome, file
+ * explorer, text editor, and other first-party applications.
+ *
+ * Palette mapping:
+ *   GUI_PAL_BG          #1E1E1E   Main content background
+ *   GUI_PAL_HEADER      #303030   Header / toolbar / breadcrumb
+ *   GUI_PAL_STATUS      #262626   Status bar background
+ *   GUI_PAL_SURFACE     #303030   Raised surface (panels, cards)
+ *   GUI_PAL_SELECTION   #424242   Selected / focused row
+ *   GUI_PAL_HOVER       #2A2A2A   Subtle hover highlight
+ *   GUI_PAL_TEXT         #DEDEDE   Primary text
+ *   GUI_PAL_TEXT_DIM     #8C8C8C   Secondary / hint text
+ *   GUI_PAL_ACCENT       blue     Accent (links, directories, active)
+ *   GUI_PAL_BORDER       #505050  Separator / scrollbar track
+ * ==================================================================== */
+
+/* Background */
+#define GUI_PAL_BG_R         30
+#define GUI_PAL_BG_G         30
+#define GUI_PAL_BG_B         30
+
+/* Header / toolbar */
+#define GUI_PAL_HEADER_R     48
+#define GUI_PAL_HEADER_G     48
+#define GUI_PAL_HEADER_B     48
+
+/* Status bar */
+#define GUI_PAL_STATUS_R     38
+#define GUI_PAL_STATUS_G     38
+#define GUI_PAL_STATUS_B     38
+
+/* Raised surface (same as header by default) */
+#define GUI_PAL_SURFACE_R    48
+#define GUI_PAL_SURFACE_G    48
+#define GUI_PAL_SURFACE_B    48
+
+/* Selection */
+#define GUI_PAL_SEL_R        66
+#define GUI_PAL_SEL_G        66
+#define GUI_PAL_SEL_B        66
+
+/* Hover */
+#define GUI_PAL_HOVER_R      42
+#define GUI_PAL_HOVER_G      42
+#define GUI_PAL_HOVER_B      42
+
+/* Primary text */
+#define GUI_PAL_TEXT_R       222
+#define GUI_PAL_TEXT_G       222
+#define GUI_PAL_TEXT_B       222
+
+/* Secondary / dim text */
+#define GUI_PAL_DIM_R        140
+#define GUI_PAL_DIM_G        140
+#define GUI_PAL_DIM_B        140
+
+/* Accent (blue) */
+#define GUI_PAL_ACCENT_R     130
+#define GUI_PAL_ACCENT_G     180
+#define GUI_PAL_ACCENT_B     255
+
+/* Border / separator */
+#define GUI_PAL_BORDER_R      80
+#define GUI_PAL_BORDER_G      80
+#define GUI_PAL_BORDER_B      80

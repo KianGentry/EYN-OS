@@ -50,9 +50,9 @@ EYN_CMDMETA_V1("Open an REI image, REIV video, REIS audio, or WAV audio viewer."
 #define AC97_DMA_BUF  4096u
 
 #define VIEW_STATUS_H 18
-#define VIEW_BG_R 30
-#define VIEW_BG_G 30
-#define VIEW_BG_B 30
+#define VIEW_BG_R GUI_PAL_BG_R
+#define VIEW_BG_G GUI_PAL_BG_G
+#define VIEW_BG_B GUI_PAL_BG_B
 
 typedef struct {
     uint32_t magic;
@@ -1360,9 +1360,9 @@ static void draw_status(app_t* app, const char* path) {
         .y = app->viewport_h,
         .w = app->content_w,
         .h = VIEW_STATUS_H,
-        .r = 38,
-        .g = 38,
-        .b = 38,
+        .r = GUI_PAL_STATUS_R,
+        .g = GUI_PAL_STATUS_G,
+        .b = GUI_PAL_STATUS_B,
         ._pad = 0
     };
     (void)gui_fill_rect(app->handle, &status_bg);
@@ -1406,8 +1406,8 @@ static void draw_status(app_t* app, const char* path) {
         str_copy(right, (int)sizeof(right), "+/- zoom  wheel zoom  arrows/mouse pan  Esc quit");
     }
 
-    gui_text_t t1 = { .x = 6, .y = app->viewport_h + 5, .r = 222, .g = 222, .b = 222, ._pad = 0, .text = left };
-    gui_text_t t2 = { .x = app->content_w / 2, .y = app->viewport_h + 5, .r = 140, .g = 140, .b = 140, ._pad = 0, .text = right };
+    gui_text_t t1 = { .x = 6, .y = app->viewport_h + 5, .r = GUI_PAL_TEXT_R, .g = GUI_PAL_TEXT_G, .b = GUI_PAL_TEXT_B, ._pad = 0, .text = left };
+    gui_text_t t2 = { .x = app->content_w / 2, .y = app->viewport_h + 5, .r = GUI_PAL_DIM_R, .g = GUI_PAL_DIM_G, .b = GUI_PAL_DIM_B, ._pad = 0, .text = right };
     (void)gui_draw_text(app->handle, &t1);
     (void)gui_draw_text(app->handle, &t2);
 }
@@ -1709,7 +1709,7 @@ int main(int argc, char** argv) {
                 /* Background bar */
                 gui_rect_t bar_bg = {
                     .x = bar_x, .y = bar_y, .w = bar_w, .h = bar_h,
-                    .r = 48, .g = 48, .b = 48, ._pad = 0
+                    .r = GUI_PAL_SURFACE_R, .g = GUI_PAL_SURFACE_G, .b = GUI_PAL_SURFACE_B, ._pad = 0
                 };
                 (void)gui_fill_rect(app.handle, &bar_bg);
 
@@ -1723,7 +1723,7 @@ int main(int argc, char** argv) {
                 if (fill_w > 0) {
                     gui_rect_t bar_fill = {
                         .x = bar_x, .y = bar_y, .w = fill_w, .h = bar_h,
-                        .r = 130, .g = 180, .b = 255, ._pad = 0
+                        .r = GUI_PAL_ACCENT_R, .g = GUI_PAL_ACCENT_G, .b = GUI_PAL_ACCENT_B, ._pad = 0
                     };
                     (void)gui_fill_rect(app.handle, &bar_fill);
                 }
@@ -1743,7 +1743,7 @@ int main(int argc, char** argv) {
 
                 gui_text_t info_text = {
                     .x = bar_x, .y = bar_y - 20,
-                    .r = 222, .g = 222, .b = 222, ._pad = 0,
+                    .r = GUI_PAL_TEXT_R, .g = GUI_PAL_TEXT_G, .b = GUI_PAL_TEXT_B, ._pad = 0,
                     .text = info
                 };
                 (void)gui_draw_text(app.handle, &info_text);

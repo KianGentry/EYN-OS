@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    gui_rgb_t bg = { .r = 12, .g = 12, .b = 16, ._pad = 0 };
+    gui_rgb_t bg = { .r = GUI_PAL_BG_R, .g = GUI_PAL_BG_G, .b = GUI_PAL_BG_B, ._pad = 0 };
     gui_rect_t rect = { .x = x, .y = y, .w = w, .h = h, .r = (uint8_t)r, .g = (uint8_t)g, .b = (uint8_t)b, ._pad = 0 };
 
     int running = 1;

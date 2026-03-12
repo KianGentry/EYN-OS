@@ -25,46 +25,45 @@ EYN_CMDMETA_V1("Graphical file explorer.", "files [/path]");
 #define FONT_H        10
 
 /*
-    Colour palette — matches the WM chrome:
-    title_focused = #424242, title_unfocused = #303030,
-    status = #262626, border = #505050, text = #DEDEDE.
+    Colour palette — uses the OS default from <gui.h>.
+    App-local aliases for brevity.
 */
 
-#define BG_R    30      /* #1E1E1E  — list area background             */
-#define BG_G    30
-#define BG_B    30
+#define BG_R    GUI_PAL_BG_R
+#define BG_G    GUI_PAL_BG_G
+#define BG_B    GUI_PAL_BG_B
 
-#define HDR_R   48      /* #303030  — header / breadcrumb bar          */
-#define HDR_G   48
-#define HDR_B   48
+#define HDR_R   GUI_PAL_HEADER_R
+#define HDR_G   GUI_PAL_HEADER_G
+#define HDR_B   GUI_PAL_HEADER_B
 
-#define SEL_R   66      /* #424242  — selected row highlight           */
-#define SEL_G   66
-#define SEL_B   66
+#define SEL_R   GUI_PAL_SEL_R
+#define SEL_G   GUI_PAL_SEL_G
+#define SEL_B   GUI_PAL_SEL_B
 
-#define HOV_R   42      /* #2A2A2A  — subtle hover hint                */
-#define HOV_G   42
-#define HOV_B   42
+#define HOV_R   GUI_PAL_HOVER_R
+#define HOV_G   GUI_PAL_HOVER_G
+#define HOV_B   GUI_PAL_HOVER_B
 
-#define DIR_R  130      /* blue accent for directories                 */
-#define DIR_G  180
-#define DIR_B  255
+#define DIR_R   GUI_PAL_ACCENT_R
+#define DIR_G   GUI_PAL_ACCENT_G
+#define DIR_B   GUI_PAL_ACCENT_B
 
-#define FILE_R 222      /* #DEDEDE  — standard text                    */
-#define FILE_G 222
-#define FILE_B 222
+#define FILE_R  GUI_PAL_TEXT_R
+#define FILE_G  GUI_PAL_TEXT_G
+#define FILE_B  GUI_PAL_TEXT_B
 
-#define PATH_R 222      /* breadcrumb text same as main text           */
-#define PATH_G 222
-#define PATH_B 222
+#define PATH_R  GUI_PAL_TEXT_R
+#define PATH_G  GUI_PAL_TEXT_G
+#define PATH_B  GUI_PAL_TEXT_B
 
-#define DIM_R  140      /* column headers, hints                       */
-#define DIM_G  140
-#define DIM_B  140
+#define DIM_R  GUI_PAL_DIM_R
+#define DIM_G  GUI_PAL_DIM_G
+#define DIM_B  GUI_PAL_DIM_B
 
-#define BORDER_R  80    /* #505050  — separator / scrollbar             */
-#define BORDER_G  80
-#define BORDER_B  80
+#define BORDER_R  GUI_PAL_BORDER_R
+#define BORDER_G  GUI_PAL_BORDER_G
+#define BORDER_B  GUI_PAL_BORDER_B
 
 /* Double-click detection threshold (frames at ~16 ms each) */
 #define DBLCLICK_FRAMES 20

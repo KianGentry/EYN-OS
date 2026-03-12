@@ -31,9 +31,9 @@ static void draw_grid(int h, int w, int hgt, int tick) {
                 .y = y,
                 .w = 24,
                 .h = 24,
-                .r = (uint8_t)(v ? 28 : 20),
-                .g = (uint8_t)(v ? 33 : 24),
-                .b = (uint8_t)(v ? 46 : 34),
+                .r = (uint8_t)(v ? GUI_PAL_HEADER_R : GUI_PAL_BG_R),
+                .g = (uint8_t)(v ? GUI_PAL_HEADER_G : GUI_PAL_BG_G),
+                .b = (uint8_t)(v ? GUI_PAL_HEADER_B : GUI_PAL_BG_B),
                 ._pad = 0
             };
             (void)gui_fill_rect(h, &cell);
@@ -76,7 +76,7 @@ static void draw_scene(int h, demo_box_t boxes[3], int active_idx, int mx, int m
 
     (void)gui_begin(h);
 
-    gui_rgb_t bg = { .r = 14, .g = 16, .b = 22, ._pad = 0 };
+    gui_rgb_t bg = { .r = GUI_PAL_BG_R, .g = GUI_PAL_BG_G, .b = GUI_PAL_BG_B, ._pad = 0 };
     (void)gui_clear(h, &bg);
     draw_grid(h, sz.w, sz.h, tick);
 
@@ -96,7 +96,7 @@ static void draw_scene(int h, demo_box_t boxes[3], int active_idx, int mx, int m
         draw_box(h, &boxes[bi], bi == active_idx);
     }
 
-    gui_text_t title = { .x = 8, .y = 6, .r = 255, .g = 255, .b = 255, ._pad = 0, .text = "Window Test: drag coloured windows, click to raise" };
+    gui_text_t title = { .x = 8, .y = 6, .r = GUI_PAL_TEXT_R, .g = GUI_PAL_TEXT_G, .b = GUI_PAL_TEXT_B, ._pad = 0, .text = "Window Test: drag coloured windows, click to raise" };
     (void)gui_draw_text(h, &title);
 
     char info[120];
