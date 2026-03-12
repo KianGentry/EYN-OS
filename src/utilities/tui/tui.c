@@ -55,13 +55,13 @@ void tui_draw_text(int x, int y, const char* text, tui_style_t style) {
     int cw = vga_text_cell_w();
     int ch = vga_text_cell_h();
     int rr = 0, gg = 0, bb = 0;
-    switch (style.fg_color) {
-        case TUI_COLOR_YELLOW: rr = 255; gg = 255; bb = 0; break;
-        case TUI_COLOR_RED:    rr = 255; gg = 0;   bb = 0; break;
-        case TUI_COLOR_MAGENTA:rr = 255; gg = 0;   bb = 255; break;
-        case TUI_COLOR_WHITE:  rr = 255; gg = 255; bb = 255; break;
-        case TUI_COLOR_BLACK:  rr = 0;   gg = 0;   bb = 0; break;
-        case TUI_COLOR_GRAY:   rr = 192; gg = 192; bb = 192; break;
+    switch (style.fg_colour) {
+        case TUI_COLOUR_YELLOW: rr = 255; gg = 255; bb = 0; break;
+        case TUI_COLOUR_RED:    rr = 255; gg = 0;   bb = 0; break;
+        case TUI_COLOUR_MAGENTA:rr = 255; gg = 0;   bb = 255; break;
+        case TUI_COLOUR_WHITE:  rr = 255; gg = 255; bb = 255; break;
+        case TUI_COLOUR_BLACK:  rr = 0;   gg = 0;   bb = 0; break;
+        case TUI_COLOUR_GRAY:   rr = 192; gg = 192; bb = 192; break;
         default:               rr = 255; gg = 255; bb = 255; break;
     }
     // Use side-effect-free pixel-based text to avoid console cursor side effects
@@ -133,13 +133,13 @@ void tui_draw_text_area(const tui_window_t* win, const char* text, int scroll_of
             int px = (x + col) * cell_w;
             int py = (y + line - scroll_offset) * cell_h;
             int rr = 255, gg = 255, bb = 255;
-            switch (style.fg_color) {
-                case TUI_COLOR_YELLOW: rr = 255; gg = 255; bb = 0; break;
-                case TUI_COLOR_RED:    rr = 255; gg = 0;   bb = 0; break;
-                case TUI_COLOR_MAGENTA:rr = 255; gg = 0;   bb = 255; break;
-                case TUI_COLOR_WHITE:  rr = 255; gg = 255; bb = 255; break;
-                case TUI_COLOR_BLACK:  rr = 0;   gg = 0;   bb = 0; break;
-                case TUI_COLOR_GRAY:   rr = 192; gg = 192; bb = 192; break;
+            switch (style.fg_colour) {
+                case TUI_COLOUR_YELLOW: rr = 255; gg = 255; bb = 0; break;
+                case TUI_COLOUR_RED:    rr = 255; gg = 0;   bb = 0; break;
+                case TUI_COLOUR_MAGENTA:rr = 255; gg = 0;   bb = 255; break;
+                case TUI_COLOUR_WHITE:  rr = 255; gg = 255; bb = 255; break;
+                case TUI_COLOUR_BLACK:  rr = 0;   gg = 0;   bb = 0; break;
+                case TUI_COLOUR_GRAY:   rr = 192; gg = 192; bb = 192; break;
                 default:               rr = 255; gg = 255; bb = 255; break;
             }
             drawTextAt(px, py, chbuf, rr, gg, bb);
@@ -164,13 +164,13 @@ void tui_draw_status_bar(const tui_window_t* win, const char* text, tui_style_t 
     int bar_width = (win == NULL) ? tui_screen_width : win->width;
     // Map style to RGB
     int rr = 255, gg = 255, bb = 255;
-    switch (style.fg_color) {
-        case TUI_COLOR_YELLOW: rr = 255; gg = 255; bb = 0; break;
-        case TUI_COLOR_RED:    rr = 255; gg = 0;   bb = 0; break;
-        case TUI_COLOR_MAGENTA:rr = 255; gg = 0;   bb = 255; break;
-        case TUI_COLOR_WHITE:  rr = 255; gg = 255; bb = 255; break;
-        case TUI_COLOR_BLACK:  rr = 0;   gg = 0;   bb = 0; break;
-        case TUI_COLOR_GRAY:   rr = 192; gg = 192; bb = 192; break;
+    switch (style.fg_colour) {
+        case TUI_COLOUR_YELLOW: rr = 255; gg = 255; bb = 0; break;
+        case TUI_COLOUR_RED:    rr = 255; gg = 0;   bb = 0; break;
+        case TUI_COLOUR_MAGENTA:rr = 255; gg = 0;   bb = 255; break;
+        case TUI_COLOUR_WHITE:  rr = 255; gg = 255; bb = 255; break;
+        case TUI_COLOUR_BLACK:  rr = 0;   gg = 0;   bb = 0; break;
+        case TUI_COLOUR_GRAY:   rr = 192; gg = 192; bb = 192; break;
         default:               rr = 255; gg = 255; bb = 255; break;
     }
 

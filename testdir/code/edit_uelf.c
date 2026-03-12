@@ -947,14 +947,14 @@ static int is_keyword_at(const char* text, int pos, int len) {
 }
 
 /*
- * Get syntax color for a character at position 'col' in a line.
- * Returns the color via r/g/b pointers.
+ * Get syntax colour for a character at position 'col' in a line.
+ * Returns the colour via r/g/b pointers.
  * Simple state machine: preprocessor, comment, string, keyword, number, default.
  */
-typedef struct { int r, g, b; } syn_color_t;
+typedef struct { int r, g, b; } syn_colour_t;
 
-static syn_color_t syntax_color(const char* text, int len, int col) {
-    syn_color_t c = { TXT_R, TXT_G, TXT_B }; /* default */
+static syn_colour_t syntax_colour(const char* text, int len, int col) {
+    syn_colour_t c = { TXT_R, TXT_G, TXT_B }; /* default */
 
     /* Preprocessor line */
     if (len > 0 && text[0] == '#') {
@@ -1172,17 +1172,17 @@ static void draw_editor(editor_t* ed) {
         if (draw_count <= 0) continue;
 
         if (ed->is_c_file) {
-            /* Syntax-colored rendering: batch same-color chars into text runs */
+            /* Syntax-coloured rendering: batch same-colour chars into text runs */
             int chunk_start = draw_from;
-            syn_color_t prev_color = syntax_color(ln->data, ln->len, draw_from);
+            syn_colour_t prev_colour = syntax_colour(ln->data, ln->len, draw_from);
 
             for (int ci = draw_from + 1; ci <= draw_from + draw_count; ++ci) {
-                syn_color_t cur_color = { TXT_R, TXT_G, TXT_B };
+                syn_colour_t cur_colour = { TXT_R, TXT_G, TXT_B };
                 if (ci < draw_from + draw_count)
-                    cur_color = syntax_color(ln->data, ln->len, ci);
+                    cur_colour = syntax_colour(ln->data, ln->len, ci);
 
                 int flush = (ci >= draw_from + draw_count) ||
-                            (cur_color.r != prev_color.r || cur_color.g != prev_color.g || cur_color.b != prev_color.b);
+                            (cur_colour.r != prev_colour.r || cur_colour.g != prev_colour.g || cur_colour.b != prev_colour.b);
 
                 if (flush) {
                     int run_len = ci - chunk_start;
@@ -1193,9 +1193,9 @@ static void draw_editor(editor_t* ed) {
                         int tx = ed->gutter_w + (chunk_start - ed->scroll_x) * fm.char_w;
                         gui_text_t tt = {
                             .x = tx, .y = py,
-                            .r = (unsigned char)prev_color.r,
-                            .g = (unsigned char)prev_color.g,
-                            .b = (unsigned char)prev_color.b,
+                            .r = (unsigned char)prev_colour.r,
+                            .g = (unsigned char)prev_colour.g,
+                            .b = (unsigned char)prev_colour.b,
                             ._pad = 0,
                             .text = run_buf
                         };
@@ -1211,9 +1211,9 @@ static void draw_editor(editor_t* ed) {
                             int tx = ed->gutter_w + (chunk_start + offset - ed->scroll_x) * fm.char_w;
                             gui_text_t tt = {
                                 .x = tx, .y = py,
-                                .r = (unsigned char)prev_color.r,
-                                .g = (unsigned char)prev_color.g,
-                                .b = (unsigned char)prev_color.b,
+                                .r = (unsigned char)prev_colour.r,
+                                .g = (unsigned char)prev_colour.g,
+                                .b = (unsigned char)prev_colour.b,
                                 ._pad = 0,
                                 .text = seg_buf
                             };
@@ -1222,7 +1222,7 @@ static void draw_editor(editor_t* ed) {
                         }
                     }
                     chunk_start = ci;
-                    prev_color = cur_color;
+                    prev_colour = cur_colour;
                 }
             }
         } else {

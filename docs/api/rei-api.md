@@ -16,7 +16,7 @@ typedef struct {
     uint32_t magic;        // Magic number to identify REI
     uint16_t width;        // Image width in pixels
     uint16_t height;       // Image height in pixels
-    uint8_t depth;         // Color depth (1, 3, or 4 bytes per pixel)
+    uint8_t depth;         // Colour depth (1, 3, or 4 bytes per pixel)
     uint8_t reserved1;     // Flags (low nibble: compression; 0=none, 1=RLE)
     uint16_t reserved2;    // Reserved for future use
 } rei_header_t;
@@ -145,7 +145,7 @@ Validates REI header for correctness.
 **Checks:**
 - Magic number
 - Dimensions (non-zero, within limits)
-- Color depth (valid values)
+- Colour depth (valid values)
 
 ### rei_calculate_data_size
 ```c
@@ -176,59 +176,59 @@ Calculates byte offset for pixel at coordinates.
 - Byte offset in pixel data
 - `-1` if coordinates are invalid
 
-### rei_get_pixel_color
+### rei_get_pixel_colour
 ```c
-uint32_t rei_get_pixel_color(const rei_image_t* image, int x, int y);
+uint32_t rei_get_pixel_colour(const rei_image_t* image, int x, int y);
 ```
 
-Gets pixel color at coordinates.
+Gets pixel colour at coordinates.
 
 **Parameters:**
 - `image`: Pointer to REI image
 - `x`, `y`: Pixel coordinates
 
 **Returns:**
-- 32-bit color value (format depends on depth)
+- 32-bit colour value (format depends on depth)
 
-### rei_set_pixel_color
+### rei_set_pixel_colour
 ```c
-void rei_set_pixel_color(rei_image_t* image, int x, int y, uint32_t color);
+void rei_set_pixel_colour(rei_image_t* image, int x, int y, uint32_t colour);
 ```
 
-Sets pixel color at coordinates.
+Sets pixel colour at coordinates.
 
 **Parameters:**
 - `image`: Pointer to REI image
 - `x`, `y`: Pixel coordinates
-- `color`: 32-bit color value
+- `colour`: 32-bit colour value
 
-## Color Conversion Functions
+## Colour Conversion Functions
 
 ### rei_rgb_to_vga
 ```c
 uint32_t rei_rgb_to_vga(uint8_t r, uint8_t g, uint8_t b);
 ```
 
-Converts RGB values to VGA color format.
+Converts RGB values to VGA colour format.
 
 **Parameters:**
 - `r`, `g`, `b`: RGB components (0-255)
 
 **Returns:**
-- VGA color value
+- VGA colour value
 
 ### rei_mono_to_vga
 ```c
 uint32_t rei_mono_to_vga(uint8_t mono);
 ```
 
-Converts monochrome value to VGA color.
+Converts monochrome value to VGA colour.
 
 **Parameters:**
 - `mono`: Monochrome value (0-255)
 
 **Returns:**
-- VGA color value
+- VGA colour value
 
 ## Error Handling
 

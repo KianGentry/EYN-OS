@@ -156,7 +156,7 @@ string readStr() {
                                 g_user_interrupt = 1;
                                 buffstr[0] = '\0';  // Clear the buffer
                                 reading = 0;        // Exit the reading loop
-                                /* Print ^C without color formatting (kernel printf doesn't accept RGB args here) */
+                                /* Print ^C without colour formatting (kernel printf doesn't accept RGB args here) */
                                 printf("^C\n");
                                 /* Return the (cleared) buffer to the caller */
                                 return buffstr;

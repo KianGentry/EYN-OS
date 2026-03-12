@@ -567,11 +567,11 @@ int shell_redirect_active = 0;
 int g_shell_capture_mode = 0;
 char shell_redirect_buf[SHELL_REDIRECT_BUF_SIZE];
 int shell_redirect_pos = 0;
-// Color for redirected output
-int shell_redirect_color_r = 255;
-int shell_redirect_color_g = 255;
-int shell_redirect_color_b = 255;
-// Per-char redirect colors parallel to shell_redirect_buf
+// Colour for redirected output
+int shell_redirect_colour_r = 255;
+int shell_redirect_colour_g = 255;
+int shell_redirect_colour_b = 255;
+// Per-char redirect colours parallel to shell_redirect_buf
 unsigned char shell_redirect_r[SHELL_REDIRECT_BUF_SIZE];
 unsigned char shell_redirect_g[SHELL_REDIRECT_BUF_SIZE];
 unsigned char shell_redirect_b[SHELL_REDIRECT_BUF_SIZE];
@@ -737,7 +737,7 @@ void drawRect(int x, int y, int w, int h, int r, int g, int b)
 
 	// If a backbuffer is available, draw into it; otherwise draw directly to framebuffer
 	if (g_backbuffer && g_backbuffer_w >= sw && g_backbuffer_h >= sh) {
-		// 32-bit packed color write for speed
+		// 32-bit packed colour write for speed
 		uint32_t packed = ((uint32_t)0 << 24) | ((uint32_t)(unsigned char)r << 16) | ((uint32_t)(unsigned char)g << 8) | (uint32_t)(unsigned char)b;
 		for (int i = 0; i < h; i++) {
 			uint32_t* row = (uint32_t*)(g_backbuffer + ((size_t)(y + i) * g_backbuffer_w + x) * 4);
@@ -1134,17 +1134,17 @@ void printf(const char* format, ...)
 	uint8 *ptr;
 	static int r = 255, g = 255, b = 255; // Default to white, static to maintain state
 
-	// Reset color to white at the start of each printf call
+	// Reset colour to white at the start of each printf call
 	r = 255;
 	g = 255;
 	b = 255;
 
-	// Check if color parameters are provided
+	// Check if colour parameters are provided
 	if (format[0] == '%' && format[1] == 'c') {
 		r = va_arg(ap, int);
 		g = va_arg(ap, int);
 		b = va_arg(ap, int);
-		format += 2; // Skip the color format specifier
+		format += 2; // Skip the colour format specifier
 	}
 
 	// Redirection/capture logic
@@ -1152,16 +1152,16 @@ void printf(const char* format, ...)
 		char temp[512];
 		int temp_pos = vga_format_to_buffer(temp, (int)sizeof(temp), format, ap);
 		
-		// record color for redirected output so callers can render it with the same color
-		shell_redirect_color_r = r;
-		shell_redirect_color_g = g;
-		shell_redirect_color_b = b;
+		// record colour for redirected output so callers can render it with the same colour
+		shell_redirect_colour_r = r;
+		shell_redirect_colour_g = g;
+		shell_redirect_colour_b = b;
 		// Append to the global buffer (with bounds checking)
 		int to_copy = temp_pos;
 		if (shell_redirect_pos + to_copy >= SHELL_REDIRECT_BUF_SIZE - 1) {
 			to_copy = SHELL_REDIRECT_BUF_SIZE - shell_redirect_pos - 1;
 		}
-		// store per-char color metadata for the temp buffer (for the actual copied count)
+		// store per-char colour metadata for the temp buffer (for the actual copied count)
 		for (int i = 0; i < to_copy; ++i) {
 			shell_redirect_r[shell_redirect_pos + i] = (unsigned char)r;
 			shell_redirect_g[shell_redirect_pos + i] = (unsigned char)g;
@@ -1171,7 +1171,7 @@ void printf(const char* format, ...)
 			shell_redirect_buf[shell_redirect_pos++] = temp[i];
 		}
 		shell_redirect_buf[shell_redirect_pos] = '\0';
-		// Also mirror to serial without colors
+		// Also mirror to serial without colours
 		for (int i = 0; i < to_copy; ++i) {
 			serial_write_char(SERIAL_COM1, temp[i]);
 		}
@@ -1232,7 +1232,7 @@ void printf(const char* format, ...)
 		}
 	}
 
-	// Mirror output to serial as we render to VGA (without color codes)
+	// Mirror output to serial as we render to VGA (without colour codes)
 	{
 		va_list ap_serial;
 		va_copy(ap_serial, ap);
@@ -2000,7 +2000,7 @@ void drawTextAt(int x, int y, const char* text, int rr, int gg, int bb)
 			cy += glyph_h;
 			continue;
 		}
-		// draw a single char at the pixel position with color
+		// draw a single char at the pixel position with colour
 		drawCharAt(cx, cy, (int)(unsigned char)*p, rr, gg, bb);
 		cx += 8;
 	}
@@ -2019,16 +2019,16 @@ void start_shell_redirect() {
 	shell_redirect_active = 1;
 	shell_redirect_pos = 0;
 	shell_redirect_buf[0] = '\0';
-	// clear per-char redirect color arrays
+	// clear per-char redirect colour arrays
 	for (int i = 0; i < SHELL_REDIRECT_BUF_SIZE; ++i) {
 		shell_redirect_r[i] = 0;
 		shell_redirect_g[i] = 0;
 		shell_redirect_b[i] = 0;
 	}
-	// reset current redirect color so new typed input falls back to vterm default
-	shell_redirect_color_r = 0;
-	shell_redirect_color_g = 0;
-	shell_redirect_color_b = 0;
+	// reset current redirect colour so new typed input falls back to vterm default
+	shell_redirect_colour_r = 0;
+	shell_redirect_colour_g = 0;
+	shell_redirect_colour_b = 0;
 	// clear any previously recorded icons for this redirect session
 	shell_redirect_icon_count = 0;
 }
@@ -2037,10 +2037,10 @@ void start_shell_redirect() {
 void stop_shell_redirect() {
 	shell_redirect_active = 0;
 	shell_redirect_pos = 0;
-	// clear redirect color so subsequent typed input doesn't inherit last printed color
-	shell_redirect_color_r = 0;
-	shell_redirect_color_g = 0;
-	shell_redirect_color_b = 0;
+	// clear redirect colour so subsequent typed input doesn't inherit last printed colour
+	shell_redirect_colour_r = 0;
+	shell_redirect_colour_g = 0;
+	shell_redirect_colour_b = 0;
 }
 
 // Register an icon to be associated with the current output position in shell_redirect_buf.
@@ -2099,15 +2099,15 @@ int snprintf(char *str, size_t size, const char *format, ...) {
     return pos;
 }
 
-void vga_set_color(int nr, int ng, int nb) {
+void vga_set_colour(int nr, int ng, int nb) {
 	vga_default_r = nr;
 	vga_default_g = ng;
 	vga_default_b = nb;
 }
 
-// Bold font - just use regular drawText with brighter color for now
+// Bold font - just use regular drawText with brighter colour for now
 void drawText_bold(int charnum, int r, int g, int b) {
-    // For now, just use regular drawText with brighter color
+    // For now, just use regular drawText with brighter colour
     drawText(charnum, r, g, b);
 }
 
@@ -2155,7 +2155,7 @@ void render_markdown(const char* content) {
             }
             if (content[i] == ' ') {
                 in_header = 1;
-                // Print header with different color
+                // Print header with different colour
                 printf("%c", 200, 180, 255); // Soft lavender for headers
                 continue;
             } else {

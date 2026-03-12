@@ -196,6 +196,53 @@ enum {
      * Returns 0 on success, -1 on error.
      */
     EYN_SYSCALL_GUI_SET_CURSOR_VISIBLE = 112,
+
+    /* ---- Audio (AC97) syscalls ---- */
+
+    /*
+     * EYN_SYSCALL_AUDIO_PROBE (113)
+     * Detect whether an AC97 audio controller is present.
+     * Returns 0 if found, -1 if absent.
+     */
+    EYN_SYSCALL_AUDIO_PROBE = 113,
+
+    /*
+     * EYN_SYSCALL_AUDIO_INIT (114)
+     * Initialise the AC97 controller (DMA, codec, IRQ).
+     * Returns 0 on success, -1 on failure.
+     */
+    EYN_SYSCALL_AUDIO_INIT = 114,
+
+    /*
+     * EYN_SYSCALL_AUDIO_WRITE (115)
+     * audio_write(const void* buf, int size_bytes)
+     * Submit 16-bit signed LE stereo PCM at 48 kHz for playback.
+     * size_bytes is clamped to 4096.
+     * Returns 0 on success, -1 on error.
+     */
+    EYN_SYSCALL_AUDIO_WRITE = 115,
+
+    /*
+     * EYN_SYSCALL_AUDIO_STOP (116)
+     * Stop playback and silence output.
+     * Returns 0.
+     */
+    EYN_SYSCALL_AUDIO_STOP = 116,
+
+    /*
+     * EYN_SYSCALL_AUDIO_IS_AVAILABLE (117)
+     * Returns 1 if audio is initialised, 0 otherwise.
+     */
+    EYN_SYSCALL_AUDIO_IS_AVAILABLE = 117,
+
+    /*
+     * EYN_SYSCALL_AUDIO_WRITE_BULK (118)
+     * audio_write_bulk(const void* buf, int total_size_bytes)
+     * Submit up to 32 KB of 48 kHz stereo s16le PCM in one syscall.
+     * The kernel splits the buffer into 4 KB DMA chunks and queues them.
+     * Returns the number of 4 KB chunks queued (>= 0), or -1 on error.
+     */
+    EYN_SYSCALL_AUDIO_WRITE_BULK = 118,
 };
 
 typedef struct {
@@ -678,6 +725,32 @@ static inline int eyn_sys_trigger_pf(uint32_t addr, int mode, int confirmed_yes)
 
 static inline int eyn_sys_ring3_test(int confirmed_yes) {
     return eyn_syscall1(EYN_SYSCALL_RING3, confirmed_yes ? 1 : 0);
+}
+
+/* ---- Audio syscall wrappers ---- */
+
+static inline int eyn_sys_audio_probe(void) {
+    return eyn_syscall0(EYN_SYSCALL_AUDIO_PROBE);
+}
+
+static inline int eyn_sys_audio_init(void) {
+    return eyn_syscall0(EYN_SYSCALL_AUDIO_INIT);
+}
+
+static inline int eyn_sys_audio_write(const void* buf, int size_bytes) {
+    return eyn_syscall3_pii(EYN_SYSCALL_AUDIO_WRITE, buf, size_bytes, 0);
+}
+
+static inline int eyn_sys_audio_stop(void) {
+    return eyn_syscall0(EYN_SYSCALL_AUDIO_STOP);
+}
+
+static inline int eyn_sys_audio_is_available(void) {
+    return eyn_syscall0(EYN_SYSCALL_AUDIO_IS_AVAILABLE);
+}
+
+static inline int eyn_sys_audio_write_bulk(const void* buf, int total_size_bytes) {
+    return eyn_syscall3_pii(EYN_SYSCALL_AUDIO_WRITE_BULK, buf, total_size_bytes, 0);
 }
 
 #ifndef __chibicc__

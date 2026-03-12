@@ -1,6 +1,5 @@
 #include <pipeline.h>
 #include <shell.h>
-#include <shell_commands.h>
 #include <shell_command_info.h>
 #include <utilities/shell/shell_args.h>
 #include <fs_commands.h>

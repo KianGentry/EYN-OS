@@ -20,17 +20,17 @@ volatile int g_abort_to_shell = 0;
 volatile int g_user_task_term = -1;
 volatile int g_user_task_ui_dirty = 0;
 
-// User-task console color state (used by ring3 stdout/stderr). Defaults to white.
-volatile int g_user_task_color_r = 255;
-volatile int g_user_task_color_g = 255;
-volatile int g_user_task_color_b = 255;
+// User-task console colour state (used by ring3 stdout/stderr). Defaults to white.
+volatile int g_user_task_colour_r = 255;
+volatile int g_user_task_colour_g = 255;
+volatile int g_user_task_colour_b = 255;
 // Parser state for 0xFF,r,g,b control sequences that may be split across writes.
-volatile uint8 g_user_task_color_state = 0;
-volatile uint8 g_user_task_color_bytes[3] = {0, 0, 0};
+volatile uint8 g_user_task_colour_state = 0;
+volatile uint8 g_user_task_colour_bytes[3] = {0, 0, 0};
 
 // Parser state for ring3 stdout control sequences.
 //
-// - 0xFF,r,g,b sets the current user-task RGB text color.
+// - 0xFF,r,g,b sets the current user-task RGB text colour.
 // - 0xFE,<16 bytes> registers a GUI icon key for the current output line.
 //   The key is a NUL-terminated string padded with zeros up to 16 bytes,
 //   matching entries in /icons (e.g. "file_txt", "dir_full").
@@ -99,10 +99,10 @@ void ui_return_from_user_task(void) {
     g_user_task_term = -1;
     g_user_task_ui_dirty = 0;
 
-    g_user_task_color_r = 255;
-    g_user_task_color_g = 255;
-    g_user_task_color_b = 255;
-    g_user_task_color_state = 0;
+    g_user_task_colour_r = 255;
+    g_user_task_colour_g = 255;
+    g_user_task_colour_b = 255;
+    g_user_task_colour_state = 0;
     g_user_task_icon_state = 0;
 
     // Prefer the graphical tiling-manager shell when it's been initialized.

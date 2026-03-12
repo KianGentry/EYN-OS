@@ -13,7 +13,7 @@
 
 // Misc
 void render_markdown(const char* content);
-void vga_set_color(int nr, int ng, int nb);
+void vga_set_colour(int nr, int ng, int nb);
 
 // Function prototypes
 void init_dynamic_log_buffer(void);
@@ -97,11 +97,11 @@ extern int g_shell_capture_mode;
 extern char shell_redirect_buf[SHELL_REDIRECT_BUF_SIZE];
 // Current write position in shell_redirect_buf while redirect is active.
 extern int shell_redirect_pos;
-// Color used for the last redirected output (set by printf while redirect active)
-extern int shell_redirect_color_r;
-extern int shell_redirect_color_g;
-extern int shell_redirect_color_b;
-// Per-character color for redirected output (parallel to shell_redirect_buf)
+// Colour used for the last redirected output (set by printf while redirect active)
+extern int shell_redirect_colour_r;
+extern int shell_redirect_colour_g;
+extern int shell_redirect_colour_b;
+// Per-character colour for redirected output (parallel to shell_redirect_buf)
 extern unsigned char shell_redirect_r[SHELL_REDIRECT_BUF_SIZE];
 extern unsigned char shell_redirect_g[SHELL_REDIRECT_BUF_SIZE];
 extern unsigned char shell_redirect_b[SHELL_REDIRECT_BUF_SIZE];

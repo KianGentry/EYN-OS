@@ -25,7 +25,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 - **[Shell Scripts](ui/shell-scripts.md)** - Shell scripting support
 - **[Command Aliases](ui/shell.md#aliases)** - Persistent command aliases with parameters
 - **[Tiling Manager](ui/tiling-manager.md)** - Tile-based UI and floating windows (GUI API)
-- **[Theme Customization](ui/tiling-manager.md#themes)** - Customizable colors and fonts
+- **[Theme Customization](ui/tiling-manager.md#themes)** - Customizable colours and fonts
 - **[Stats Monitor](ui/stats-gui.md)** - Graphical CPU/memory/disk monitor
 - **[Help System](ui/enhanced-help-system.md)** - Interactive help command
 - **[Command Reference](command-reference.md)** - Complete command documentation (auto-generated)

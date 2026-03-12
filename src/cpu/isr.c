@@ -22,10 +22,10 @@
 #include <ata.h>
 #include <serial.h>
 #include <crashlog.h>
-#include <shell_commands.h>
 #include <pipeline.h>
 #include <drivers/pci.h>
 #include <drivers/e1000.h>
+#include <drivers/ac97.h>
 #include <network/netstack.h>
 #include <predictive_memory.h>
 #include <run_command.h>
@@ -429,6 +429,75 @@ uint32 get_last_error_eip() {
  * Security: Same capability requirements as gui_warp_mouse.
  */
 #define SYSCALL_GUI_SET_CURSOR_VISIBLE 112
+
+/*
+ * SYSCALL_AUDIO_PROBE (113): Detect whether an AC97 audio controller is
+ * present on the PCI bus.
+ *
+ * args: none
+ * returns: 0 if found, -1 if absent.
+ * ABI-sensitive: Yes (number 113 is locked once published).
+ */
+#define SYSCALL_AUDIO_PROBE 113
+
+/*
+ * SYSCALL_AUDIO_INIT (114): Initialise the AC97 audio controller.
+ *
+ * Allocates DMA buffers, programs the codec, and registers the IRQ handler.
+ * Must be called after a successful AUDIO_PROBE.
+ * args: none
+ * returns: 0 on success, -1 on failure.
+ * ABI-sensitive: Yes (number 114 is locked once published).
+ */
+#define SYSCALL_AUDIO_INIT 114
+
+/*
+ * SYSCALL_AUDIO_WRITE (115): Submit a buffer of PCM data for playback.
+ *
+ * args: (const void* buf, int size_bytes)
+ *   buf:  pointer to 16-bit signed LE stereo PCM at 48 kHz.
+ *   size: byte length, clamped to AC97_DMA_BUF_SIZE (4096).
+ * returns: 0 on success, -1 on error.
+ * ABI-sensitive: Yes (number 115 is locked once published).
+ * SECURITY-INVARIANT: buf is validated and copied from user space.
+ */
+#define SYSCALL_AUDIO_WRITE 115
+
+/*
+ * SYSCALL_AUDIO_STOP (116): Stop audio playback and silence the output.
+ *
+ * args: none
+ * returns: 0 always.
+ * ABI-sensitive: Yes (number 116 is locked once published).
+ */
+#define SYSCALL_AUDIO_STOP 116
+
+/*
+ * SYSCALL_AUDIO_IS_AVAILABLE (117): Query whether audio is initialised.
+ *
+ * args: none
+ * returns: 1 if audio is available, 0 if not.
+ * ABI-sensitive: Yes (number 117 is locked once published).
+ */
+#define SYSCALL_AUDIO_IS_AVAILABLE 117
+
+/*
+ * SYSCALL_AUDIO_WRITE_BULK (118): Submit a large PCM buffer for playback.
+ *
+ * The kernel splits the user buffer into AC97_DMA_BUF_SIZE (4 KB) chunks
+ * and queues as many as the ring can accept in one syscall, then restarts
+ * DMA at most once.  This reduces per-buffer syscall overhead from N
+ * round-trips to 1.
+ *
+ * args: (const void* buf, int total_size_bytes)
+ *   buf:        pointer to 16-bit signed LE stereo PCM at 48 kHz.
+ *   total_size: total byte length (capped to 32 768 = 8 DMA buffers).
+ * returns: number of 4 KB chunks queued (>= 0), or -1 on error.
+ *          0 means the ring was already full.
+ * ABI-sensitive: Yes (number 118 is locked once published).
+ * SECURITY-INVARIANT: buf is validated and copied per-chunk from user space.
+ */
+#define SYSCALL_AUDIO_WRITE_BULK 118
 
 // Cooperative scheduling from userland
 #define SYSCALL_SLEEP_US 22
@@ -1179,33 +1248,33 @@ static int syscall_getdents_cb(const char* name, int is_dir, uint32 size, void* 
 static void syscall_console_write(const char* buf, int len) {
     if (!buf || len <= 0) return;
 
-    // For user-task output, explicitly control the vterm color so it does not
-    // inherit shell capture/redirect colors. Programs can change it by writing
+    // For user-task output, explicitly control the vterm colour so it does not
+    // inherit shell capture/redirect colours. Programs can change it by writing
     // the byte sequence: 0xFF, r, g, b.
-    extern volatile int g_user_task_color_r;
-    extern volatile int g_user_task_color_g;
-    extern volatile int g_user_task_color_b;
-    extern volatile uint8 g_user_task_color_state;
-    extern volatile uint8 g_user_task_color_bytes[3];
+    extern volatile int g_user_task_colour_r;
+    extern volatile int g_user_task_colour_g;
+    extern volatile int g_user_task_colour_b;
+    extern volatile uint8 g_user_task_colour_state;
+    extern volatile uint8 g_user_task_colour_bytes[3];
     extern volatile uint8 g_user_task_icon_state;
     extern volatile uint8 g_user_task_icon_bytes[16];
-    extern int shell_redirect_color_r;
-    extern int shell_redirect_color_g;
-    extern int shell_redirect_color_b;
+    extern int shell_redirect_colour_r;
+    extern int shell_redirect_colour_g;
+    extern int shell_redirect_colour_b;
 
-    int prev_r = shell_redirect_color_r;
-    int prev_g = shell_redirect_color_g;
-    int prev_b = shell_redirect_color_b;
+    int prev_r = shell_redirect_colour_r;
+    int prev_g = shell_redirect_colour_g;
+    int prev_b = shell_redirect_colour_b;
 
-    // Start with current user-task color (default white).
-    shell_redirect_color_r = (int)g_user_task_color_r;
-    shell_redirect_color_g = (int)g_user_task_color_g;
-    shell_redirect_color_b = (int)g_user_task_color_b;
+    // Start with current user-task colour (default white).
+    shell_redirect_colour_r = (int)g_user_task_colour_r;
+    shell_redirect_colour_g = (int)g_user_task_colour_g;
+    shell_redirect_colour_b = (int)g_user_task_colour_b;
 
     // Control sequences for ring3 stdout/stderr.
-    //  - 0xFF,r,g,b: set current color
+    //  - 0xFF,r,g,b: set current colour
     //  - 0xFE,<16 bytes>: register line icon key
-    const uint8 CTRL_COLOR = 0xFF;
+    const uint8 CTRL_COLOUR = 0xFF;
     const uint8 CTRL_ICON = 0xFE;
     if (tile_is_tiling_active()) {
         int term = tile_get_focused();
@@ -1216,21 +1285,21 @@ static void syscall_console_write(const char* buf, int len) {
         for (int i = 0; i < len; ++i) {
             uint8 ch = (uint8)buf[i];
 
-            if (g_user_task_color_state != 0) {
+            if (g_user_task_colour_state != 0) {
                 // Collect r,g,b across bytes (sequence may be split across writes).
-                int idx = (int)g_user_task_color_state - 1;
+                int idx = (int)g_user_task_colour_state - 1;
                 if (idx >= 0 && idx < 3) {
-                    g_user_task_color_bytes[idx] = ch;
+                    g_user_task_colour_bytes[idx] = ch;
                 }
-                g_user_task_color_state++;
-                if (g_user_task_color_state == 4) {
-                    g_user_task_color_r = (int)g_user_task_color_bytes[0];
-                    g_user_task_color_g = (int)g_user_task_color_bytes[1];
-                    g_user_task_color_b = (int)g_user_task_color_bytes[2];
-                    shell_redirect_color_r = (int)g_user_task_color_r;
-                    shell_redirect_color_g = (int)g_user_task_color_g;
-                    shell_redirect_color_b = (int)g_user_task_color_b;
-                    g_user_task_color_state = 0;
+                g_user_task_colour_state++;
+                if (g_user_task_colour_state == 4) {
+                    g_user_task_colour_r = (int)g_user_task_colour_bytes[0];
+                    g_user_task_colour_g = (int)g_user_task_colour_bytes[1];
+                    g_user_task_colour_b = (int)g_user_task_colour_bytes[2];
+                    shell_redirect_colour_r = (int)g_user_task_colour_r;
+                    shell_redirect_colour_g = (int)g_user_task_colour_g;
+                    shell_redirect_colour_b = (int)g_user_task_colour_b;
+                    g_user_task_colour_state = 0;
                 }
                 continue;
             }
@@ -1253,8 +1322,8 @@ static void syscall_console_write(const char* buf, int len) {
                 continue;
             }
 
-            if (ch == CTRL_COLOR) {
-                g_user_task_color_state = 1;
+            if (ch == CTRL_COLOUR) {
+                g_user_task_colour_state = 1;
                 continue;
             }
             if (ch == CTRL_ICON) {
@@ -1267,9 +1336,9 @@ static void syscall_console_write(const char* buf, int len) {
         if (g_user_task_active) {
             g_user_task_ui_dirty = 1;
         }
-        shell_redirect_color_r = prev_r;
-        shell_redirect_color_g = prev_g;
-        shell_redirect_color_b = prev_b;
+        shell_redirect_colour_r = prev_r;
+        shell_redirect_colour_g = prev_g;
+        shell_redirect_colour_b = prev_b;
         return;
     }
     // Fallback: use kernel printf (serial/text console)
@@ -1287,15 +1356,15 @@ static void syscall_console_write(const char* buf, int len) {
     for (int i = 0; i < len; ++i) {
         uint8 ch = (uint8)buf[i];
 
-        if (g_user_task_color_state != 0) {
-            int idx = (int)g_user_task_color_state - 1;
-            if (idx >= 0 && idx < 3) g_user_task_color_bytes[idx] = ch;
-            g_user_task_color_state++;
-            if (g_user_task_color_state == 4) {
-                g_user_task_color_r = (int)g_user_task_color_bytes[0];
-                g_user_task_color_g = (int)g_user_task_color_bytes[1];
-                g_user_task_color_b = (int)g_user_task_color_bytes[2];
-                g_user_task_color_state = 0;
+        if (g_user_task_colour_state != 0) {
+            int idx = (int)g_user_task_colour_state - 1;
+            if (idx >= 0 && idx < 3) g_user_task_colour_bytes[idx] = ch;
+            g_user_task_colour_state++;
+            if (g_user_task_colour_state == 4) {
+                g_user_task_colour_r = (int)g_user_task_colour_bytes[0];
+                g_user_task_colour_g = (int)g_user_task_colour_bytes[1];
+                g_user_task_colour_b = (int)g_user_task_colour_bytes[2];
+                g_user_task_colour_state = 0;
             }
             continue;
         }
@@ -1310,7 +1379,7 @@ static void syscall_console_write(const char* buf, int len) {
             continue;
         }
 
-        if (ch == CTRL_COLOR) { FLUSH_OUT(); g_user_task_color_state = 1; continue; }
+        if (ch == CTRL_COLOUR) { FLUSH_OUT(); g_user_task_colour_state = 1; continue; }
         if (ch == CTRL_ICON) { FLUSH_OUT(); g_user_task_icon_state = 1; continue; }
 
         out[out_len++] = (char)ch;
@@ -1322,9 +1391,9 @@ static void syscall_console_write(const char* buf, int len) {
     FLUSH_OUT();
     #undef FLUSH_OUT
 
-    shell_redirect_color_r = prev_r;
-    shell_redirect_color_g = prev_g;
-    shell_redirect_color_b = prev_b;
+    shell_redirect_colour_r = prev_r;
+    shell_redirect_colour_g = prev_g;
+    shell_redirect_colour_b = prev_b;
 }
 
 static void syscall_maybe_render_ui(void) {
@@ -1472,18 +1541,29 @@ static int syscall_seek_fd(user_fd_t* ufd, int32 offset, int whence) {
     }
     ufd->offset = (uint32)next;
     /*
-     * Reset the EYNFS block cursor on any seek.  eynfs_read_file_fast() will
-     * re-traverse from first_block when cur_block == 0, so an explicit reset
-     * here avoids any stale cursor pointing past the new offset causing the
-     * cursor-continuation path to use the wrong starting block.  Backward
-     * seeks already fall back correctly (offset < cur_block_off), but forward
-     * seeks to a position that happens to land exactly on cur_block_off could
-     * re-use a cursor that has accumulated rounding drift.  Resetting on every
-     * seek is the safest choice; the traversal cost for WAD lump reads is
-     * amortised across sequential reads within each lump.
+     * EYNFS block cursor management.
+     *
+     * For FORWARD seeks (new offset >= cur_block_off), the cursor is
+     * preserved.  eynfs_read_file_fast() already handles forward jumps
+     * by traversing from the cursor instead of from the file start,
+     * avoiding an O(offset/block_size) chain walk.
+     *
+     * For BACKWARD seeks (new offset < cur_block_off), the cursor must
+     * be reset because the singly-linked block chain can only be walked
+     * forward.  eynfs_read_file_fast() will re-traverse from first_block.
+     *
+     * This is critical for audio streaming: an unnecessary cursor reset
+     * on a forward seek forces a full chain walk on the next read,
+     * which for a 9.5 MB file at 5 seconds in means walking ~1900
+     * blocks and consuming all CPU time.
      */
-    ufd->cur_block     = 0;
-    ufd->cur_block_off = 0;
+    if (ufd->cur_block != 0 && (uint32)next >= ufd->cur_block_off) {
+        /* Forward seek — cursor stays valid. */
+    } else {
+        /* Backward seek or uninitialised cursor — reset. */
+        ufd->cur_block     = 0;
+        ufd->cur_block_off = 0;
+    }
     return (int)ufd->offset;
 }
 
@@ -3500,6 +3580,15 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
             if (e->is_floating) {
                 wm_invalidate_window(e->win_id);
+                /*
+                 * While a ring-3 task owns the CPU, the main WM loop is paused.
+                 * Floating-window invalidation alone only marks the window dirty;
+                 * nothing repaints until some unrelated input path triggers a
+                 * compositor frame.  Render immediately here so GUI clients that
+                 * animate without input (audio progress bars, clocks, etc.) update
+                 * continuously.
+                 */
+                tile_render_once();
             } else {
                 tile_invalidate_gui(e->tile_idx);
                 /* Render a single frame now so GUI updates appear without input events. */
@@ -4115,6 +4204,96 @@ uint32 syscall_dispatch(regs_t* regs) {
             extern void gui_cursor_set_hidden(int hidden);
             gui_cursor_set_hidden(visible ? 0 : 1);
             regs->eax = 0;
+            break;
+        }
+
+        /* ---- Audio (AC97) syscalls ---- */
+
+        case SYSCALL_AUDIO_PROBE: {
+            /*
+             * Probe PCI bus for an AC97 audio controller.
+             * CAPABILITY-REQUIRED: CAP_DEV_AUDIO.
+             */
+            if (!syscall_ctx_allow(CAP_DEV_AUDIO, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)ac97_probe();
+            break;
+        }
+
+        case SYSCALL_AUDIO_INIT: {
+            /*
+             * Initialise the AC97 controller (DMA, codec, IRQ).
+             * CAPABILITY-REQUIRED: CAP_DEV_AUDIO | CAP_ALLOC_MEMORY.
+             */
+            if (!syscall_ctx_allow(CAP_DEV_AUDIO | CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)ac97_init();
+            break;
+        }
+
+        case SYSCALL_AUDIO_WRITE: {
+            /*
+             * Submit PCM data for playback.
+             * CAPABILITY-REQUIRED: CAP_DEV_AUDIO.
+             * SECURITY-INVARIANT: user buffer is validated via copyin.
+             */
+            if (!syscall_ctx_allow(CAP_DEV_AUDIO, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const void* user_buf = (const void*)arg1;
+            int buf_size = (int)arg2;
+            if (!user_buf || buf_size <= 0) { regs->eax = (uint32)-1; break; }
+            if ((uint32)buf_size > AC97_DMA_BUF_SIZE) buf_size = (int)AC97_DMA_BUF_SIZE;
+
+            uint8_t kbuf[AC97_DMA_BUF_SIZE];
+            if (copyin(kbuf, user_buf, (size_t)buf_size) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)ac97_write(kbuf, (size_t)buf_size);
+            break;
+        }
+
+        case SYSCALL_AUDIO_STOP: {
+            if (!syscall_ctx_allow(CAP_DEV_AUDIO, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            ac97_stop();
+            regs->eax = 0;
+            break;
+        }
+
+        case SYSCALL_AUDIO_IS_AVAILABLE: {
+            /* No capability check — informational query. */
+            regs->eax = (uint32)ac97_is_available();
+            break;
+        }
+
+        case SYSCALL_AUDIO_WRITE_BULK: {
+            /*
+             * Submit multiple 4 KB PCM chunks in one syscall, reducing
+             * ring-3/ring-0 transitions by up to 8×.
+             *
+             * CAPABILITY-REQUIRED: CAP_DEV_AUDIO.
+             * SECURITY-INVARIANT: each 4 KB chunk is validated via copyin.
+             */
+            if (!syscall_ctx_allow(CAP_DEV_AUDIO, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            const uint8_t* user_buf = (const uint8_t*)arg1;
+            int total_size = (int)arg2;
+            if (!user_buf || total_size <= 0) { regs->eax = (uint32)-1; break; }
+
+            /*
+             * Cap at 8 DMA buffers (32 KB) per syscall to bound time
+             * spent with interrupts disabled.
+             */
+            int max_bytes = (int)(8u * AC97_DMA_BUF_SIZE);
+            if (total_size > max_bytes) total_size = max_bytes;
+
+            uint8_t kbuf[AC97_DMA_BUF_SIZE];
+            int count = 0;
+            int offset = 0;
+
+            while (offset < total_size) {
+                int chunk = total_size - offset;
+                if (chunk > (int)AC97_DMA_BUF_SIZE) chunk = (int)AC97_DMA_BUF_SIZE;
+                if (copyin(kbuf, user_buf + offset, (size_t)chunk) != 0) break;
+                if (ac97_write(kbuf, (size_t)chunk) < 0) break;
+                offset += chunk;
+                count++;
+            }
+
+            regs->eax = (uint32)count;
             break;
         }
 

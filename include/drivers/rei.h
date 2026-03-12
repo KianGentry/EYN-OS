@@ -22,7 +22,7 @@
 #define REI_MAX_WIDTH 640
 #define REI_MAX_HEIGHT 480
 
-// Color depth constants
+// Colour depth constants
 #define REI_DEPTH_MONO  1
 #define REI_DEPTH_RGB   3
 #define REI_DEPTH_RGBA  4
@@ -32,7 +32,7 @@ typedef struct {
     uint32_t magic;        // Magic number to identify REI
     uint16_t width;        // Image width in pixels
     uint16_t height;       // Image height in pixels
-    uint8_t depth;         // Color depth (1, 3, or 4 bytes per pixel)
+    uint8_t depth;         // Colour depth (1, 3, or 4 bytes per pixel)
     uint8_t reserved1;     // Flags/Compression (low nibble = compression)
     uint16_t reserved2;    // Reserved for future use
 } rei_header_t;
@@ -61,10 +61,10 @@ int rei_display_image_centered(const rei_image_t* image);
 
 // Utility functions
 int rei_get_pixel_offset(const rei_header_t* header, int x, int y);
-uint32_t rei_get_pixel_color(const rei_image_t* image, int x, int y);
-void rei_set_pixel_color(rei_image_t* image, int x, int y, uint32_t color);
+uint32_t rei_get_pixel_colour(const rei_image_t* image, int x, int y);
+void rei_set_pixel_colour(rei_image_t* image, int x, int y, uint32_t colour);
 
-// Color conversion utilities
+// Colour conversion utilities
 uint32_t rei_rgb_to_vga(uint8_t r, uint8_t g, uint8_t b);
 uint32_t rei_mono_to_vga(uint8_t mono);
 

@@ -29,8 +29,8 @@ EYN_CMDMETA_V1("X11 xeyes - eyes that follow the mouse pointer", "xeyes");
 #define EYE_H       90      /* Eye ellipse height (pixels) */
 #define PUPIL_W     18      /* Pupil ellipse width */
 #define PUPIL_H     24      /* Pupil ellipse height */
-#define IRIS_W      34      /* Iris (colored ring) width */
-#define IRIS_H      42      /* Iris (colored ring) height */
+#define IRIS_W      34      /* Iris (coloured ring) width */
+#define IRIS_H      42      /* Iris (coloured ring) height */
 #define EYE_GAP     20      /* Horizontal gap between eyes */
 #define BORDER      20      /* Padding around the eyes */
 
@@ -45,7 +45,7 @@ static void draw_eye(Display *dpy, Window win, GC gc, int scr,
                      int cx, int cy, int ew, int eh,
                      int iw, int ih, int pw, int ph,
                      int mx, int my,
-                     unsigned long iris_color) {
+                     unsigned long iris_colour) {
     /* White sclera (eye background) */
     XSetForeground(dpy, gc, WhitePixel(dpy, scr));
     XFillArc(dpy, win, gc,
@@ -76,8 +76,8 @@ static void draw_eye(Display *dpy, Window win, GC gc, int scr,
     int ox = (int)dx;
     int oy = (int)dy;
 
-    /* Iris (colored ring) */
-    XSetForeground(dpy, gc, iris_color);
+    /* Iris (coloured ring) */
+    XSetForeground(dpy, gc, iris_colour);
     XFillArc(dpy, win, gc,
              cx + ox - iw / 2, cy + oy - ih / 2, iw, ih,
              0, 360 * 64);
@@ -108,12 +108,12 @@ int main(void) {
     Window root = RootWindow(dpy, scr);
 
     /* Skin tone background */
-    unsigned long bg_color = 0xFFE0BD;
+    unsigned long bg_colour = 0xFFE0BD;
 
     Window win = XCreateSimpleWindow(dpy, root,
                                      0, 0, WIN_W, WIN_H, 1,
                                      BlackPixel(dpy, scr),
-                                     bg_color);
+                                     bg_colour);
 
     XStoreName(dpy, win, "xeyes");
 
@@ -135,7 +135,7 @@ int main(void) {
     int my = WIN_H / 2;
     int running = 1;
 
-    /* Iris color (blue-gray) */
+    /* Iris colour (blue-gray) */
     unsigned long iris_pixel = 0x4488AA;
 
     while (running) {
@@ -178,7 +178,7 @@ int main(void) {
         /* Redraw if no more events are queued (coalesce redraws) */
         if (running && !XPending(dpy)) {
             /* Fill background */
-            XSetForeground(dpy, gc, bg_color);
+            XSetForeground(dpy, gc, bg_colour);
             XFillRectangle(dpy, win, gc, 0, 0, WIN_W, WIN_H);
 
             /* Draw both eyes */

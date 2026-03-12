@@ -49,7 +49,7 @@ The TUI system consists of several key components:
 │    (windows, lists, text areas)     │
 ├─────────────────────────────────────┤
 │           VGA Driver                │
-│    (text rendering, colors)         │
+│    (text rendering, colours)         │
 ├─────────────────────────────────────┤
 │           Hardware                  │
 │    (VGA controller, keyboard)       │
@@ -118,26 +118,26 @@ void tui_draw_status_bar(const tui_window_t* win, const char* text,
 
 ## Styling System
 
-### Color Definitions
+### Colour Definitions
 
-The TUI system provides a predefined color palette optimized for text display:
+The TUI system provides a predefined colour palette optimized for text display:
 
 ```c
-#define TUI_COLOR_DEFAULT 0    // System default
-#define TUI_COLOR_YELLOW  1    // Highlighting and titles
-#define TUI_COLOR_RED     2    // Errors and warnings
-#define TUI_COLOR_MAGENTA 3    // Special indicators
-#define TUI_COLOR_WHITE   4    // Primary text
-#define TUI_COLOR_BLACK   5    // Background
-#define TUI_COLOR_GRAY    6    // Secondary text
+#define TUI_COLOUR_DEFAULT 0    // System default
+#define TUI_COLOUR_YELLOW  1    // Highlighting and titles
+#define TUI_COLOUR_RED     2    // Errors and warnings
+#define TUI_COLOUR_MAGENTA 3    // Special indicators
+#define TUI_COLOUR_WHITE   4    // Primary text
+#define TUI_COLOUR_BLACK   5    // Background
+#define TUI_COLOUR_GRAY    6    // Secondary text
 ```
 
 ### Style Structure
 
 ```c
 typedef struct {
-    uint8_t fg_color;    // Foreground color
-    uint8_t bg_color;    // Background color
+    uint8_t fg_colour;    // Foreground colour
+    uint8_t bg_colour;    // Background colour
     uint8_t bold;        // Bold text flag
 } tui_style_t;
 ```
@@ -146,16 +146,16 @@ typedef struct {
 
 ```c
 // Standard text style
-tui_style_t normal_style = {TUI_COLOR_WHITE, TUI_COLOR_BLACK, 0};
+tui_style_t normal_style = {TUI_COLOUR_WHITE, TUI_COLOUR_BLACK, 0};
 
 // Highlighted text style
-tui_style_t highlight_style = {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1};
+tui_style_t highlight_style = {TUI_COLOUR_YELLOW, TUI_COLOUR_BLACK, 1};
 
 // Error text style
-tui_style_t error_style = {TUI_COLOR_RED, TUI_COLOR_BLACK, 0};
+tui_style_t error_style = {TUI_COLOUR_RED, TUI_COLOUR_BLACK, 0};
 
 // Secondary text style
-tui_style_t secondary_style = {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0};
+tui_style_t secondary_style = {TUI_COLOUR_GRAY, TUI_COLOUR_BLACK, 0};
 ```
 
 ## Input Handling
@@ -235,20 +235,20 @@ void write_editor_draw(const char* filename) {
         0, 0,                    // Position
         78, EDITOR_HEIGHT + 3,   // Size
         "",                      // Title (custom drawn)
-        {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1},  // Title style
-        {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0},    // Border style
-        {TUI_COLOR_BLACK, TUI_COLOR_BLACK, 0}    // Background style
+        {TUI_COLOUR_YELLOW, TUI_COLOUR_BLACK, 1},  // Title style
+        {TUI_COLOUR_GRAY, TUI_COLOUR_BLACK, 0},    // Border style
+        {TUI_COLOUR_BLACK, TUI_COLOUR_BLACK, 0}    // Background style
     };
     
     tui_draw_window(&editor_win);
     
     // Custom title bar with filename and status
-    tui_style_t file_style = {TUI_COLOR_WHITE, TUI_COLOR_BLACK, 1};
+    tui_style_t file_style = {TUI_COLOUR_WHITE, TUI_COLOUR_BLACK, 1};
     tui_draw_text(editor_win.x + 2, editor_win.y, filename, file_style);
     
     // Draw text content with cursor
-    tui_style_t text_style = {TUI_COLOR_WHITE, TUI_COLOR_BLACK, 0};
-    tui_style_t cursor_style = {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1};
+    tui_style_t text_style = {TUI_COLOUR_WHITE, TUI_COLOUR_BLACK, 0};
+    tui_style_t cursor_style = {TUI_COLOUR_YELLOW, TUI_COLOUR_BLACK, 1};
     
     // Render text lines with cursor positioning
     for (int i = 0; i < max_visible; i++) {
@@ -285,17 +285,17 @@ void help_tui() {
     tui_window_t left_win = {
         0, 0, CMD_LIST_WIDTH, win_height,
         "Commands",
-        {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1},
-        {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0},
-        {TUI_COLOR_BLACK, TUI_COLOR_BLACK, 0}
+        {TUI_COLOUR_YELLOW, TUI_COLOUR_BLACK, 1},
+        {TUI_COLOUR_GRAY, TUI_COLOUR_BLACK, 0},
+        {TUI_COLOUR_BLACK, TUI_COLOUR_BLACK, 0}
     };
     
     tui_window_t right_win = {
         CMD_LIST_WIDTH + 2, 0, DESC_WIDTH, win_height,
         "Description",
-        {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1},
-        {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0},
-        {TUI_COLOR_BLACK, TUI_COLOR_BLACK, 0}
+        {TUI_COLOUR_YELLOW, TUI_COLOUR_BLACK, 1},
+        {TUI_COLOUR_GRAY, TUI_COLOUR_BLACK, 0},
+        {TUI_COLOUR_BLACK, TUI_COLOUR_BLACK, 0}
     };
     
     while (running) {
@@ -304,8 +304,8 @@ void help_tui() {
         tui_draw_window(&right_win);
         
         // Draw command list with selection
-        tui_style_t norm_style = {TUI_COLOR_WHITE, TUI_COLOR_BLACK, 0};
-        tui_style_t sel_style = {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1};
+        tui_style_t norm_style = {TUI_COLOUR_WHITE, TUI_COLOUR_BLACK, 0};
+        tui_style_t sel_style = {TUI_COLOUR_YELLOW, TUI_COLOUR_BLACK, 1};
         
         for (int i = 0; i < visible_commands; i++) {
             int y_pos = left_win.y + 2 + i;
@@ -338,11 +338,11 @@ void help_tui() {
 2. **Clear Hierarchy**: Use borders and spacing to organize information
 3. **Responsive Layout**: Design for different screen sizes and content lengths
 
-### Color Usage
+### Colour Usage
 
-1. **Semantic Colors**: Use colors consistently for their intended purpose
+1. **Semantic Colours**: Use colours consistently for their intended purpose
 2. **Contrast**: Ensure text is readable against backgrounds
-3. **Moderation**: Don't overuse colors - they should enhance, not distract
+3. **Moderation**: Don't overuse colours - they should enhance, not distract
 
 ### User Experience
 
@@ -386,13 +386,13 @@ void tui_draw_progress_bar(const tui_window_t* win, int progress, int max) {
     // Draw background
     for (int i = 0; i < bar_width; i++) {
         tui_draw_text(win->x + 1 + i, win->y + 2, "░", 
-                     {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0});
+                     {TUI_COLOUR_GRAY, TUI_COLOUR_BLACK, 0});
     }
     
     // Draw filled portion
     for (int i = 0; i < filled_width; i++) {
         tui_draw_text(win->x + 1 + i, win->y + 2, "█", 
-                     {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 0});
+                     {TUI_COLOUR_YELLOW, TUI_COLOUR_BLACK, 0});
     }
 }
 ```
@@ -411,9 +411,9 @@ void my_app() {
     tui_window_t main_win = {
         5, 3, 70, 20,
         "My Application",
-        {TUI_COLOR_YELLOW, TUI_COLOR_BLACK, 1},
-        {TUI_COLOR_GRAY, TUI_COLOR_BLACK, 0},
-        {TUI_COLOR_BLACK, TUI_COLOR_BLACK, 0}
+        {TUI_COLOUR_YELLOW, TUI_COLOUR_BLACK, 1},
+        {TUI_COLOUR_GRAY, TUI_COLOUR_BLACK, 0},
+        {TUI_COLOUR_BLACK, TUI_COLOUR_BLACK, 0}
     };
     
     while (running) {
@@ -423,7 +423,7 @@ void my_app() {
         // Your application logic here
         
         tui_draw_status_bar(&main_win, "Status: Ready", 
-                           {TUI_COLOR_WHITE, TUI_COLOR_BLACK, 0});
+                           {TUI_COLOUR_WHITE, TUI_COLOUR_BLACK, 0});
         
         int key = tui_read_key();
         // Handle input...
@@ -436,14 +436,14 @@ void my_app() {
 ### Common Issues
 
 1. **Screen Not Clearing**: Ensure `tui_clear()` is called before drawing
-2. **Text Not Visible**: Check color combinations for adequate contrast
+2. **Text Not Visible**: Check colour combinations for adequate contrast
 3. **Windows Not Drawing**: Verify window coordinates are within screen bounds
 4. **Input Not Responding**: Check key handling in your main loop
 
 ### Debugging Tips
 
 1. **Use Status Bars**: Display debug information in status bars
-2. **Color Coding**: Use different colors to identify different components
+2. **Colour Coding**: Use different colours to identify different components
 3. **Incremental Testing**: Test each TUI component individually
 4. **Screen Coordinates**: Verify all drawing coordinates are valid
 

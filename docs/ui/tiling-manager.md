@@ -253,7 +253,7 @@ int  vterm_get_version(int idx); // content version for incremental redraw
 
 ## Theming
 
-The title bar and status bar colors are runtime-configurable via:
+The title bar and status bar colours are runtime-configurable via:
 
 ```c
 typedef struct {
@@ -283,7 +283,7 @@ The `theme` shell command provides an interactive picker.
 | `setbg <file.rei>` | Set background image for the focused tile (Tile/Scale/Center chooser) |
 | `clearbg` | Remove the background for the focused tile |
 | `setfont <file.hex>` | Load a bitmap font system-wide |
-| `theme` | Interactive theme (title bar color) picker |
+| `theme` | Interactive theme (title bar colour) picker |
 | `stats` / `kstats` | Show system stats overlay |
 
 ## Input

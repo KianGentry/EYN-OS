@@ -188,7 +188,7 @@ typedef struct {
     uint32_t magic;        // Magic number to identify REI
     uint16_t width;        // Image width in pixels
     uint16_t height;       // Image height in pixels
-    uint8_t depth;         // Color depth (1, 3, or 4 bytes per pixel)
+    uint8_t depth;         // Colour depth (1, 3, or 4 bytes per pixel)
     uint8_t reserved1;     // Reserved for future use
     uint16_t reserved2;    // Reserved for future use
 } rei_header_t;
@@ -243,7 +243,7 @@ Text User Interface framework.
 #### TUI Functions
 ```c
 void tui_init();
-void tui_draw_text(int x, int y, const char* text, uint8_t color);
+void tui_draw_text(int x, int y, const char* text, uint8_t colour);
 int tui_read_key();
 void tui_clear_window();
 void tui_draw_border(int x, int y, int width, int height);

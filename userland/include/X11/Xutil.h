@@ -117,7 +117,7 @@ XClassHint *XAllocClassHint(void);
 
 int XStringListToTextProperty(char **list, int count, XTextProperty *text_prop_return);
 
-/* Visual matching (always returns the single TrueColor visual) */
+/* Visual matching (always returns the single TrueColour visual) */
 typedef struct {
     Visual       *visual;
     VisualID      visualid;
@@ -127,7 +127,7 @@ typedef struct {
     unsigned long red_mask;
     unsigned long green_mask;
     unsigned long blue_mask;
-    int           colormap_size;
+    int           colourmap_size;
     int           bits_per_rgb;
 } XVisualInfo;
 
@@ -139,7 +139,7 @@ typedef struct {
 #define VisualRedMaskMask    0x10
 #define VisualGreenMaskMask  0x20
 #define VisualBlueMaskMask   0x40
-#define VisualColormapSizeMask 0x80
+#define VisualColourmapSizeMask 0x80
 #define VisualBitsPerRGBMask 0x100
 #define VisualAllMask        0x1FF
 

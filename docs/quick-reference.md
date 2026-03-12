@@ -181,7 +181,7 @@ e1000 udp-drain
 | Command | Description | Example |
 |---------|-------------|---------|
 | `tile` | Tiling manager control | `tile focus 1` |
-| `theme` | Customize UI theme | `theme color fg 255 255 255` |
+| `theme` | Customize UI theme | `theme colour fg 255 255 255` |
 | `setfont` | Change system font | `setfont /fonts/unscii-16.hex` |
 | `setbg` | Set background image | `setbg image.rei` |
 | `clearbg` | Clear background | `clearbg` |
@@ -195,10 +195,10 @@ tile focus 2
 # Resize windows
 tile resize 400 300
 
-# Set custom theme colors
-theme color fg 255 255 255
-theme color bg 0 0 0
-theme color accent 0 150 255
+# Set custom theme colours
+theme colour fg 255 255 255
+theme colour bg 0 0 0
+theme colour accent 0 150 255
 ```
 
 ## Pipeline and Redirection
@@ -451,7 +451,7 @@ status              # Check command loading status
 
 ### TUI System
 - **Consistent Interface**: All TUI apps use same framework
-- **Color Support**: Multiple colors for different elements
+- **Colour Support**: Multiple colours for different elements
 - **Keyboard Handling**: Unified input processing
 - **Dual-Pane Layout**: Interactive help system
 

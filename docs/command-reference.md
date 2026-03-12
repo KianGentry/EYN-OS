@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-06 07:57:56
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-12 14:59:14
 
 **Total Commands:** 80
 
@@ -783,7 +783,7 @@ theme /fonts/unscii-16.hex
 **Metadata Source:** `testdir/code/view_uelf.c`
 
 **Description:**
-Open an REI image or REIV video viewer.
+Open an REI image, REIV video, REIS audio, or WAV audio viewer.
 
 **Example:**
 ```bash

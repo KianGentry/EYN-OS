@@ -351,4 +351,60 @@ The capability syscalls mirror the plain GUI calls but accept a capability token
 | 47 | `DET_ENABLE` | Enable/disable deterministic scheduling for the current task |
 | 48 | `DET_STEP` | Advance by at most N scheduler events while in deterministic mode |
 
+## Audio syscalls (113–117)
+
+Audio playback is provided through the AC97 driver. The output format is fixed at 48 kHz stereo 16-bit signed little-endian. User programs must resample their data to this format before writing.
+
+### Audio Probe (syscall 113)
+
+Scans the PCI bus for an Intel AC97 audio controller (vendor 0x8086, device 0x2415).
+
+**Arguments:** none
+
+**Returns:** EAX: 0 if AC97 hardware found, -1 otherwise
+
+**Capability:** `CAP_DEV_AUDIO`
+
+### Audio Init (syscall 114)
+
+Initializes the AC97 hardware: performs cold reset, configures codec registers, allocates DMA buffer descriptor list and double-buffered DMA buffers, and registers the IRQ handler.
+
+**Arguments:** none
+
+**Returns:** EAX: 0 on success, -1 on failure
+
+**Capability:** `CAP_DEV_AUDIO`, `CAP_ALLOC_MEMORY`
+
+### Audio Write (syscall 115)
+
+Submits a buffer of PCM audio data (48 kHz stereo s16le) for playback. The data is copied from userspace into a kernel buffer and then forwarded to the AC97 DMA engine.
+
+**Arguments:**
+- EBX: Pointer to PCM data buffer (userspace)
+- ECX: Size in bytes (max 4096 per call)
+
+**Returns:** EAX: number of bytes queued, or -1 on error
+
+**Capability:** `CAP_DEV_AUDIO`
+
+### Audio Stop (syscall 116)
+
+Stops audio playback and resets the DMA engine.
+
+**Arguments:** none
+
+**Returns:** EAX: 0
+
+**Capability:** none
+
+### Audio Is Available (syscall 117)
+
+Checks whether the AC97 driver has been initialized and is ready for playback.
+
+**Arguments:** none
+
+**Returns:** EAX: 1 if available, 0 if not
+
+**Capability:** none
+
 Deterministic mode is used by test harnesses that need reproducible event ordering.and wrappers.

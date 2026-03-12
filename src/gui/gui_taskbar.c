@@ -17,7 +17,7 @@ static int g_programs_hover = -1;  // hovered program index
  * Cached list of program names from /binaries.
  * Scanned once on first open; refreshed on each start-menu toggle.
  */
-#define PROGRAMS_MAX 96
+#define PROGRAMS_MAX 128
 static char  g_program_names[PROGRAMS_MAX][PROG_NAME_MAX];
 static int   g_program_count = 0;
 static int   g_programs_scanned = 0;
@@ -466,7 +466,7 @@ static int handle_bg_modal_key(int key) {
             }
             g_tile_bg[ti].mode = (bg_mode_t)mode;
             g_tile_bg[ti].darken = 16; // keep global darken light; rely on local darken under text
-            g_tile_bg[ti].adapt_text = 0; // keep terminal default colors (often white) consistent
+            g_tile_bg[ti].adapt_text = 0; // keep terminal default colours (often white) consistent
             g_tile_bg[ti].text_shadow = 1; // default: enable shadow for readability
             g_tile_bg[ti].local_darken = 1; // darken only behind text
             // Force content redraw

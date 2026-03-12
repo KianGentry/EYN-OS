@@ -137,7 +137,7 @@ Display directory structure in a tree format with indentation.
 
 **Features:**
 - Visual tree connectors (├─)
-- Color-coded directories (blue) and files (white)
+- Colour-coded directories (blue) and files (white)
 - Configurable depth (default: 3, max: 10)
 - Recursive directory traversal
 
@@ -219,11 +219,11 @@ Reset cache performance statistics.
 - Prepare for new measurements
 
 #### `blockmap`
-Visualize block usage with color-coded map.
+Visualize block usage with colour-coded map.
 
 **Features:**
 - Grid-based block display
-- Color coding: Green (free), Red (used)
+- Colour coding: Green (free), Red (used)
 - 64 blocks per line
 - Spacing for readability
 - Total block count

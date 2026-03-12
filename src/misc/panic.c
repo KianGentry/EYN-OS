@@ -49,7 +49,7 @@ static const char* category_label(panic_cat_t c) {
     }
 }
 
-static void pick_bg_color_for_category(panic_cat_t c, unsigned hash, int* pr, int* pg, int* pb) {
+static void pick_bg_colour_for_category(panic_cat_t c, unsigned hash, int* pr, int* pg, int* pb) {
     (void)c; (void)hash;
     // Dark, calm background similar to #3d4872
     *pr = 61; *pg = 72; *pb = 114;
@@ -67,11 +67,11 @@ static void render_bsod(const char* title, const char* msg, const char* file, in
     vga_init_double_buffer();
     vga_begin_frame();
 
-    // Choose a soothing dark pastel color by category
+    // Choose a soothing dark pastel colour by category
     int br=16, bg=32, bb=96;
     unsigned h = fnv1a_hash(msg, file, line);
     panic_cat_t cat = classify_category(title, msg);
-    pick_bg_color_for_category(cat, h, &br, &bg, &bb);
+    pick_bg_colour_for_category(cat, h, &br, &bg, &bb);
     // Determine full-screen dimensions from framebuffer
     extern multiboot_info_t *g_mbi;
     int sw = (g_mbi && g_mbi->framebuffer_width) ? (int)g_mbi->framebuffer_width : 640;

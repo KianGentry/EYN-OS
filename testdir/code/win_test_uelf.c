@@ -96,7 +96,7 @@ static void draw_scene(int h, demo_box_t boxes[3], int active_idx, int mx, int m
         draw_box(h, &boxes[bi], bi == active_idx);
     }
 
-    gui_text_t title = { .x = 8, .y = 6, .r = 255, .g = 255, .b = 255, ._pad = 0, .text = "Window Test: drag colored windows, click to raise" };
+    gui_text_t title = { .x = 8, .y = 6, .r = 255, .g = 255, .b = 255, ._pad = 0, .text = "Window Test: drag coloured windows, click to raise" };
     (void)gui_draw_text(h, &title);
 
     char info[120];

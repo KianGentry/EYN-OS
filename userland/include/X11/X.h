@@ -72,7 +72,7 @@
 #define SelectionClear          29
 #define SelectionRequest        30
 #define SelectionNotify         31
-#define ColormapNotify          32
+#define ColourmapNotify          32
 #define ClientMessage           33
 #define MappingNotify           34
 #define LASTEvent               35
@@ -106,7 +106,7 @@
 #define SubstructureRedirectMask (1L << 20)
 #define FocusChangeMask         (1L << 21)
 #define PropertyChangeMask      (1L << 22)
-#define ColormapChangeMask      (1L << 23)
+#define ColourmapChangeMask      (1L << 23)
 #define OwnerGrabButtonMask     (1L << 24)
 
 /*
@@ -227,10 +227,10 @@
  */
 #define StaticGray      0
 #define GrayScale       1
-#define StaticColor     2
-#define PseudoColor     3
-#define TrueColor       4
-#define DirectColor     5
+#define StaticColour     2
+#define PseudoColour     3
+#define TrueColour       4
+#define DirectColour     5
 
 /*
  * -----------------------------------------------------------------
@@ -298,7 +298,7 @@
 #define CWSaveUnder         (1L << 10)
 #define CWEventMask         (1L << 11)
 #define CWDontPropagate     (1L << 12)
-#define CWColormap          (1L << 13)
+#define CWColourmap          (1L << 13)
 #define CWCursor            (1L << 14)
 
 /*

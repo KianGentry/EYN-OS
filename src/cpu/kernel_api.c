@@ -60,7 +60,7 @@ uint32 eyn_kernel_system(uint32 function, uint32 var1, uint32 var2) {
             return 25; // Default VGA text mode height
             
         case EYN_SYSTEM_GET_SCREEN_BPP:
-            return 32; // Assume 32-bit color
+            return 32; // Assume 32-bit colour
             
         case EYN_SYSTEM_GET_LFB:
             return 0xB8000; // VGA text mode framebuffer address

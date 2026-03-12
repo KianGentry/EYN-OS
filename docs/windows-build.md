@@ -104,7 +104,7 @@ gdb -ex "target remote :1234" -ex "set architecture i386"
 Planned optional enhancements:
 * Incremental compile (timestamp comparison)
 * Parallel compilation using `Start-Job`
-* ANSI color toggle for non-Windows terminals
+* ANSI colour toggle for non-Windows terminals
 * Artifact hash summary
 
 ---

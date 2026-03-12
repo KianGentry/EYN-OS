@@ -8,7 +8,7 @@
  *
  * Supported:  Window creation, basic drawing (rectangles, lines, arcs,
  *             points, text), event handling (key, button, motion, expose).
- * Unsupported: Pixmaps, colormaps, cursors, atoms, selections, extensions.
+ * Unsupported: Pixmaps, colourmaps, cursors, atoms, selections, extensions.
  *
  * ABI-INVARIANT: Struct layouts and constant values match X11R7 where
  * possible so that source code compiles without modification.
@@ -31,7 +31,7 @@ typedef unsigned long XID;
 typedef XID           Window;
 typedef XID           Drawable;
 typedef XID           Pixmap;
-typedef XID           Colormap;
+typedef XID           Colourmap;
 typedef XID           Cursor;
 typedef XID           Font;
 typedef XID           KeySym;
@@ -56,7 +56,7 @@ typedef struct _XGC     *GC;
 
 typedef struct _Visual {
     VisualID visualid;
-    int      class_;       /* TrueColor etc. — named class_ to avoid C++ keyword */
+    int      class_;       /* TrueColour etc. — named class_ to avoid C++ keyword */
     int      bits_per_rgb;
     int      map_entries;
     unsigned long red_mask;
@@ -73,7 +73,7 @@ typedef struct _Screen {
     int           root_depth;
     Visual       *root_visual;
     GC            default_gc;
-    Colormap      cmap;
+    Colourmap      cmap;
     unsigned long white_pixel;
     unsigned long black_pixel;
 } Screen;
@@ -153,7 +153,7 @@ typedef struct {
 } XSegment;
 
 /* ------------------------------------------------------------------ */
-/*  Color                                                              */
+/*  Colour                                                              */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
@@ -161,7 +161,7 @@ typedef struct {
     unsigned short red, green, blue;
     char  flags;     /* DoRed, DoGreen, DoBlue */
     char  pad;
-} XColor;
+} XColour;
 
 #define DoRed       (1 << 0)
 #define DoGreen     (1 << 1)
@@ -185,7 +185,7 @@ typedef struct {
     long          event_mask;
     long          do_not_propagate_mask;
     Bool          override_redirect;
-    Colormap      colormap;
+    Colourmap      colourmap;
     Cursor        cursor;
 } XSetWindowAttributes;
 
@@ -203,7 +203,7 @@ typedef struct {
     unsigned long backing_planes;
     unsigned long backing_pixel;
     Bool          save_under;
-    Colormap      colormap;
+    Colourmap      colourmap;
     Bool          map_installed;
     int           map_state;
     long          all_event_masks;
@@ -484,7 +484,7 @@ typedef struct _XImage {
 
 #define DefaultDepth(dpy,scr)       (ScreenOfDisplay(dpy,scr)->root_depth)
 #define DefaultVisual(dpy,scr)      (ScreenOfDisplay(dpy,scr)->root_visual)
-#define DefaultColormap(dpy,scr)    (ScreenOfDisplay(dpy,scr)->cmap)
+#define DefaultColourmap(dpy,scr)    (ScreenOfDisplay(dpy,scr)->cmap)
 #define DefaultGC(dpy,scr)          (ScreenOfDisplay(dpy,scr)->default_gc)
 
 #define DisplayWidth(dpy,scr)       (ScreenOfDisplay(dpy,scr)->width)
@@ -655,21 +655,21 @@ Bool     XQueryPointer(Display *display, Window w,
                        int *win_x_return, int *win_y_return,
                        unsigned int *mask_return);
 
-/* Color */
-Status   XAllocColor(Display *display, Colormap colormap, XColor *screen_in_out);
-Status   XAllocNamedColor(Display *display, Colormap colormap,
-                          const char *color_name,
-                          XColor *screen_def_return,
-                          XColor *exact_def_return);
-Status   XParseColor(Display *display, Colormap colormap,
-                     const char *spec, XColor *exact_def_return);
-int      XFreeColors(Display *display, Colormap colormap,
+/* Colour */
+Status   XAllocColour(Display *display, Colourmap colourmap, XColour *screen_in_out);
+Status   XAllocNamedColour(Display *display, Colourmap colourmap,
+                          const char *colour_name,
+                          XColour *screen_def_return,
+                          XColour *exact_def_return);
+Status   XParseColour(Display *display, Colourmap colourmap,
+                     const char *spec, XColour *exact_def_return);
+int      XFreeColours(Display *display, Colourmap colourmap,
                      unsigned long *pixels, int npixels,
                      unsigned long planes);
-Status   XLookupColor(Display *display, Colormap colormap,
-                      const char *color_name,
-                      XColor *exact_def_return,
-                      XColor *screen_def_return);
+Status   XLookupColour(Display *display, Colourmap colourmap,
+                      const char *colour_name,
+                      XColour *exact_def_return,
+                      XColour *screen_def_return);
 
 /* Misc */
 int      XSetWindowBackground(Display *display, Window w,

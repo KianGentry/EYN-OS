@@ -205,7 +205,7 @@
      struct
      {
        multiboot_uint32_t framebuffer_palette_addr;
-       multiboot_uint16_t framebuffer_palette_num_colors;
+       multiboot_uint16_t framebuffer_palette_num_colours;
      };
      struct
      {
@@ -220,7 +220,7 @@
  };
  typedef struct multiboot_info multiboot_info_t;
  
- struct multiboot_color
+ struct multiboot_colour
  {
    multiboot_uint8_t red;
    multiboot_uint8_t green;

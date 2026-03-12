@@ -93,8 +93,8 @@ set default=0
 set timeout=0
 set gfxmode=text
 set gfxpayload=text
-set color_normal=white/black
-set color_highlight=black/white
+set colour_normal=white/black
+set colour_highlight=black/white
 
 menuentry "EYN-OS" {
     multiboot /boot/kernel.bin

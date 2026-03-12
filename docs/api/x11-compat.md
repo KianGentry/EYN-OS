@@ -84,7 +84,7 @@ simple desktop toys, but not for toolkit-heavy applications.
 
 ### Connection & Display
 `XOpenDisplay`, `XCloseDisplay`, `XDefaultScreen`, `XDefaultVisual`,
-`XDefaultColormap`, `XDisplayWidth`, `XDisplayHeight`, `XDefaultDepth`,
+`XDefaultColourmap`, `XDisplayWidth`, `XDisplayHeight`, `XDefaultDepth`,
 `ConnectionNumber`, `XServerVendor`, `XVendorRelease`, `XProtocolVersion`
 
 ### Window Management
@@ -106,7 +106,7 @@ simple desktop toys, but not for toolkit-heavy applications.
 `XCheckMaskEvent`, `XCheckTypedWindowEvent`, `XCheckWindowEvent`
 
 ### Colour
-`XAllocColor`, `XParseColor`, `XAllocNamedColor`, `XLookupColor`
+`XAllocColour`, `XParseColour`, `XAllocNamedColour`, `XLookupColour`
 
 ### Miscellaneous
 `XFlush`, `XSync`, `XQueryPointer`, `XInternAtom`, `XSetWMProtocols`,
@@ -166,10 +166,10 @@ xeyes
 
 ## Colour Handling
 
-Colours passed to `XAllocColor` use the X11 convention of 16-bit per-channel
+Colours passed to `XAllocColour` use the X11 convention of 16-bit per-channel
 values (`0–65535`) which are internally down-converted to RGB565.
 
-`XParseColor` supports:
+`XParseColour` supports:
 - Hex: `#RGB`, `#RRGGBB`, `#RRRRGGGGBBBB`
 - ~40 named colours (`red`, `blue`, `white`, `coral`, `dodgerblue`, …)
 

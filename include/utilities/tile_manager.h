@@ -145,7 +145,7 @@ typedef struct {
 	uint8 status_text_r, status_text_g, status_text_b;
 } wm_theme_t;
 
-// Get/set runtime theme colors used by the tiler/window manager.
+// Get/set runtime theme colours used by the tiler/window manager.
 void wm_theme_get(wm_theme_t* out);
 void wm_theme_set(const wm_theme_t* in);
 void wm_theme_reset_defaults(void);

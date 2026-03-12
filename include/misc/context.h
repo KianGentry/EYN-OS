@@ -23,7 +23,19 @@ typedef struct command_context_t {
 #define CAP_DEV_NET       (1u << 6)
 #define CAP_DEV_INPUT     (1u << 7)
 
-#define CAP_ALL (CAP_WRITE_CONSOLE | CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY | CAP_DEV_SERIAL | CAP_DEV_DISK | CAP_DEV_NET | CAP_DEV_INPUT)
+/*
+ * SECURITY-INVARIANT: Audio device capability bit.
+ *
+ * Why: gates access to the AC97 audio controller syscalls.
+ * Invariant: user programs must hold this bit to submit PCM buffers
+ *            or query audio device state.
+ * Breakage if changed: existing binaries that check this bit would
+ *                      gain or lose audio access.
+ * ABI-sensitive: Yes (bit position is locked once published).
+ */
+#define CAP_DEV_AUDIO    (1u << 8)
+
+#define CAP_ALL (CAP_WRITE_CONSOLE | CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY | CAP_DEV_SERIAL | CAP_DEV_DISK | CAP_DEV_NET | CAP_DEV_INPUT | CAP_DEV_AUDIO)
 
 extern command_context_t* current_command_context;
 

@@ -392,7 +392,7 @@ int vfprintf(FILE* f, const char* fmt, va_list ap) {
     if (!f || !fmt) return -1;
     int total = 0;
 
-    // Console color control: if writing to stdout AND the format starts with
+    // Console colour control: if writing to stdout AND the format starts with
     // "%c", consume 3 ints (r,g,b) and emit a control sequence understood
     // by the kernel's console output path.
     //

@@ -71,10 +71,10 @@ static void draw_decorations(tile_t* t, int is_focused) {
     if (g_gui_low_mode) {
         if (title_h > 0) {
             int title_y = t->y;
-            int title_color_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
-            int title_color_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
-            int title_color_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
-            drawRect(t->x, title_y, t->width, title_h, title_color_r, title_color_g, title_color_b);
+            int title_colour_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
+            int title_colour_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
+            int title_colour_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
+            drawRect(t->x, title_y, t->width, title_h, title_colour_r, title_colour_g, title_colour_b);
             if (t->title && t->title[0]) {
                 int title_len = (int)strlen(t->title);
                 int avail_chars = (t->width - 8 - btn_zone) / cw;
@@ -114,18 +114,18 @@ static void draw_decorations(tile_t* t, int is_focused) {
     }
     if (title_h > 0) {
         int title_y = t->y;
-        int title_color_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
-        int title_color_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
-        int title_color_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
-        drawRect(t->x, title_y, t->width, title_h, title_color_r, title_color_g, title_color_b);
+        int title_colour_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
+        int title_colour_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
+        int title_colour_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
+        drawRect(t->x, title_y, t->width, title_h, title_colour_r, title_colour_g, title_colour_b);
         if (t->title && t->title[0]) {
             int title_len = (int)strlen(t->title);
             int avail_chars = (t->width - 8 - btn_zone) / cw;
             if (avail_chars < 0) avail_chars = 0;
             int text_y = title_y + (title_h - fh) / 2;
-            int color_r = is_focused ? 230 : 160;
-            int color_g = is_focused ? 230 : 160;
-            int color_b = is_focused ? 230 : 160;
+            int colour_r = is_focused ? 230 : 160;
+            int colour_g = is_focused ? 230 : 160;
+            int colour_b = is_focused ? 230 : 160;
             /* Left-aligned title (modern desktop style) */
             int draw_len = title_len;
             if (draw_len > avail_chars) draw_len = avail_chars;
@@ -133,7 +133,7 @@ static void draw_decorations(tile_t* t, int is_focused) {
             for (int i = 0; i < draw_len; ++i) {
                 int cx = start_x + i * cw;
                 if (cx < 0 || cx + cw > screen_w) break;
-                drawCharAt(cx, text_y, (int)(unsigned char)t->title[i], color_r, color_g, color_b);
+                drawCharAt(cx, text_y, (int)(unsigned char)t->title[i], colour_r, colour_g, colour_b);
             }
         }
         /* Tile title bar buttons (close, maximize, minimize) — same icons as floating windows */
@@ -397,7 +397,7 @@ static void draw_tile_content(const tile_t* t) {
                     int rr = 200, gg = 200, bb = 200;
                     if (src_col < len) {
                         ch = src[src_col];
-                        vterm_get_char_color_abs(t->term_idx, abs_row, src_col, &rr, &gg, &bb);
+                        vterm_get_char_colour_abs(t->term_idx, abs_row, src_col, &rr, &gg, &bb);
                     }
                     // Adaptive default text brightness against background
                     if (bg_bright != -1 && rr == 200 && gg == 200 && bb == 200) {
@@ -435,7 +435,7 @@ static void draw_tile_content(const tile_t* t) {
                         tile_bg_t* bgp = &g_tile_bg[ti_bg_idx];
                         if (bgp->img && bgp->text_shadow) {
                             use_shadow = 1;
-                            // Choose shadow color opposing the text brightness slightly for contrast
+                            // Choose shadow colour opposing the text brightness slightly for contrast
                             // If text is bright, use darker shadow; if text is dark, use very dark gray
                             if (rr + gg + bb > 380) { sr = 0; sg = 0; sb = 0; }
                             else { sr = 10; sg = 10; sb = 10; }

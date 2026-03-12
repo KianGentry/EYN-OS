@@ -3,19 +3,19 @@
 
 #include <stdint.h>
 
-// Color definitions (can be expanded later)
-#define TUI_COLOR_DEFAULT 0
-#define TUI_COLOR_YELLOW  1
-#define TUI_COLOR_RED     2
-#define TUI_COLOR_MAGENTA 3
-#define TUI_COLOR_WHITE   4
-#define TUI_COLOR_BLACK   5
-#define TUI_COLOR_GRAY    6
+// Colour definitions (can be expanded later)
+#define TUI_COLOUR_DEFAULT 0
+#define TUI_COLOUR_YELLOW  1
+#define TUI_COLOUR_RED     2
+#define TUI_COLOUR_MAGENTA 3
+#define TUI_COLOUR_WHITE   4
+#define TUI_COLOUR_BLACK   5
+#define TUI_COLOUR_GRAY    6
 
 // Style for text
 typedef struct {
-    uint8_t fg_color;
-    uint8_t bg_color;
+    uint8_t fg_colour;
+    uint8_t bg_colour;
     uint8_t bold;
 } tui_style_t;
 

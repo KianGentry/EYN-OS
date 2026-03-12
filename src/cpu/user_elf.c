@@ -331,16 +331,16 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     if (g_user_task_term < 0) g_user_task_term = 0;
     g_user_task_ui_dirty = 1;
 
-    // Default user program output color to white (programs can change it).
-    extern volatile int g_user_task_color_r;
-    extern volatile int g_user_task_color_g;
-    extern volatile int g_user_task_color_b;
-    extern volatile uint8 g_user_task_color_state;
+    // Default user program output colour to white (programs can change it).
+    extern volatile int g_user_task_colour_r;
+    extern volatile int g_user_task_colour_g;
+    extern volatile int g_user_task_colour_b;
+    extern volatile uint8 g_user_task_colour_state;
     extern volatile uint8 g_user_task_icon_state;
-    g_user_task_color_r = 255;
-    g_user_task_color_g = 255;
-    g_user_task_color_b = 255;
-    g_user_task_color_state = 0;
+    g_user_task_colour_r = 255;
+    g_user_task_colour_g = 255;
+    g_user_task_colour_b = 255;
+    g_user_task_colour_state = 0;
     g_user_task_icon_state = 0;
     
     // Clear the stdin buffer for this terminal so the user task starts fresh

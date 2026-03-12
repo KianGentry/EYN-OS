@@ -279,7 +279,7 @@ Loaded on-demand to conserve memory:
 - **Aliases** (Jan 2026): Persistent command aliases with parameter substitution
 - **Window Resizing** (Jan 2026): Dynamic window sizing in tiling manager
 - **REIV Format** (Dec 2025): Video/GIF playback support (MP4→REIV converter)
-- **Theme Customization** (Jan 2026): Customizable tiling manager colors and fonts
+- **Theme Customization** (Jan 2026): Customizable tiling manager colours and fonts
 - **Watchdog** (Dec 2025): Hang detection and recovery system
 - **Partitioning** (Dec 2025): MBR partition support, multi-partition disk images
 - **PCI Enumeration** (Dec 2025): Device scanning and identification

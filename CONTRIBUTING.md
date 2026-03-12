@@ -81,7 +81,7 @@ Your command will automatically appear in the help system and be available in th
 - Use `uint8`, `uint32`, etc. from `types.h` instead of standard types
 - Include headers with `#include <header.h>` (not relative paths)
 - Functions should have descriptive names: `custom_command_handler()`
-- Use `printf("%c", r, g, b, ...)` for colored output
+- Use `printf("%c", r, g, b, ...)` for coloured output
 - Keep functions focused and under 100 lines when possible
 
 ### Command Handlers
@@ -159,7 +159,7 @@ void example_cmd(string arg) {
 ### Runtime Issues
 - **Command not found**: Verify `REGISTER_SHELL_COMMAND` macro is correct
 - **Crash**: Check argument parsing and validation
-- **Wrong output**: Verify `printf()` color parameters
+- **Wrong output**: Verify `printf()` colour parameters
 
 ## Getting Help
 

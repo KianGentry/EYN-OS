@@ -95,8 +95,8 @@ typedef struct {
 
     /* Window geometry (capped to X11_MAX_FB_W x X11_MAX_FB_H) */
     int              win_w, win_h;
-    unsigned long    bg_color;      /* Background pixel for XClearWindow */
-    unsigned long    border_color;
+    unsigned long    bg_colour;      /* Background pixel for XClearWindow */
+    unsigned long    border_colour;
     long             event_mask;
 
     /* Software framebuffer (RGB565LE, row-major) */
@@ -660,7 +660,7 @@ Display *XOpenDisplay(const char *display_name) {
 
     /* Set up Visual */
     g_x11->visual.visualid = 1;
-    g_x11->visual.class_  = TrueColor;
+    g_x11->visual.class_  = TrueColour;
     g_x11->visual.bits_per_rgb = 8;
     g_x11->visual.map_entries = 256;
     g_x11->visual.red_mask   = 0xFF0000;
@@ -739,14 +739,14 @@ Window XCreateSimpleWindow(Display *display, Window parent,
 
     g_x11->win_w = w;
     g_x11->win_h = h;
-    g_x11->bg_color = background;
-    g_x11->border_color = border;
+    g_x11->bg_colour = background;
+    g_x11->border_colour = border;
 
     /* Allocate the software framebuffer */
     g_x11->fb = (uint16_t *)calloc(w * h, sizeof(uint16_t));
     if (!g_x11->fb) return None;
 
-    /* Fill with background color */
+    /* Fill with background colour */
     uint16_t bg565 = rgb_to_565(background);
     for (int i = 0; i < w * h; i++)
         g_x11->fb[i] = bg565;
@@ -1056,7 +1056,7 @@ GC XCopyGC(Display *display, GC src, unsigned long valuemask, GC dest) {
 int XClearWindow(Display *display, Window w) {
     (void)display; (void)w;
     if (!g_x11 || !g_x11->fb) return 0;
-    uint16_t bg = rgb_to_565(g_x11->bg_color);
+    uint16_t bg = rgb_to_565(g_x11->bg_colour);
     for (int i = 0; i < g_x11->win_w * g_x11->win_h; i++)
         g_x11->fb[i] = bg;
     g_x11->fb_dirty = 1;
@@ -1071,7 +1071,7 @@ int XClearArea(Display *display, Window w,
     if (!g_x11) return 0;
     int cw = (int)width  > 0 ? (int)width  : g_x11->win_w;
     int ch = (int)height > 0 ? (int)height : g_x11->win_h;
-    fb_fill_rect(x, y, cw, ch, rgb_to_565(g_x11->bg_color));
+    fb_fill_rect(x, y, cw, ch, rgb_to_565(g_x11->bg_colour));
     return 0;
 }
 
@@ -1206,7 +1206,7 @@ int XFillPolygon(Display *display, Drawable d, GC gc,
     (void)display; (void)d; (void)shape; (void)mode;
     if (!g_x11 || !gc || npoints < 3) return 0;
 
-    uint16_t color = rgb_to_565(gc->values.foreground);
+    uint16_t colour = rgb_to_565(gc->values.foreground);
 
     /* Find bounding box */
     int min_y = points[0].y, max_y = points[0].y;
@@ -1236,7 +1236,7 @@ int XFillPolygon(Display *display, Drawable d, GC gc,
         /* Fill between pairs */
         for (int k = 0; k + 1 < nx; k += 2) {
             for (int x = xs[k]; x <= xs[k+1]; x++)
-                fb_put(x, y, color);
+                fb_put(x, y, colour);
         }
     }
     g_x11->fb_dirty = 1;
@@ -1484,13 +1484,13 @@ Bool XQueryPointer(Display *display, Window w,
     return True;
 }
 
-/* ---- Color ------------------------------------------------------- */
+/* ---- Colour ------------------------------------------------------- */
 
-Status XAllocColor(Display *display, Colormap colormap,
-                   XColor *screen_in_out) {
-    (void)display; (void)colormap;
+Status XAllocColour(Display *display, Colourmap colourmap,
+                   XColour *screen_in_out) {
+    (void)display; (void)colourmap;
     if (!screen_in_out) return 0;
-    /* TrueColor: pack the 16-bit channel values into a 24-bit pixel */
+    /* TrueColour: pack the 16-bit channel values into a 24-bit pixel */
     unsigned long r = (screen_in_out->red   >> 8) & 0xFF;
     unsigned long g = (screen_in_out->green >> 8) & 0xFF;
     unsigned long b = (screen_in_out->blue  >> 8) & 0xFF;
@@ -1498,9 +1498,9 @@ Status XAllocColor(Display *display, Colormap colormap,
     return 1;
 }
 
-/* Simple named color lookup for common X11 color names */
-static int parse_named_color(const char *name, unsigned long *pixel) {
-    struct { const char *name; unsigned long val; } colors[] = {
+/* Simple named colour lookup for common X11 colour names */
+static int parse_named_colour(const char *name, unsigned long *pixel) {
+    struct { const char *name; unsigned long val; } colours[] = {
         {"black",    0x000000}, {"white",   0xFFFFFF},
         {"red",      0xFF0000}, {"green",   0x00FF00},
         {"blue",     0x0000FF}, {"yellow",  0xFFFF00},
@@ -1525,8 +1525,8 @@ static int parse_named_color(const char *name, unsigned long *pixel) {
         {"indigo",   0x4B0082}, {"sienna",  0xA0522D},
     };
     /* Case-insensitive name search */
-    for (int i = 0; i < (int)(sizeof(colors)/sizeof(colors[0])); i++) {
-        const char *cn = colors[i].name;
+    for (int i = 0; i < (int)(sizeof(colours)/sizeof(colours[0])); i++) {
+        const char *cn = colours[i].name;
         const char *nm = name;
         int match = 1;
         while (*cn && *nm) {
@@ -1537,21 +1537,21 @@ static int parse_named_color(const char *name, unsigned long *pixel) {
             cn++; nm++;
         }
         if (match && *cn == '\0' && *nm == '\0') {
-            *pixel = colors[i].val;
+            *pixel = colours[i].val;
             return 1;
         }
     }
     return 0;
 }
 
-Status XParseColor(Display *display, Colormap colormap,
-                   const char *spec, XColor *exact_def_return) {
-    (void)display; (void)colormap;
+Status XParseColour(Display *display, Colourmap colourmap,
+                   const char *spec, XColour *exact_def_return) {
+    (void)display; (void)colourmap;
     if (!spec || !exact_def_return) return 0;
 
     unsigned long pix = 0;
     if (spec[0] == '#') {
-        /* Parse hex color: #RGB, #RRGGBB, #RRRRGGGGBBBB */
+        /* Parse hex colour: #RGB, #RRGGBB, #RRRRGGGGBBBB */
         int len = 0;
         for (const char *p = spec+1; *p; p++) len++;
         unsigned long val = 0;
@@ -1571,14 +1571,14 @@ Status XParseColor(Display *display, Colormap colormap,
         } else if (len == 6) {
             pix = val & 0xFFFFFF;
         } else if (len == 12) {
-            /* 12-hex-digit color: #RRRRGGGGBBBB — extract top 8 bits of each */
+            /* 12-hex-digit colour: #RRRRGGGGBBBB — extract top 8 bits of each */
             unsigned long rr = (val >> 24) & 0xFF00;
             unsigned long gg = (val >> 16) & 0xFF00;
             unsigned long bb = (val >>  8) & 0xFF00;
             pix = ((rr >> 8) << 16) | ((gg >> 8) << 8) | (bb >> 8);
         }
     } else {
-        if (!parse_named_color(spec, &pix))
+        if (!parse_named_colour(spec, &pix))
             return 0;
     }
 
@@ -1590,34 +1590,34 @@ Status XParseColor(Display *display, Colormap colormap,
     return 1;
 }
 
-Status XAllocNamedColor(Display *display, Colormap colormap,
-                        const char *color_name,
-                        XColor *screen_def_return,
-                        XColor *exact_def_return) {
-    XColor temp;
-    if (!XParseColor(display, colormap, color_name, &temp))
+Status XAllocNamedColour(Display *display, Colourmap colourmap,
+                        const char *colour_name,
+                        XColour *screen_def_return,
+                        XColour *exact_def_return) {
+    XColour temp;
+    if (!XParseColour(display, colourmap, colour_name, &temp))
         return 0;
     if (exact_def_return) *exact_def_return = temp;
     if (screen_def_return) {
         *screen_def_return = temp;
-        XAllocColor(display, colormap, screen_def_return);
+        XAllocColour(display, colourmap, screen_def_return);
     }
     return 1;
 }
 
-int XFreeColors(Display *display, Colormap colormap,
+int XFreeColours(Display *display, Colourmap colourmap,
                 unsigned long *pixels, int npixels,
                 unsigned long planes) {
-    (void)display; (void)colormap; (void)pixels;
+    (void)display; (void)colourmap; (void)pixels;
     (void)npixels; (void)planes;
     return 0;
 }
 
-Status XLookupColor(Display *display, Colormap colormap,
-                    const char *color_name,
-                    XColor *exact_def_return,
-                    XColor *screen_def_return) {
-    return XAllocNamedColor(display, colormap, color_name,
+Status XLookupColour(Display *display, Colourmap colourmap,
+                    const char *colour_name,
+                    XColour *exact_def_return,
+                    XColour *screen_def_return) {
+    return XAllocNamedColour(display, colourmap, colour_name,
                             screen_def_return, exact_def_return);
 }
 
@@ -1626,14 +1626,14 @@ Status XLookupColor(Display *display, Colormap colormap,
 int XSetWindowBackground(Display *display, Window w,
                          unsigned long background_pixel) {
     (void)display; (void)w;
-    if (g_x11) g_x11->bg_color = background_pixel;
+    if (g_x11) g_x11->bg_colour = background_pixel;
     return 0;
 }
 
 int XSetWindowBorder(Display *display, Window w,
                      unsigned long border_pixel) {
     (void)display; (void)w;
-    if (g_x11) g_x11->border_color = border_pixel;
+    if (g_x11) g_x11->border_colour = border_pixel;
     return 0;
 }
 
@@ -1784,11 +1784,11 @@ XVisualInfo *XGetVisualInfo(Display *display, long vinfo_mask,
     vi->visualid   = 1;
     vi->screen     = 0;
     vi->depth      = 24;
-    vi->class_     = TrueColor;
+    vi->class_     = TrueColour;
     vi->red_mask   = 0xFF0000;
     vi->green_mask = 0x00FF00;
     vi->blue_mask  = 0x0000FF;
-    vi->colormap_size = 256;
+    vi->colourmap_size = 256;
     vi->bits_per_rgb  = 8;
     if (nitems_return) *nitems_return = 1;
     return vi;

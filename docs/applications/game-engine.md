@@ -45,12 +45,12 @@ width: 20
 height: 15
 
 [objects]
-wall: type=1, symbol=#, color=7, solid=1, collectible=0, damage=0, health=0, name=Wall
-food: type=3, symbol=*, color=2, solid=0, collectible=1, damage=0, health=0, name=Food
+wall: type=1, symbol=#, colour=7, solid=1, collectible=0, damage=0, health=0, name=Wall
+food: type=3, symbol=*, colour=2, solid=0, collectible=1, damage=0, health=0, name=Food
 
 [entities]
-player: x=10, y=7, direction=1, symbol=@, color=14, health=3, max_health=3, damage=1, speed=1, name=Player, controlled=1, ai_type=0
-enemy: x=5, y=5, direction=0, symbol=G, color=4, health=2, max_health=2, damage=1, speed=2, name=Goblin, controlled=0, ai_type=1
+player: x=10, y=7, direction=1, symbol=@, colour=14, health=3, max_health=3, damage=1, speed=1, name=Player, controlled=1, ai_type=0
+enemy: x=5, y=5, direction=0, symbol=G, colour=4, health=2, max_health=2, damage=1, speed=2, name=Goblin, controlled=0, ai_type=1
 
 [layout]
 00000000000000000000
@@ -74,7 +74,7 @@ enemy: x=5, y=5, direction=0, symbol=G, color=4, health=2, max_health=2, damage=
 - `x, y` - Position coordinates
 - `direction` - Facing direction (0=up, 1=right, 2=down, 3=left)
 - `symbol` - Display character
-- `color` - Display color (0-15)
+- `colour` - Display colour (0-15)
 - `health` - Current health
 - `max_health` - Maximum health
 - `damage` - Attack damage

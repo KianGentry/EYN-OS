@@ -85,7 +85,7 @@ static const int WHEEL_Y24[24] = {
     0, -259, -500, -707, -866, -966, -1000, -966, -866, -707, -500, -259
 };
 
-static const uint16_t WHEEL_COLORS[24] = {
+static const uint16_t WHEEL_COLOURS[24] = {
     0xF800, 0xF940, 0xFA80, 0xFBC0, 0xFD40, 0xFEC0,
     0xFFE0, 0xCFE0, 0x9FE0, 0x5FE0, 0x1FE0, 0x07E0,
     0x07F0, 0x07FF, 0x069F, 0x053F, 0x03DF, 0x029F,
@@ -207,10 +207,10 @@ static int init_canvas(app_t* app, int width, int height) {
     return 0;
 }
 
-static void paint_pixel(app_t* app, int x, int y, uint16_t color) {
+static void paint_pixel(app_t* app, int x, int y, uint16_t colour) {
     if (!app || !app->canvas) return;
     if (x < 0 || y < 0 || x >= app->canvas_w || y >= app->canvas_h) return;
-    app->canvas[(size_t)y * (size_t)app->canvas_w + (size_t)x] = color;
+    app->canvas[(size_t)y * (size_t)app->canvas_w + (size_t)x] = colour;
 }
 
 static void paint_brush(app_t* app, int x, int y) {
@@ -367,7 +367,7 @@ static void draw_canvas_pixels(app_t* app) {
     }
 }
 
-static int color_wheel_pick(app_t* app, int mx, int my) {
+static int colour_wheel_pick(app_t* app, int mx, int my) {
     int panel_x = app->canvas_area_x + app->canvas_area_w + 8;
     int wheel_cx = panel_x + (PANEL_W - 24) / 2;
     int wheel_cy = 96;
@@ -386,7 +386,7 @@ static int color_wheel_pick(app_t* app, int mx, int my) {
         }
     }
     if (best >= 0 && best_dist <= (14 * 14)) {
-        app->brush = WHEEL_COLORS[best];
+        app->brush = WHEEL_COLOURS[best];
         return 1;
     }
     return 0;
@@ -512,7 +512,7 @@ static void draw_ui(app_t* app) {
     };
     (void)gui_fill_rect(app->handle, &panel);
 
-    gui_text_t ptitle = { .x = panel_x + 10, .y = 14, .r = 250, .g = 225, .b = 160, ._pad = 0, .text = "Color wheel" };
+    gui_text_t ptitle = { .x = panel_x + 10, .y = 14, .r = 250, .g = 225, .b = 160, ._pad = 0, .text = "Colour wheel" };
     (void)gui_draw_text(app->handle, &ptitle);
 
     int wheel_cx = panel_x + (PANEL_W - 24) / 2;
@@ -520,7 +520,7 @@ static void draw_ui(app_t* app) {
     for (int i = 0; i < 24; ++i) {
         int sx = wheel_cx + (WHEEL_X24[i] * 54) / 1000;
         int sy = wheel_cy + (WHEEL_Y24[i] * 54) / 1000;
-        uint16_t c = WHEEL_COLORS[i];
+        uint16_t c = WHEEL_COLOURS[i];
         gui_rect_t sw = {
             .x = sx - 6,
             .y = sy - 6,
@@ -736,7 +736,7 @@ static void handle_main_mouse(app_t* app, const gui_event_t* ev) {
     app->mouse_y = ev->b;
 
     if (press_edge) {
-        if (color_wheel_pick(app, ev->a, ev->b)) {
+        if (colour_wheel_pick(app, ev->a, ev->b)) {
             set_status(app, "brush colour changed");
             app->has_last_canvas = 0;
             return;

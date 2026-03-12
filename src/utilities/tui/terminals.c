@@ -38,11 +38,11 @@ typedef struct {
     char saved_input[INPUT_BUF_LEN];
     // per-vterm current working directory (isolate cd per terminal)
     char cwd[128];
-    // per-line and per-char color metadata for rendering
+    // per-line and per-char colour metadata for rendering
     uint8_t line_r[VTERM_HISTORY_ROWS];
     uint8_t line_g[VTERM_HISTORY_ROWS];
     uint8_t line_b[VTERM_HISTORY_ROWS];
-    // per-character color (row x col)
+    // per-character colour (row x col)
     uint8_t char_r[VTERM_HISTORY_ROWS][TERM_COLS];
     uint8_t char_g[VTERM_HISTORY_ROWS][TERM_COLS];
     uint8_t char_b[VTERM_HISTORY_ROWS][TERM_COLS];
@@ -181,18 +181,18 @@ int vterm_get_scroll(int idx) {
         int n = snprintf(prompt, sizeof(prompt), "%d:%s! ", logical, t->cwd);
         for (int i = 0; i < n; ++i) {
             if ((i & 0x7) == 0) vterm_ctx_allow(CAP_WRITE_CONSOLE);
-            // write the char then override its color to match prompt styling
+            // write the char then override its colour to match prompt styling
             vterm_write_char(idx, prompt[i]);
-            // color drive and leading ':' and '/' as gray, '!' as yellow, rest default
+            // colour drive and leading ':' and '/' as gray, '!' as yellow, rest default
             int drive_and_sep_len = 2; // e.g. "0:"
             // find position of '!' in prompt
             int bang_pos = -1;
             for (int j = 0; j < n; ++j) if (prompt[j] == '!') { bang_pos = j; break; }
-            // determine color for this char
+            // determine colour for this char
             int rr = 200, gg = 200, bb = 200;
             if (i < drive_and_sep_len) { rr = 150; gg = 150; bb = 150; }
             if (i == bang_pos) { rr = 255; gg = 255; bb = 0; }
-            // set color for the character we just wrote (cur_x was incremented)
+            // set colour for the character we just wrote (cur_x was incremented)
             int written_row = t->cur_y;
             int written_col = t->cur_x - 1;
             if (written_row >= t->head_row && written_row <= t->cur_y && written_col >= 0 && written_col < TERM_COLS) {
@@ -293,15 +293,15 @@ void vterm_write_char(int idx, char ch) {
     int row = vterm_row_slot(t->cur_y);
     t->buf[row][t->cur_x] = ch;
     t->buf[row][t->cur_x + 1] = '\0';
-    /* set per-char color from current redirect color if available (non-zero), else default */
-    int use_r = (shell_redirect_color_r > 0) ? shell_redirect_color_r : 200;
-    int use_g = (shell_redirect_color_g > 0) ? shell_redirect_color_g : 200;
-    int use_b = (shell_redirect_color_b > 0) ? shell_redirect_color_b : 200;
+    /* set per-char colour from current redirect colour if available (non-zero), else default */
+    int use_r = (shell_redirect_colour_r > 0) ? shell_redirect_colour_r : 200;
+    int use_g = (shell_redirect_colour_g > 0) ? shell_redirect_colour_g : 200;
+    int use_b = (shell_redirect_colour_b > 0) ? shell_redirect_colour_b : 200;
     t->char_r[row][t->cur_x] = use_r;
     t->char_g[row][t->cur_x] = use_g;
     t->char_b[row][t->cur_x] = use_b;
     t->cur_x++;
-    /* ensure this line has a sensible default color if not already set */
+    /* ensure this line has a sensible default colour if not already set */
     if (t->line_r[row] == 0 && t->line_g[row] == 0 && t->line_b[row] == 0) {
         t->line_r[row] = 200;
         t->line_g[row] = 200;
@@ -356,7 +356,7 @@ void vterm_backspace_output(int idx) {
     int row = vterm_row_slot(t->cur_y);
     t->buf[row][t->cur_x] = '\0';
 
-    // Reset per-char color at erased position to the line default.
+    // Reset per-char colour at erased position to the line default.
     uint8 rr = t->line_r[row] ? t->line_r[row] : 200;
     uint8 gg = t->line_g[row] ? t->line_g[row] : 200;
     uint8 bb = t->line_b[row] ? t->line_b[row] : 200;
@@ -666,7 +666,7 @@ void vterm_handle_key(int idx, int key) {
                                 t->line_indent_px[out_slot] = 0;
                             }
 
-                            // write characters with per-char colors
+                            // write characters with per-char colours
                             for (int i = 0; i < len; ++i) {
                                 vterm_write_char(idx, start[i]);
                                 int wr = shell_redirect_r[base + i] ? shell_redirect_r[base + i] : 200;
@@ -770,7 +770,7 @@ const char* vterm_get_tail_line(int idx, int visible_index, int visible_count) {
     return t->buf[vterm_row_slot(target)];
 }
 
-void vterm_get_tail_line_color(int idx, int visible_index, int visible_count, int* r, int* g, int* b) {
+void vterm_get_tail_line_colour(int idx, int visible_index, int visible_count, int* r, int* g, int* b) {
     if (r) *r = 200;
     if (g) *g = 200;
     if (b) *b = 200;
@@ -788,8 +788,8 @@ void vterm_get_tail_line_color(int idx, int visible_index, int visible_count, in
     if (b) *b = t->line_b[slot];
 }
 
-// Return color for a specific character in the tail view
-void vterm_get_tail_char_color(int idx, int visible_index, int visible_count, int char_col, int* r, int* g, int* b) {
+// Return colour for a specific character in the tail view
+void vterm_get_tail_char_colour(int idx, int visible_index, int visible_count, int char_col, int* r, int* g, int* b) {
     if (r) *r = 200;
     if (g) *g = 200;
     if (b) *b = 200;
@@ -865,7 +865,7 @@ int vterm_get_cursor_row(int idx) {
     return vterms[idx].cur_y;
 }
 
-void vterm_get_char_color_abs(int idx, int row, int col, int* r, int* g, int* b) {
+void vterm_get_char_colour_abs(int idx, int row, int col, int* r, int* g, int* b) {
     if (r) *r = 200;
     if (g) *g = 200;
     if (b) *b = 200;

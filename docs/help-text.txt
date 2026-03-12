@@ -62,7 +62,7 @@ GUI/Window Commands:
   setfont         - Set runtime system font.
   stats           - Open the stats GUI.
   theme           - Open the theme editor.
-  view            - Open an REI image or REIV video viewer.
+  view            - Open an REI image, REIV video, REIS audio, or WAV audio viewer.
 
 Development Commands:
 --------------------

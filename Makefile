@@ -10,7 +10,7 @@ GRUB_MKRESCUE := $(shell command -v grub2-mkrescue 2>/dev/null || command -v gru
 # Note: keep frame pointers for stack traces; avoid stack protector & fortify in freestanding kernel
 CPU_HAS_INVLPG ?= 0
 
-KERNEL_CFLAGS = -m32 -march=i386 -mtune=i386 -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-common \
+KERNEL_CFLAGS = -m32 -march=i386 -mtune=i386 -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-common -MMD -MP \
 		 -Os -fno-strict-overflow -fwrapv \
 		 -DCONFIG_CPU_HAS_INVLPG=$(CPU_HAS_INVLPG) \
 		 -fdata-sections -ffunction-sections \
@@ -63,6 +63,8 @@ OBJS += obj/pci.o
 OBJS += obj/e1000.o
 OBJS += obj/netstack.o
 OBJS += obj/shell_script.o
+OBJS += obj/ac97.o
+OBJS += obj/reis.o
 OUTPUT = $(BOOTDIR)/kernel.bin
 
 # Source files to object files
@@ -205,6 +207,12 @@ obj/rei.o:src/drivers/rei.c
 obj/reiv.o:src/drivers/reiv.c
 	$(COMPILER) $(CFLAGS) src/drivers/reiv.c -o obj/reiv.o
 
+obj/reis.o:src/drivers/reis.c
+	$(COMPILER) $(CFLAGS) src/drivers/reis.c -o obj/reis.o
+
+obj/ac97.o:src/drivers/ac97.c
+	$(COMPILER) $(CFLAGS) src/drivers/ac97.c -o obj/ac97.o
+
 obj/run_command.o:src/utilities/shell/run_command.c
 	$(COMPILER) $(CFLAGS) src/utilities/shell/run_command.c -o obj/run_command.o
 
@@ -329,6 +337,8 @@ run: build
 	-display $(QEMU_DISPLAY) \
 	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
 	-device e1000,netdev=net0 \
+	-audiodev pipewire,id=audio0 \
+	-device ac97,audiodev=audio0 \
 	-m 128M
 
 # Debug run with serial logging and detailed CPU/interrupt logs
@@ -341,10 +351,12 @@ qemu-debug: build
 	-display $(QEMU_DISPLAY) \
 	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
 	-device e1000,netdev=net0 \
+	-audiodev pipewire,id=audio0 \
+	-device ac97,audiodev=audio0 \
 	-serial stdio \
 	-d int,cpu_reset -D tmp/qemu-debug.log \
 	-no-reboot -no-shutdown \
-	-m 9M
+	-m 64M
 
 # Halt at start for GDB attach on tcp:1234 (target remote :1234)
 .PHONY: qemu-gdb
@@ -410,3 +422,5 @@ checkfs: fsck_eynfs
 analyze:
 	@echo "Running GCC static analyzer over src/**/*.c ..."
 	@find src -name "*.c" -print0 | xargs -0 -I{} sh -c 'echo Analyzing {}; $(COMPILER) $(KERNEL_CFLAGS) -fanalyzer -c {} -o /dev/null' || true
+# Auto-generated header dependency files (produced by -MMD -MP in KERNEL_CFLAGS).
+-include $(wildcard obj/*.d)

@@ -14,18 +14,18 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         // frame background
         drawRect(w->x, w->y, w->w, w->h, 0, 0, 0);
         // title bar
-        int title_color_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
-        int title_color_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
-        int title_color_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
-        drawRect(w->x, w->y, w->w, th, title_color_r, title_color_g, title_color_b);
+        int title_colour_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
+        int title_colour_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
+        int title_colour_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
+        drawRect(w->x, w->y, w->w, th, title_colour_r, title_colour_g, title_colour_b);
         if (w->title && w->title[0]) {
             int len = (int)strlen(w->title);
             int max_chars = (w->w - 12) / cw; if (max_chars < 0) max_chars = 0;
-            int color_r = is_focused ? 230 : 160, color_g = is_focused ? 230 : 160, color_b = is_focused ? 230 : 160;
+            int colour_r = is_focused ? 230 : 160, colour_g = is_focused ? 230 : 160, colour_b = is_focused ? 230 : 160;
             int text_y = w->y + (th - fh) / 2;
             if (len > max_chars) len = max_chars;
             int start_x = w->x + 6;
-            for (int i = 0; i < len; ++i) drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], color_r, color_g, color_b);
+            for (int i = 0; i < len; ++i) drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], colour_r, colour_g, colour_b);
         }
         (void)sh;
         // border — Materia gray
@@ -41,10 +41,10 @@ static void wm_draw_decor(window_t* w, int is_focused) {
     // frame background
     drawRect(w->x, w->y, w->w, w->h, 0, 0, 0);
     // title bar
-    int title_color_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
-    int title_color_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
-    int title_color_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
-    drawRect(w->x, w->y, w->w, th, title_color_r, title_color_g, title_color_b);
+    int title_colour_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
+    int title_colour_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
+    int title_colour_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
+    drawRect(w->x, w->y, w->w, th, title_colour_r, title_colour_g, title_colour_b);
     if (w->title && w->title[0]) {
         int len = (int)strlen(w->title);
         // Reserve space for the three titlebar buttons on the right
@@ -52,15 +52,15 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         int avail_chars = (w->w - 8 - btn_zone) / cw;
         if (avail_chars < 0) avail_chars = 0;
         int text_y = w->y + (th - fh) / 2;
-        int color_r = is_focused ? 230 : 160;
-        int color_g = is_focused ? 230 : 160;
-        int color_b = is_focused ? 230 : 160;
+        int colour_r = is_focused ? 230 : 160;
+        int colour_g = is_focused ? 230 : 160;
+        int colour_b = is_focused ? 230 : 160;
         // Left-aligned title (with small left padding)
         int draw_len = len;
         if (draw_len > avail_chars) draw_len = avail_chars;
         int start_x = w->x + 6;
         for (int i = 0; i < draw_len; ++i)
-            drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], color_r, color_g, color_b);
+            drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], colour_r, colour_g, colour_b);
     }
     // Titlebar buttons (minimize, maximize, close) on the right
     if (th >= 12) {
@@ -211,7 +211,7 @@ static void wm_draw_icon_into_button(const rei_image_t* icon, int loaded, int bx
     int depth = icon->header.depth;
     // Mark the whole button area dirty once; we'll write many pixels without per-pixel marks
     vga_mark_dirty_rect(bx, by, bw, bh);
-    // Determine color key for non-alpha formats by sampling corners
+    // Determine colour key for non-alpha formats by sampling corners
     int use_key = 0; uint8_t keyR = 0, keyG = 0, keyB = 0, keyM = 0;
     if (depth == REI_DEPTH_RGB && iw > 0 && ih > 0) {
         const uint8_t* tl = data + 0 * iw * depth + 0 * 3;
@@ -634,14 +634,14 @@ static void draw_cursor_overlay(int x, int y) {
     }
     // Transparency handling:
     // - RGBA: draw only if alpha >= 128 (skip low-alpha to avoid halos)
-    // - RGB/MONO: if the four corner pixels are the same value/color, treat that as a color key
+    // - RGB/MONO: if the four corner pixels are the same value/colour, treat that as a colour key
     //   and skip any pixels matching it. This removes solid background boxes on assets lacking alpha.
     const uint8_t* data = cim->data;
     int depth = cim->header.depth;
     int sw = cim->header.width;
     int sh = cim->header.height;
     int stride = sw * depth;
-    // Determine color key for non-alpha formats by sampling corners
+    // Determine colour key for non-alpha formats by sampling corners
     int use_key = 0; uint8_t keyR = 0, keyG = 0, keyB = 0, keyM = 0;
     if (depth == REI_DEPTH_RGB && sw > 0 && sh > 0) {
         const uint8_t* tl = data + 0 * stride + 0 * 3;

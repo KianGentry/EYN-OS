@@ -389,7 +389,7 @@ static int g_min_icon_unf_loaded = 0;
 static rei_image_t g_max_icon_unf;
 static int g_max_icon_unf_loaded = 0;
 
-// --- Runtime theme (tile/window chrome colors) ---
+// --- Runtime theme (tile/window chrome colours) ---
 // Materia-inspired gray palette: neutral mid-grays for chrome, white text/icons.
 static wm_theme_t g_wm_theme = {
     .title_focused_r = 66, .title_focused_g = 66, .title_focused_b = 66,

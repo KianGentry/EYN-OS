@@ -17,7 +17,7 @@ void vterm_set_scroll(int idx, int scroll);
 int vterm_get_scroll(int idx);
 // Handle a full key press for the vterm: editing, history, enter to execute command
 void vterm_handle_key(int idx, int key);
-// Stream a single redirected output character directly into a vterm (with color).
+// Stream a single redirected output character directly into a vterm (with colour).
 // Used to keep the GUI updating while a ring3 task is running.
 void vterm_stream_redirect_char(int idx, char ch, int r, int g, int b);
 // Print the shell prompt into the vterm (e.g. "0:/! ")
@@ -34,10 +34,10 @@ int vterm_is_selected(int idx, int row, int col);
 // Get the Nth line from the tail when showing last visible lines. 
 // visible_index is 0..(visible_count-1), where 0 is the earliest visible line.
 const char* vterm_get_tail_line(int idx, int visible_index, int visible_count);
-// Get color for tail line
-void vterm_get_tail_line_color(int idx, int visible_index, int visible_count, int* out_r, int* out_g, int* out_b);
-// Get color for a specific character column in the tail view
-void vterm_get_tail_char_color(int idx, int visible_index, int visible_count, int char_col, int* out_r, int* out_g, int* out_b);
+// Get colour for tail line
+void vterm_get_tail_line_colour(int idx, int visible_index, int visible_count, int* out_r, int* out_g, int* out_b);
+// Get colour for a specific character column in the tail view
+void vterm_get_tail_char_colour(int idx, int visible_index, int visible_count, int char_col, int* out_r, int* out_g, int* out_b);
 
 // Per-line icon metadata for rendering small file/dir icons alongside text.
 // Icons are anchored to a character column (cell start) and are not meant to
@@ -55,8 +55,8 @@ const char* vterm_get_line_icon_key_n(int idx, int row, int n, int* out_anchor_c
 void vterm_register_line_icon(int idx, const char* icon_key);
 
 // Absolute helpers for rendering/wrapping
-// Get per-character color at absolute (row, col) indices
-void vterm_get_char_color_abs(int idx, int row, int col, int* out_r, int* out_g, int* out_b);
+// Get per-character colour at absolute (row, col) indices
+void vterm_get_char_colour_abs(int idx, int row, int col, int* out_r, int* out_g, int* out_b);
 // Monotonic version counter for each vterm that increments when content changes.
 // Use to drive incremental redraws in the tiler.
 int vterm_get_version(int idx);
