@@ -102,9 +102,17 @@ void irq_init(void) {
     mask1 &= ~(1 << 0);
     outportb(PIC1_DATA, mask1);
 
-    pit_init(50); // 50 Hz ticks (reduced to lower system interrupt overhead)
+    /*
+     * 1000 Hz PIT: gives 1 ms tick granularity so usleep() can provide
+     * accurate sub-20ms sleeps without spin-waiting.  At 50 Hz each
+     * sched_sleep_us call was rounded up to the nearest 20 ms, causing
+     * video frame pacing to overshoot by up to 19 ms per frame.
+     *
+     * Overhead: ~1 µs ISR × 1000/s = 1 ms/s CPU cost — negligible.
+     */
+    pit_init(1000);
     extern void sched_set_tick_hz(uint32);
-    sched_set_tick_hz(50);
+    sched_set_tick_hz(1000);
 }
 
 void register_interrupt_handler(int irq, irq_handler_t handler) {

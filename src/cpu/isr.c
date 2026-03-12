@@ -632,6 +632,26 @@ typedef struct {
     uint32 eynfs_first_block;
     uint32 cur_block;
     uint32 cur_block_off;
+
+    /*
+     * Per-FD reusable kernel read buffer.
+     *
+     * Why: syscall_read_file previously called malloc(maxlen)+free on every
+     *      read call.  For REIV video frames (~40-80 KB each) decoded at
+     *      30 fps, that is 30 malloc/free cycles per second through the
+     *      kernel heap allocator.  malloc/free itself is fast, but every
+     *      free() triggers merge_free_blocks() which scans the heap.  A
+     *      reusable per-FD buffer eliminates this churn entirely.
+     *
+     * Invariant: kbuf is NULL when kbuf_size is 0.  kbuf_size reflects
+     *            the allocated capacity in bytes.  The buffer is only grown
+     *            (reallocated), never shrunk, until close.
+     * Lifetime: allocated on first read of a given FD; freed on close.
+     * Breakage if removed: reverts to per-read heap churn.
+     * ABI-sensitive: No.  Kernel-internal only.
+     */
+    uint8* kbuf;
+    uint32 kbuf_size;
 } user_fd_t;
 
 #define USER_FD_MAX 16
@@ -677,6 +697,8 @@ void syscall_reset_user_fds(void) {
         if (g_user_fds[i].used) {
             cap_revoke_object(&g_user_fds[i], CAP_OBJ_USER_FD);
         }
+        if (g_user_fds[i].kbuf) { free(g_user_fds[i].kbuf); g_user_fds[i].kbuf = NULL; }
+        g_user_fds[i].kbuf_size = 0;
         g_user_fds[i].used = 0;
         g_user_fds[i].is_dir = 0;
         g_user_fds[i].offset = 0;
@@ -1121,6 +1143,10 @@ static char* kstrdup_bounded(const char* s, size_t max_len) {
 static int user_fd_alloc(void) {
     for (int i = 3; i < USER_FD_MAX; ++i) {
         if (!g_user_fds[i].used) {
+            /* Defensive: free any leftover kbuf from a prior close that
+             * forgot to release it (e.g. raw used=0 without free). */
+            if (g_user_fds[i].kbuf) { free(g_user_fds[i].kbuf); g_user_fds[i].kbuf = NULL; }
+            g_user_fds[i].kbuf_size = 0;
             g_user_fds[i].used = 1;
             g_user_fds[i].is_dir = 0;
             g_user_fds[i].offset = 0;
@@ -1458,8 +1484,16 @@ static int syscall_read_file(user_fd_t* ufd, char* user_dst, int maxlen) {
                (int)ufd->drive, ufd->path, (int)ufd->size, maxlen);
     }
 
-    uint8 *kbuf = (uint8 *)malloc((size_t)maxlen);
-    if (!kbuf) return -1;
+    /* Grow the per-FD reusable kernel buffer only when needed.
+     * This eliminates the malloc/free cycle on every read call,
+     * which was causing unnecessary heap churn for video frames. */
+    if ((uint32)maxlen > ufd->kbuf_size) {
+        if (ufd->kbuf) { free(ufd->kbuf); ufd->kbuf = NULL; }
+        ufd->kbuf = (uint8*)malloc((size_t)maxlen);
+        if (!ufd->kbuf) { ufd->kbuf_size = 0; return -1; }
+        ufd->kbuf_size = (uint32)maxlen;
+    }
+    uint8 *kbuf = ufd->kbuf;
 
     int n;
     if (ufd->eynfs_first_block != 0) {
@@ -1479,7 +1513,6 @@ static int syscall_read_file(user_fd_t* ufd, char* user_dst, int maxlen) {
 
     if (n > 0) {
         if (copyout(user_dst, kbuf, (size_t)n) != 0) {
-            free(kbuf);
             return -1;
         }
         ufd->offset += (uint32)n;
@@ -1488,7 +1521,7 @@ static int syscall_read_file(user_fd_t* ufd, char* user_dst, int maxlen) {
                (int)ufd->offset, (int)ufd->size);
     }
 
-    free(kbuf);
+    /* kbuf is retained for the next read on this FD — no free here. */
     return (n < 0) ? -1 : n;
 }
 
@@ -2657,6 +2690,9 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (fd < 0 || fd >= USER_FD_MAX) { regs->eax = (uint32)-1; break; }
             if (fd <= 2) { regs->eax = 0; break; }
             cap_revoke_object(&g_user_fds[fd], CAP_OBJ_USER_FD);
+            /* Release the per-FD reusable read buffer on close. */
+            if (g_user_fds[fd].kbuf) { free(g_user_fds[fd].kbuf); g_user_fds[fd].kbuf = NULL; }
+            g_user_fds[fd].kbuf_size = 0;
             g_user_fds[fd].used = 0;
             regs->eax = 0;
             break;

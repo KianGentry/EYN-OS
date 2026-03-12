@@ -27,7 +27,20 @@ static uint32 g_ready_bitmap = 0;
 
 static volatile uint32 g_ticks = 0;
 static uint32 g_tick_hz = 100;
-static uint32 g_timeslice_ticks = 5; // ~50ms at 100Hz
+/*
+ * ABI-INVARIANT: Scheduler timeslice length in ticks.
+ *
+ * Why: Controls how often sched_on_timeslice_end() fires, which runs
+ *      deferred work items (UI events, network polling, etc.).
+ * Invariant: timeslice_ticks × tick_period_ms = timeslice_real_ms.
+ *   At 1000 Hz (1 ms/tick): 100 ticks = 100 ms timeslice.
+ *   At  100 Hz (10 ms/tick):  10 ticks = 100 ms timeslice.
+ *   At   50 Hz (20 ms/tick):   5 ticks = 100 ms timeslice.
+ * Breakage if changed: reducing the timeslice starves deferred work;
+ *   increasing makes the system less responsive to background tasks.
+ * ABI-sensitive: No.  Scheduler-internal only.
+ */
+static uint32 g_timeslice_ticks = 100; // 100 ms at 1000 Hz
 static uint32 g_current_slice = 0;
 static volatile uint32 g_idle_hlt_count = 0; // counts ticks elapsed while idling (not raw HLTs)
 

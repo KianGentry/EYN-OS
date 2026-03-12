@@ -772,12 +772,18 @@ static int reiv_open_and_prepare_stream(reiv_stream_t* video, const char* path) 
     }
 
     if (!video->index) {
+        /* First open: allocate and populate the index. */
         video->index = (reiv_frame_entry_t*)malloc(index_bytes);
         if (!video->index) return -1;
-    }
-
-    if (read_exact_fd(fd, video->index, index_bytes) != 0) {
-        return -1;
+        if (read_exact_fd(fd, video->index, index_bytes) != 0) {
+            return -1;
+        }
+    } else {
+        /* Rewind (fallback path): index is already in memory.
+         * Just skip past the index bytes to position the FD at frame data. */
+        if (skip_fd_bytes(fd, index_bytes) != 0) {
+            return -1;
+        }
     }
 
     video->stream_data_base = hdr.frames_offset + (uint32_t)index_bytes;
@@ -786,15 +792,43 @@ static int reiv_open_and_prepare_stream(reiv_stream_t* video, const char* path) 
 
 static int reiv_rewind(reiv_stream_t* video) {
     if (!video) return -1;
-    if (!video->path[0]) return -1;
 
+    video->next_frame = 0u;
+    video->stream_payload_off = 0u;
+
+    /*
+     * Seek to the start of frame data rather than closing and reopening.
+     *
+     * Why: the original close+open path re-ran the EYNFS directory scan
+     * (open syscall) plus re-read the entire frame index on every loop
+     * cycle.  For a 30-frame video this happened once per second and
+     * caused a visible stutter every 30 frames.
+     *
+     * lseek(SEEK_SET, stream_data_base) positions the FD right at the
+     * first frame's payload, so the follow-up read in reiv_decode_next
+     * finds the correct data without any directory traversal.  The
+     * EYNFS backward-seek path resets the block cursor to the first
+     * block; since stream_data_base is only a few hundred bytes into
+     * the file, the cursor walk costs ~1 block traversal — negligible.
+     *
+     * Fallback: if the fd is invalid or the seek fails, close and
+     * reopen the traditional way.
+     */
+    if (video->fd >= 0 && video->stream_data_base > 0u) {
+        long new_off = lseek(video->fd, (long)video->stream_data_base, SEEK_SET);
+        if (new_off == (long)video->stream_data_base) {
+            memset(video->prev_frame, 0, (size_t)video->frame_size_bytes);
+            return 0;
+        }
+    }
+
+    /* Fallback: close and reopen (covers first-open or seek failure). */
     if (video->fd >= 0) {
         close(video->fd);
         video->fd = -1;
     }
 
-    video->next_frame = 0u;
-    video->stream_payload_off = 0u;
+    if (!video->path[0]) return -1;
 
     if (reiv_open_and_prepare_stream(video, video->path) != 0) {
         return -1;
@@ -1468,6 +1502,23 @@ static void render_framebuffer(app_t* app, const uint16_t* src, int src_w, int s
     int zoom = app->zoom_permille;
     if (zoom <= 0) zoom = 1000;
 
+    /*
+     * Precompute source-X for each blit column once, outside the row loop.
+     * The inner loop previously did two integer divisions per pixel: one for
+     * the blit→viewport column scale and one for the viewport→source zoom.
+     * Both depend only on bx (not by), so they can be hoisted entirely.
+     * blit_w is ≤320 by construction; sx_table is indexed [0, blit_w).
+     */
+    int sx_table[320];
+    int ncols = (app->blit_w < 320) ? app->blit_w : 320;
+    for (int bx = 0; bx < ncols; ++bx) {
+        int vpx = (app->blit_w == app->viewport_w)
+                  ? bx
+                  : (bx * app->viewport_w / app->blit_w);
+        int sx = ((vpx - app->origin_x) * 1000) / zoom;
+        sx_table[bx] = (sx >= 0 && sx < src_w) ? sx : -1;
+    }
+
     for (int by = 0; by < app->blit_h; ++by) {
         /* Map blit row → viewport row (integer nearest-neighbour downscale) */
         int vpy = (app->blit_h == app->viewport_h)
@@ -1477,13 +1528,9 @@ static void render_framebuffer(app_t* app, const uint16_t* src, int src_w, int s
         if (sy < 0 || sy >= src_h) continue;
         size_t row_off = (size_t)by * (size_t)app->blit_w;
         size_t src_row = (size_t)sy * (size_t)src_w;
-        for (int bx = 0; bx < app->blit_w; ++bx) {
-            /* Map blit column → viewport column */
-            int vpx = (app->blit_w == app->viewport_w)
-                      ? bx
-                      : (bx * app->viewport_w / app->blit_w);
-            int sx = ((vpx - app->origin_x) * 1000) / zoom;
-            if (sx < 0 || sx >= src_w) continue;
+        for (int bx = 0; bx < ncols; ++bx) {
+            int sx = sx_table[bx];
+            if (sx < 0) continue;
             app->viewbuf[row_off + (size_t)bx] = src[src_row + (size_t)sx];
         }
     }
@@ -1701,6 +1748,21 @@ int main(int argc, char** argv) {
     (void)gui_set_continuous_redraw(app.handle, 1);
     app.running = 1;
 
+    /*
+     * Deadline-based video frame pacing.
+     *
+     * Instead of sleeping a fixed frame_delay_us after every frame (which
+     * accumulates work_time as drift), we record when playback began and
+     * compute the wall-clock deadline for each frame.  Sleep only the
+     * remaining time to hit that deadline.  If we're already past it
+     * (decode + render took too long), skip the sleep entirely.
+     *
+     * On loop/rewind (next_frame wraps back), reset the base so the
+     * new cycle starts fresh.
+     */
+    uint32_t video_base_ms = audio_now_ms();
+    uint32_t video_last_frame = 0;
+
     while (app.running) {
         gui_size_t sz = {0, 0};
         (void)gui_get_content_size(app.handle, &sz);
@@ -1904,7 +1966,18 @@ int main(int argc, char** argv) {
         app.frame_counter += 1;
 
         if (app.video.is_video) {
-            usleep(app.video.frame_delay_us);
+            uint32_t cur_frame = app.video.next_frame;
+            if (cur_frame < video_last_frame) {
+                /* Rewind occurred — reset deadline base. */
+                video_base_ms = audio_now_ms();
+            }
+            video_last_frame = cur_frame;
+            uint32_t target_ms = video_base_ms
+                + (uint32_t)(((uint64_t)cur_frame * (uint64_t)app.video.frame_delay_us) / 1000u);
+            uint32_t now = audio_now_ms();
+            if (now < target_ms) {
+                usleep((target_ms - now) * 1000u);
+            }
         } else if (app.audio.is_audio) {
             usleep(10000);  /* ~10 ms polling interval for audio */
         } else {
