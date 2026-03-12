@@ -75,6 +75,8 @@ typedef struct {
     char     name[56];
     uint32_t size;
     uint8_t  is_dir;
+    uint8_t  is_drive;
+    uint8_t  drive_index;
 } entry_t;
 
 typedef struct {
@@ -82,6 +84,8 @@ typedef struct {
     int      running;
 
     char     path[MAX_PATH];
+    int      drive;
+    int      at_drive_select;
 
     entry_t  entries[MAX_ENTRIES];
     int      entry_count;
@@ -108,6 +112,17 @@ static int str_len(const char* s) {
     int n = 0;
     while (s[n]) ++n;
     return n;
+}
+
+static void build_path_label(const app_t* app, char* out, int cap) {
+    if (!out || cap <= 0) return;
+    if (app->at_drive_select) {
+        safe_strcpy(out, cap, "Drives");
+        return;
+    }
+
+    const char* path = app->path[0] ? app->path : "/";
+    snprintf(out, (size_t)cap, "%d:%s", app->drive, path);
 }
 
 static void format_size(char* buf, int buf_sz, uint32_t sz) {
@@ -197,10 +212,37 @@ static const char* find_ext(const char* name) {
     return dot;
 }
 
+static int load_drive_list(app_t* app) {
+    app->entry_count = 0;
+    app->selected    = 0;
+    app->scroll      = 0;
+
+    int count = eyn_sys_drive_get_count();
+    if (count < 0) count = 0;
+
+    for (int i = 0; i < count && app->entry_count < MAX_ENTRIES; ++i) {
+        int present = eyn_sys_drive_is_present((uint32_t)i);
+        if (present <= 0) continue;
+
+        entry_t* e = &app->entries[app->entry_count++];
+        snprintf(e->name, sizeof(e->name), "Drive %d", i);
+        e->size = 0;
+        e->is_dir = 1;
+        e->is_drive = 1;
+        e->drive_index = (uint8_t)i;
+    }
+
+    return app->entry_count;
+}
+
 
 // Directory loading
 
 static int load_directory(app_t* app) {
+    if (app->at_drive_select) {
+        return load_drive_list(app);
+    }
+
     app->entry_count = 0;
     app->selected    = 0;
     app->scroll      = 0;
@@ -219,6 +261,8 @@ static int load_directory(app_t* app) {
             safe_strcpy(e->name, (int)sizeof(e->name), raw[i].name);
             e->size   = raw[i].size;
             e->is_dir = raw[i].is_dir;
+            e->is_drive = 0;
+            e->drive_index = 0;
             app->entry_count++;
         }
     }
@@ -260,6 +304,8 @@ static void navigate_into(app_t* app, const char* child) {
 }
 
 static void navigate_up(app_t* app) {
+    if (app->at_drive_select) return;
+
     int plen = str_len(app->path);
 
     if (plen > 1 && app->path[plen - 1] == '/') {
@@ -267,6 +313,7 @@ static void navigate_up(app_t* app) {
     }
 
     if (plen <= 1) {
+        app->at_drive_select = 1;
         safe_strcpy(app->path, MAX_PATH, "/");
         load_directory(app);
         return;
@@ -298,6 +345,15 @@ static int is_elf_file(const char* path) {
 static void activate_entry(app_t* app) {
     if (app->selected < 0 || app->selected >= app->entry_count) return;
     entry_t* e = &app->entries[app->selected];
+
+    if (e->is_drive) {
+        (void)eyn_sys_drive_set_logical((uint32_t)e->drive_index);
+        app->drive = (int)e->drive_index;
+        app->at_drive_select = 0;
+        safe_strcpy(app->path, MAX_PATH, "/");
+        load_directory(app);
+        return;
+    }
 
     if (e->is_dir) {
         navigate_into(app, e->name);
@@ -432,10 +488,12 @@ static void draw_ui(app_t* app) {
     (void)gui_fill_rect(app->handle, &hdr);
 
     /* Path breadcrumb */
+    char path_buf[MAX_PATH + 16];
+    build_path_label(app, path_buf, (int)sizeof(path_buf));
     gui_text_t path_txt = {
         .x = 8, .y = (HEADER_H - FONT_H) / 2,
         .r = PATH_R, .g = PATH_G, .b = PATH_B, ._pad = 0,
-        .text = app->path
+        .text = path_buf
     };
     (void)gui_draw_text(app->handle, &path_txt);
 
@@ -481,7 +539,7 @@ static void draw_ui(app_t* app) {
         gui_text_t empty = {
             .x = NAME_COL_X, .y = list_y + 6,
             .r = DIM_R, .g = DIM_G, .b = DIM_B, ._pad = 0,
-            .text = "(empty directory)"
+            .text = app->at_drive_select ? "(no drives present)" : "(empty directory)"
         };
         (void)gui_draw_text(app->handle, &empty);
     }
@@ -503,7 +561,7 @@ static void draw_ui(app_t* app) {
         }
 
         /* File-type icon (REI image from kernel icon cache) */
-        {
+        if (!e->is_drive) {
             const char* iname = icon_name_for_entry(e);
             gui_icon_t ic = {
                 .x = ICON_X, .y = ey + (ROW_H - ICON_SIZE) / 2,
@@ -513,7 +571,14 @@ static void draw_ui(app_t* app) {
         }
 
         /* Name */
-        if (e->is_dir) {
+        if (e->is_drive) {
+            gui_text_t t = {
+                .x = NAME_COL_X, .y = ey + 2,
+                .r = DIR_R, .g = DIR_G, .b = DIR_B, ._pad = 0,
+                .text = e->name
+            };
+            (void)gui_draw_text(app->handle, &t);
+        } else if (e->is_dir) {
             char dir_name[60];
             int ni = 0;
             for (; ni < 55 && e->name[ni]; ++ni)
@@ -675,6 +740,20 @@ int main(int argc, char** argv) {
     memset(&app, 0, sizeof(app));
     app.running        = 1;
     app.last_click_idx = -1;
+    app.drive          = 0;
+    app.at_drive_select = 0;
+
+    int drive_count = eyn_sys_drive_get_count();
+    if (drive_count <= 0) {
+        app.at_drive_select = 1;
+    } else {
+        int cur = eyn_sys_drive_get_logical();
+        if (cur < 0 || cur >= drive_count) {
+            cur = 0;
+            (void)eyn_sys_drive_set_logical(0);
+        }
+        app.drive = cur;
+    }
 
     if (argc >= 2 && argv[1] && argv[1][0]) {
         safe_strcpy(app.path, MAX_PATH, argv[1]);
@@ -682,7 +761,7 @@ int main(int argc, char** argv) {
         safe_strcpy(app.path, MAX_PATH, "/");
     }
 
-    if (load_directory(&app) < 0) {
+    if (load_directory(&app) < 0 && !app.at_drive_select) {
         printf("files: cannot open %s\n", app.path);
         return 1;
     }
