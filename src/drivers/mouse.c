@@ -62,6 +62,7 @@ static int mouse_has_5btn = 0;
 
 // Helpers for packet synchronization and sign extension
 static inline int mouse_packet_is_sync(uint8 b0) { return (b0 & 0x08) != 0; }
+static inline int mouse_packet_has_overflow(uint8 b0) { return (b0 & 0xC0) != 0; }
 static inline int8 sign_extend_8(uint8 v) { return (int8)v; }
 
 static void mouse_enable_irq12(void) {
@@ -267,6 +268,11 @@ void mouse_interrupt_handler(void) {
 
         if (mouse_packet_index == mouse_packet_len) {
             uint8 status = mouse_packet_buffer[0];
+            if (mouse_packet_has_overflow(status)) {
+                // Drop overflow packets; their deltas are truncated and can cause large jumps.
+                mouse_packet_index = 0;
+                continue;
+            }
             int8 delta_x = sign_extend_8(mouse_packet_buffer[1]);
             int8 delta_y = sign_extend_8(mouse_packet_buffer[2]);
             int wheel = 0;
@@ -393,6 +399,10 @@ int mouse_poll(void) {
         progressed = 1;
         if (mouse_packet_index == mouse_packet_len) {
             uint8 st = mouse_packet_buffer[0];
+            if (mouse_packet_has_overflow(st)) {
+                mouse_packet_index = 0;
+                continue;
+            }
             int8 dx = sign_extend_8(mouse_packet_buffer[1]);
             int8 dy = sign_extend_8(mouse_packet_buffer[2]);
             int wheel = 0;
