@@ -8,7 +8,7 @@
 #include <eynos_cmdmeta.h>
 #include <eynos_syscall.h>
 
-EYN_CMDMETA_V1("Open an REI image, REIV video, REIS audio, or WAV audio viewer.", "view /images/picture.rei");
+EYN_CMDMETA_V1("Open an REI, BMP image, REIV video, REIS audio, or WAV audio viewer.", "view /images/picture.rei");
 
 #define REI_MAGIC 0x52454900u
 #define REI_DEPTH_MONO 1u
@@ -42,6 +42,14 @@ EYN_CMDMETA_V1("Open an REI image, REIV video, REIS audio, or WAV audio viewer."
 #define WAV_WAVE_MAGIC   0x45564157u  /* 'WAVE' LE */
 #define WAV_FMT_MAGIC    0x20746D66u  /* 'fmt ' LE */
 #define WAV_DATA_MAGIC   0x61746164u  /* 'data' LE */
+
+/* BMP / DIB magic: first two bytes are always 'B','M' (0x42, 0x4D). */
+#define BMP_MAGIC_B0     0x42u
+#define BMP_MAGIC_B1     0x4Du
+#define BMP_BI_RGB       0u   /* uncompressed */
+#define BMP_BI_BITFIELDS 3u   /* channel masks in header */
+#define BMP_FILEHEADER_SIZE 14u
+#define BMP_INFOHEADER_MIN  40u
 
 /* AC97 output format: 48 kHz stereo 16-bit signed LE */
 #define AC97_RATE     48000u
@@ -391,6 +399,133 @@ static int rle_decode_packbits(const uint8_t* in, size_t in_len, uint8_t* out, s
         }
     }
     return (op == out_len) ? 0 : -1;
+}
+
+/*
+ * Probe whether the file begins with the BMP 'BM' signature.
+ * Returns 1 if BMP, 0 otherwise.
+ */
+static int probe_is_bmp(const char* path) {
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0) return 0;
+    uint8_t sig[2];
+    ssize_t n = read(fd, sig, 2);
+    close(fd);
+    if (n < 2) return 0;
+    return (sig[0] == BMP_MAGIC_B0 && sig[1] == BMP_MAGIC_B1) ? 1 : 0;
+}
+
+/*
+ * Load a BMP image file into an rei_image_t (RGB565 pixel buffer).
+ *
+ * Supports:
+ *   - 24-bit and 32-bit uncompressed (BI_RGB) BMPs.
+ *   - 32-bit BI_BITFIELDS BMPs (common from Windows screenshot tools).
+ *   - Bottom-up (positive biHeight) and top-down (negative biHeight) row order.
+ *
+ * BMP rows are padded to 4-byte boundaries; the loader accounts for this.
+ */
+static int bmp_load_file(const char* path, rei_image_t* out_image) {
+    if (!path || !out_image) return -1;
+
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0) return -1;
+
+    /* ---- Read BMP file header (14 bytes) ---- */
+    uint8_t fh[BMP_FILEHEADER_SIZE];
+    if (read_exact_fd(fd, fh, BMP_FILEHEADER_SIZE) != 0) { close(fd); return -1; }
+    if (fh[0] != BMP_MAGIC_B0 || fh[1] != BMP_MAGIC_B1) { close(fd); return -1; }
+
+    uint32_t bf_off_bits = (uint32_t)fh[10] | ((uint32_t)fh[11] << 8)
+                         | ((uint32_t)fh[12] << 16) | ((uint32_t)fh[13] << 24);
+
+    /* ---- Read BITMAPINFOHEADER (at least 40 bytes) ---- */
+    uint8_t ih[124]; /* large enough for BITMAPV5HEADER */
+    memset(ih, 0, sizeof(ih));
+    if (read_exact_fd(fd, ih, 4) != 0) { close(fd); return -1; }
+    uint32_t hdr_size = (uint32_t)ih[0] | ((uint32_t)ih[1] << 8)
+                      | ((uint32_t)ih[2] << 16) | ((uint32_t)ih[3] << 24);
+    if (hdr_size < BMP_INFOHEADER_MIN || hdr_size > sizeof(ih)) { close(fd); return -1; }
+    /* Read the rest of the DIB header */
+    if (read_exact_fd(fd, ih + 4, hdr_size - 4) != 0) { close(fd); return -1; }
+
+    int32_t bi_width  = (int32_t)((uint32_t)ih[4]  | ((uint32_t)ih[5]  << 8)
+                      | ((uint32_t)ih[6]  << 16) | ((uint32_t)ih[7]  << 24));
+    int32_t bi_height = (int32_t)((uint32_t)ih[8]  | ((uint32_t)ih[9]  << 8)
+                      | ((uint32_t)ih[10] << 16) | ((uint32_t)ih[11] << 24));
+    uint16_t bi_bit_count = (uint16_t)((uint16_t)ih[14] | ((uint16_t)ih[15] << 8));
+    uint32_t bi_compression = (uint32_t)ih[16] | ((uint32_t)ih[17] << 8)
+                            | ((uint32_t)ih[18] << 16) | ((uint32_t)ih[19] << 24);
+
+    if (bi_width <= 0 || bi_width > 4096) { close(fd); return -1; }
+    int top_down = 0;
+    int height;
+    if (bi_height < 0) {
+        top_down = 1;
+        height = -bi_height;
+    } else {
+        height = bi_height;
+    }
+    if (height <= 0 || height > 4096) { close(fd); return -1; }
+
+    int bytes_per_pixel;
+    if (bi_bit_count == 24 && bi_compression == BMP_BI_RGB) {
+        bytes_per_pixel = 3;
+    } else if (bi_bit_count == 32 &&
+               (bi_compression == BMP_BI_RGB || bi_compression == BMP_BI_BITFIELDS)) {
+        bytes_per_pixel = 4;
+    } else {
+        /* Unsupported bit depth / compression */
+        close(fd);
+        return -1;
+    }
+
+    int width = (int)bi_width;
+    /* BMP rows are padded to 4-byte boundaries */
+    size_t row_bytes_raw = (size_t)width * (size_t)bytes_per_pixel;
+    size_t row_stride = (row_bytes_raw + 3u) & ~(size_t)3u;
+
+    /* Skip to pixel data */
+    size_t header_total = BMP_FILEHEADER_SIZE + hdr_size;
+    if (bf_off_bits > header_total) {
+        if (skip_fd_bytes(fd, bf_off_bits - header_total) != 0) { close(fd); return -1; }
+    }
+
+    size_t px_count = (size_t)width * (size_t)height;
+    uint16_t* rgb = (uint16_t*)malloc(px_count * sizeof(uint16_t));
+    if (!rgb) { close(fd); return -1; }
+
+    uint8_t* row_buf = (uint8_t*)malloc(row_stride);
+    if (!row_buf) { free(rgb); close(fd); return -1; }
+
+    for (int row = 0; row < height; ++row) {
+        if (read_exact_fd(fd, row_buf, row_stride) != 0) {
+            free(row_buf);
+            free(rgb);
+            close(fd);
+            return -1;
+        }
+        /* BMP default is bottom-up: row 0 is the bottom scanline */
+        int dest_row = top_down ? row : (height - 1 - row);
+        uint16_t* dst = rgb + (size_t)dest_row * (size_t)width;
+        for (int col = 0; col < width; ++col) {
+            size_t off = (size_t)col * (size_t)bytes_per_pixel;
+            /* BMP pixel order is BGR(A) */
+            uint8_t b = row_buf[off + 0];
+            uint8_t g = row_buf[off + 1];
+            uint8_t r = row_buf[off + 2];
+            dst[col] = rgb565(r, g, b);
+        }
+    }
+
+    free(row_buf);
+    close(fd);
+
+    out_image->loaded = 1;
+    out_image->width = width;
+    out_image->height = height;
+    out_image->pixels = rgb;
+    return 0;
 }
 
 static void rei_free(rei_image_t* image) {
@@ -1478,6 +1613,7 @@ int main(int argc, char** argv) {
     int is_reiv = str_ends_with(path, ".reiv");
     int is_reis = str_ends_with(path, ".reis");
     int is_wav  = str_ends_with(path, ".wav");
+    int is_bmp  = str_ends_with(path, ".bmp");
     int is_audio = is_reis || is_wav;
 
     /*
@@ -1493,7 +1629,11 @@ int main(int argc, char** argv) {
         } else if (magic == REIV_MAGIC) {
             is_reiv = 1; is_reis = 0; is_wav = 0; is_audio = 0;
         } else if (magic == REI_MAGIC) {
-            is_reiv = 0; is_reis = 0; is_wav = 0; is_audio = 0;
+            is_reiv = 0; is_reis = 0; is_wav = 0; is_bmp = 0; is_audio = 0;
+        }
+        /* BMP magic is only 2 bytes ('BM'); probe separately */
+        if (!is_reis && !is_wav && !is_reiv && probe_is_bmp(path)) {
+            is_bmp = 1; is_reiv = 0; is_reis = 0; is_wav = 0; is_audio = 0;
         }
     }
 
@@ -1535,6 +1675,11 @@ int main(int argc, char** argv) {
         if (reiv_decode_next(&app.video) != 0) {
             puts("view: failed to decode first video frame");
             reiv_close(&app.video);
+            return 1;
+        }
+    } else if (is_bmp) {
+        if (bmp_load_file(path, &app.image) != 0) {
+            puts("view: failed to load BMP image");
             return 1;
         }
     } else {
