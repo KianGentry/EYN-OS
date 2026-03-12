@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# build_doom.sh — cross-compile linuxdoom-1.10 for EYN-OS.
+# build_doom.sh -- cross-compile linuxdoom-1.10 for EYN-OS.
 #
 # Usage:
 #   devtools/build_doom.sh [output_path]
@@ -166,7 +166,7 @@ done
 echo "==> Compiled ${#doom_objects[@]} DOOM source files."
 
 # -------------------------------------------------------------------------
-# Compile i_main.c separately (entry point — lives in DOOM source tree).
+# Compile i_main.c separately (entry point -- lives in DOOM source tree).
 # -------------------------------------------------------------------------
 "$CC" "${CFLAGS[@]}" -c "$doom_src/i_main.c" -o "$tmp_root/doom/i_main.o"
 doom_objects+=("$tmp_root/doom/i_main.o")

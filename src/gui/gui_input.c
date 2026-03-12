@@ -811,7 +811,7 @@ int tile_pump_input_once(void) {
     /*
      * Key release: tui_read_key() returns negative values for key releases.
      * Route directly to the gui_key_cb (with the negative value preserved)
-     * bypassing all hotkey / stdin processing — release events should not
+     * bypassing all hotkey / stdin processing -- release events should not
      * trigger shortcuts or echo characters.
      */
     if (key < 0) {

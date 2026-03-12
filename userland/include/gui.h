@@ -171,7 +171,7 @@ int gui_set_cursor_visible(int handle, int visible);
 int gui_wait_event(int handle, gui_event_t* out_event);
 
 /* ====================================================================
- * Default OS colour palette — Materia-inspired neutral grays.
+ * Default OS colour palette -- Materia-inspired neutral grays.
  *
  * Applications that include <gui.h> get these constants automatically.
  * Using them ensures visual consistency with the WM chrome, file

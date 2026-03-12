@@ -1,5 +1,5 @@
 /*
- * x11.c — X11/Xlib compatibility layer for EYN-OS.
+ * x11.c -- X11/Xlib compatibility layer for EYN-OS.
  *
  * Translates standard Xlib function calls into EYN-OS native GUI syscalls.
  * All rendering is done in a userland software framebuffer (RGB565) and
@@ -451,7 +451,7 @@ static int evq_count(void) {
 static void evq_push(const XEvent *ev) {
     int next = (g_x11->evq_tail + 1) & X11_EVQ_MASK;
     if (next == g_x11->evq_head) {
-        /* Queue full — drop oldest event */
+        /* Queue full -- drop oldest event */
         g_x11->evq_head = (g_x11->evq_head + 1) & X11_EVQ_MASK;
     }
     g_x11->evq[g_x11->evq_tail] = *ev;
@@ -713,7 +713,7 @@ int XCloseDisplay(Display *display) {
     if (!g_x11) return 0;
     /* Note: gui_create windows are cleaned up when the process exits */
     g_x11->initialized = 0;
-    g_x11 = NULL;  /* Don't free — bump allocator, free is no-op */
+    g_x11 = NULL;  /* Don't free -- bump allocator, free is no-op */
     return 0;
 }
 
@@ -1315,13 +1315,13 @@ int XNextEvent(Display *display, XEvent *event_return) {
     if (evq_pop(event_return))
         return 0;
 
-    /* No internal events — block on EYN-OS GUI event */
+    /* No internal events -- block on EYN-OS GUI event */
     gui_event_t ge;
     while (1) {
         int rc = eyn_syscall3(EYN_SYSCALL_GUI_WAIT_EVENT,
                               g_x11->gui_handle, &ge, (int)sizeof(ge));
         if (rc < 0) {
-            /* Error or interrupted — synthesize a ClientMessage */
+            /* Error or interrupted -- synthesize a ClientMessage */
             memset(event_return, 0, sizeof(*event_return));
             event_return->type = ClientMessage;
             event_return->xclient.display = &g_x11->display;
@@ -1571,7 +1571,7 @@ Status XParseColour(Display *display, Colourmap colourmap,
         } else if (len == 6) {
             pix = val & 0xFFFFFF;
         } else if (len == 12) {
-            /* 12-hex-digit colour: #RRRRGGGGBBBB — extract top 8 bits of each */
+            /* 12-hex-digit colour: #RRRRGGGGBBBB -- extract top 8 bits of each */
             unsigned long rr = (val >> 24) & 0xFF00;
             unsigned long gg = (val >> 16) & 0xFF00;
             unsigned long bb = (val >>  8) & 0xFF00;

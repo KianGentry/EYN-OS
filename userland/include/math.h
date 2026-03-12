@@ -1,9 +1,9 @@
 /*
- * math.h — Minimal math library for EYN-OS userland programs.
+ * math.h -- Minimal math library for EYN-OS userland programs.
  *
  * When compiled with GCC/i686-elf-gcc, functions are implemented as
  * static inline using x87 FPU instructions (the kernel initialises the
- * FPU during boot — see src/cpu/fpu.c).
+ * FPU during boot -- see src/cpu/fpu.c).
  *
  * When compiled with chibicc (__chibicc__ defined), inline assembly is
  * unavailable.  Functions are declared as external and implemented in
@@ -133,7 +133,7 @@ static inline double cos(double x) {
 }
 
 /*
- * atan2(y, x) — implemented via fpatan which computes arctan(y/x)
+ * atan2(y, x) -- implemented via fpatan which computes arctan(y/x)
  * and returns the result in the correct quadrant.
  *
  * x87 fpatan: ST(1) = atan2(ST(1), ST(0)); pop ST(0)

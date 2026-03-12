@@ -19,7 +19,7 @@ EYN_CMDMETA_V1("Graphical text editor.", "edit [/path/to/file]");
 #define FIND_BUF_MAX   64
 #define TAB_WIDTH      4
 
-// Colours — base palette from OS defaults, app-specific overrides follow.
+// Colours -- base palette from OS defaults, app-specific overrides follow.
 
 /* Background */
 #define BG_R  GUI_PAL_BG_R
@@ -503,7 +503,7 @@ static int editor_load_file(editor_t* ed, const char* path) {
 
 static int editor_save_file(editor_t* ed) {
     if (!ed->has_file) {
-        set_status(ed, "No filename — use Ctrl+S after providing path via args");
+        set_status(ed, "No filename -- use Ctrl+S after providing path via args");
         return -1;
     }
 
@@ -715,7 +715,7 @@ static void editor_undo(editor_t* ed) {
 
     switch (e->type) {
     case UNDO_INSERT_CHAR:
-        /* Was an insert — delete it */
+        /* Was an insert -- delete it */
         ed->cur_line = e->line;
         ed->cur_col = e->col;
         {
@@ -729,7 +729,7 @@ static void editor_undo(editor_t* ed) {
         }
         break;
     case UNDO_DELETE_CHAR:
-        /* Was a delete — re-insert it */
+        /* Was a delete -- re-insert it */
         ed->cur_line = e->line;
         ed->cur_col = e->col;
         {
@@ -745,7 +745,7 @@ static void editor_undo(editor_t* ed) {
         }
         break;
     case UNDO_INSERT_LINE:
-        /* Was a newline insert — merge the lines back */
+        /* Was a newline insert -- merge the lines back */
         if (e->line + 1 < ed->line_count) {
             /* Restore original line content */
             memcpy(ed->lines[e->line].data, e->saved_line, (size_t)e->saved_len);
@@ -760,7 +760,7 @@ static void editor_undo(editor_t* ed) {
         ed->cur_col = e->col;
         break;
     case UNDO_DELETE_LINE:
-        /* Was a line merge — split them back */
+        /* Was a line merge -- split them back */
         if (ed->line_count < MAX_LINES) {
             /* Restore the line before merge */
             memcpy(ed->lines[e->line - 1].data, e->saved_line, (size_t)e->saved_len);
@@ -1162,7 +1162,7 @@ static void draw_editor(editor_t* ed) {
             }
         }
 
-        /* Text content — draw visible portion using gui_draw_text in chunks */
+        /* Text content -- draw visible portion using gui_draw_text in chunks */
         line_t* ln = &ed->lines[li];
         int draw_from = ed->scroll_x;
         if (draw_from < 0) draw_from = 0;
@@ -1201,7 +1201,7 @@ static void draw_editor(editor_t* ed) {
                         };
                         gui_draw_text(ed->handle, &tt);
                     } else if (run_len >= 63) {
-                        /* Very long run — split into 63-char chunks */
+                        /* Very long run -- split into 63-char chunks */
                         int offset = 0;
                         while (offset < run_len) {
                             int seg = mini(run_len - offset, 63);
@@ -1439,13 +1439,13 @@ static void handle_key(editor_t* ed, int key) {
 
     /* ── Ctrl combos ── */
 
-    /* Ctrl+S — save */
+    /* Ctrl+S -- save */
     if (key == GUI_KEY_CTRL_S) {
         editor_save_file(ed);
         return;
     }
 
-    /* Ctrl+Q — quit */
+    /* Ctrl+Q -- quit */
     if (key == GUI_KEY_CTRL_Q) {
         if (ed->modified) {
             set_status(ed, "Unsaved changes! Ctrl+Q again to force quit.");
@@ -1459,7 +1459,7 @@ static void handle_key(editor_t* ed, int key) {
         return;
     }
 
-    /* Ctrl+F — find */
+    /* Ctrl+F -- find */
     if (key == GUI_KEY_CTRL_F) {
         ed->find_active = 1;
         ed->find_len = 0;
@@ -1469,7 +1469,7 @@ static void handle_key(editor_t* ed, int key) {
         return;
     }
 
-    /* Ctrl+G — go to line (simple: treat next typed number as line number) */
+    /* Ctrl+G -- go to line (simple: treat next typed number as line number) */
     if (key == GUI_KEY_CTRL_G) {
         set_status(ed, "Go to line: type line number then Enter");
         /* We'll handle this by temporarily using find mode with a special flag */
@@ -1478,24 +1478,24 @@ static void handle_key(editor_t* ed, int key) {
         return;
     }
 
-    /* Ctrl+Z — undo */
+    /* Ctrl+Z -- undo */
     if (key == GUI_KEY_CTRL_Z) {
         editor_undo(ed);
         return;
     }
 
-    /* Ctrl+Y — redo */
+    /* Ctrl+Y -- redo */
     if (key == GUI_KEY_CTRL_Y) {
         editor_redo(ed);
         return;
     }
 
-    /* Ctrl+N — new file */
+    /* Ctrl+N -- new file */
     if (key == GUI_KEY_CTRL_N) {
         if (ed->modified) {
             set_status(ed, "Unsaved changes! Save first (Ctrl+S) or Ctrl+N again.");
             if (ed->status_timer > 100) {
-                /* Already warned — proceed */
+                /* Already warned -- proceed */
                 ed->line_count = 1;
                 ed->lines[0].len = 0;
                 ed->lines[0].data[0] = '\0';
@@ -1530,7 +1530,7 @@ static void handle_key(editor_t* ed, int key) {
         return;
     }
 
-    /* Ctrl+A — select all (moves cursor to end) */
+    /* Ctrl+A -- select all (moves cursor to end) */
     if (key == GUI_KEY_CTRL_A) {
         ed->sel_anchor_line = 0;
         ed->sel_anchor_col = 0;
@@ -1539,7 +1539,7 @@ static void handle_key(editor_t* ed, int key) {
         return;
     }
 
-    /* Ctrl+C — copy selection */
+    /* Ctrl+C -- copy selection */
     if (key == GUI_KEY_CTRL_C) {
         if (has_selection(ed)) {
             int n = clipboard_copy(ed);
@@ -1548,7 +1548,7 @@ static void handle_key(editor_t* ed, int key) {
         return;
     }
 
-    /* Ctrl+X — cut selection */
+    /* Ctrl+X -- cut selection */
     if (key == GUI_KEY_CTRL_X) {
         if (has_selection(ed)) {
             clipboard_copy(ed);
@@ -1559,13 +1559,13 @@ static void handle_key(editor_t* ed, int key) {
         return;
     }
 
-    /* Ctrl+V — paste */
+    /* Ctrl+V -- paste */
     if (key == GUI_KEY_CTRL_V) {
         clipboard_paste(ed);
         return;
     }
 
-    /* F3 — find next */
+    /* F3 -- find next */
     if (key == GUI_KEY_F3) {
         if (ed->find_len > 0) find_next(ed);
         else { ed->find_active = 1; ed->find_len = 0; ed->find_buf[0] = '\0'; }
@@ -1712,7 +1712,7 @@ static void handle_key(editor_t* ed, int key) {
 }
 
 static void handle_mouse(editor_t* ed, gui_event_t* ev) {
-    /* Mouse wheel — scroll */
+    /* Mouse wheel -- scroll */
     if (ev->d > 0) {
         ed->scroll_y -= 3;
         if (ed->scroll_y < 0) ed->scroll_y = 0;
@@ -1790,7 +1790,7 @@ int main(int argc, char** argv) {
 
     if (argc >= 2 && argv[1] && argv[1][0]) {
         if (editor_load_file(&ed, argv[1]) < 0) {
-            /* File doesn't exist — create new with that name */
+            /* File doesn't exist -- create new with that name */
             safe_strcpy(ed.filepath, MAX_PATH_LEN, argv[1]);
             ed.has_file = 1;
             ed.is_c_file = is_c_extension(argv[1]);

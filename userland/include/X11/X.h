@@ -1,5 +1,5 @@
 /*
- * X11/X.h — Core X protocol constants for EYN-OS Xlib compatibility layer.
+ * X11/X.h -- Core X protocol constants for EYN-OS Xlib compatibility layer.
  *
  * This header mirrors the standard X11 X.h definitions needed to compile
  * unmodified Xlib programs.  Only a subset of constants is provided;

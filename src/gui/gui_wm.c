@@ -28,7 +28,7 @@ static void wm_draw_decor(window_t* w, int is_focused) {
             for (int i = 0; i < len; ++i) drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], colour_r, colour_g, colour_b);
         }
         (void)sh;
-        // border — Materia gray
+        // border -- Materia gray
         int br = is_focused ? 80 : 56, bg2 = is_focused ? 80 : 56, bb = is_focused ? 80 : 56;
         drawRect(w->x, w->y, w->w, 1, br, bg2, bb);
         drawRect(w->x, w->y + w->h - 1, w->w, 1, br, bg2, bb);
@@ -127,7 +127,7 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         }
     }
     (void)sh;
-    // border — subtle gray, slightly brighter when focused
+    // border -- subtle gray, slightly brighter when focused
     int br = is_focused ? 80 : 56, wbg = is_focused ? 80 : 56, bb = is_focused ? 80 : 56;
     drawRect(w->x, w->y, w->w, 1, br, wbg, bb);
     drawRect(w->x, w->y + w->h - 1, w->w, 1, br, wbg, bb);
@@ -343,7 +343,7 @@ static int wm_resize_hit_test_edges(const window_t* w, int x, int y) {
 }
 
 /*
- * tile_border_resize_hit_test — hit-test the edge/corner grab zones of a tile
+ * tile_border_resize_hit_test -- hit-test the edge/corner grab zones of a tile
  * window, mirroring wm_resize_hit_test_edges() for floating windows.
  *
  * Returns a bitmask of RESIZE_EDGE_* flags, or 0 if the point is not inside
@@ -359,7 +359,7 @@ static int tile_border_resize_hit_test(const tile_t* t, int x, int y) {
     const int m = 4;
     const int corner = 10;
     if (!point_in_rect(x, y, t->x, t->y, t->width, t->height)) return 0;
-    /* Prefer diagonal corners — they give a larger, easier grab target. */
+    /* Prefer diagonal corners -- they give a larger, easier grab target. */
     if (x < t->x + corner && y < t->y + corner) return RESIZE_EDGE_L | RESIZE_EDGE_T;
     if (x >= t->x + t->width - corner && y < t->y + corner) return RESIZE_EDGE_R | RESIZE_EDGE_T;
     if (x < t->x + corner && y >= t->y + t->height - corner) return RESIZE_EDGE_L | RESIZE_EDGE_B;
@@ -575,7 +575,7 @@ void wm_close_window(int win_id) {
     if (win_id < 0 || win_id >= MAX_WINDOWS || !g_windows[win_id].used) return;
     /*
      * If a close callback is registered, give it a chance to veto the close.
-     * Zero return from the callback means "veto" — the user program is expected
+     * Zero return from the callback means "veto" -- the user program is expected
      * to eventually call exit() which will re-invoke wm_close_window().
      * Clear close_cb before invoking it to prevent infinite recursion on re-close.
      */

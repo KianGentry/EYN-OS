@@ -742,7 +742,7 @@ void start_tiling_manager() {
                         goto after_mouse_handling;
                     }
 
-                    /* App buttons — click to focus/raise */
+                    /* App buttons -- click to focus/raise */
                     for (int bi = 0; bi < g_tb_button_count; ++bi) {
                         if (me.x >= g_tb_buttons[bi].x && me.x < g_tb_buttons[bi].x + g_tb_buttons[bi].w) {
                             if (g_tb_buttons[bi].kind == 0) {
@@ -811,7 +811,7 @@ void start_tiling_manager() {
                         }
                     }
 
-                    /* Clicked elsewhere on taskbar — dismiss menus */
+                    /* Clicked elsewhere on taskbar -- dismiss menus */
                     g_start_active = 0;
                     g_dropdown_active = 0;
                     g_force_full_redraw = 1;

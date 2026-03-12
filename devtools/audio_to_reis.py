@@ -20,7 +20,7 @@ Notes
 
 Dependencies
 ------------
-    WAV:  Python standard library (wave module) — no external deps.
+    WAV:  Python standard library (wave module) -- no external deps.
     MP3:  Requires ffmpeg on $PATH (converts to temp WAV first).
 
 REIS format summary (see include/drivers/reis.h)

@@ -99,7 +99,7 @@ int eynfs_stream_end(int handle) {
 }
 
 /*
- * lseek() — reposition an open file descriptor's read offset.
+ * lseek() -- reposition an open file descriptor's read offset.
  *
  * Wraps SYSCALL_LSEEK (110).  whence values match POSIX:
  *   SEEK_SET (0): offset from start of file
@@ -118,7 +118,7 @@ long lseek(int fd, long offset, int whence) {
 }
 
 /*
- * access() — check accessibility of a file path.
+ * access() -- check accessibility of a file path.
  *
  * EYN-OS has no permission model; any path that exists is considered
  * accessible.  We attempt to open the file read-only; if it succeeds the

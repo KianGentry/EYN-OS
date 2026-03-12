@@ -844,7 +844,7 @@ segfault:
 }
 
 /*
- * vmm_fault_in_user_write — pre-fault user pages for kernel-initiated writes.
+ * vmm_fault_in_user_write -- pre-fault user pages for kernel-initiated writes.
  *
  * copyout() must not fail when writing to valid user memory that merely hasn't
  * been physically mapped yet (demand-zero PTE_DEMAND pages, or stack/heap
@@ -910,7 +910,7 @@ int vmm_fault_in_user_write(uint32 va_start, size_t len) {
                 continue;
             }
 
-            /* PTE exists but has no recognised state — deny. */
+            /* PTE exists but has no recognised state -- deny. */
             return -1;
         }
 
@@ -933,7 +933,7 @@ int vmm_fault_in_user_write(uint32 va_start, size_t len) {
             continue;
         }
 
-        /* Unmapped region — deny. */
+        /* Unmapped region -- deny. */
         return -1;
     }
 

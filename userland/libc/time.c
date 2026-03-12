@@ -8,7 +8,7 @@ time_t time(time_t* t) {
 }
 
 /*
- * gettimeofday() — return wall-clock time derived from the PIT tick counter.
+ * gettimeofday() -- return wall-clock time derived from the PIT tick counter.
  *
  * EYN-OS has no real-time clock, so tv_sec counts seconds since kernel boot
  * (not the Unix epoch).  Resolution is 1000/hz ms (10ms at default 100Hz).

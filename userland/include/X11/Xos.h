@@ -1,5 +1,5 @@
 /*
- * X11/Xos.h — OS abstraction header.
+ * X11/Xos.h -- OS abstraction header.
  *
  * Part of the EYN-OS X11 compatibility layer.
  * This is a minimal stub that satisfies #include <X11/Xos.h> in common

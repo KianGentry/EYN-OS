@@ -287,7 +287,7 @@ int vmm_munmap(address_space_t* as, uint32 va, uint32 size);
 void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip);
 
 /*
- * vmm_fault_in_user_write — pre-fault user pages before a kernel copyout.
+ * vmm_fault_in_user_write -- pre-fault user pages before a kernel copyout.
  *
  * Allocates any demand-zero, swap-backed, or un-faulted stack/heap pages
  * in [va_start, va_start+len) so that user_access_ok() can confirm they

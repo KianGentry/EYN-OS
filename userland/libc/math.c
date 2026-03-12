@@ -1,5 +1,5 @@
 /*
- * math.c — Software implementations of math functions for chibicc.
+ * math.c -- Software implementations of math functions for chibicc.
  *
  * These are portable C implementations used when the compiler does not
  * support inline assembly (chibicc).  They are linked into libeync.a so
@@ -103,7 +103,7 @@ static double reduce_angle(double x) {
 }
 
 /*
- * sin(x) — Taylor series around 0, reduced range.
+ * sin(x) -- Taylor series around 0, reduced range.
  * sin(x) = x - x^3/3! + x^5/5! - x^7/7! + ...
  */
 double sin(double x) {
@@ -119,7 +119,7 @@ double sin(double x) {
 }
 
 /*
- * cos(x) — Taylor series around 0, reduced range.
+ * cos(x) -- Taylor series around 0, reduced range.
  * cos(x) = 1 - x^2/2! + x^4/4! - x^6/6! + ...
  */
 double cos(double x) {
@@ -141,7 +141,7 @@ double tan(double x) {
 }
 
 /*
- * atan(x) — Maclaurin series with range reduction.
+ * atan(x) -- Maclaurin series with range reduction.
  *
  * For |x| <= 1:  atan(x) = x - x^3/3 + x^5/5 - x^7/7 + …
  * For |x| > 1:   atan(x) = pi/2 - atan(1/x)
@@ -208,7 +208,7 @@ float acosf(float x)  { return (float)acos((double)x); }
 /* ------------------------------------------------------------------ */
 
 /*
- * exp(x) — Taylor series: e^x = 1 + x + x^2/2! + x^3/3! + …
+ * exp(x) -- Taylor series: e^x = 1 + x + x^2/2! + x^3/3! + …
  * Argument reduction: exp(x) = exp(n*ln2 + r) = 2^n * exp(r)
  * where r = x - n*ln2 and |r| < ln2/2.
  */
@@ -237,7 +237,7 @@ double exp(double x) {
 }
 
 /*
- * log(x) — natural logarithm.
+ * log(x) -- natural logarithm.
  * Reduce: x = m * 2^e where 1 <= m < 2.
  * Then ln(x) = e*ln(2) + ln(m).
  * ln(m) via series: ln(1+t) = t - t^2/2 + t^3/3 - … where t = m - 1.

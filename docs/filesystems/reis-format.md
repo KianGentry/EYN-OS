@@ -104,10 +104,10 @@ Options:
 
 EYN-OS integration:
 
-- `include/drivers/reis.h` — format header struct and API
-- `src/drivers/reis.c` — kernel-side parsing and RLE decompression
-- `include/drivers/ac97.h` — AC97 audio driver header
-- `src/drivers/ac97.c` — AC97 audio driver (PCI, DMA, 48 kHz stereo s16le output)
+- `include/drivers/reis.h` -- format header struct and API
+- `src/drivers/reis.c` -- kernel-side parsing and RLE decompression
+- `include/drivers/ac97.h` -- AC97 audio driver header
+- `src/drivers/ac97.c` -- AC97 audio driver (PCI, DMA, 48 kHz stereo s16le output)
 
 ## Audio Syscalls
 
@@ -118,8 +118,8 @@ The kernel provides five audio syscalls (113–117) for userland programs. All a
 | 113 | `AUDIO_PROBE` | `CAP_DEV_AUDIO` | Scan PCI for AC97 hardware; returns 0 if found |
 | 114 | `AUDIO_INIT` | `CAP_DEV_AUDIO`, `CAP_ALLOC_MEMORY` | Initialize AC97 (DMA, IRQ); returns 0 on success |
 | 115 | `AUDIO_WRITE` | `CAP_DEV_AUDIO` | Submit PCM buffer (EBX=ptr, ECX=size); returns bytes queued |
-| 116 | `AUDIO_STOP` | — | Stop playback and reset DMA |
-| 117 | `AUDIO_IS_AVAILABLE` | — | Returns 1 if AC97 is initialized, 0 otherwise |
+| 116 | `AUDIO_STOP` | -- | Stop playback and reset DMA |
+| 117 | `AUDIO_IS_AVAILABLE` | -- | Returns 1 if AC97 is initialized, 0 otherwise |
 
 ## Notes
 

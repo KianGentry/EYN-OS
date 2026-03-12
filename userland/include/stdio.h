@@ -53,7 +53,7 @@ FILE* open_memstream(char** bufp, size_t* sizep);
 int putchar(int ch);
 int puts(const char* s);
 
-/* File positioning — backed by SYSCALL_LSEEK (110). */
+/* File positioning -- backed by SYSCALL_LSEEK (110). */
 int    fseek(FILE* f, long offset, int whence);
 long   ftell(FILE* f);
 void   rewind(FILE* f);

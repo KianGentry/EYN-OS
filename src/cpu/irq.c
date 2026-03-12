@@ -108,7 +108,7 @@ void irq_init(void) {
      * sched_sleep_us call was rounded up to the nearest 20 ms, causing
      * video frame pacing to overshoot by up to 19 ms per frame.
      *
-     * Overhead: ~1 µs ISR × 1000/s = 1 ms/s CPU cost — negligible.
+     * Overhead: ~1 µs ISR × 1000/s = 1 ms/s CPU cost -- negligible.
      */
     pit_init(1000);
     extern void sched_set_tick_hz(uint32);

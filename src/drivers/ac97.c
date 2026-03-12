@@ -1,5 +1,5 @@
 /*
- * AC97 audio controller driver — Intel ICH-compatible.
+ * AC97 audio controller driver -- Intel ICH-compatible.
  *
  * See include/drivers/ac97.h for hardware overview and design rationale.
  *
@@ -57,7 +57,7 @@ static void ac97_memcpy(void* dst, const void* src, size_t n) {
  * The shared pci_read_config_dword() API is gated behind a capability check
  * (CAP_DEV_NET) via the current_command_context.  When ac97_probe() is called
  * during a user syscall, the context carries user-process capabilities, which
- * do not include CAP_DEV_NET, so every read returns 0xFFFFFFFF — making the
+ * do not include CAP_DEV_NET, so every read returns 0xFFFFFFFF -- making the
  * entire PCI bus appear empty.
  *
  * As a kernel driver, the AC97 code is entitled to access config space
@@ -185,8 +185,8 @@ static void ac97_debug_dump_runtime(const char* tag, int slot) {
  *
  * Hardware registers used:
  *   SR.DCH (bit 0): DMA halted.  When set, no entry is in flight.
- *   CIV     (1 byte at CH+0x04): Current Index Value — slot being played.
- *   LVI     (1 byte at CH+0x05): Last Valid Index    — last slot submitted.
+ *   CIV     (1 byte at CH+0x04): Current Index Value -- slot being played.
+ *   LVI     (1 byte at CH+0x05): Last Valid Index    -- last slot submitted.
  *
  * When running: slots CIV..LVI (mod 32, inclusive) are in flight.
  *   count = (LVI - CIV + 32) % 32 + 1.
@@ -234,7 +234,7 @@ static int ac97_find_pci(void) {
                     g_ac97.pci_dev  = (uint8_t)dev;
                     g_ac97.pci_func = (uint8_t)func;
 
-                    /* Read BAR0 (NAM) and BAR1 (NABM) — I/O space */
+                    /* Read BAR0 (NAM) and BAR1 (NABM) -- I/O space */
                     uint32_t bar0 = ac97_pci_read32((uint8_t)bus, (uint8_t)dev,
                                                     (uint8_t)func, 0x10);
                     uint32_t bar1 = ac97_pci_read32((uint8_t)bus, (uint8_t)dev,
@@ -306,7 +306,7 @@ int ac97_init(void) {
     /* ---- 4. Check for Variable Rate Audio support ---- */
     uint16_t ext_id = nam_read16(AC97_NAM_EXT_AUDIO_ID);
     if (ext_id & 0x0001u) {
-        /* VRA supported — enable it and set 48 kHz. */
+        /* VRA supported -- enable it and set 48 kHz. */
         uint16_t ext_ctrl = nam_read16(AC97_NAM_EXT_AUDIO_CTRL);
         ext_ctrl |= 0x0001u;  /* enable VRA */
         nam_write16(AC97_NAM_EXT_AUDIO_CTRL, ext_ctrl);
@@ -355,7 +355,7 @@ int ac97_init(void) {
         g_ac97.bdl[i].addr    = ac97_dma_phys(g_ac97.dma_buf[i]);
         g_ac97.bdl[i].samples = AC97_DMA_SAMPLES;
         /*
-         * No IOC flag — we use purely polled ring management.  IOC would
+         * No IOC flag -- we use purely polled ring management.  IOC would
          * fire ~47 IRQs/sec at 48 kHz, each causing a context switch that
          * adds latency without benefit (ac97_hw_in_flight polls CIV/DCH
          * directly).  The hardware still sets SR.DCH and SR.LVBCI when it
@@ -447,13 +447,13 @@ static int ac97_queue_buffer(const void* data, size_t size) {
  * reaches LVI it sets LVBCI + DCH and stops.  We must clear LVBCI
  * before re-asserting RPBM, otherwise the hardware refuses to resume.
  *
- * When DMA is already running (DCH=0), this is a no-op — avoids the
+ * When DMA is already running (DCH=0), this is a no-op -- avoids the
  * per-buffer SR/CR I/O writes that caused audible glitches on QEMU.
  */
 static void ac97_ensure_running(void) {
     uint16_t sr = nabm_read16(AC97_NABM_PCMOUT + AC97_CH_SR);
     if (sr & AC97_SR_DCH) {
-        /* Halted — clear sticky status then start bus master. */
+        /* Halted -- clear sticky status then start bus master. */
         nabm_write16(AC97_NABM_PCMOUT + AC97_CH_SR,
                      AC97_SR_LVBCI | AC97_SR_BCIS | AC97_SR_FIFOE);
         nabm_write8(AC97_NABM_PCMOUT + AC97_CH_CR, AC97_CR_RPBM);

@@ -2,7 +2,7 @@
 
 EYN-OS ships a **source-level Xlib compatibility shim** that lets unmodified
 X11 C programs compile and run on the native EYN-OS GUI.  The programs do not
-need to link against a real X server — all Xlib calls are translated at compile
+need to link against a real X server -- all Xlib calls are translated at compile
 time into EYN-OS syscalls.
 
 ## Architecture
@@ -134,7 +134,7 @@ All headers live under `userland/include/X11/`.
 
 ## Building an X11 Program
 
-Use the standard userland build script — the X11 shim is compiled and archived
+Use the standard userland build script -- the X11 shim is compiled and archived
 into `libeync.a` automatically:
 
 ```bash
@@ -146,7 +146,7 @@ bash devtools/build_user_c_chibicc.sh testdir/code/myapp_uelf.c testdir/binaries
 ```
 
 The program source should `#include <X11/Xlib.h>` (and any other X11 headers
-it needs) — the build system's `-I userland/include` flag resolves them.
+it needs) -- the build system's `-I userland/include` flag resolves them.
 
 ### Example: xeyes
 
@@ -195,11 +195,11 @@ is available to all userland programs, not just X11 ones.
 
 ## Porting Tips
 
-1. **Strip toolkit dependencies** — the shim only covers core Xlib.  Remove
+1. **Strip toolkit dependencies** -- the shim only covers core Xlib.  Remove
    Xt, Motif, GTK includes and widget calls.
-2. **Keep window size ≤ 320 × 200** — larger windows will be clipped.
-3. **No OpenGL** — replace GLX rendering with Xlib drawing primitives.
-4. **Memory budget** — userland heap is 1 MB with a bump allocator (`free` is
+2. **Keep window size ≤ 320 × 200** -- larger windows will be clipped.
+3. **No OpenGL** -- replace GLX rendering with Xlib drawing primitives.
+4. **Memory budget** -- userland heap is 1 MB with a bump allocator (`free` is
    a no-op).  Avoid programs that allocate heavily at runtime.
-5. **Single window** — multi-window programs need restructuring to use one
+5. **Single window** -- multi-window programs need restructuring to use one
    top-level window.

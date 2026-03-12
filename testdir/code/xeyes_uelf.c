@@ -1,5 +1,5 @@
 /*
- * xeyes — Classic X11 "eyes that follow the mouse" demo.
+ * xeyes -- Classic X11 "eyes that follow the mouse" demo.
  *
  * This is a pure-Xlib implementation of xeyes.  It uses ONLY standard
  * X11/Xlib calls and compiles unmodified against either a real X server

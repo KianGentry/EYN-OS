@@ -1,5 +1,5 @@
 /*
- * X11/Xlib.h — Xlib types, structures, and function prototypes for EYN-OS.
+ * X11/Xlib.h -- Xlib types, structures, and function prototypes for EYN-OS.
  *
  * This is the primary header for the EYN-OS X11 compatibility layer.
  * It implements a source-compatible subset of Xlib that compiles
@@ -56,7 +56,7 @@ typedef struct _XGC     *GC;
 
 typedef struct _Visual {
     VisualID visualid;
-    int      class_;       /* TrueColour etc. — named class_ to avoid C++ keyword */
+    int      class_;       /* TrueColour etc. -- named class_ to avoid C++ keyword */
     int      bits_per_rgb;
     int      map_entries;
     unsigned long red_mask;
@@ -85,7 +85,7 @@ typedef struct _Screen {
  * can reference them directly.
  */
 struct _XDisplay {
-    int          fd;             /* Dummy — no real connection fd       */
+    int          fd;             /* Dummy -- no real connection fd       */
     int          nscreens;
     int          default_screen;
     Screen      *screens;
@@ -393,7 +393,7 @@ typedef struct {
 } XResizeRequestEvent;
 
 /*
- * XEvent — the master event union.
+ * XEvent -- the master event union.
  * Pad to 24 longs (96 bytes on 32-bit) to match the real X11 layout.
  */
 typedef union _XEvent {
@@ -435,7 +435,7 @@ typedef struct {
 } XTextProperty;
 
 /* ------------------------------------------------------------------ */
-/*  Image (minimal — enough for compilation)                           */
+/*  Image (minimal -- enough for compilation)                           */
 /* ------------------------------------------------------------------ */
 
 typedef struct _XImage {
@@ -455,7 +455,7 @@ typedef struct _XImage {
     unsigned long blue_mask;
     void         *obdata;
     struct funcs {
-        void *dummy[8];     /* function pointers — unused in the shim */
+        void *dummy[8];     /* function pointers -- unused in the shim */
     } f;
 } XImage;
 

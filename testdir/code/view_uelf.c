@@ -160,7 +160,7 @@ typedef struct {
     uint32_t played_ms;
 
     /*
-     * Source PCM — two modes:
+     * Source PCM -- two modes:
      *   Buffered: pcm != NULL, entire decoded audio in memory.
      *   Streaming: pcm == NULL, src_fd >= 0, frames read from disk
      *              on demand sequentially (no lseek in the hot loop).
@@ -176,7 +176,7 @@ typedef struct {
     uint32_t  src_frame_count; /* total source frames available */
 
     /* Resampled 48 kHz stereo s16le for AC97 */
-    int16_t*  out_buf;       /* pre-resampled buffer (NULL — not used) */
+    int16_t*  out_buf;       /* pre-resampled buffer (NULL -- not used) */
     size_t    out_frames;    /* total output frames at AC97_RATE */
     size_t    out_size;      /* byte size of out_buf */
 
@@ -199,10 +199,10 @@ typedef struct {
      * disk-read syscall overhead across many DMA buffer fills and keeps
      * the ring fed even when individual VFS reads are slow.
      *
-     * ra_buf   — raw source bytes
-     * ra_len   — bytes currently valid in ra_buf
-     * ra_pos   — read cursor within ra_buf (bytes consumed so far)
-     * ra_error — Bresenham fractional error carried between refills
+     * ra_buf   -- raw source bytes
+     * ra_len   -- bytes currently valid in ra_buf
+     * ra_pos   -- read cursor within ra_buf (bytes consumed so far)
+     * ra_error -- Bresenham fractional error carried between refills
      */
     uint8_t  ra_buf[AUDIO_READAHEAD];
     size_t   ra_len;   /* valid bytes in ra_buf */
@@ -809,7 +809,7 @@ static int reiv_rewind(reiv_stream_t* video) {
      * finds the correct data without any directory traversal.  The
      * EYNFS backward-seek path resets the block cursor to the first
      * block; since stream_data_base is only a few hundred bytes into
-     * the file, the cursor walk costs ~1 block traversal — negligible.
+     * the file, the cursor walk costs ~1 block traversal -- negligible.
      *
      * Fallback: if the fd is invalid or the seek fails, close and
      * reopen the traditional way.
@@ -1260,7 +1260,7 @@ static int audio_pump(audio_state_t* a) {
 
         /*
          * If we have a partial tail (less than 4 KB remaining in the
-         * file), include it — the kernel will zero-pad the last DMA
+         * file), include it -- the kernel will zero-pad the last DMA
          * buffer.  This avoids dropping the final fraction of audio.
          */
         if (aligned == 0 && submit > 0)
@@ -1270,7 +1270,7 @@ static int audio_pump(audio_state_t* a) {
 
         int count = eyn_sys_audio_write_bulk(
                         a->ra_buf + a->ra_pos, (int)aligned);
-        if (count <= 0) return 0;  /* ring full — retry next frame */
+        if (count <= 0) return 0;  /* ring full -- retry next frame */
 
         size_t bytes_queued  = (size_t)count * AC97_DMA_BUF;
         if (bytes_queued > aligned) bytes_queued = aligned;
@@ -1295,7 +1295,7 @@ static int audio_pump(audio_state_t* a) {
          * ra_advance: how many bytes to commit from ra_buf after a
          * successful write.  Set during the chunk-build step below,
          * applied only after eyn_sys_audio_write succeeds.  This
-         * prevents ra_pos from advancing when the ring is full —
+         * prevents ra_pos from advancing when the ring is full --
          * which previously caused the audio to skip forward because
          * ra_buf moved ahead of cursor.
          *
@@ -1368,7 +1368,7 @@ static int audio_pump(audio_state_t* a) {
                     si++;
                 }
             }
-            /* Record advance amounts — applied only after successful write. */
+            /* Record advance amounts -- applied only after successful write. */
             size_t src_consumed = si * src_frame_bytes;
             if (src_consumed > avail) src_consumed = avail;
             ra_advance   = src_consumed;
@@ -1423,7 +1423,7 @@ static int audio_pump(audio_state_t* a) {
         size_t bytes = to_send * AC97_CHANNELS * sizeof(int16_t);
         int rc = eyn_sys_audio_write((const void*)chunk_buf, (int)bytes);
         if (rc < 0)
-            return 0;  /* ring full — come back next render frame */
+            return 0;  /* ring full -- come back next render frame */
 
         /*
          * Write succeeded: commit read-ahead state.  These are only
@@ -1879,13 +1879,13 @@ int main(int argc, char** argv) {
         if (app.audio.is_audio && app.audio.playing && app.running) {
             int arc = audio_pump(&app.audio);
             if (arc == 1) {
-                /* Finished playback — clean stop. */
+                /* Finished playback -- clean stop. */
                 app.audio.played_ms = app.audio.duration_ms;
                 app.audio.playing = 0;
                 eyn_sys_audio_stop();
             }
-            /* arc == 0: ring full or transient — retry next frame (normal). */
-            /* arc < 0:  guard failed — do not kill playing; let pump retry.  */
+            /* arc == 0: ring full or transient -- retry next frame (normal). */
+            /* arc < 0:  guard failed -- do not kill playing; let pump retry.  */
         }
 
         /* ---- Video frame advance ---- */
@@ -1968,7 +1968,7 @@ int main(int argc, char** argv) {
         if (app.video.is_video) {
             uint32_t cur_frame = app.video.next_frame;
             if (cur_frame < video_last_frame) {
-                /* Rewind occurred — reset deadline base. */
+                /* Rewind occurred -- reset deadline base. */
                 video_base_ms = audio_now_ms();
             }
             video_last_frame = cur_frame;

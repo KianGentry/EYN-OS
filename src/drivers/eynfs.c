@@ -1315,7 +1315,7 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
 }
 
 /*
- * eynfs_read_file_fast — cursor-aware file read for EYNFS.
+ * eynfs_read_file_fast -- cursor-aware file read for EYNFS.
  *
  * Like eynfs_read_file() but avoids re-traversing the full block chain from
  * the beginning on every call.  A caller-supplied cursor (*p_cur_block,
@@ -1328,9 +1328,9 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
  * after the initial traversal.
  *
  * Cursor semantics:
- *   *p_cur_block     — EYNFS block number.  0 = uninitialized; restart from
+ *   *p_cur_block     -- EYNFS block number.  0 = uninitialized; restart from
  *                      first_block at file offset 0.
- *   *p_cur_block_off — file byte offset at which *p_cur_block's data payload
+ *   *p_cur_block_off -- file byte offset at which *p_cur_block's data payload
  *                      begins (i.e., immediately after its 4-byte chain ptr).
  *
  * On return both fields are updated to the block reached after the skip

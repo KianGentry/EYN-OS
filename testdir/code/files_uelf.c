@@ -25,7 +25,7 @@ EYN_CMDMETA_V1("Graphical file explorer.", "files [/path]");
 #define FONT_H        10
 
 /*
-    Colour palette — uses the OS default from <gui.h>.
+    Colour palette -- uses the OS default from <gui.h>.
     App-local aliases for brevity.
 */
 
@@ -392,7 +392,7 @@ static void activate_entry(app_t* app) {
     char cmd[MAX_PATH + 32];
 
     if (ext && strcmp(ext, ".uelf") == 0) {
-        /* Executable UELF — run directly */
+        /* Executable UELF -- run directly */
         (void)gui_set_continuous_redraw(app->handle, 0);
         app->running = 0;
         eyn_sys_run(full);
@@ -400,7 +400,7 @@ static void activate_entry(app_t* app) {
     }
 
     if (ext && (strcmp(ext, ".rei") == 0 || strcmp(ext, ".reiv") == 0)) {
-        /* Image — open with view */
+        /* Image -- open with view */
         safe_strcpy(cmd, (int)sizeof(cmd), "/binaries/view ");
         int clen = str_len(cmd);
         int flen = str_len(full);
@@ -416,14 +416,14 @@ static void activate_entry(app_t* app) {
     }
 
     if (ext && strcmp(ext, ".shell") == 0) {
-        /* Shell script — run directly */
+        /* Shell script -- run directly */
         (void)gui_set_continuous_redraw(app->handle, 0);
         app->running = 0;
         eyn_sys_run(full);
         return;
     }
 
-    /* No recognized extension — check if it's an ELF binary (magic bytes) */
+    /* No recognized extension -- check if it's an ELF binary (magic bytes) */
     if (is_elf_file(full)) {
         (void)gui_set_continuous_redraw(app->handle, 0);
         app->running = 0;
@@ -440,7 +440,7 @@ static void activate_entry(app_t* app) {
         return;
     }
 
-    /* Unrecognised file type — do nothing (write editor unavailable) */
+    /* Unrecognised file type -- do nothing (write editor unavailable) */
 }
 
 
@@ -471,7 +471,7 @@ static void draw_ui(app_t* app) {
     if (sz.w <= 0) sz.w = 480;
     if (sz.h <= 0) sz.h = 360;
 
-    /* Begin a new frame — resets the kernel draw-command buffer.
+    /* Begin a new frame -- resets the kernel draw-command buffer.
      * Without this, commands accumulate across frames and exceed the
      * 48-slot limit, causing subsequent draw calls to silently fail. */
     (void)gui_begin(app->handle);

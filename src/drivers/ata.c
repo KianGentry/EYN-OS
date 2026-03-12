@@ -266,7 +266,7 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
     if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
 
     /*
-     * SECURITY-INVARIANT: Re-entrancy guard — must be checked before touching
+     * SECURITY-INVARIANT: Re-entrancy guard -- must be checked before touching
      * any controller register.
      *
      * Why: A synchronous page fault can fire at any point in this function,
@@ -284,7 +284,7 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
      * PF handler, so g_ata_busy will clear quickly (the outer PIO is done before
      * the PF fires if IRQs are disabled, or the IRQ guard ensures it completes).
      *
-     * If the flag is still set when we check, we spin briefly then proceed —
+     * If the flag is still set when we check, we spin briefly then proceed --
      * the outer call must be nearly done (it holds IRQs off for its PIO).
      * A hard timeout prevents livelock if the outer call was abandoned.
      * Breakage if removed: nested PF swap-reads corrupt controller state and
@@ -372,7 +372,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
     }
     if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
 
-    /* Re-entrancy guard — see ata_read_sector for full rationale. */
+    /* Re-entrancy guard -- see ata_read_sector for full rationale. */
     {
         int spin = 2000000;
         while (g_ata_busy && --spin);
@@ -389,7 +389,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
     outportb(io_base + ATA_REG_LBA1, (uint8)((lba >> 8) & 0xFF));
     outportb(io_base + ATA_REG_LBA2, (uint8)((lba >> 16) & 0xFF));
 
-    /* Same IRQ guard as ata_read_sector — see comment there. */
+    /* Same IRQ guard as ata_read_sector -- see comment there. */
     arch_irq_state_t irq_state = arch_irq_save();
 
     // Send write command

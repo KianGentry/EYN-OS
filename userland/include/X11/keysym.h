@@ -1,5 +1,5 @@
 /*
- * X11/keysym.h — Key symbol definitions wrapper.
+ * X11/keysym.h -- Key symbol definitions wrapper.
  *
  * Part of the EYN-OS X11 compatibility layer.
  * Most X11 programs include this header; it simply pulls in keysymdef.h.

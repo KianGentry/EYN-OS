@@ -1,5 +1,5 @@
 /*
- * X11/keysymdef.h — X11 key symbol definitions for EYN-OS.
+ * X11/keysymdef.h -- X11 key symbol definitions for EYN-OS.
  *
  * Only the most commonly used key symbols are defined here: Latin-1,
  * function keys, navigation keys, and modifiers.  This covers the vast
@@ -94,7 +94,7 @@
 #define XK_KP_Equal         0xFFBD
 
 /*
- * Latin-1 (ISO 8859-1) — keysyms equal Unicode code point.
+ * Latin-1 (ISO 8859-1) -- keysyms equal Unicode code point.
  * Only printable range 0x20..0x7E and 0xA0..0xFF.
  */
 #define XK_space            0x0020

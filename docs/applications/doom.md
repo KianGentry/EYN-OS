@@ -3,9 +3,9 @@
 EYN-OS now ships with a native userland port of **linuxdoom-1.10** and two
 practical ways to build or run it:
 
-1. **Host-built DOOM** — cross-compiled on the host and packed into the disk
+1. **Host-built DOOM** -- cross-compiled on the host and packed into the disk
    image as the `doom` binary.
-2. **In-OS DOOM build** — compiled from source inside EYN-OS using chibicc via
+2. **In-OS DOOM build** -- compiled from source inside EYN-OS using chibicc via
    the `build_doom` shell script, producing `doom_chibicc`.
 
 This makes the port useful both as a playable application and as a regression
@@ -13,10 +13,10 @@ test for the userland compiler, paging, filesystem, and GUI stack.
 
 ## What is included
 
-- `doom` — the host-built DOOM binary in `testdir/programs/doom`
-- `build_doom` — an in-OS shell script that drives chibicc
-- `doom_chibicc` — generated at runtime by `build_doom`
-- `doom1.wad` — bundled test IWAD in `testdir/`
+- `doom` -- the host-built DOOM binary in `testdir/programs/doom`
+- `build_doom` -- an in-OS shell script that drives chibicc
+- `doom_chibicc` -- generated at runtime by `build_doom`
+- `doom1.wad` -- bundled test IWAD in `testdir/`
 
 The host-side helper script lives at `devtools/build_doom.sh` and cross-builds
 the port into a normal EYN-OS userland executable.
@@ -104,7 +104,7 @@ EYN-OS as a self-hosting-style development environment.
 
 ## Related documentation
 
-- `docs/tools/chibicc.md` — compiler and in-OS build workflow
-- `docs/ui/shell-scripts.md` — `build_doom` scripting model
-- `docs/api/userland-uelf-abi.md` — executable format and runtime ABI
-- `docs/api/x11-compat.md` — source-level GUI compatibility layer for Xlib apps
+- `docs/tools/chibicc.md` -- compiler and in-OS build workflow
+- `docs/ui/shell-scripts.md` -- `build_doom` scripting model
+- `docs/api/userland-uelf-abi.md` -- executable format and runtime ABI
+- `docs/api/x11-compat.md` -- source-level GUI compatibility layer for Xlib apps

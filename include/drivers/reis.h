@@ -1,5 +1,5 @@
 /*
- * REIS — REI Sound format (part of the REI multimedia family).
+ * REIS -- REI Sound format (part of the REI multimedia family).
  *
  * REIS is a simple audio container designed for EYN-OS.  It stores
  * uncompressed or RLE-compressed PCM audio in a compact on-disk format that
@@ -10,16 +10,16 @@
  * ==============
  *   Offset  Size   Field
  *   ------  ----   -----
- *     0       4    magic       — 0x52454953 ('REIS')
- *     4       2    version     — format version (currently 1)
- *     6       1    channels    — 1 = mono, 2 = stereo
- *     7       1    bits        — bits per sample (8 or 16)
- *     8       4    sample_rate — samples per second (e.g. 22050, 44100)
- *    12       4    frame_count — total sample frames (one frame = one sample per channel)
- *    16       4    data_offset — byte offset from file start to PCM/compressed payload
- *    20       4    data_size   — byte length of the payload region
- *    24       4    flags       — bit 0 = RLE compression (PackBits, 1-byte or 2-byte unit)
- *    28       4    reserved    — must be 0
+ *     0       4    magic       -- 0x52454953 ('REIS')
+ *     4       2    version     -- format version (currently 1)
+ *     6       1    channels    -- 1 = mono, 2 = stereo
+ *     7       1    bits        -- bits per sample (8 or 16)
+ *     8       4    sample_rate -- samples per second (e.g. 22050, 44100)
+ *    12       4    frame_count -- total sample frames (one frame = one sample per channel)
+ *    16       4    data_offset -- byte offset from file start to PCM/compressed payload
+ *    20       4    data_size   -- byte length of the payload region
+ *    24       4    flags       -- bit 0 = RLE compression (PackBits, 1-byte or 2-byte unit)
+ *    28       4    reserved    -- must be 0
  *                               (32 bytes total header)
  *
  * PCM encoding
@@ -82,7 +82,7 @@
 /*
  * SECURITY-INVARIANT: Maximum duration in sample frames the kernel will
  * accept for a single REIS file.  At 48 kHz stereo 16-bit this caps memory
- * at ~180 MB of raw PCM — well above practical use on EYN-OS.  The field is
+ * at ~180 MB of raw PCM -- well above practical use on EYN-OS.  The field is
  * primarily a sanity check against corrupt headers.
  */
 #define REIS_MAX_FRAME_COUNT (48000u * 60u * 30u)  /* 30 minutes at 48 kHz */

@@ -1,4 +1,4 @@
-# build_doom.shell — Compile DOOM from source using chibicc on EYN-OS
+# build_doom.shell -- Compile DOOM from source using chibicc on EYN-OS
 #
 # Usage:  build_doom
 #
@@ -31,8 +31,8 @@ if -f $ASM
         echo  Run with: doom_chibicc
         echo ========================================
     else
-        echo Error: Linking failed — output not created
+        echo Error: Linking failed -- output not created
     endif
 else
-    echo Error: Compilation failed — assembly not created
+    echo Error: Compilation failed -- assembly not created
 endif

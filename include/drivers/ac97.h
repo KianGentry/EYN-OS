@@ -7,15 +7,15 @@
  * Hardware overview
  * =================
  *   The AC97 audio subsystem consists of two components:
- *     1. An AC97 *codec* (the analog part — DAC/ADC/mixer).
+ *     1. An AC97 *codec* (the analog part -- DAC/ADC/mixer).
  *     2. An *AC97 controller* on the PCI bus (Intel ICH or compatible).
  *
  *   The controller exposes two I/O BAR regions:
- *     - BAR0 (NAM — Native Audio Mixer): codec register access (16-bit I/O).
- *     - BAR1 (NABM — Native Audio Bus-Mastering): DMA control (32-bit I/O).
+ *     - BAR0 (NAM -- Native Audio Mixer): codec register access (16-bit I/O).
+ *     - BAR1 (NABM -- Native Audio Bus-Mastering): DMA control (32-bit I/O).
  *
  *   Playback uses a Bus-Master Output (PCM-Out) channel.  The driver
- *   programs a Buffer Descriptor List (BDL) — an array of up to 32 entries,
+ *   programs a Buffer Descriptor List (BDL) -- an array of up to 32 entries,
  *   each pointing to a PCM buffer + sample count.  The hardware walks the
  *   list, fetching and playing buffers via DMA, and raises an IRQ on each
  *   buffer completion (IOC) or list completion (LVBCI).
@@ -71,13 +71,13 @@
 /*
  * Each DMA channel has a block of 0x20 bytes; PCM-Out is at offset 0x10.
  * Within each channel block:
- *   +0x00  BDBAR — Buffer Descriptor list Base Address Register (32-bit)
- *   +0x04  CIV   — Current Index Value (8-bit, read-only)
- *   +0x05  LVI   — Last Valid Index     (8-bit, read/write)
- *   +0x06  SR    — Status Register      (16-bit, W1C)
- *   +0x08  PICB  — Position In Current Buffer (16-bit, read-only)
- *   +0x0A  PIV   — Prefetched Index Value (8-bit, read-only)
- *   +0x0B  CR    — Control Register     (8-bit, read/write)
+ *   +0x00  BDBAR -- Buffer Descriptor list Base Address Register (32-bit)
+ *   +0x04  CIV   -- Current Index Value (8-bit, read-only)
+ *   +0x05  LVI   -- Last Valid Index     (8-bit, read/write)
+ *   +0x06  SR    -- Status Register      (16-bit, W1C)
+ *   +0x08  PICB  -- Position In Current Buffer (16-bit, read-only)
+ *   +0x0A  PIV   -- Prefetched Index Value (8-bit, read-only)
+ *   +0x0B  CR    -- Control Register     (8-bit, read/write)
  */
 #define AC97_NABM_PCMOUT      0x10u  /* PCM-Out channel base              */
 #define AC97_NABM_GLB_CTRL    0x2Cu  /* Global control                    */
@@ -115,7 +115,7 @@
  *
  * The AC97 hardware supports up to 32 BDL entries.  We use all 32 in a
  * circular ring.  write_idx cycles modulo AC97_BDL_COUNT so LVI always
- * advances forward — never backwards — preventing hardware stalls caused
+ * advances forward -- never backwards -- preventing hardware stalls caused
  * by CIV > LVI.
  *
  * Breakage if changed: must remain ≤ 32; write_idx wraps at this value.

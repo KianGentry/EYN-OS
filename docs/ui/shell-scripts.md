@@ -11,7 +11,7 @@ inside scripts.
 Scripts can be executed in several ways:
 
 ```
-# By name — if the file lives in /binaries/ and starts with '#' it is
+# By name -- if the file lives in /binaries/ and starts with '#' it is
 # auto-detected as a script (no extension needed):
 build_doom
 
@@ -34,12 +34,12 @@ interpreter.
 ### Comments
 
 Lines beginning with `#` (after optional whitespace) are comments and are
-ignored.  Inline comments are **not** supported — the `#` must be the first
+ignored.  Inline comments are **not** supported -- the `#` must be the first
 non-whitespace character on the line.
 
 ```shell
 # This is a comment
-echo hello   # this is NOT a comment — the '#' is passed to the command
+echo hello   # this is NOT a comment -- the '#' is passed to the command
 ```
 
 ### Variables
@@ -108,7 +108,7 @@ Example:
 if -f /binaries/doom
     echo DOOM binary exists
 else
-    echo DOOM binary not found — building...
+    echo DOOM binary not found -- building...
     build_doom
 endif
 ```
@@ -119,7 +119,7 @@ endif
 set COUNT=3
 while $COUNT != 0
     echo Countdown: $COUNT
-    # (no arithmetic yet — decrement manually or use an external tool)
+    # (no arithmetic yet -- decrement manually or use an external tool)
     set COUNT=$(decrement $COUNT)
 endwhile
 ```
@@ -181,7 +181,7 @@ doom_chibicc
 A complete example script that compiles DOOM from source using chibicc:
 
 ```shell
-# build_doom — Compile DOOM from source using chibicc on EYN-OS
+# build_doom -- Compile DOOM from source using chibicc on EYN-OS
 set CC=chibicc
 set SRC=/DOOM/doom_unity.c
 set ASM=/doom_compiled.s

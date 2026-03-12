@@ -363,7 +363,7 @@ The capability syscalls mirror the plain GUI calls but accept a capability token
 
 | # | Name | Mirrors |
 |---|---|---|
-| 28 | `CAP_MINT_FD` | — (mint a file-descriptor capability) |
+| 28 | `CAP_MINT_FD` | -- (mint a file-descriptor capability) |
 | 29–41 | `CAP_GUI_*` | `GUI_BEGIN` … `GUI_BLIT_RGB565` |
 | 42 | `CAP_GUI_CLOSE` | `wm_close_window` |
 | 43 | `CAP_FD_WRITE` | file write via capability |

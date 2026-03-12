@@ -628,17 +628,17 @@ typedef struct {
     char path[128];
 
     /*
-     * EYNFS streaming cursor — avoids re-traversing the full block chain from
+     * EYNFS streaming cursor -- avoids re-traversing the full block chain from
      * first_block on every read call.  O(28 000) block reads for a 14 MB WAD
      * drops to O(1) for sequential reads once the cursor is primed.
      *
-     * eynfs_first_block  — first_block from the dir entry, populated at open
+     * eynfs_first_block  -- first_block from the dir entry, populated at open
      *                      time.  0 = not an EYNFS file (FAT32 or directory);
      *                      fall back to vfs_read_file_at() in that case.
-     * cur_block          — EYNFS block number where the cursor currently sits.
+     * cur_block          -- EYNFS block number where the cursor currently sits.
      *                      0 = not yet initialised; eynfs_read_file_fast()
      *                      will restart from eynfs_first_block.
-     * cur_block_off      — file byte offset at the START of cur_block's data
+     * cur_block_off      -- file byte offset at the START of cur_block's data
      *                      payload (i.e. 4 bytes past the chain pointer).
      *
      * On any backwards seek that takes offset below cur_block_off, the fast
@@ -756,7 +756,7 @@ typedef struct {
      *            (syscall returns -1). Callers should minimise per-frame commands.
      * Breakage if changed:
      *   - Increasing: linearly grows per-user-GUI kernel memory (~96 bytes/slot).
-     *     256 slots ≈ 24 KB — acceptable on 9 MB target. Needed for text-heavy
+     *     256 slots ≈ 24 KB -- acceptable on 9 MB target. Needed for text-heavy
      *     applications (e.g. text editors drawing 30+ lines per frame).
      *   - Decreasing: existing GUI programs may silently lose draw calls.
      * ABI-sensitive: Yes (user-visible limit on draw throughput per frame).
@@ -1013,13 +1013,13 @@ static void user_gui_key_cb(int tile_idx, int key, void* userdata) {
  * Close-request callback registered with the tiling manager.
  * Instead of directly closing, push a CLOSE event into the userland
  * event queue so the ring3 program can save state / confirm / clean up.
- * Returns 0 (veto) to prevent the tiler from destroying the tile —
+ * Returns 0 (veto) to prevent the tiler from destroying the tile --
  * the user program is expected to call exit() when ready.
  */
 static int user_gui_close_cb(int tile_idx, void* userdata) {
     int handle = (int)(uint32)userdata;
     user_gui_t* e = user_gui_get(handle);
-    if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return 1; /* not ours — allow close */
+    if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return 1; /* not ours -- allow close */
     user_gui_event_t ev;
     ev.type = USER_GUI_EVENT_CLOSE;
     ev.a = 0;
@@ -1474,7 +1474,7 @@ static void syscall_maybe_render_ui(void) {
 #endif
 
 /*
- * syscall_read_file — kernel-side handler for SYSCALL_READ on a regular file.
+ * syscall_read_file -- kernel-side handler for SYSCALL_READ on a regular file.
  *
  * Replaced the old 256-byte inner loop that called vfs_read_file_at() for
  * each tiny chunk, re-traversing the EYNFS block chain from first_block every
@@ -1487,7 +1487,7 @@ static void syscall_maybe_render_ui(void) {
  *      which uses the per-FD block cursor for O(1) continuation on sequential
  *      reads and only re-traverses on backwards seeks.
  *   3. For FAT32 / other files (eynfs_first_block == 0): single
- *      vfs_read_file_at() call — still eliminates the inner loop that was
+ *      vfs_read_file_at() call -- still eliminates the inner loop that was
  *      previously O(maxlen/256) re-traversals.
  *   4. copyout the full result, update offset, free kernel buffer.
  */
@@ -1537,7 +1537,7 @@ static int syscall_read_file(user_fd_t* ufd, char* user_dst, int maxlen) {
                (int)ufd->offset, (int)ufd->size);
     }
 
-    /* kbuf is retained for the next read on this FD — no free here. */
+    /* kbuf is retained for the next read on this FD -- no free here. */
     return (n < 0) ? -1 : n;
 }
 
@@ -1607,9 +1607,9 @@ static int syscall_seek_fd(user_fd_t* ufd, int32 offset, int whence) {
      * blocks and consuming all CPU time.
      */
     if (ufd->cur_block != 0 && (uint32)next >= ufd->cur_block_off) {
-        /* Forward seek — cursor stays valid. */
+        /* Forward seek -- cursor stays valid. */
     } else {
-        /* Backward seek or uninitialised cursor — reset. */
+        /* Backward seek or uninitialised cursor -- reset. */
         ufd->cur_block     = 0;
         ufd->cur_block_off = 0;
     }
@@ -4228,14 +4228,14 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
         case SYSCALL_GET_TICKS_MS: {
             /*
-             * get_ticks_ms() — return milliseconds elapsed since kernel boot.
+             * get_ticks_ms() -- return milliseconds elapsed since kernel boot.
              *
              * Computes ticks * 1000 / hz avoiding 32-bit overflow by splitting
              * into whole seconds and the fractional millisecond remainder.
              * Wraps at ~49.7 days (uint32 rollover), which is sufficient for
              * interactive userland timing.
              *
-             * No capability required — wall-clock time is not privileged.
+             * No capability required -- wall-clock time is not privileged.
              */
             uint32 ticks = sched_get_tick_count();
             uint32 hz    = sched_get_tick_hz();
@@ -4246,7 +4246,7 @@ uint32 syscall_dispatch(regs_t* regs) {
 
         case SYSCALL_LSEEK: {
             /*
-             * lseek(fd, offset, whence) — reposition an open file descriptor.
+             * lseek(fd, offset, whence) -- reposition an open file descriptor.
              *
              * SECURITY-INVARIANT: fd is validated through user_fd_get() which
              * checks bounds and the 'used' flag; the file offset is clamped to
@@ -4274,7 +4274,7 @@ uint32 syscall_dispatch(regs_t* regs) {
 
         case SYSCALL_GUI_WARP_MOUSE: {
             /*
-             * gui_warp_mouse(handle, x, y) — move the physical cursor to
+             * gui_warp_mouse(handle, x, y) -- move the physical cursor to
              * (x, y) relative to the window content area.
              *
              * SECURITY-INVARIANT: The caller must own the GUI handle and hold
@@ -4309,7 +4309,7 @@ uint32 syscall_dispatch(regs_t* regs) {
 
         case SYSCALL_GUI_SET_CURSOR_VISIBLE: {
             /*
-             * gui_set_cursor_visible(handle, visible) — show or hide the
+             * gui_set_cursor_visible(handle, visible) -- show or hide the
              * mouse cursor sprite.
              *
              * SECURITY-INVARIANT: Same capability gate as gui_warp_mouse.
@@ -4375,7 +4375,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
 
         case SYSCALL_AUDIO_IS_AVAILABLE: {
-            /* No capability check — informational query. */
+            /* No capability check -- informational query. */
             regs->eax = (uint32)ac97_is_available();
             break;
         }

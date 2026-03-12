@@ -154,7 +154,7 @@ enum {
     EYN_SYSCALL_PF = 103,
     EYN_SYSCALL_RING3 = 104,
 
-    // GUI icon drawing — renders a named icon from the kernel-side icon cache
+    // GUI icon drawing -- renders a named icon from the kernel-side icon cache
     EYN_SYSCALL_GUI_DRAW_ICON = 105,
 
     // GUI outlined rectangle (1px border, no fill)
@@ -374,7 +374,7 @@ static void eyn_user_read_segments(uint16_t* out_cs, uint16_t* out_ds) {
     if (out_ds) *out_ds = 0;
 }
 
-#else /* GCC — inline assembly path */
+#else /* GCC -- inline assembly path */
 
 static inline int eyn_syscall3(int n, int a1, const void* a2, int a3) {
     int ret;

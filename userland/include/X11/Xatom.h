@@ -1,5 +1,5 @@
 /*
- * X11/Xatom.h — Predefined X11 atom constants.
+ * X11/Xatom.h -- Predefined X11 atom constants.
  *
  * Part of the EYN-OS X11 compatibility layer.
  * These atoms have fixed IDs in the X protocol and are referenced by

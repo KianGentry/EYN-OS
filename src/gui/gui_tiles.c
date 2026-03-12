@@ -136,7 +136,7 @@ static void draw_decorations(tile_t* t, int is_focused) {
                 drawCharAt(cx, text_y, (int)(unsigned char)t->title[i], colour_r, colour_g, colour_b);
             }
         }
-        /* Tile title bar buttons (close, maximize, minimize) — same icons as floating windows */
+        /* Tile title bar buttons (close, maximize, minimize) -- same icons as floating windows */
         if (title_h >= 12) {
             /* Close */
             if (g_close_icon_loaded && g_close_icon.data) {
@@ -186,7 +186,7 @@ static void draw_decorations(tile_t* t, int is_focused) {
         }
     }
     // status overlay is drawn after content
-    // borders — subtle Materia gray
+    // borders -- subtle Materia gray
     int border_r = is_focused ? 80 : 50;
     int border_g = is_focused ? 80 : 50;
     int border_b = is_focused ? 80 : 50;

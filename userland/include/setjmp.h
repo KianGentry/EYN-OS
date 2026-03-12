@@ -8,12 +8,12 @@
  * original setjmp() call site.
  *
  * Saved register layout (jmp_buf indices):
- *   0  ebx  — callee-saved
- *   1  esi  — callee-saved
- *   2  edi  — callee-saved
- *   3  ebp  — frame pointer
- *   4  esp  — stack pointer at setjmp() call site
- *   5  eip  — return address (top of stack at call site)
+ *   0  ebx  -- callee-saved
+ *   1  esi  -- callee-saved
+ *   2  edi  -- callee-saved
+ *   3  ebp  -- frame pointer
+ *   4  esp  -- stack pointer at setjmp() call site
+ *   5  eip  -- return address (top of stack at call site)
  *
  * Changing this layout without recompiling all translation units that
  * link setjmp.c breaks the ABI silently.  Treat as a stable interface.

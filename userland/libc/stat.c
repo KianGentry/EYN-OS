@@ -5,7 +5,7 @@
 #include <errno.h>
 
 /*
- * fstat — query metadata for an open file descriptor.
+ * fstat -- query metadata for an open file descriptor.
  *
  * EYN-OS VFS does not expose extended metadata (ownership, timestamps) to
  * ring-3 programs.  We fill in st_size by seeking to the end and back, and

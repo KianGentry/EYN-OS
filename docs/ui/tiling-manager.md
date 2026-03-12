@@ -36,7 +36,7 @@ EYN-OS uses a tiling window manager. Windows are arranged in a grid rather than 
 
 ### Source Layout
 
-The GUI compositor lives entirely in `src/gui/`. It is built as a **unity build** — a single compilation unit (`tiling_manager.c`) that `#include`s the sub-modules in dependency order. This keeps all state file-scoped while making each concern easy to navigate and contribute to independently.
+The GUI compositor lives entirely in `src/gui/`. It is built as a **unity build** -- a single compilation unit (`tiling_manager.c`) that `#include`s the sub-modules in dependency order. This keeps all state file-scoped while making each concern easy to navigate and contribute to independently.
 
 | File | Lines | Responsibility |
 |---|---|---|
@@ -71,9 +71,9 @@ Adding a sub-module: create `src/gui/gui_<name>.c` with a brief description comm
 ```
 
 Key headers:
-- `include/utilities/tile_manager.h` — full kernel-side API
-- `userland/include/gui.h` — userland GUI API (ring-3 programs)
-- `include/utilities/terminals.h` — virtual terminal API
+- `include/utilities/tile_manager.h` -- full kernel-side API
+- `userland/include/gui.h` -- userland GUI API (ring-3 programs)
+- `include/utilities/terminals.h` -- virtual terminal API
 
 ## Tile GUI API
 

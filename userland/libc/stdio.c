@@ -369,7 +369,7 @@ int vsnprintf(char* buf, size_t sz, const char* fmt, va_list ap) {
             snbuf_render_unsigned(tmp, &tlen, val, 16, 0);
             for (int i = 0; i < tlen; i++) snbuf_putc(buf, sz, &pos, tmp[i]);
         } else {
-            /* Unknown specifier — emit literally */
+            /* Unknown specifier -- emit literally */
             snbuf_putc(buf, sz, &pos, '%');
             snbuf_putc(buf, sz, &pos, *p);
         }
@@ -574,7 +574,7 @@ int sprintf(char* buf, const char* fmt, ...) {
     return n;
 }
 
-/* fscanf — read one word/token from a FILE and parse it.
+/* fscanf -- read one word/token from a FILE and parse it.
  *
  * Very minimal: reads a whitespace-delimited token into a local buffer and
  * delegates to vsscanf.  Only needed for M_LoadDefaults (reads one token per
@@ -610,13 +610,13 @@ int fscanf(FILE* f, const char* fmt, ...) {
     return n;
 }
 
-/* setbuf — DOOM calls this to disable buffering on stderr.
+/* setbuf -- DOOM calls this to disable buffering on stderr.
  * EYN-OS FILE is always write-through so this is a no-op. */
 void setbuf(FILE* f, char* buf) {
     (void)f; (void)buf;
 }
 
-/* getchar — read a single character from stdin. */
+/* getchar -- read a single character from stdin. */
 int getchar(void) {
     return fgetc(stdin);
 }
@@ -677,7 +677,7 @@ int ferror(FILE* f) {
 }
 
 /*
- * vsscanf / sscanf — minimal scanf implementation for reading from a string.
+ * vsscanf / sscanf -- minimal scanf implementation for reading from a string.
  *
  * Supports: %d %i %u %x %c %s and skips whitespace between conversions.
  * Does not support width specifiers, floats, or *, which are not needed
@@ -704,7 +704,7 @@ int vsscanf(const char* str, const char* fmt, va_list ap) {
         }
         f++;  /* skip '%' */
 
-        /* Skip '*' (suppress assignment) — basic support. */
+        /* Skip '*' (suppress assignment) -- basic support. */
         int suppress = 0;
         if (*f == '*') { suppress = 1; f++; }
 

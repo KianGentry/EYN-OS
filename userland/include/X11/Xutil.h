@@ -1,5 +1,5 @@
 /*
- * X11/Xutil.h — Utility types and helper functions for Xlib programs.
+ * X11/Xutil.h -- Utility types and helper functions for Xlib programs.
  *
  * Part of the EYN-OS X11 compatibility layer.  Provides the minimal set
  * of ICCCM / Xutil structures that common programs expect.

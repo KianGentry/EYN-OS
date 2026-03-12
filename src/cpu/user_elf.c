@@ -95,7 +95,7 @@ typedef struct {
  *   will report "out of memory" before doing any work.
  *
  * ABI-sensitive: No (internal loader policy, not exposed to user ABI).
- * Security-critical: Yes — bounds worst-case kernel heap usage from untrusted
+ * Security-critical: Yes -- bounds worst-case kernel heap usage from untrusted
  *   ELF files loaded from disk.
  */
 #define USER_ELF_MAX_FILE_BYTES (16u * 1024u * 1024u)
@@ -307,8 +307,8 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
      *   this before we reach here, so the guard is redundant but kept for
      *   defence-in-depth.
      *
-     * ABI-sensitive: Yes — this is the effective user-program BSS ceiling.
-     * Security-critical: Yes — prevents an untrusted ELF from exhausting the
+     * ABI-sensitive: Yes -- this is the effective user-program BSS ceiling.
+     * Security-critical: Yes -- prevents an untrusted ELF from exhausting the
      *   page-table allocation budget or mapping into kernel space.
      */
     if (pages == 0 || pages > 16384) {

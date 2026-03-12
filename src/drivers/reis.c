@@ -1,5 +1,5 @@
 /*
- * REIS audio format parser — kernel side.
+ * REIS audio format parser -- kernel side.
  *
  * Handles header validation and optional PackBits RLE decompression.
  * The decompression reuses the same PackBits algorithm as REI and REIV.
