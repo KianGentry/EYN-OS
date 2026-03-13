@@ -27,6 +27,7 @@ int user_task_continue_or_schedule(void);
 void user_task_request_schedule(void);
 int user_task_poll_scheduler(void);
 void user_task_capture_syscall_frame(const regs_t* regs);
+int user_task_try_resume_from_syscall(regs_t* regs);
 
 // Mapping ownership accessors used by abort/cleanup logic.
 void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* stack_page);

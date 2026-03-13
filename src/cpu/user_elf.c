@@ -545,12 +545,20 @@ typedef struct {
     char* arg_storage[USER_TASK_MAX_SPAWN_ARGC];
 } user_task_image_t;
 
+typedef enum {
+    USER_TASK_STATE_UNUSED = 0,
+    USER_TASK_STATE_RUNNABLE = 1,
+    USER_TASK_STATE_RUNNING = 2,
+    USER_TASK_STATE_BLOCKED = 3,
+    USER_TASK_STATE_ZOMBIE = 4,
+} user_task_state_t;
+
 typedef struct {
     int used;
     int pid;
-    int exited;
     int status;
-    int started;
+    user_task_state_t state;
+    int wait_target_pid;
     user_task_runtime_t runtime;
     user_task_image_t* image;
     int has_syscall_frame;
@@ -627,7 +635,8 @@ static void user_task_image_free(user_task_image_t* image) {
 static int user_task_launch_slot(user_task_slot_t* slot) {
     if (!slot || !slot->image) return -1;
 
-    slot->started = 1;
+    slot->state = USER_TASK_STATE_RUNNING;
+    slot->wait_target_pid = 0;
     g_user_task_active_slot = slot;
     g_user_task_pending_pid = slot->pid;
 
@@ -640,7 +649,7 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
     g_user_task_active_slot = NULL;
     if (g_user_task_pending_pid == slot->pid) g_user_task_pending_pid = 0;
     if (g_user_task_running_pid == slot->pid) g_user_task_running_pid = 0;
-    slot->exited = 1;
+    slot->state = USER_TASK_STATE_ZOMBIE;
     slot->status = (rc == 0) ? 0 : -1;
     return rc;
 }
@@ -691,6 +700,48 @@ static user_task_slot_t* user_task_alloc_slot(void) {
     return NULL;
 }
 
+static int user_task_runtime_matches_live(const user_task_runtime_t* rt) {
+    if (!rt) return 0;
+    return (rt->code_base == g_user_code_base &&
+            rt->code_pages == g_user_code_pages &&
+            rt->stack_page == g_user_stack_page) ? 1 : 0;
+}
+
+int user_task_try_resume_from_syscall(regs_t* regs) {
+    if (!regs) return 0;
+    if (!g_user_task_schedule_request) return 0;
+    if (!g_user_task_active) return 0;
+
+    int current_pid = (int)g_user_task_running_pid;
+    user_task_slot_t* current = user_task_find_slot_by_pid(current_pid);
+    if (!current) return 0;
+
+    user_task_slot_t* target = NULL;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used) continue;
+        if (slot->pid == current_pid) continue;
+        if (slot->state != USER_TASK_STATE_RUNNABLE) continue;
+        if (!slot->has_syscall_frame) continue;
+        if (!user_task_runtime_matches_live(&slot->runtime)) continue;
+        target = slot;
+        break;
+    }
+
+    if (!target) return 0;
+
+    current->last_syscall_frame = *regs;
+    current->has_syscall_frame = 1;
+    current->state = USER_TASK_STATE_RUNNABLE;
+
+    *regs = target->last_syscall_frame;
+    target->state = USER_TASK_STATE_RUNNING;
+    g_user_task_active_slot = target;
+    g_user_task_running_pid = target->pid;
+    g_user_task_schedule_request = 0;
+    return 1;
+}
+
 int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
     user_task_slot_t* slot = user_task_alloc_slot();
     if (!slot) return -1;
@@ -702,6 +753,8 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     slot->used = 1;
     slot->pid = g_user_task_next_pid++;
     slot->image = image;
+    slot->state = USER_TASK_STATE_RUNNABLE;
+    slot->wait_target_pid = 0;
     if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
 
     /*
@@ -725,7 +778,7 @@ int user_task_continue_or_schedule(void) {
     // Prefer runnable queued tasks over UI fallback.
     for (int i = 0; i < USER_TASK_MAX; ++i) {
         user_task_slot_t* slot = &g_user_tasks[i];
-        if (!slot->used || slot->exited || slot->started) continue;
+        if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) continue;
         (void)user_task_launch_slot(slot);
         return 1;
     }
@@ -760,7 +813,7 @@ void user_task_notify_exit(int status) {
     if (pid > 0) {
         user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
         if (slot) {
-            slot->exited = 1;
+            slot->state = USER_TASK_STATE_ZOMBIE;
             slot->status = status;
         }
     }
@@ -774,7 +827,7 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
     if (!slot) return -1;
 
-    while (!slot->exited) {
+    while (slot->state != USER_TASK_STATE_ZOMBIE) {
         if (flags & USER_TASK_WAIT_NOHANG) return 0;
         watchdog_kick("waitpid");
         __asm__ __volatile__("sti");
@@ -786,9 +839,9 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->image = NULL;
     slot->used = 0;
     slot->pid = 0;
-    slot->exited = 0;
+    slot->state = USER_TASK_STATE_UNUSED;
     slot->status = 0;
-    slot->started = 0;
+    slot->wait_target_pid = 0;
     slot->has_syscall_frame = 0;
     user_task_request_schedule();
     return pid;

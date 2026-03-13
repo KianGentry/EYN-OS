@@ -5160,6 +5160,7 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
     }
 
+    (void)user_task_try_resume_from_syscall(regs);
     return regs->eax;
 }
 
