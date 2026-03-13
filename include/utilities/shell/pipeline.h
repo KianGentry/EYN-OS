@@ -98,6 +98,8 @@ int execute_background_command(command_t* cmd);
 int execute_command(command_t* cmd);
 int execute_pipeline(pipeline_t* pipeline);
 int execute_complex_pipeline(pipeline_t* pipeline);
+int pipeline_is_runtime_active(void);
+int pipeline_resume_pending(void);
 
 // Background process management
 int add_background_process(int pid, const char* command);

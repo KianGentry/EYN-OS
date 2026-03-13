@@ -8,6 +8,7 @@
 #include <terminals.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <utilities/shell/pipeline.h>
 
 // shell_current_path is maintained by the main shell code
 extern char shell_current_path[128];
@@ -597,6 +598,10 @@ void vterm_handle_key(int idx, int key) {
         vterm_write_char(idx, '\n');
         // handle command: use existing handle_shell_command, but capture output via shell redirect
         if (strlen(t->input_buf) > 0) {
+            while (pipeline_resume_pending()) {
+                // Drain any previously armed pipeline before processing input.
+            }
+
             char raw_input[INPUT_BUF_LEN];
             strncpy(raw_input, t->input_buf, sizeof(raw_input) - 1);
             raw_input[sizeof(raw_input) - 1] = '\0';
@@ -616,6 +621,9 @@ void vterm_handle_key(int idx, int key) {
 
             start_shell_redirect();
                 handle_shell_command(t->input_buf);
+                while (pipeline_resume_pending()) {
+                    // Continue newly armed pipelines in tiling-terminal mode.
+                }
             // Capture the redirect length before stopping, since stop() resets the position
             int captured_redirect_pos = shell_redirect_pos;
             stop_shell_redirect();

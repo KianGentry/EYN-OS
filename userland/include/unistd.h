@@ -16,6 +16,10 @@ ssize_t read(int fd, void* buf, size_t len);
 
 int close(int fd);
 
+// IPC primitives
+int pipe(int pipefd[2]);
+int mkfifo(const char* path, mode_t mode);
+
 // Create/overwrite a file with given contents.
 int writefile(const char* path, const void* buf, size_t len);
 

@@ -248,6 +248,12 @@ enum {
     EYN_SYSCALL_NET_TCP_SEND = 121,
     EYN_SYSCALL_NET_TCP_RECV = 122,
     EYN_SYSCALL_NET_TCP_CLOSE = 123,
+
+    // IPC primitives
+    // PIPE: args (int out_fds[2]) -> 0 or -1; out_fds[0]=read end, out_fds[1]=write end
+    EYN_SYSCALL_PIPE = 124,
+    // MKFIFO: args (const char* path) -> 0 or -1 (kernel-runtime FIFO namespace)
+    EYN_SYSCALL_MKFIFO = 125,
 };
 
 typedef struct {

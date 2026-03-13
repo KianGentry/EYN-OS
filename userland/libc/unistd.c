@@ -19,6 +19,17 @@ int close(int fd) {
     return eyn_syscall1(EYN_SYSCALL_CLOSE, fd);
 }
 
+int pipe(int pipefd[2]) {
+    if (!pipefd) return -1;
+    return eyn_syscall1(EYN_SYSCALL_PIPE, (int)(uintptr_t)pipefd);
+}
+
+int mkfifo(const char* path, mode_t mode) {
+    (void)mode;
+    if (!path) return -1;
+    return eyn_syscall1(EYN_SYSCALL_MKFIFO, (int)(uintptr_t)path);
+}
+
 int writefile(const char* path, const void* buf, size_t len) {
     if (!path || !buf) return -1;
     if (len > 0x7fffffffU) len = 0x7fffffffU;

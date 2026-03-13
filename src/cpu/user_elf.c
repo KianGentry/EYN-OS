@@ -321,7 +321,10 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     user_task_cleanup_mappings();
 
     // Reset per-task syscall state.
-    syscall_reset_user_fds();
+    if (!syscall_get_user_fd_inherit_mode()) {
+        syscall_reset_user_fds();
+        syscall_reset_user_stdio_fds();
+    }
     syscall_reset_user_streams();
     syscall_reset_user_guis();
 

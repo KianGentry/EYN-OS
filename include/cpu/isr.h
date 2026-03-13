@@ -72,6 +72,19 @@ uint32 syscall_dispatch(regs_t* r);
 // Reset the user-task file descriptor table (used when starting/ending ring3 tasks).
 void syscall_reset_user_fds(void);
 
+// Toggle whether user FD table should be preserved across SYSCALL_EXIT and
+// subsequent user_elf_run_argv launches. Used by shell pipelines.
+void syscall_set_user_fd_inherit_mode(int enabled);
+int syscall_get_user_fd_inherit_mode(void);
+
+// Configure fd numbers backing user stdin/stdout/stderr for the next/active task.
+void syscall_set_user_stdio_fds(int stdin_fd, int stdout_fd, int stderr_fd);
+void syscall_reset_user_stdio_fds(void);
+
+// Kernel-side helpers for creating/closing user FD entries for shell plumbing.
+int syscall_kernel_pipe_create(int* out_read_fd, int* out_write_fd);
+int syscall_kernel_close_user_fd(int fd);
+
 // Reset the user-task EYNFS streaming-writer handles (used when starting/ending ring3 tasks).
 void syscall_reset_user_streams(void);
 

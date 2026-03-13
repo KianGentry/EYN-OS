@@ -90,6 +90,10 @@ enum {
     EYN_SYSCALL_NET_TCP_SEND       = 121,
     EYN_SYSCALL_NET_TCP_RECV       = 122,
     EYN_SYSCALL_NET_TCP_CLOSE      = 123,
+
+    // IPC primitives
+    EYN_SYSCALL_PIPE = 124,
+    EYN_SYSCALL_MKFIFO = 125,
 };
 
 enum {

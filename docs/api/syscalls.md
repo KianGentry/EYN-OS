@@ -18,7 +18,7 @@ Syscalls are made using the `int 0x80` instruction with the following register c
 Writes data to a file descriptor.
 
 **Arguments:**
-- EBX: File descriptor (1 for stdout)
+- EBX: File descriptor (stdout is `1`; open FDs and pipe ends are also supported)
 - ECX: Buffer address
 - EDX: Number of bytes to write
 
@@ -48,7 +48,7 @@ int 0x80            ; make syscall
 Reads data from a file descriptor.
 
 **Arguments:**
-- EBX: File descriptor (0 for stdin)
+- EBX: File descriptor (stdin is `0`; open FDs and pipe ends are also supported)
 - ECX: Buffer address
 - EDX: Maximum bytes to read
 
@@ -74,11 +74,39 @@ Open a file or directory for reading.
 - ECX: flags (currently minimal)
 - EDX: mode (unused today)
 
+Notes:
+- Paths registered through `mkfifo` resolve to runtime FIFO objects.
+- For FIFO paths, `O_RDONLY` opens the read end, `O_WRONLY`/`O_RDWR` open the write end.
+
 #### Close (syscall 5)
 Close an open file descriptor.
 
 **Arguments:**
 - EBX: fd
+
+#### Anonymous pipe (syscall 124)
+Create an anonymous unidirectional byte-stream pipe.
+
+**Arguments:**
+- EBX: `int pipefd[2]` user pointer
+
+**Returns:**
+- EAX: `0` on success, `-1` on failure
+
+On success, `pipefd[0]` is the read end and `pipefd[1]` is the write end.
+
+#### Named pipe create (syscall 125)
+Create/register a named FIFO endpoint in the kernel runtime IPC namespace.
+
+**Arguments:**
+- EBX: `const char* path`
+
+**Returns:**
+- EAX: `0` on success, `-1` on failure
+
+Notes:
+- FIFO names are opened with `open(path, O_RDONLY|O_WRONLY|O_RDWR, ...)`.
+- FIFO registration is kernel-runtime metadata, not an on-disk EYNFS file type.
 
 #### Get directory entries (syscall 7)
 Read directory entries from an open directory fd.

@@ -286,6 +286,24 @@ void handle_shell_command(string input) {
         break;
     }
 
+    // Allow pipeline syntax in all dispatch paths (interactive shell, scripts,
+    // and any internal callers), not only in launch_shell().
+    if (is_pipeline_command(current)) {
+        pipeline_t* pipeline = parse_pipeline(current);
+        if (pipeline) {
+            watchdog_kick("exec-pipeline");
+            (void)execute_pipeline(pipeline);
+            // Multi-stage pipeline execution is resumable and transfers
+            // ownership of the parsed pipeline to the runtime state.
+            if (!pipeline_is_runtime_active()) {
+                free_pipeline(pipeline);
+            }
+        } else {
+            printf("Failed to parse pipeline command\n");
+        }
+        goto cleanup;
+    }
+
     // Resolve and execute userland binaries only.
     shell_args_t unknown_args;
     if (shell_args_parse(&unknown_args, current) == 0 && try_run_unknown_as_uelf(&unknown_args))
@@ -324,6 +342,12 @@ void launch_shell(int n) {
     init_pipeline_system();
     
     while (1) {
+        // Resume any multi-stage pipeline that was interrupted by user-task
+        // exit abort path after a prior stage.
+        if (pipeline_resume_pending()) {
+            continue;
+        }
+
         // Note shell loop progress for the watchdog
         watchdog_kick("shell-loop");
         if (shell_log_active) {
@@ -401,8 +425,11 @@ void launch_shell(int n) {
                     add_to_history(&g_command_history, ch);
                 }
                 watchdog_kick("exec-pipeline");
-                execute_pipeline(pipeline);
-                free_pipeline(pipeline);
+                // execute_pipeline() takes ownership for multi-stage pipelines
+                // and may resume across subsequent shell-loop ticks.
+                if (execute_pipeline(pipeline) < 0) {
+                    free_pipeline(pipeline);
+                }
             } else {
                 printf("Failed to parse pipeline command\n");
             }

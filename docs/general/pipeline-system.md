@@ -1,20 +1,19 @@
 # Pipeline and Redirection System - EYN-OS
 
-EYN-OS includes a Unix-like pipeline and redirection system that enables command chaining and I/O manipulation. **Note: This system is currently in development and not all features are fully functional yet.**
+EYN-OS includes a Unix-like pipeline and redirection system that enables command chaining and I/O manipulation.
 
 ## Current Status
 
 ### **Working Features**
 - **Basic Output Redirection**: Write to files with `>` operator
 - **Append Redirection**: Append to files with `>>` operator  
-- **Simple Command Piping**: Basic `|` operator for 2-command pipelines
+- **Kernel Pipe Chaining**: `|` uses kernel pipe FDs for multi-stage command composition
 - **Universal Search Command**: Enhanced `search` command that works in multiple modes
 
 ### **In Development**
-- **Complex Pipelines**: Multi-command pipelines (3+ commands)
 - **Input Redirection**: Read from files with `<` operator
 - **Background Execution**: Run commands in background with `&`
-- **Advanced File Descriptor Management**: Full Unix file descriptor support
+- **Expanded FD Ops**: Additional `dup`/`poll`-style primitives
 
 ### **Planned Features**
 - **Process Substitution**: `<()` and `>()` operators
@@ -25,7 +24,7 @@ EYN-OS includes a Unix-like pipeline and redirection system that enables command
 ## Overview
 
 The current pipeline system provides:
-- **Command Piping**: Chain commands with `|` operator (2 commands max)
+- **Command Piping**: Chain commands with `|` operator across multiple stages
 - **Output Redirection**: Write to files with `>` operator
 - **Append Redirection**: Append to files with `>>` operator
 - **Universal Search**: Enhanced search command for filtering and filesystem search

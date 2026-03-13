@@ -156,6 +156,8 @@ handler.  This means:
 - All programs in `/binaries/` work: `chibicc`, `doom`, `ls`, `cat`, etc.
 - Aliases are expanded.
 - Pipelines work: `ls | grep doom`.
+- `|` is backed by kernel pipe FDs; shell stages are launched in-order with
+    stdin/stdout remapped to pipe ends.
 - File redirection: commands using `>` behave the same as in interactive mode.
 
 ```shell

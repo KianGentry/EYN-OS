@@ -13,6 +13,7 @@
 #include <context.h>
 #include <misc/sched.h>
 #include <mm/slab.h>
+#include <utilities/shell/pipeline.h>
 
 volatile int g_user_interrupt = 0;
 volatile int g_user_task_active = 0;
@@ -79,7 +80,11 @@ void user_task_cleanup_mappings(void) {
 
     vm_tlb_defer_end();
 
-    syscall_reset_user_fds();
+    // Keep inherited user FDs alive while a multi-stage shell pipeline is
+    // active; the pipeline runtime will close and reset them when it finishes.
+    if (!pipeline_is_runtime_active()) {
+        syscall_reset_user_fds();
+    }
     syscall_reset_user_streams();
 }
 
@@ -104,6 +109,10 @@ void ui_return_from_user_task(void) {
     g_user_task_colour_b = 255;
     g_user_task_colour_state = 0;
     g_user_task_icon_state = 0;
+
+    // Continue any pipeline stage that was armed before this user task exited.
+    // This path is reached via non-local abort return from SYSCALL_EXIT.
+    (void)pipeline_resume_pending();
 
     // Prefer the graphical tiling-manager shell when it's been initialized.
     if (tile_is_tiling_active()) {
