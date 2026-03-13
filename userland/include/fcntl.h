@@ -14,6 +14,7 @@
 #define O_CREAT   0x0040   /* create file if it does not exist */
 #define O_TRUNC   0x0200   /* truncate file to zero on open   */
 #define O_APPEND  0x0400   /* writes always go to end of file */
+#define O_NONBLOCK 0x0800  /* non-blocking I/O for supported endpoints */
 #define O_BINARY  0x0000   /* no-op on EYN-OS (all I/O is binary) */
 
 int open(const char* path, int flags, ...);   /* varargs: optional mode_t mode */

@@ -84,6 +84,8 @@ void syscall_reset_user_stdio_fds(void);
 // Kernel-side helpers for creating/closing user FD entries for shell plumbing.
 int syscall_kernel_pipe_create(int* out_read_fd, int* out_write_fd);
 int syscall_kernel_close_user_fd(int fd);
+int syscall_kernel_set_user_fd_nonblock(int fd, int enabled);
+int syscall_kernel_set_user_pipe_spool(int fd, int enabled);
 
 // Reset the user-task EYNFS streaming-writer handles (used when starting/ending ring3 tasks).
 void syscall_reset_user_streams(void);

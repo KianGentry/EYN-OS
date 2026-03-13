@@ -522,6 +522,7 @@ uint32 get_last_error_eip() {
 #define SYSCALL_DUP2 127
 #define SYSCALL_FD_SET_INHERIT 128
 #define SYSCALL_FD_SET_STDIO 129
+#define SYSCALL_FD_SET_NONBLOCK 130
 
 #define FIFO_METADATA_MARKER "EYNFIFO1\n"
 #define FIFO_METADATA_MARKER_LEN 9
@@ -529,6 +530,10 @@ uint32 get_last_error_eip() {
 /* open(2) flag bits used by SYSCALL_OPEN for FIFO endpoint selection. */
 #define OPEN_FLAG_WRONLY 0x0001
 #define OPEN_FLAG_RDWR 0x0002
+#define OPEN_FLAG_NONBLOCK 0x0800
+
+/* Bounded spill capacity used by pipeline spool fallback when pipe ring fills. */
+#define USER_PIPE_SPOOL_CAP_BYTES 16384
 
 // Cooperative scheduling from userland
 #define SYSCALL_SLEEP_US 22
@@ -672,11 +677,17 @@ typedef enum {
 typedef struct {
     int used;
     int persistent_fifo;
+    int spool_enabled;
     int reader_refs;
     int writer_refs;
     uint32 read_pos;
     uint32 write_pos;
     uint32 bytes_used;
+    uint8* spool_buf;
+    uint32 spool_cap;
+    uint32 spool_read_pos;
+    uint32 spool_write_pos;
+    uint32 spool_bytes;
     char fifo_path[128];
     uint8 buffer[USER_PIPE_BUFFER_BYTES];
 } user_pipe_t;
@@ -684,6 +695,7 @@ typedef struct {
 typedef struct {
     int used;
     int is_dir;
+    int nonblock;
     int kind;
     int pipe_id;
     int pipe_end;
@@ -789,10 +801,17 @@ static void user_pipe_maybe_destroy(int pipe_id) {
             p->bytes_used = 0;
             p->read_pos = 0;
             p->write_pos = 0;
+            p->spool_read_pos = 0;
+            p->spool_write_pos = 0;
+            p->spool_bytes = 0;
         }
         return;
     }
     if (p->reader_refs == 0 && p->writer_refs == 0) {
+        if (p->spool_buf) {
+            free(p->spool_buf);
+            p->spool_buf = NULL;
+        }
         memset(p, 0, sizeof(*p));
     }
 }
@@ -821,16 +840,49 @@ static int user_pipe_find_fifo_by_path(const char* path) {
     return -1;
 }
 
-static int user_pipe_read(int pipe_id, void* user_dst, int maxlen) {
+static int user_pipe_set_spool(int pipe_id, int enabled) {
+    if (pipe_id < 0 || pipe_id >= USER_PIPE_MAX) return -1;
+    user_pipe_t* p = &g_user_pipes[pipe_id];
+    if (!p->used) return -1;
+
+    if (!enabled) {
+        p->spool_enabled = 0;
+        p->spool_read_pos = 0;
+        p->spool_write_pos = 0;
+        p->spool_bytes = 0;
+        if (p->spool_buf) {
+            free(p->spool_buf);
+            p->spool_buf = NULL;
+        }
+        p->spool_cap = 0;
+        return 0;
+    }
+
+    if (!p->spool_buf) {
+        p->spool_buf = (uint8*)malloc(USER_PIPE_SPOOL_CAP_BYTES);
+        if (!p->spool_buf) return -1;
+        p->spool_cap = USER_PIPE_SPOOL_CAP_BYTES;
+        p->spool_read_pos = 0;
+        p->spool_write_pos = 0;
+        p->spool_bytes = 0;
+    }
+    p->spool_enabled = 1;
+    return 0;
+}
+
+static int user_pipe_read(int pipe_id, void* user_dst, int maxlen, int nonblock) {
     if (pipe_id < 0 || pipe_id >= USER_PIPE_MAX || maxlen < 0 || !user_dst) return -1;
     user_pipe_t* p = &g_user_pipes[pipe_id];
     if (!p->used) return -1;
     if (maxlen == 0) return 0;
 
-    while (p->bytes_used == 0) {
+    while (p->bytes_used == 0 && p->spool_bytes == 0) {
         if (p->writer_refs == 0) {
             // POSIX-style EOF: no writers and no buffered bytes.
             return 0;
+        }
+        if (nonblock) {
+            return -1;
         }
         if (g_user_interrupt) return -1;
         watchdog_kick("pipe-read");
@@ -846,10 +898,18 @@ static int user_pipe_read(int pipe_id, void* user_dst, int maxlen) {
         p->bytes_used--;
         n++;
     }
+
+    while (n < maxlen && p->spool_bytes > 0) {
+        uint8 b = p->spool_buf[p->spool_read_pos];
+        if (copyout((uint8*)user_dst + n, &b, 1) != 0) return -1;
+        p->spool_read_pos = (p->spool_read_pos + 1u) % p->spool_cap;
+        p->spool_bytes--;
+        n++;
+    }
     return n;
 }
 
-static int user_pipe_write(int pipe_id, const void* user_src, int len) {
+static int user_pipe_write(int pipe_id, const void* user_src, int len, int nonblock) {
     if (pipe_id < 0 || pipe_id >= USER_PIPE_MAX || len < 0 || !user_src) return -1;
     user_pipe_t* p = &g_user_pipes[pipe_id];
     if (!p->used) return -1;
@@ -862,8 +922,11 @@ static int user_pipe_write(int pipe_id, const void* user_src, int len) {
 
     int n = 0;
     while (n < len) {
-        while (p->bytes_used >= USER_PIPE_BUFFER_BYTES) {
+        while (p->bytes_used >= USER_PIPE_BUFFER_BYTES && (!p->spool_enabled || p->spool_bytes >= p->spool_cap)) {
             if (p->reader_refs == 0) {
+                return (n > 0) ? n : -1;
+            }
+            if (nonblock) {
                 return (n > 0) ? n : -1;
             }
             if (g_user_interrupt) {
@@ -876,9 +939,18 @@ static int user_pipe_write(int pipe_id, const void* user_src, int len) {
 
         uint8 b = 0;
         if (copyin(&b, (const uint8*)user_src + n, 1) != 0) return -1;
-        p->buffer[p->write_pos] = b;
-        p->write_pos = (p->write_pos + 1u) % USER_PIPE_BUFFER_BYTES;
-        p->bytes_used++;
+        if (p->bytes_used < USER_PIPE_BUFFER_BYTES) {
+            p->buffer[p->write_pos] = b;
+            p->write_pos = (p->write_pos + 1u) % USER_PIPE_BUFFER_BYTES;
+            p->bytes_used++;
+        } else if (p->spool_enabled && p->spool_buf && p->spool_bytes < p->spool_cap) {
+            p->spool_buf[p->spool_write_pos] = b;
+            p->spool_write_pos = (p->spool_write_pos + 1u) % p->spool_cap;
+            p->spool_bytes++;
+        } else {
+            if (nonblock) return (n > 0) ? n : -1;
+            continue;
+        }
         n++;
     }
     return n;
@@ -909,6 +981,7 @@ static int user_fd_release(int fd) {
     ufd->kbuf_size = 0;
     ufd->used = 0;
     ufd->is_dir = 0;
+    ufd->nonblock = 0;
     ufd->kind = USER_FD_KIND_FILE;
     ufd->pipe_id = -1;
     ufd->pipe_end = -1;
@@ -939,6 +1012,7 @@ static int user_fd_duplicate_into(int oldfd, int newfd) {
 
     dst->used = 1;
     dst->is_dir = src->is_dir;
+    dst->nonblock = src->nonblock;
     dst->kind = src->kind;
     dst->pipe_id = src->pipe_id;
     dst->pipe_end = src->pipe_end;
@@ -1002,6 +1076,22 @@ void syscall_reset_user_stdio_fds(void) {
 int syscall_kernel_close_user_fd(int fd) {
     if (fd <= 2) return 0;
     return user_fd_release(fd);
+}
+
+int syscall_kernel_set_user_fd_nonblock(int fd, int enabled) {
+    if (fd < 0 || fd >= USER_FD_MAX) return -1;
+    if (fd <= 2) return -1;
+    if (!g_user_fds[fd].used) return -1;
+    g_user_fds[fd].nonblock = enabled ? 1 : 0;
+    return 0;
+}
+
+int syscall_kernel_set_user_pipe_spool(int fd, int enabled) {
+    if (fd < 0 || fd >= USER_FD_MAX) return -1;
+    if (fd <= 2) return -1;
+    if (!g_user_fds[fd].used) return -1;
+    if (g_user_fds[fd].kind != USER_FD_KIND_PIPE) return -1;
+    return user_pipe_set_spool(g_user_fds[fd].pipe_id, enabled);
 }
 
 int syscall_kernel_pipe_create(int* out_read_fd, int* out_write_fd) {
@@ -2910,7 +3000,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             user_fd_t* ufd = user_fd_get(fd);
             if (!ufd) { regs->eax = (uint32)-1; break; }
             if (ufd->kind == USER_FD_KIND_PIPE) {
-                int n = user_pipe_write(ufd->pipe_id, user_buf, len);
+                int n = user_pipe_write(ufd->pipe_id, user_buf, len, ufd->nonblock);
                 regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
                 break;
             }
@@ -3030,7 +3120,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (!ufd) { regs->eax = (uint32)-1; break; }
 
             if (ufd->kind == USER_FD_KIND_PIPE) {
-                int n = user_pipe_read(ufd->pipe_id, (char*)arg2, maxlen);
+                int n = user_pipe_read(ufd->pipe_id, (char*)arg2, maxlen, ufd->nonblock);
                 regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
                 break;
             }
@@ -3079,6 +3169,7 @@ uint32 syscall_dispatch(regs_t* regs) {
                 ufd->pipe_end = ((open_flags & (OPEN_FLAG_WRONLY | OPEN_FLAG_RDWR)) != 0)
                               ? USER_PIPE_END_WRITE
                               : USER_PIPE_END_READ;
+                ufd->nonblock = ((open_flags & OPEN_FLAG_NONBLOCK) != 0) ? 1 : 0;
                 ufd->is_dir = 0;
                 ufd->size = 0;
                 ufd->offset = 0;
@@ -3130,6 +3221,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             ufd->offset = 0;
             ufd->dir_pos = 0;
             ufd->is_dir = (st.type == VFS_NODE_DIR);
+            ufd->nonblock = 0;
             ufd->size = st.size;
 
             /* Pre-populate the EYNFS block cursor so sequential reads pay
@@ -3338,6 +3430,12 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = 0;
             break;
         }
+        case SYSCALL_FD_SET_NONBLOCK: {
+            int fd = (int)arg1;
+            int enabled = (int)arg2;
+            regs->eax = (syscall_kernel_set_user_fd_nonblock(fd, enabled ? 1 : 0) == 0) ? 0u : (uint32)-1;
+            break;
+        }
         case SYSCALL_CAP_MINT_FD: {
             if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             int fd = (int)arg1;
@@ -3379,7 +3477,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (!ufd) { regs->eax = (uint32)-1; break; }
 
             int n = (ufd->kind == USER_FD_KIND_PIPE)
-                ? user_pipe_read(ufd->pipe_id, user_buf, maxlen)
+                ? user_pipe_read(ufd->pipe_id, user_buf, maxlen, ufd->nonblock)
                 : syscall_read_file(ufd, user_buf, maxlen);
             regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
             break;
@@ -3409,7 +3507,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (!ufd) { regs->eax = (uint32)-1; break; }
 
             int written = (ufd->kind == USER_FD_KIND_PIPE)
-                        ? user_pipe_write(ufd->pipe_id, user_buf, len)
+                        ? user_pipe_write(ufd->pipe_id, user_buf, len, ufd->nonblock)
                         : syscall_write_file_from_fd(ufd, user_buf, len);
             regs->eax = (written < 0) ? (uint32)-1 : (uint32)written;
             break;

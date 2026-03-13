@@ -8,12 +8,14 @@ EYN-OS includes a Unix-like pipeline and redirection system that enables command
 - **Basic Output Redirection**: Write to files with `>` operator
 - **Append Redirection**: Append to files with `>>` operator  
 - **Kernel Pipe Chaining**: `|` uses kernel pipe FDs for multi-stage command composition
+- **Bounded Spool Fallback**: Pipeline-created pipes enable bounded temporary spool memory when the ring buffer fills
 - **Universal Search Command**: Enhanced `search` command that works in multiple modes
 
 ### **In Development**
 - **Input Redirection**: Read from files with `<` operator
 - **Background Execution**: Run commands in background with `&`
 - **Expanded FD Ops**: Additional `dup`/`poll`-style primitives
+- **True Concurrent Spawn**: Run pipeline stages concurrently with independent ring3 task contexts
 
 ### **Planned Features**
 - **Process Substitution**: `<()` and `>()` operators

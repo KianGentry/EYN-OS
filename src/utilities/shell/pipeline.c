@@ -889,6 +889,9 @@ int pipeline_resume_pending(void) {
                 pipeline_runtime_finish();
                 return 1;
             }
+            // Sequential stage execution can overrun the in-kernel pipe ring;
+            // enable bounded spool fallback for this pipeline link.
+            (void)syscall_kernel_set_user_pipe_spool(next_write_fd, 1);
             stage_output_fd = next_write_fd;
             PIPE_DBG("resume stage %d pipe read_fd=%d write_fd=%d", stage_idx, next_read_fd, next_write_fd);
         }

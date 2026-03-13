@@ -46,6 +46,10 @@ int fd_set_stdio(int stdin_fd, int stdout_fd, int stderr_fd) {
     return eyn_syscall3_iii(EYN_SYSCALL_FD_SET_STDIO, stdin_fd, stdout_fd, stderr_fd);
 }
 
+int fd_set_nonblock(int fd, int enabled) {
+    return eyn_syscall3_iii(EYN_SYSCALL_FD_SET_NONBLOCK, fd, enabled ? 1 : 0, 0);
+}
+
 int writefile(const char* path, const void* buf, size_t len) {
     if (!path || !buf) return -1;
     if (len > 0x7fffffffU) len = 0x7fffffffU;

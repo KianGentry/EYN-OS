@@ -77,6 +77,7 @@ Open a file or directory for reading.
 Notes:
 - Paths created by `mkfifo` resolve to persistent FIFO metadata files (`VFS_NODE_FIFO`) and runtime FIFO objects.
 - For FIFO paths, `O_RDONLY` opens the read end, `O_WRONLY`/`O_RDWR` open the write end.
+- `O_NONBLOCK` is honored for pipe/FIFO endpoints.
 
 #### Close (syscall 5)
 Close an open file descriptor.
@@ -146,6 +147,16 @@ Explicitly set the active stdin/stdout/stderr backing descriptors.
 - EBX: stdin fd
 - ECX: stdout fd
 - EDX: stderr fd
+
+**Returns:**
+- EAX: `0` on success, `-1` on failure
+
+#### Set FD non-blocking mode (syscall 130)
+Toggle non-blocking behavior on an open FD.
+
+**Arguments:**
+- EBX: fd
+- ECX: enabled (`0` or `1`)
 
 **Returns:**
 - EAX: `0` on success, `-1` on failure

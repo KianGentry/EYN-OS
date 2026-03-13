@@ -262,6 +262,8 @@ enum {
     EYN_SYSCALL_FD_SET_INHERIT = 128,
     // Explicit stdio remap for next/active task: args (int in_fd, int out_fd, int err_fd)
     EYN_SYSCALL_FD_SET_STDIO = 129,
+    // Toggle non-blocking mode for a specific FD: args (int fd, int enabled)
+    EYN_SYSCALL_FD_SET_NONBLOCK = 130,
 };
 
 typedef struct {

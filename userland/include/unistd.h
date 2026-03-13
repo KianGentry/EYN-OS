@@ -25,6 +25,7 @@ int mkfifo(const char* path, mode_t mode);
 // Explicit FD inheritance controls for spawn/run workflows.
 int fd_set_inherit(int enabled);
 int fd_set_stdio(int stdin_fd, int stdout_fd, int stderr_fd);
+int fd_set_nonblock(int fd, int enabled);
 
 // Create/overwrite a file with given contents.
 int writefile(const char* path, const void* buf, size_t len);
