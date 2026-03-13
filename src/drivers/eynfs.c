@@ -1858,7 +1858,15 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
     s->drive = drive;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &s->sb) != 0) {
         if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] read_superblock failed\n");
-        return -1;
+        return -101;
+    }
+    if (s->sb.magic != EYNFS_MAGIC || s->sb.block_size != EYNFS_BLOCK_SIZE) {
+        if (EYNFS_STREAM_DEBUG) {
+            printf("[EYNFS:stream_begin] invalid superblock magic=0x%X block=%u\n",
+                   (unsigned)s->sb.magic,
+                   (unsigned)s->sb.block_size);
+        }
+        return -102;
     }
     // Determine parent dir and file name
     char parent_path[256];
@@ -1867,7 +1875,7 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
         size_t plen = filename - path;
         if (plen >= sizeof(parent_path)) {
             if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] parent path too long\n");
-            return -1;
+            return -103;
         }
         memcpy(parent_path, path, plen);
         parent_path[plen] = '\0';
@@ -1881,11 +1889,11 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
     uint32_t parent_block, entry_idx;
     if (eynfs_traverse_path(drive, &s->sb, parent_path, &parent_entry, &parent_block, NULL) != 0) {
         if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] traverse parent failed: '%s'\n", parent_path);
-        return -1;
+        return -104;
     }
     if (parent_entry.type != EYNFS_TYPE_DIR) {
         if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] parent not dir: '%s'\n", parent_path);
-        return -1;
+        return -105;
     }
     // If file exists, delete it to simplify streaming overwrite
     eynfs_dir_entry_t tmp;
@@ -1900,13 +1908,13 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
         if (EYNFS_STREAM_DEBUG) {
             printf("[EYNFS:stream_begin] create_entry failed parent='%s' name='%s' rc=%d\n", parent_path, filename, cr);
         }
-        return -1;
+        return -106;
     }
     if (eynfs_find_in_dir(drive, &s->sb, parent_entry.first_block, filename, &s->entry, &s->entry_index) != 0) {
         if (EYNFS_STREAM_DEBUG) {
             printf("[EYNFS:stream_begin] find-after-create failed parent='%s' name='%s'\n", parent_path, filename);
         }
-        return -1;
+        return -107;
     }
     s->parent_block = parent_entry.first_block;
     // `eynfs_create_entry()` allocates a data block for files. Reuse it as the
@@ -1921,7 +1929,7 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
         uint8 block[EYNFS_BLOCK_SIZE] = {0};
         *(uint32_t*)block = 0;
         eynfs_cache_invalidate_block(s->curr_block);
-        if (eynfs_cache_write_block(s->drive, s->curr_block, block) != 0) return -1;
+        if (eynfs_cache_write_block(s->drive, s->curr_block, block) != 0) return -108;
     }
     return 0;
 }

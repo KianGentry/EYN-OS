@@ -8,10 +8,25 @@
 #include <misc/sched.h>
 #include <vga.h>
 #include <utilities/shell/shell_args.h>
+#include <multiboot.h>
+#include <mm/vmm.h>
 
-#define EYNFS_SUPERBLOCK_LBA 2048
 #define VFS_FIFO_MARKER "EYNFIFO1\n"
 #define VFS_FIFO_MARKER_LEN 9
+
+#define RAMDISK_PART_TYPE_EYNFS 0xEFu
+
+extern multiboot_info_t *g_mbi;
+
+typedef struct {
+    const uint8* base;
+    uint32 sectors;
+    uint32 part_start_lba;
+    eynfs_superblock_t sb;
+} vfs_ramdisk_ctx_t;
+
+static int vfs_ramdisk_debug_logged = 0;
+static int vfs_ramdisk_read_error_logged = 0;
 
 static int vfs_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -54,6 +69,365 @@ static int vfs_join_child_path(const char* parent, const char* name, char out[25
 
     int n = snprintf(out, 256, "%s/%s", parent, name);
     return (n > 0 && n < 256) ? 0 : -1;
+}
+
+static int vfs_str_contains_nocase(const char* haystack, const char* needle) {
+    if (!haystack || !needle || !needle[0]) return 0;
+    for (int i = 0; haystack[i]; ++i) {
+        int j = 0;
+        while (needle[j]) {
+            char hc = haystack[i + j];
+            char nc = needle[j];
+            if (!hc) return 0;
+            if (hc >= 'A' && hc <= 'Z') hc = (char)(hc - 'A' + 'a');
+            if (nc >= 'A' && nc <= 'Z') nc = (char)(nc - 'A' + 'a');
+            if (hc != nc) break;
+            j++;
+        }
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+static int vfs_ramdisk_pick_module(multiboot_module_t** out_mod) {
+    if (!out_mod || !g_mbi) return -1;
+    if (!(g_mbi->flags & MULTIBOOT_INFO_MODS) || g_mbi->mods_count == 0 || !g_mbi->mods_addr) return -1;
+
+    multiboot_module_t* mods = (multiboot_module_t*)g_mbi->mods_addr;
+    uint32 pick = 0;
+    for (uint32 i = 0; i < g_mbi->mods_count; ++i) {
+        const char* cmdline = (const char*)mods[i].cmdline;
+        if (cmdline && vfs_str_contains_nocase(cmdline, "ramdisk")) {
+            pick = i;
+            break;
+        }
+    }
+
+    if (mods[pick].mod_end <= mods[pick].mod_start) return -1;
+    *out_mod = &mods[pick];
+    return 0;
+}
+
+static int vfs_ramdisk_read_sector_raw(const vfs_ramdisk_ctx_t* rd, uint32 lba, uint8 out[512]) {
+    if (!rd || !rd->base || !out) return -1;
+    if (lba >= rd->sectors) return -1;
+    memcpy(out, rd->base + (lba * 512u), 512u);
+    return 0;
+}
+
+static int vfs_ramdisk_find_partition_start(const vfs_ramdisk_ctx_t* rd, uint32* out_start) {
+    if (!rd || !out_start) return -1;
+
+    uint8 mbr[512];
+    if (vfs_ramdisk_read_sector_raw(rd, 0, mbr) != 0) return -1;
+
+    if (mbr[510] == 0x55 && mbr[511] == 0xAA) {
+        uint32 first_nonempty_lba = 0;
+        for (int i = 0; i < 4; ++i) {
+            uint8* entry = mbr + 0x1BE + (i * 16);
+            uint8 type = entry[4];
+            uint32 lba_start = entry[8] | ((uint32)entry[9] << 8) | ((uint32)entry[10] << 16) | ((uint32)entry[11] << 24);
+            uint32 sectors = entry[12] | ((uint32)entry[13] << 8) | ((uint32)entry[14] << 16) | ((uint32)entry[15] << 24);
+            if (type == RAMDISK_PART_TYPE_EYNFS && sectors > 0) {
+                *out_start = lba_start;
+                return 0;
+            }
+            if (!first_nonempty_lba && sectors > 0 && lba_start > 0) {
+                first_nonempty_lba = lba_start;
+            }
+        }
+        if (first_nonempty_lba) {
+            *out_start = first_nonempty_lba;
+            return 0;
+        }
+    }
+
+    *out_start = EYNFS_SUPERBLOCK_LBA;
+    return 0;
+}
+
+static int vfs_ramdisk_load(vfs_ramdisk_ctx_t* rd) {
+    if (!rd) return -1;
+    memset(rd, 0, sizeof(*rd));
+
+    if (!g_mbi) {
+        if (!vfs_ramdisk_debug_logged) {
+            vfs_ramdisk_debug_logged = 1;
+            printf("[ramfs] load fail: g_mbi is null\n");
+        }
+        return -1;
+    }
+
+    multiboot_module_t* mod = NULL;
+    if (vfs_ramdisk_pick_module(&mod) != 0) {
+        if (!vfs_ramdisk_debug_logged) {
+            vfs_ramdisk_debug_logged = 1;
+            printf("[ramfs] load fail: no multiboot ramdisk module\n");
+        }
+        return -1;
+    }
+
+    /*
+     * SECURITY-INVARIANT: Access multiboot module bytes through the
+     * KERNEL_BASE physical alias, never through low identity virtual addrs.
+     *
+     * Why: user tasks are mapped at USER_CODE_BASE (0x00400000). If RAM:/
+     * reads use identity addresses, module bytes above 4MB can alias user
+     * mappings and return corrupted data (observed at RAM:/binaries/stats).
+     */
+    rd->base = (const uint8*)(uintptr_t)(KERNEL_BASE + (uint32)mod->mod_start);
+    uint32 bytes = (uint32)(mod->mod_end - mod->mod_start);
+    rd->sectors = bytes / 512u;
+    if (!rd->base || rd->sectors == 0) {
+        if (!vfs_ramdisk_debug_logged) {
+            vfs_ramdisk_debug_logged = 1;
+            printf("[ramfs] load fail: invalid module range start=0x%X end=0x%X sectors=%u\n",
+                   (unsigned)mod->mod_start, (unsigned)mod->mod_end, (unsigned)rd->sectors);
+        }
+        return -1;
+    }
+
+    if (vfs_ramdisk_find_partition_start(rd, &rd->part_start_lba) != 0) {
+        if (!vfs_ramdisk_debug_logged) {
+            vfs_ramdisk_debug_logged = 1;
+            printf("[ramfs] load fail: could not find partition start\n");
+        }
+        return -1;
+    }
+    if (rd->part_start_lba >= rd->sectors) {
+        if (!vfs_ramdisk_debug_logged) {
+            vfs_ramdisk_debug_logged = 1;
+            printf("[ramfs] load fail: part_start=%u >= sectors=%u\n",
+                   (unsigned)rd->part_start_lba, (unsigned)rd->sectors);
+        }
+        return -1;
+    }
+
+    uint8 sbsec[512];
+    if (vfs_ramdisk_read_sector_raw(rd, rd->part_start_lba, sbsec) == 0) {
+        memcpy(&rd->sb, sbsec, sizeof(rd->sb));
+        if (rd->sb.magic == EYNFS_MAGIC && rd->sb.block_size == EYNFS_BLOCK_SIZE) {
+            if (!vfs_ramdisk_debug_logged) {
+                vfs_ramdisk_debug_logged = 1;
+                printf("[ramfs] load ok: start=0x%X sectors=%u part=%u magic=0x%X\n",
+                       (unsigned)mod->mod_start,
+                       (unsigned)rd->sectors,
+                       (unsigned)rd->part_start_lba,
+                       (unsigned)rd->sb.magic);
+            }
+            return 0;
+        }
+    }
+
+    // Compatibility probes for legacy/full-disk images or atypical partition metadata.
+    if (vfs_ramdisk_read_sector_raw(rd, 0, sbsec) == 0) {
+        memcpy(&rd->sb, sbsec, sizeof(rd->sb));
+        if (rd->sb.magic == EYNFS_MAGIC && rd->sb.block_size == EYNFS_BLOCK_SIZE) {
+            rd->part_start_lba = 0;
+            if (!vfs_ramdisk_debug_logged) {
+                vfs_ramdisk_debug_logged = 1;
+                printf("[ramfs] load ok via lba0 probe: magic=0x%X\n", (unsigned)rd->sb.magic);
+            }
+            return 0;
+        }
+    }
+    if (EYNFS_SUPERBLOCK_LBA < rd->sectors && vfs_ramdisk_read_sector_raw(rd, EYNFS_SUPERBLOCK_LBA, sbsec) == 0) {
+        memcpy(&rd->sb, sbsec, sizeof(rd->sb));
+        if (rd->sb.magic == EYNFS_MAGIC && rd->sb.block_size == EYNFS_BLOCK_SIZE) {
+            rd->part_start_lba = EYNFS_SUPERBLOCK_LBA;
+            if (!vfs_ramdisk_debug_logged) {
+                vfs_ramdisk_debug_logged = 1;
+                printf("[ramfs] load ok via lba2048 probe: magic=0x%X\n", (unsigned)rd->sb.magic);
+            }
+            return 0;
+        }
+    }
+
+    if (!vfs_ramdisk_debug_logged) {
+        uint32 m_part_magic = 0;
+        uint32 m_lba0_magic = 0;
+        uint32 m_lba2048_magic = 0;
+        if (vfs_ramdisk_read_sector_raw(rd, rd->part_start_lba, sbsec) == 0) {
+            m_part_magic = (uint32)sbsec[0] | ((uint32)sbsec[1] << 8) | ((uint32)sbsec[2] << 16) | ((uint32)sbsec[3] << 24);
+        }
+        if (vfs_ramdisk_read_sector_raw(rd, 0, sbsec) == 0) {
+            m_lba0_magic = (uint32)sbsec[0] | ((uint32)sbsec[1] << 8) | ((uint32)sbsec[2] << 16) | ((uint32)sbsec[3] << 24);
+        }
+        if (EYNFS_SUPERBLOCK_LBA < rd->sectors && vfs_ramdisk_read_sector_raw(rd, EYNFS_SUPERBLOCK_LBA, sbsec) == 0) {
+            m_lba2048_magic = (uint32)sbsec[0] | ((uint32)sbsec[1] << 8) | ((uint32)sbsec[2] << 16) | ((uint32)sbsec[3] << 24);
+        }
+        vfs_ramdisk_debug_logged = 1;
+        printf("[ramfs] load fail: start=0x%X sectors=%u part=%u m(part)=0x%X m(0)=0x%X m(2048)=0x%X\n",
+               (unsigned)mod->mod_start,
+               (unsigned)rd->sectors,
+               (unsigned)rd->part_start_lba,
+               (unsigned)m_part_magic,
+               (unsigned)m_lba0_magic,
+               (unsigned)m_lba2048_magic);
+    }
+
+    return -1;
+}
+
+/* Read-only fallback: installer media can boot with an empty target disk.
+ * In that case, resolve reads from the multiboot RAM module instead. */
+static int vfs_ramdisk_available(void) {
+    vfs_ramdisk_ctx_t rd;
+    return (vfs_ramdisk_load(&rd) == 0) ? 1 : 0;
+}
+
+static uint32 vfs_ramdisk_fs_block_to_lba(const vfs_ramdisk_ctx_t* rd, uint32 fs_block) {
+    return rd->part_start_lba + fs_block;
+}
+
+static int vfs_ramdisk_find_in_dir(const vfs_ramdisk_ctx_t* rd, uint32 dir_block, const char* name, eynfs_dir_entry_t* out) {
+    uint32 current = dir_block;
+    uint8 sec[512];
+    while (current) {
+        if (vfs_ramdisk_read_sector_raw(rd, vfs_ramdisk_fs_block_to_lba(rd, current), sec) != 0) return -1;
+        uint32 next = *(uint32*)sec;
+        const eynfs_dir_entry_t* entries = (const eynfs_dir_entry_t*)(sec + 4);
+        int entry_count = (int)((512 - 4) / sizeof(eynfs_dir_entry_t));
+        for (int i = 0; i < entry_count; ++i) {
+            if (entries[i].name[0] == '\0') continue;
+            if (strcmp(entries[i].name, name) == 0) {
+                if (out) *out = entries[i];
+                return 0;
+            }
+        }
+        current = next;
+    }
+    return -1;
+}
+
+static int vfs_ramdisk_traverse(const vfs_ramdisk_ctx_t* rd, const char* path, eynfs_dir_entry_t* out) {
+    if (!rd || !path || !out || path[0] != '/') return -1;
+
+    if (strcmp(path, "/") == 0) {
+        memset(out, 0, sizeof(*out));
+        out->type = EYNFS_TYPE_DIR;
+        out->first_block = rd->sb.root_dir_block;
+        return 0;
+    }
+
+    char temp[256];
+    strncpy(temp, path, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+
+    uint32 current_dir = rd->sb.root_dir_block;
+    char* save = NULL;
+    char* tok = strtok_r(temp + 1, "/", &save);
+    while (tok) {
+        eynfs_dir_entry_t ent;
+        if (vfs_ramdisk_find_in_dir(rd, current_dir, tok, &ent) != 0) return -1;
+        tok = strtok_r(NULL, "/", &save);
+        if (!tok) {
+            *out = ent;
+            return 0;
+        }
+        if (ent.type != EYNFS_TYPE_DIR) return -1;
+        current_dir = ent.first_block;
+    }
+
+    return -1;
+}
+
+static int vfs_ramdisk_read_file_at_internal(const vfs_ramdisk_ctx_t* rd, const eynfs_dir_entry_t* ent, void* buf, int bufsize, uint32 offset) {
+    if (!rd || !ent || !buf || bufsize <= 0) return -1;
+    if (ent->type != EYNFS_TYPE_FILE) return -1;
+    if (offset >= ent->size) return 0;
+
+    uint32 remain_file = ent->size - offset;
+    uint32 want = (remain_file < (uint32)bufsize) ? remain_file : (uint32)bufsize;
+    uint32 copied = 0;
+    uint32 skip = offset;
+    uint32 current = ent->first_block;
+    uint8 sec[512];
+
+    while (current && skip >= (512u - 4u)) {
+        uint32 lba = vfs_ramdisk_fs_block_to_lba(rd, current);
+        if (current >= rd->sb.total_blocks || vfs_ramdisk_read_sector_raw(rd, lba, sec) != 0) {
+            return -1;
+        }
+        current = *(uint32*)sec;
+        skip -= (512u - 4u);
+    }
+
+    while (current && copied < want) {
+        uint32 lba = vfs_ramdisk_fs_block_to_lba(rd, current);
+        if (current >= rd->sb.total_blocks || vfs_ramdisk_read_sector_raw(rd, lba, sec) != 0) {
+            return -1;
+        }
+        uint32 next = *(uint32*)sec;
+        uint32 start = 4u + skip;
+        uint32 avail = 512u - start;
+        uint32 take = ((want - copied) < avail) ? (want - copied) : avail;
+        memcpy((uint8*)buf + copied, sec + start, take);
+        copied += take;
+        current = next;
+        skip = 0;
+    }
+
+    return (int)copied;
+}
+
+static int vfs_ramdisk_stat(const char* path, vfs_stat_t* st) {
+    vfs_ramdisk_ctx_t rd;
+    eynfs_dir_entry_t ent;
+    if (!path || !st) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    if (vfs_ramdisk_traverse(&rd, path, &ent) != 0) return -1;
+    st->type = (ent.type == EYNFS_TYPE_DIR) ? VFS_NODE_DIR : VFS_NODE_FILE;
+    st->size = ent.size;
+    return 0;
+}
+
+static int vfs_ramdisk_listdir_typed(const char* path, vfs_listdir_typed_cb_t cb, void* user) {
+    vfs_ramdisk_ctx_t rd;
+    eynfs_dir_entry_t dir;
+    if (!path || !cb) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    if (vfs_ramdisk_traverse(&rd, path, &dir) != 0 || dir.type != EYNFS_TYPE_DIR) return -1;
+
+    uint32 current = dir.first_block;
+    uint8 sec[512];
+    while (current) {
+        if (vfs_ramdisk_read_sector_raw(&rd, vfs_ramdisk_fs_block_to_lba(&rd, current), sec) != 0) return -1;
+        uint32 next = *(uint32*)sec;
+        const eynfs_dir_entry_t* entries = (const eynfs_dir_entry_t*)(sec + 4);
+        int entry_count = (int)((512 - 4) / sizeof(eynfs_dir_entry_t));
+        for (int i = 0; i < entry_count; ++i) {
+            if (entries[i].name[0] == '\0') continue;
+            vfs_node_type_t t = (entries[i].type == EYNFS_TYPE_DIR) ? VFS_NODE_DIR : VFS_NODE_FILE;
+            if (cb(entries[i].name, t, entries[i].size, user)) return 0;
+        }
+        current = next;
+    }
+
+    return 0;
+}
+
+static int vfs_ramdisk_read_file_at(const char* path, void* buf, int bufsize, uint32 offset) {
+    vfs_ramdisk_ctx_t rd;
+    eynfs_dir_entry_t ent;
+    if (!path || !buf || bufsize <= 0) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    if (vfs_ramdisk_traverse(&rd, path, &ent) != 0) return -1;
+    {
+        int rc = vfs_ramdisk_read_file_at_internal(&rd, &ent, buf, bufsize, offset);
+        if (rc < 0 && !vfs_ramdisk_read_error_logged) {
+            vfs_ramdisk_read_error_logged = 1;
+            printf("[ramfs] read fail path=%s off=%u size=%u first=%u part=%u sectors=%u total=%u\n",
+                   path,
+                   (unsigned)offset,
+                   (unsigned)ent.size,
+                   (unsigned)ent.first_block,
+                   (unsigned)rd.part_start_lba,
+                   (unsigned)rd.sectors,
+                   (unsigned)rd.sb.total_blocks);
+        }
+        return rc;
+    }
 }
 
 // Internal: FAT32 helpers for absolute path traversal (8.3 only for now)
@@ -100,19 +474,30 @@ static int fat32_path_to_entry(uint8 drive, struct fat32_bpb* bpb, const char* a
 
 // Helpers for FAT32 writes (sector I/O)
 static int fat32_read_fat_entry(uint8 drive, uint32 part_lba, struct fat32_bpb* bpb, uint32 clus, uint32* out_val) {
+    if (!bpb || !out_val) return -1;
+    if (bpb->BytsPerSec < 4 || (bpb->BytsPerSec % 4) != 0) return -1;
+    if (bpb->NumFATs == 0 || bpb->FATSz32 == 0) return -1;
+
     uint8 sector[512];
     uint32 fat_sector = bpb->RsvdSecCnt + (clus * 4) / bpb->BytsPerSec;
     if (ata_read_sector(drive, part_lba + fat_sector, sector) != 0) return -1;
     uint32* fat = (uint32*)sector;
-    uint32 idx = clus % (bpb->BytsPerSec / 4);
+    uint32 entries_per_sec = bpb->BytsPerSec / 4;
+    if (entries_per_sec == 0) return -1;
+    uint32 idx = clus % entries_per_sec;
     *out_val = fat[idx] & 0x0FFFFFFF;
     return 0;
 }
 
 static int fat32_write_fat_entry_all(uint8 drive, uint32 part_lba, struct fat32_bpb* bpb, uint32 clus, uint32 val) {
+    if (!bpb) return -1;
+    if (bpb->BytsPerSec < 4 || (bpb->BytsPerSec % 4) != 0) return -1;
+    if (bpb->NumFATs == 0 || bpb->FATSz32 == 0) return -1;
+
     // Update all FAT copies
     uint8 sector[512];
     uint32 entries_per_sec = bpb->BytsPerSec / 4;
+    if (entries_per_sec == 0) return -1;
     for (uint32 f = 0; f < bpb->NumFATs; ++f) {
         uint32 fat_sector = bpb->RsvdSecCnt + (clus * 4) / bpb->BytsPerSec + (f * bpb->FATSz32);
         if (ata_read_sector(drive, part_lba + fat_sector, sector) != 0) return -1;
@@ -138,9 +523,14 @@ static int fat32_free_chain_sector_all(uint8 drive, uint32 part_lba, struct fat3
 }
 
 static int fat32_allocate_chain_sector_all(uint8 drive, uint32 part_lba, struct fat32_bpb* bpb, uint32 clusters_needed, uint32* out_first) {
+    if (!bpb || !out_first) return -5;
+    if (bpb->BytsPerSec < 4 || (bpb->BytsPerSec % 4) != 0) return -5;
+    if (bpb->SecPerClus == 0 || bpb->NumFATs == 0 || bpb->FATSz32 == 0) return -5;
+
     if (clusters_needed == 0) { *out_first = 0; return 0; }
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 entries_per_sec = byts_per_sec / 4;
+    if (entries_per_sec == 0) return -5;
     uint32 first = 0, prev = 0;
     uint8 sector[512];
     uint32 last_fat_sector = 0xFFFFFFFF;
@@ -173,6 +563,10 @@ fail:
 
 vfs_fs_type_t vfs_detect(uint8 drive) {
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return VFS_FS_NONE;
+    if (drive == VFS_DRIVE_RAM) {
+        vfs_ramdisk_ctx_t rd;
+        return (vfs_ramdisk_load(&rd) == 0) ? VFS_FS_EYNFS : VFS_FS_NONE;
+    }
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         return VFS_FS_EYNFS;
@@ -188,6 +582,12 @@ vfs_fs_type_t vfs_detect(uint8 drive) {
 int vfs_get_file_size(uint8 drive, const char* path, uint32* out_size) {
     if (!path || !out_size) return -1;
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+    if (drive == VFS_DRIVE_RAM) {
+        vfs_stat_t st;
+        if (vfs_ramdisk_stat(path, &st) != 0 || st.type != VFS_NODE_FILE) return -1;
+        *out_size = st.size;
+        return 0;
+    }
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; uint32_t pb, idx;
@@ -199,7 +599,16 @@ int vfs_get_file_size(uint8 drive, const char* path, uint32* out_size) {
     // FAT32
     uint32 part_lba = fat32_get_partition_lba_start(drive);
     struct fat32_bpb bpb;
-    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -3;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) {
+        if (vfs_ramdisk_available()) {
+            vfs_stat_t st;
+            if (vfs_ramdisk_stat(path, &st) == 0 && st.type == VFS_NODE_FILE) {
+                *out_size = st.size;
+                return 0;
+            }
+        }
+        return -3;
+    }
     struct fat32_dir_entry dent; uint32 cluster;
     if (fat32_path_to_entry(drive, &bpb, path, &dent, &cluster) != 0) return -4;
     if (dent.Attr & 0x10) return -5; // directory
@@ -209,6 +618,9 @@ int vfs_get_file_size(uint8 drive, const char* path, uint32* out_size) {
 int vfs_read_file(uint8 drive, const char* path, void* buf, int bufsize) {
     if (!path || !buf || bufsize <= 0) return -1;
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+    if (drive == VFS_DRIVE_RAM) {
+        return vfs_ramdisk_read_file_at(path, buf, bufsize, 0);
+    }
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; uint32_t pb, idx;
@@ -219,7 +631,12 @@ int vfs_read_file(uint8 drive, const char* path, void* buf, int bufsize) {
     // FAT32 path
     uint32 part_lba = fat32_get_partition_lba_start(drive);
     struct fat32_bpb bpb;
-    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -3;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) {
+        if (vfs_ramdisk_available()) {
+            return vfs_ramdisk_read_file_at(path, buf, bufsize, 0);
+        }
+        return -3;
+    }
     struct fat32_dir_entry dent; uint32 file_first;
     if (fat32_path_to_entry(drive, &bpb, path, &dent, &file_first) != 0) return -4;
     if (dent.Attr & 0x10) return -5;
@@ -251,6 +668,10 @@ int vfs_read_file_at(uint8 drive, const char* path, void* buf, int bufsize, uint
     if (!path || !buf || bufsize <= 0) return -1;
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
 
+    if (drive == VFS_DRIVE_RAM) {
+        return vfs_ramdisk_read_file_at(path, buf, bufsize, offset);
+    }
+
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; uint32_t pb, idx;
@@ -264,7 +685,12 @@ int vfs_read_file_at(uint8 drive, const char* path, void* buf, int bufsize, uint
     // FAT32 path
     uint32 part_lba = fat32_get_partition_lba_start(drive);
     struct fat32_bpb bpb;
-    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -3;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) {
+        if (vfs_ramdisk_available()) {
+            return vfs_ramdisk_read_file_at(path, buf, bufsize, offset);
+        }
+        return -3;
+    }
     struct fat32_dir_entry dent; uint32 file_first;
     if (fat32_path_to_entry(drive, &bpb, path, &dent, &file_first) != 0) return -4;
     if (dent.Attr & 0x10) return -5;
@@ -320,6 +746,9 @@ int vfs_read_file_at(uint8 drive, const char* path, void* buf, int bufsize, uint
 int vfs_stat(uint8 drive, const char* path, vfs_stat_t* st) {
     if (!path || !st) return -1;
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+    if (drive == VFS_DRIVE_RAM) {
+        return vfs_ramdisk_stat(path, st);
+    }
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; if (eynfs_traverse_path(drive, &sb, path, &ent, NULL, NULL) != 0) return -2;
@@ -332,7 +761,13 @@ int vfs_stat(uint8 drive, const char* path, vfs_stat_t* st) {
         return 0;
     }
     uint32 part_lba = fat32_get_partition_lba_start(drive);
-    struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -3;
+    struct fat32_bpb bpb;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) {
+        if (vfs_ramdisk_available()) {
+            return vfs_ramdisk_stat(path, st);
+        }
+        return -3;
+    }
     // Root directory special case
     if (strcmp(path, "/") == 0) {
         st->type = VFS_NODE_DIR;
@@ -358,6 +793,10 @@ int vfs_stat(uint8 drive, const char* path, vfs_stat_t* st) {
 int vfs_listdir_typed(uint8 drive, const char* path, vfs_listdir_typed_cb_t cb, void* user) {
     if (!path || !cb) return -1;
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+
+    if (drive == VFS_DRIVE_RAM) {
+        return vfs_ramdisk_listdir_typed(path, cb, user);
+    }
 
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -410,7 +849,13 @@ int vfs_listdir_typed(uint8 drive, const char* path, vfs_listdir_typed_cb_t cb, 
     }
 
     uint32 part_lba = fat32_get_partition_lba_start(drive);
-    struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -4;
+    struct fat32_bpb bpb;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) {
+        if (vfs_ramdisk_available()) {
+            return vfs_ramdisk_listdir_typed(path, cb, user);
+        }
+        return -4;
+    }
     struct fat32_dir_entry dent; uint32 clus;
     if (fat32_path_to_entry(drive, &bpb, path, &dent, &clus) != 0) {
         if (strcmp(path, "/") == 0) clus = bpb.RootClus; else return -5;
@@ -506,6 +951,7 @@ static void vfs_split_path(const char* abspath, char* parent_out, size_t parent_
 int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) {
     if (!path || !buf) return -1;
     if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (drive == VFS_DRIVE_RAM) return -1;
     // EYNFS fast-path
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -522,7 +968,11 @@ int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) 
     }
     // FAT32 write
     uint32 part_lba = fat32_get_partition_lba_start(drive);
-    struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -10;
+    struct fat32_bpb bpb;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -10;
+    if (bpb.BytsPerSec != 512 || bpb.SecPerClus == 0 || bpb.NumFATs == 0 || bpb.FATSz32 == 0) {
+        return -10;
+    }
     char parent[256], base[128]; vfs_split_path(path, parent, sizeof(parent), base, sizeof(base));
     // Resolve parent directory cluster
     struct fat32_dir_entry parent_ent; uint32 parent_clus;
@@ -640,6 +1090,7 @@ int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) 
 int vfs_mkdir(uint8 drive, const char* path) {
     if (!path || path[0] != '/') return -1;
     if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (drive == VFS_DRIVE_RAM) return -1;
     // EYNFS
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -651,7 +1102,11 @@ int vfs_mkdir(uint8 drive, const char* path) {
     }
     // FAT32
     uint32 part_lba = fat32_get_partition_lba_start(drive);
-    struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -10;
+    struct fat32_bpb bpb;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -10;
+    if (bpb.BytsPerSec != 512 || bpb.SecPerClus == 0 || bpb.NumFATs == 0 || bpb.FATSz32 == 0) {
+        return -10;
+    }
     char parent[256], base[128]; vfs_split_path(path, parent, sizeof(parent), base, sizeof(base));
     // Resolve parent dir
     struct fat32_dir_entry pentry; uint32 pclus;
@@ -719,6 +1174,7 @@ int vfs_mkdir(uint8 drive, const char* path) {
 int vfs_rmdir(uint8 drive, const char* path) {
     if (!path || strcmp(path, "/") == 0) return -1;
     if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (drive == VFS_DRIVE_RAM) return -1;
     // EYNFS
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -813,6 +1269,7 @@ int vfs_rmdir(uint8 drive, const char* path) {
 int vfs_unlink(uint8 drive, const char* path) {
     if (!path || path[0] != '/') return -1;
     if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    if (drive == VFS_DRIVE_RAM) return -1;
     // EYNFS
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {

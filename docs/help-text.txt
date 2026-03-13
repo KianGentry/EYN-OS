@@ -81,7 +81,6 @@ Utility Commands:
 ----------------
   alias           - Create or remove command aliases.
   calc            - Integer calculator supporting + - * /.
-  chibicc         - Run the chibicc command.
   diskmgr         - Manage logical drives from userland.
   download        - Download a file over HTTP/1.1 (GET only) with DNS support.
   echo            - Print arguments to stdout.
@@ -92,6 +91,7 @@ Utility Commands:
   gui_demo        - Run the gui_demo command.
   hello           - Run the hello command.
   history         - Show or clear command history.
+  installer       - EYN-OS graphical installer.
   jobs            - List background jobs.
   list            - List directory entries with terminal icons.
   metadata        - Show metadata for a file or directory.

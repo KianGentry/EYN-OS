@@ -21,6 +21,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_DIR_NAME="${TMPDIR:-tmp_user}"
 TMP_ROOT="${REPO_ROOT}/${TMP_DIR_NAME}"
 KERNEL_BIN="${TMP_ROOT}/boot/kernel.bin"
+INSTALLER_RAMDISK_BIN="${TMP_ROOT}/boot/installer_ramdisk.img"
 ISO_OUT="${REPO_ROOT}/EYNOS.iso"
 
 if [[ ! -f "${KERNEL_BIN}" ]]; then
@@ -88,6 +89,12 @@ trap cleanup EXIT INT TERM
 install -d -m 0755 "${stage_dir}/boot/grub"
 cp "${KERNEL_BIN}" "${stage_dir}/boot/"
 
+if [[ -f "${INSTALLER_RAMDISK_BIN}" ]]; then
+  cp "${INSTALLER_RAMDISK_BIN}" "${stage_dir}/boot/"
+else
+  echo "Warning: installer ramdisk not found at ${INSTALLER_RAMDISK_BIN}; ISO will boot without RAM:/ payload" >&2
+fi
+
 cat >"${stage_dir}/boot/grub/grub.cfg" <<'EOF'
 set default=0
 set timeout=0
@@ -97,7 +104,8 @@ set colour_normal=white/black
 set colour_highlight=black/white
 
 menuentry "EYN-OS" {
-    multiboot /boot/kernel.bin
+  multiboot /boot/kernel.bin installer=1
+  module /boot/installer_ramdisk.img ramdisk
     boot
 }
 EOF

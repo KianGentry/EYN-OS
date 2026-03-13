@@ -199,6 +199,131 @@ static inline int frame_test(uint32 frame_num) {
     return (g_frame_alloc.bitmap[frame_num / 32] & (1 << (frame_num % 32))) != 0;
 }
 
+static void frame_reserve_range_bytes(uint32 start, uint32 end_exclusive) {
+    if (end_exclusive <= start) return;
+
+    uint32 pa = start & PAGE_MASK;
+    uint32 end = (end_exclusive + PAGE_SIZE - 1u) & PAGE_MASK;
+    for (; pa < end; pa += PAGE_SIZE) {
+        uint32 frame_num = pa / PAGE_SIZE;
+        if (frame_num >= g_frame_alloc.total_frames) break;
+        if (!frame_test(frame_num)) {
+            frame_set(frame_num);
+            if (g_frame_alloc.free_frames) g_frame_alloc.free_frames--;
+        }
+    }
+}
+
+/*
+ * ABI-INVARIANT: Multiboot payload ranges (modules + metadata) must stay reserved.
+ *
+ * Why: GRUB modules (e.g. installer ramdisk) are stored in physical RAM before
+ * paging starts. If these frames are not reserved in the frame allocator, early
+ * kernel allocations can reuse/overwrite them and make RAM:/ appear empty.
+ */
+static void frame_reserve_multiboot_ranges(void) {
+    if (!g_mbi) return;
+
+    frame_reserve_range_bytes((uint32)(uintptr_t)g_mbi,
+                              (uint32)(uintptr_t)g_mbi + sizeof(multiboot_info_t));
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_MEM_MAP) && g_mbi->mmap_addr && g_mbi->mmap_length) {
+        frame_reserve_range_bytes((uint32)g_mbi->mmap_addr,
+                                  (uint32)g_mbi->mmap_addr + (uint32)g_mbi->mmap_length);
+    }
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_CMDLINE) && g_mbi->cmdline) {
+        uint32 cmd = (uint32)g_mbi->cmdline;
+        uint32 len = 0;
+        while (((const char*)(uintptr_t)cmd)[len] && len < 4096u) len++;
+        frame_reserve_range_bytes(cmd, cmd + len + 1u);
+    }
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_MODS) && g_mbi->mods_addr && g_mbi->mods_count) {
+        uint32 mods_start = (uint32)g_mbi->mods_addr;
+        uint32 mods_size = (uint32)g_mbi->mods_count * (uint32)sizeof(multiboot_module_t);
+        frame_reserve_range_bytes(mods_start, mods_start + mods_size);
+
+        multiboot_module_t* mods = (multiboot_module_t*)(uintptr_t)g_mbi->mods_addr;
+        for (uint32 i = 0; i < g_mbi->mods_count; ++i) {
+            if (mods[i].mod_end > mods[i].mod_start) {
+                frame_reserve_range_bytes((uint32)mods[i].mod_start,
+                                          (uint32)mods[i].mod_end);
+            }
+            if (mods[i].cmdline) {
+                uint32 cmd = (uint32)mods[i].cmdline;
+                uint32 len = 0;
+                while (((const char*)(uintptr_t)cmd)[len] && len < 4096u) len++;
+                frame_reserve_range_bytes(cmd, cmd + len + 1u);
+            }
+        }
+    }
+}
+
+static void boot_range_extend(uint32* max_end, uint32 start, uint32 end_exclusive) {
+    (void)start;
+    if (!max_end) return;
+    if (end_exclusive > *max_end) {
+        *max_end = end_exclusive;
+    }
+}
+
+/*
+ * SECURITY-INVARIANT: early_alloc base must not overlap multiboot payloads.
+ *
+ * Why: The bootstrap bump allocator carves page tables/page directory before
+ * the regular heap is online. If it starts near __kernel_end without checking
+ * multiboot module ranges, it can overwrite the installer RAM disk in-place.
+ *
+ * Invariant: early_alloc begins at a page-aligned address strictly above the
+ * kernel image and all known multiboot metadata/module spans.
+ */
+static uint32 compute_boot_alloc_base(void) {
+    uint32 max_end = (uint32)&__kernel_end;
+
+    if (!g_mbi) {
+        return (max_end + PAGE_SIZE - 1u) & PAGE_MASK;
+    }
+
+    boot_range_extend(&max_end,
+                      (uint32)(uintptr_t)g_mbi,
+                      (uint32)(uintptr_t)g_mbi + (uint32)sizeof(multiboot_info_t));
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_MEM_MAP) && g_mbi->mmap_addr && g_mbi->mmap_length) {
+        boot_range_extend(&max_end,
+                          (uint32)g_mbi->mmap_addr,
+                          (uint32)g_mbi->mmap_addr + (uint32)g_mbi->mmap_length);
+    }
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_CMDLINE) && g_mbi->cmdline) {
+        uint32 cmd = (uint32)g_mbi->cmdline;
+        uint32 len = 0;
+        while (((const char*)(uintptr_t)cmd)[len] && len < 4096u) len++;
+        boot_range_extend(&max_end, cmd, cmd + len + 1u);
+    }
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_MODS) && g_mbi->mods_addr && g_mbi->mods_count) {
+        uint32 mods_start = (uint32)g_mbi->mods_addr;
+        uint32 mods_end = mods_start + ((uint32)g_mbi->mods_count * (uint32)sizeof(multiboot_module_t));
+        boot_range_extend(&max_end, mods_start, mods_end);
+
+        multiboot_module_t* mods = (multiboot_module_t*)(uintptr_t)g_mbi->mods_addr;
+        for (uint32 i = 0; i < g_mbi->mods_count; ++i) {
+            if (mods[i].mod_end > mods[i].mod_start) {
+                boot_range_extend(&max_end, (uint32)mods[i].mod_start, (uint32)mods[i].mod_end);
+            }
+            if (mods[i].cmdline) {
+                uint32 cmd = (uint32)mods[i].cmdline;
+                uint32 len = 0;
+                while (((const char*)(uintptr_t)cmd)[len] && len < 4096u) len++;
+                boot_range_extend(&max_end, cmd, cmd + len + 1u);
+            }
+        }
+    }
+
+    return (max_end + PAGE_SIZE - 1u) & PAGE_MASK;
+}
+
 /* Initialize frame allocator based on detected RAM */
 static void frame_alloc_init(uint32 total_ram_bytes) {
     memset(&g_frame_alloc, 0, sizeof(g_frame_alloc));
@@ -1434,9 +1559,12 @@ void vmm_init(uint32 total_ram_bytes) {
     
     /* Set up frame allocator */
     frame_alloc_init(total_ram_bytes);
+
+    /* Preserve multiboot modules/metadata (installer RAM disk, mmap buffers, etc.). */
+    frame_reserve_multiboot_ranges();
     
-    /* Set early heap pointer to right after kernel */
-    early_heap_ptr = ((uint32)&__kernel_end + PAGE_SIZE) & PAGE_MASK;
+    /* Set early boot allocator above kernel + multiboot payloads. */
+    early_heap_ptr = compute_boot_alloc_base();
     uint32 boot_alloc_start = early_heap_ptr;
     
     /* Allocate kernel page directory */

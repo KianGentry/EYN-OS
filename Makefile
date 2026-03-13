@@ -274,12 +274,20 @@ obj/irq.o:src/cpu/irq.c include/cpu/irq.h
 
 # Actually building the OS (The stuff you should actually run, i.e. make run, make build, etc.)
 
-build: all eynfsimg docs
+build: all installer_ramdisk eynfsimg docs
 	@if [ -z "$(GRUB_MKRESCUE)" ]; then \
 		echo "grub-mkrescue not found. Install grub2 (grub2-mkrescue) or grub-pc-bin (grub-mkrescue)."; \
 		exit 1; \
 	fi
 	bash devtools/build_iso.sh "$(GRUB_MKRESCUE)"
+
+.PHONY: installer_userland installer_ramdisk
+installer_userland:
+	bash devtools/build_user_c.sh testdir/code/installer_uelf.c testdir/binaries/installer
+
+installer_ramdisk: installer_userland
+	mkdir -p tmp_user/boot
+	python3 devtools/build_installer_ramdisk.py tmp_user/boot/installer_ramdisk.img
 
 clean:
 	rm -rf obj/*.o tmp/boot/kernel.bin *.img eynfs_format EYNOS.iso
@@ -409,13 +417,6 @@ runfat32: build fat32img
 	-hdb fat32.img \
 	-boot d \
 	-m 64M
-
-.PHONY: fsck_eynfs
-fsck_eynfs: eynfsimg
-	python3 devtools/fsck_eynfs.py eynfs.img || true
-
-.PHONY: checkfs
-checkfs: fsck_eynfs
 
 # Static analysis (GCC -fanalyzer) over all kernel sources
 .PHONY: analyze

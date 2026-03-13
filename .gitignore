@@ -1,0 +1,9 @@
+*.img
+/.github/
+/obj/
+/tmp/
+/tmp_user/
+EYNOS.iso
+eynfs_format
+/.venv/
+/devtools/__pycache__/

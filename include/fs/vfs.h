@@ -25,6 +25,19 @@ typedef struct {
 	uint32 size;          // size for files; 0 for directories
 } vfs_stat_t;
 
+/*
+ * ABI-INVARIANT: Reserved logical drive ID for read-only RAM install media.
+ *
+ * Why: Installer workflows need a stable, non-ATA-backed source namespace
+ *      (`RAM:/`) for files loaded by the bootloader as multiboot modules.
+ * Invariant: No physical ATA device is mapped to this ID.
+ * Breakage if changed: Userland paths and installer tooling that rely on
+ *                      `RAM:/` would stop resolving to the in-memory payload.
+ * ABI-sensitive: Yes (path/drive contract).
+ * Security-critical: Yes (explicitly isolates memory-backed media from disk IDs).
+ */
+#define VFS_DRIVE_RAM 0xFEu
+
 // Detect which filesystem is present on the given drive
 vfs_fs_type_t vfs_detect(uint8 drive);
 

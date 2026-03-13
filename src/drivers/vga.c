@@ -1280,11 +1280,28 @@ void drawPixel(int x, int y, int r, int g, int b)
 	}
 
 	unsigned char *video = (unsigned char *)(uintptr_t)g_mbi->framebuffer_addr;
-	unsigned int offset = (x + y * g_mbi->framebuffer_width) * 4; // finding loc of pixel
-	video[offset] = (unsigned char)b;   // setting the colour of pixel; blue, green, red
-	video[offset + 1] = (unsigned char)g;
-	video[offset + 2] = (unsigned char)r;
-	video[offset + 3] = 0;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8;
+	if (!video || pitch <= 0 || bpp <= 0) return;
+
+	unsigned char* p = video + y * pitch + x * bpp;
+	if (bpp >= 4) {
+		p[0] = (unsigned char)b;
+		p[1] = (unsigned char)g;
+		p[2] = (unsigned char)r;
+		p[3] = 0xFF;
+	} else if (bpp == 3) {
+		p[0] = (unsigned char)b;
+		p[1] = (unsigned char)g;
+		p[2] = (unsigned char)r;
+	} else if (bpp == 2) {
+		// RGB565 fallback for 16bpp framebuffers.
+		uint16_t pix565 = (uint16_t)((((unsigned)r & 0xF8u) << 8) |
+		                           (((unsigned)g & 0xFCu) << 3) |
+		                           (((unsigned)b & 0xF8u) >> 3));
+		p[0] = (unsigned char)(pix565 & 0xFFu);
+		p[1] = (unsigned char)((pix565 >> 8) & 0xFFu);
+	}
 	return;
 }
 

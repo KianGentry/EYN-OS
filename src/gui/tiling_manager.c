@@ -20,8 +20,12 @@ static int g_tm_initialized = 0;
 #include <drivers/e1000.h>
 #include <context.h>
 #include <utilities/shell/shell.h>
+#include <fs/vfs.h>
+#include <cpu/user_elf.h>
+#include <multiboot.h>
 
 extern uint8_t g_current_drive;
+static int g_tm_boot_installer_attempted = 0;
 
 
 /* 
@@ -46,10 +50,52 @@ extern uint8_t g_current_drive;
 #include "gui_taskbar.c"
 #include "gui_input.c"
 
+static int tm_str_contains(const char* haystack, const char* needle) {
+    if (!haystack || !needle || !needle[0]) return 0;
+    for (int i = 0; haystack[i]; ++i) {
+        int j = 0;
+        while (needle[j] && haystack[i + j] == needle[j]) {
+            ++j;
+        }
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+static int tm_boot_installer_requested(void) {
+    if (!g_mbi) return 0;
+    if (!(g_mbi->flags & MULTIBOOT_INFO_CMDLINE) || !g_mbi->cmdline) return 0;
+    const char* cmdline = (const char*)(uintptr_t)g_mbi->cmdline;
+    return tm_str_contains(cmdline, "installer=1") || tm_str_contains(cmdline, "installer");
+}
+
 /* -- Main compositor loop and runtime configuration -------------------- */
 
 void start_tiling_manager() {
     if (!g_tm_initialized) {
+        command_context_t tm_boot_ctx;
+        tm_boot_ctx.caps = CAP_ALL;
+        tm_boot_ctx.wo = 0;
+        tm_boot_ctx.det_seq = 0;
+        tm_boot_ctx.drive = g_current_drive;
+        int tm_boot_ctx_pushed = command_context_push(&tm_boot_ctx);
+
+        // Installer-media fallback: the tiling manager boots before launch_shell().
+        // In installer mode, prefer RAM:/ unconditionally when it is available.
+        vfs_fs_type_t drive_fs = vfs_detect(g_current_drive);
+        vfs_fs_type_t ram_fs = vfs_detect(VFS_DRIVE_RAM);
+        int installer_requested = tm_boot_installer_requested();
+        printf("[installer] tm boot check: current_drive=0x%X fs=%d ram_fs=%d installer=%d\n",
+               (unsigned)g_current_drive, (int)drive_fs, (int)ram_fs, installer_requested);
+
+        if (installer_requested && ram_fs == VFS_FS_EYNFS) {
+            g_current_drive = VFS_DRIVE_RAM;
+            printf("[installer] forcing current drive to RAM:/ due to installer boot flag\n");
+        } else if (drive_fs == VFS_FS_NONE && ram_fs == VFS_FS_EYNFS) {
+            g_current_drive = VFS_DRIVE_RAM;
+            printf("[installer] switched current drive to RAM:/ because disk fs is NONE\n");
+        }
+
         // initialize screen dimensions from global framebuffer if available
         if (g_mbi) {
             screen_w = g_mbi->framebuffer_width;
@@ -139,9 +185,41 @@ void start_tiling_manager() {
         vterm_set_active(0, 1);
         // Print initial prompt into vterm 0
         vterm_print_prompt(0);
-        layout_tiles();
 
+        if (tm_boot_ctx_pushed) {
+            command_context_pop();
+        }
+
+        layout_tiles();
         g_tm_initialized = 1;
+
+        // Boot directly into installer when RAM media is present.
+        // Do this only after layout+init so gui_attach() sees a live compositor.
+        if (!g_tm_boot_installer_attempted) {
+            g_tm_boot_installer_attempted = 1;
+            command_context_t tm_launch_ctx;
+            tm_launch_ctx.caps = CAP_ALL;
+            tm_launch_ctx.wo = 0;
+            tm_launch_ctx.det_seq = 0;
+            tm_launch_ctx.drive = g_current_drive;
+            int tm_launch_ctx_pushed = command_context_push(&tm_launch_ctx);
+
+            vfs_stat_t st;
+            int installer_stat = vfs_stat(VFS_DRIVE_RAM, "/binaries/installer", &st);
+            printf("[installer] tm launch check: drive=0x%X stat=%d type=%d\n",
+                   (unsigned)g_current_drive, installer_stat, (int)st.type);
+            if (g_current_drive == VFS_DRIVE_RAM &&
+                installer_stat == 0 &&
+                st.type == VFS_NODE_FILE) {
+                printf("[installer] launching RAM:/binaries/installer\n");
+                int installer_rc = user_elf_run_argv(VFS_DRIVE_RAM, "/binaries/installer", 0, NULL);
+                printf("[installer] launcher returned rc=%d\n", installer_rc);
+            }
+
+            if (tm_launch_ctx_pushed) {
+                command_context_pop();
+            }
+        }
     } else {
         // Re-entry path (e.g. aborting a ring3 task): keep all UI state, just ensure
         // a prompt is visible and force redraw so VGA updates immediately.

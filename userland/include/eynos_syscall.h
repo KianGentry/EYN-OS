@@ -268,6 +268,12 @@ enum {
     EYN_SYSCALL_SPAWN = 131,
     // Wait for a spawned PID: args (int pid, int* out_status, int flags)
     EYN_SYSCALL_WAITPID = 132,
+
+    // Installer disk management syscalls
+    EYN_SYSCALL_INSTALLER_PREPARE_DRIVE = 133,
+    EYN_SYSCALL_INSTALLER_FORMAT_EYNFS_PARTITION = 134,
+    EYN_SYSCALL_INSTALLER_WRITE_SECTOR = 135,
+    EYN_SYSCALL_INSTALLER_GET_PARTITIONS = 136,
 };
 
 typedef struct {
@@ -340,6 +346,22 @@ typedef struct {
     int32_t active;
     char command[96];
 } eyn_bg_job_info_t;
+
+typedef struct {
+    uint8_t present;
+    uint8_t type;
+    uint8_t bootable;
+    uint8_t _pad;
+    uint32_t lba_start;
+    uint32_t sector_count;
+} eyn_installer_partition_t;
+
+typedef struct {
+    uint32_t logical_drive;
+    uint32_t physical_drive;
+    uint32_t partition_count;
+    eyn_installer_partition_t partitions[4];
+} eyn_installer_partitions_t;
 
 typedef struct {
     uint32_t obj_type;
@@ -802,6 +824,31 @@ static inline int eyn_sys_audio_is_available(void) {
 
 static inline int eyn_sys_audio_write_bulk(const void* buf, int total_size_bytes) {
     return eyn_syscall3_pii(EYN_SYSCALL_AUDIO_WRITE_BULK, buf, total_size_bytes, 0);
+}
+
+static inline int eyn_sys_installer_prepare_drive(uint32_t logical_drive) {
+    return eyn_syscall1(EYN_SYSCALL_INSTALLER_PREPARE_DRIVE, (int)logical_drive);
+}
+
+static inline int eyn_sys_installer_format_eynfs_partition(uint32_t logical_drive, uint32_t partition_num) {
+    return eyn_syscall3_iii(EYN_SYSCALL_INSTALLER_FORMAT_EYNFS_PARTITION,
+                            (int)logical_drive,
+                            (int)partition_num,
+                            0);
+}
+
+static inline int eyn_sys_installer_write_sector(uint32_t logical_drive, uint32_t lba, const void* sector512) {
+    return eyn_syscall3_iip(EYN_SYSCALL_INSTALLER_WRITE_SECTOR,
+                            (int)logical_drive,
+                            (int)lba,
+                            sector512);
+}
+
+static inline int eyn_sys_installer_get_partitions(uint32_t logical_drive, eyn_installer_partitions_t* out) {
+    return eyn_syscall3_iii(EYN_SYSCALL_INSTALLER_GET_PARTITIONS,
+                            (int)logical_drive,
+                            (int)(uintptr_t)out,
+                            (int)sizeof(*out));
 }
 
 #ifndef __chibicc__

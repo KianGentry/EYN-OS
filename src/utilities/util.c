@@ -645,9 +645,16 @@ void init_memory_manager() {
 
 // Lazy memory initialization - only initialize when first allocation is needed
 static void ensure_memory_initialized() {
-    if (!memory_initialized) {
-        init_memory_manager();
+    if (memory_initialized) return;
+
+    // If vmm_init() has not run yet, the fallback heap placement can overlap
+    // boot-time early_alloc() page-table memory and corrupt allocator metadata.
+    // Fail closed here; callers should retry after VMM initialization.
+    if (vmm_get_boot_alloc_end() == 0) {
+        return;
     }
+
+    init_memory_manager();
 }
 
 static uint32 find_free_block(uint32 size) {
@@ -740,6 +747,9 @@ static void merge_free_blocks() {
 static void* heap_malloc(size_t nbytes) {
     // Lazy initialization
     ensure_memory_initialized();
+    if (!memory_initialized) {
+        return NULL;
+    }
     
     // Check for stack overflow
     check_stack_overflow();
@@ -843,6 +853,9 @@ void* malloc(size_t nbytes) {
     // runs, it reserves+memsets the heap physical range and writes heap headers
     // (MAGIC_NUMBER), which would silently overwrite slab metadata and cause
     // freelist/header corruption (observed as free_list=0xDEADBEEF).
+    if (!memory_initialized && vmm_get_boot_alloc_end() == 0) {
+        return NULL;
+    }
     ensure_memory_initialized();
 
     if (nbytes == 0) return NULL;

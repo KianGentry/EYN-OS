@@ -9,6 +9,7 @@
 #include <context.h>
 #include <misc/sched.h>
 #include <utilities/shell/pipeline.h>
+#include <fs/vfs.h>
 
 // shell_current_path is maintained by the main shell code
 extern char shell_current_path[128];
@@ -177,9 +178,15 @@ int vterm_get_scroll(int idx) {
         /* Print prompt at the current cursor position */
         extern uint8_t g_current_drive;
         extern uint8 ata_physical_to_logical(uint8 physical_drive);
-        uint8 logical = ata_physical_to_logical(g_current_drive);
         char prompt[64];
-        int n = snprintf(prompt, sizeof(prompt), "%d:%s! ", logical, t->cwd);
+        int n;
+        if (g_current_drive == VFS_DRIVE_RAM) {
+            n = snprintf(prompt, sizeof(prompt), "RAM:%s! ", t->cwd);
+        } else {
+            uint8 logical = ata_physical_to_logical(g_current_drive);
+            if (logical == 0xFF) logical = 0;
+            n = snprintf(prompt, sizeof(prompt), "%d:%s! ", logical, t->cwd);
+        }
         for (int i = 0; i < n; ++i) {
             if ((i & 0x7) == 0) vterm_ctx_allow(CAP_WRITE_CONSOLE);
             // write the char then override its colour to match prompt styling
@@ -484,7 +491,8 @@ void vterm_handle_key(int idx, int key) {
         if (g_command_history.count > 0) {
             if (t->history_idx == -1) {
                 // first time browsing - save current input
-                strncpy(t->saved_input, t->input_buf, INPUT_BUF_LEN);
+                strncpy(t->saved_input, t->input_buf, INPUT_BUF_LEN - 1);
+                t->saved_input[INPUT_BUF_LEN - 1] = '\0';
                 t->history_idx = g_command_history.count - 1;
             } else if (t->history_idx > 0) {
                 t->history_idx--;
@@ -494,7 +502,8 @@ void vterm_handle_key(int idx, int key) {
             t->buf[vterm_row_slot(t->cur_y)][t->input_start_col] = '\0';
             t->cur_x = t->input_start_col;
             // load history entry (per-vterm browsing)
-            strncpy(t->input_buf, g_command_history.commands[t->history_idx], INPUT_BUF_LEN);
+            strncpy(t->input_buf, g_command_history.commands[t->history_idx], INPUT_BUF_LEN - 1);
+            t->input_buf[INPUT_BUF_LEN - 1] = '\0';
             t->input_pos = strlen(t->input_buf);
             vterm_render_input(idx);
         }
@@ -509,13 +518,15 @@ void vterm_handle_key(int idx, int key) {
             t->cur_x = t->input_start_col;
             if (t->history_idx >= g_command_history.count) {
                 // restore saved input
-                strncpy(t->input_buf, t->saved_input, INPUT_BUF_LEN);
+                strncpy(t->input_buf, t->saved_input, INPUT_BUF_LEN - 1);
+                t->input_buf[INPUT_BUF_LEN - 1] = '\0';
                 t->input_pos = strlen(t->input_buf);
                 vterm_render_input(idx);
                 t->history_idx = -1;
                 } else {
                 // load next history entry
-                strncpy(t->input_buf, g_command_history.commands[t->history_idx], INPUT_BUF_LEN);
+                strncpy(t->input_buf, g_command_history.commands[t->history_idx], INPUT_BUF_LEN - 1);
+                t->input_buf[INPUT_BUF_LEN - 1] = '\0';
                 t->input_pos = strlen(t->input_buf);
                 vterm_render_input(idx);
             }

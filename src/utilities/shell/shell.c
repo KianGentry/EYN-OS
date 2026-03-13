@@ -28,6 +28,7 @@ typedef struct {
 static command_hash_entry_t g_command_hash_table[COMMAND_HASH_SIZE];
 static int g_command_hash_initialized = 0;
 static int g_command_hash_disabled = 0; // Fallback to linear search when table would be full
+static int g_boot_installer_autorun_done = 0;
 
 static size_t shell_command_count(void) {
     uintptr_t start = (uintptr_t)__start_shellcmds;
@@ -340,6 +341,22 @@ string get_last_failed_command() {
 void launch_shell(int n) {
     // Initialize pipeline system
     init_pipeline_system();
+
+    if (vfs_detect(g_current_drive) == VFS_FS_NONE && vfs_detect(VFS_DRIVE_RAM) == VFS_FS_EYNFS) {
+        g_current_drive = VFS_DRIVE_RAM;
+        strncpy(shell_current_path, "/", sizeof(shell_current_path) - 1);
+        shell_current_path[sizeof(shell_current_path) - 1] = '\0';
+        printf("%c[installer] defaulting shell drive to RAM:/\n", 140, 220, 255);
+    }
+
+    if (!g_boot_installer_autorun_done) {
+        vfs_stat_t st;
+        if (vfs_stat(VFS_DRIVE_RAM, "/binaries/installer", &st) == 0 && st.type == VFS_NODE_FILE) {
+            g_boot_installer_autorun_done = 1;
+            printf("%c[installer] launching RAM:/binaries/installer\n", 140, 220, 255);
+            (void)user_elf_run_argv(VFS_DRIVE_RAM, "/binaries/installer", 0, NULL);
+        }
+    }
     
     while (1) {
         // Resume any multi-stage pipeline that was interrupted by user-task
@@ -359,9 +376,13 @@ void launch_shell(int n) {
         }
         // Print prompt: <drive>:<path>! 
         // convert physical drive to logical drive for display
-        uint8 logical_drive = ata_physical_to_logical(g_current_drive);
-        if (logical_drive == 0xFF) logical_drive = 0;  // fallback to 0 if mapping fails
-        printf("%c%d:%s", 200, 200, 200, logical_drive, shell_current_path); // white for drive:path
+        if (g_current_drive == VFS_DRIVE_RAM) {
+            printf("%cRAM:%s", 200, 200, 200, shell_current_path);
+        } else {
+            uint8 logical_drive = ata_physical_to_logical(g_current_drive);
+            if (logical_drive == 0xFF) logical_drive = 0;  // fallback to 0 if mapping fails
+            printf("%c%d:%s", 200, 200, 200, logical_drive, shell_current_path); // white for drive:path
+        }
         printf("%c! ", 255, 255, 0); // yellow for !
         string ch = readStr_with_history(&g_command_history);
         

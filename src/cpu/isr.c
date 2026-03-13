@@ -32,6 +32,7 @@
 #include <paging.h>
 #include <drivers/mouse.h>
 #include <cpu/user_elf.h>
+#include <partition.h>
 
 extern background_process_t g_background_processes[MAX_BACKGROUND_PROCESSES];
 
@@ -526,6 +527,10 @@ uint32 get_last_error_eip() {
 #define SYSCALL_FD_SET_NONBLOCK 130
 #define SYSCALL_SPAWN 131
 #define SYSCALL_WAITPID 132
+#define SYSCALL_INSTALLER_PREPARE_DRIVE 133
+#define SYSCALL_INSTALLER_FORMAT_EYNFS_PARTITION 134
+#define SYSCALL_INSTALLER_WRITE_SECTOR 135
+#define SYSCALL_INSTALLER_GET_PARTITIONS 136
 
 #define FIFO_METADATA_MARKER "EYNFIFO1\n"
 #define FIFO_METADATA_MARKER_LEN 9
@@ -1554,6 +1559,161 @@ static int copyin_cstr(char* dst, size_t dstsz, const char* user_src) {
     return -1;
 }
 
+/* Parse explicit drive prefixes. Supported forms:
+ *   RAM:/path  -> VFS_DRIVE_RAM
+ *   N:/path    -> logical ATA drive N
+ * Returns 1 when a prefix is present; 0 otherwise.
+ */
+static int syscall_parse_explicit_drive_prefix(const char* path, uint8* out_drive, const char** out_relpath) {
+    if (!path || !out_drive || !out_relpath) return 0;
+
+    if (path[0] == 'R' && path[1] == 'A' && path[2] == 'M' && path[3] == ':' && path[4] == '/') {
+        *out_drive = VFS_DRIVE_RAM;
+        *out_relpath = path + 4; /* keep leading '/' */
+        return 1;
+    }
+
+    if (path[0] < '0' || path[0] > '9') return 0;
+
+    uint32 logical = 0;
+    int i = 0;
+    while (path[i] >= '0' && path[i] <= '9') {
+        logical = (logical * 10u) + (uint32)(path[i] - '0');
+        if (logical > 255u) return 0;
+        i++;
+    }
+    if (path[i] != ':' || path[i + 1] != '/') return 0;
+
+    uint8 phys = ata_logical_to_physical((uint8)logical);
+    if (phys == 0xFFu) return 0;
+
+    *out_drive = phys;
+    *out_relpath = path + i + 1; /* keep leading '/' */
+    return 1;
+}
+
+typedef struct {
+    uint8 present;
+    uint8 type;
+    uint8 bootable;
+    uint8 _pad;
+    uint32 lba_start;
+    uint32 sector_count;
+} syscall_installer_partition_t;
+
+typedef struct {
+    uint32 logical_drive;
+    uint32 physical_drive;
+    uint32 partition_count;
+    syscall_installer_partition_t partitions[4];
+} syscall_installer_partitions_t;
+
+static int syscall_installer_get_disk_table(uint8 logical, disk_info_t* out_disk, uint8* out_physical) {
+    if (!out_disk || !out_physical) return -1;
+    uint8 physical = ata_logical_to_physical(logical);
+    if (physical == 0xFFu) return -1;
+    if (partition_read_table(physical, out_disk) != 0) return -1;
+    *out_physical = physical;
+    return 0;
+}
+
+/* Format an existing partition entry as EYNFS (partition_num: 1..4). */
+static int syscall_installer_format_eynfs_partition(uint8 physical_drive, uint8 partition_num) {
+    if (partition_num < 1 || partition_num > 4) return -1;
+
+    disk_info_t disk;
+    if (partition_read_table(physical_drive, &disk) != 0) return -1;
+
+    partition_info_t* part = &disk.partitions[partition_num - 1];
+    if (part->type == PART_TYPE_EMPTY || part->sector_count < 8u) return -1;
+
+    uint32 start_lba = part->lba_start;
+    uint32 total_blocks = part->sector_count;
+    uint32 bitmap_bytes = (total_blocks + 7u) / 8u;
+    uint32 bitmap_blocks = (bitmap_bytes + 511u) / 512u;
+    uint32 superblock_block = 0;
+    uint32 bitmap_block = 1;
+    uint32 nametable_block = bitmap_block + bitmap_blocks;
+    uint32 rootdir_block = nametable_block + 1u;
+
+    if (rootdir_block >= total_blocks) return -1;
+
+    uint8 sector[512];
+    memset(sector, 0, sizeof(sector));
+
+    eynfs_superblock_t sb;
+    memset(&sb, 0, sizeof(sb));
+    sb.magic = EYNFS_MAGIC;
+    sb.version = EYNFS_VERSION;
+    sb.block_size = EYNFS_BLOCK_SIZE;
+    sb.total_blocks = total_blocks;
+    sb.root_dir_block = rootdir_block;
+    sb.free_block_map = bitmap_block;
+    sb.name_table_block = nametable_block;
+
+    memcpy(sector, &sb, sizeof(sb));
+    if (ata_write_sector(physical_drive, start_lba + superblock_block, sector) != 0) return -1;
+
+    for (uint32 b = 0; b < bitmap_blocks; ++b) {
+        memset(sector, 0, sizeof(sector));
+        for (uint32 reserved = 0; reserved <= rootdir_block; ++reserved) {
+            uint32 byte_index = reserved / 8u;
+            uint32 bit_index = reserved % 8u;
+            uint32 byte_block = byte_index / 512u;
+            uint32 byte_off = byte_index % 512u;
+            if (byte_block == b) sector[byte_off] |= (uint8)(1u << bit_index);
+        }
+        if (ata_write_sector(physical_drive, start_lba + bitmap_block + b, sector) != 0) return -1;
+    }
+
+    memset(sector, 0, sizeof(sector));
+    if (ata_write_sector(physical_drive, start_lba + nametable_block, sector) != 0) return -1;
+    if (ata_write_sector(physical_drive, start_lba + rootdir_block, sector) != 0) return -1;
+
+    return 0;
+}
+
+/* Create a single bootable EYNFS partition spanning the disk and format it. */
+static int syscall_installer_prepare_drive(uint8 logical_drive) {
+    uint8 physical = ata_logical_to_physical(logical_drive);
+    if (physical == 0xFFu) return -1;
+
+    drive_info_t* info = ata_get_drive_info(physical);
+    if (!info || !info->present || info->sectors <= 4096u) return -1;
+
+    disk_info_t disk;
+    memset(&disk, 0, sizeof(disk));
+    disk.drive = physical;
+    disk.has_valid_mbr = 1;
+    disk.partition_count = 1;
+
+    disk.partitions[0].drive = physical;
+    disk.partitions[0].partition_num = 0;
+    disk.partitions[0].bootable = 1;
+    disk.partitions[0].type = PART_TYPE_EYNFS;
+    disk.partitions[0].lba_start = 2048u;
+    disk.partitions[0].sector_count = info->sectors - 2048u;
+    disk.partitions[0].size_mb = disk.partitions[0].sector_count / 2048u;
+
+    if (partition_write_table(physical, &disk) != 0) return -1;
+    if (syscall_installer_format_eynfs_partition(physical, 1) != 0) return -1;
+
+    /*
+     * FS-INVARIANT: Installer format path performs raw ATA writes that bypass
+     * EYNFS cache helpers.
+     *
+     * Why: partition_write_table()/syscall_installer_format_eynfs_partition()
+     * write sectors directly. Any previously cached EYNFS directory/data blocks
+     * for this drive may now be stale and must not be reused.
+     *
+     * Breakage if omitted: eynfs_create_entry() can observe stale root directory
+     * entries (e.g. old /test.txt), causing false "already exists" failures on
+     * the first installer copy pass after a reformat.
+     */
+    eynfs_cache_clear();
+    return 0;
+}
+
 static void trim_trailing_crlf(char* s) {
     if (!s) return;
     size_t n = strlen(s);
@@ -1924,14 +2084,37 @@ static int syscall_read_file(user_fd_t* ufd, char* user_dst, int maxlen) {
                (int)ufd->drive, ufd->path, (int)ufd->size, maxlen);
     }
 
-    /* Grow the per-FD reusable kernel buffer only when needed.
-     * This eliminates the malloc/free cycle on every read call,
-     * which was causing unnecessary heap churn for video frames. */
+    /*
+     * Grow the per-FD reusable kernel buffer only when needed.
+     *
+     * LOW-MEM INVARIANT: read(2) should degrade to smaller chunks under
+     * memory pressure rather than fail with -1 when a larger temporary buffer
+     * cannot be allocated. Returning fewer bytes than requested is valid POSIX
+     * behavior and lets userland stream loops continue progress.
+     */
     if ((uint32)maxlen > ufd->kbuf_size) {
+        uint32 target = (uint32)maxlen;
+        if (target > SYSCALL_IO_MAX) target = SYSCALL_IO_MAX;
+
         if (ufd->kbuf) { free(ufd->kbuf); ufd->kbuf = NULL; }
-        ufd->kbuf = (uint8*)malloc((size_t)maxlen);
-        if (!ufd->kbuf) { ufd->kbuf_size = 0; return -1; }
-        ufd->kbuf_size = (uint32)maxlen;
+
+        while (target >= 256u) {
+            ufd->kbuf = (uint8*)malloc((size_t)target);
+            if (ufd->kbuf) {
+                ufd->kbuf_size = target;
+                break;
+            }
+            target >>= 1;
+        }
+
+        if (!ufd->kbuf) {
+            ufd->kbuf_size = 0;
+            return -1;
+        }
+    }
+
+    if ((uint32)maxlen > ufd->kbuf_size) {
+        maxlen = (int)ufd->kbuf_size;
     }
     uint8 *kbuf = ufd->kbuf;
 
@@ -2296,6 +2479,63 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (copyout(user_buf + n, "\0", 1) != 0) { regs->eax = (uint32)-1; break; }
 
             regs->eax = (uint32)n;
+            break;
+        }
+        case SYSCALL_INSTALLER_PREPARE_DRIVE: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint8 logical = (uint8)arg1;
+            regs->eax = (uint32)syscall_installer_prepare_drive(logical);
+            break;
+        }
+        case SYSCALL_INSTALLER_FORMAT_EYNFS_PARTITION: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint8 logical = (uint8)arg1;
+            uint8 part_num = (uint8)arg2;
+            uint8 physical = ata_logical_to_physical(logical);
+            if (physical == 0xFFu) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)syscall_installer_format_eynfs_partition(physical, part_num);
+            break;
+        }
+        case SYSCALL_INSTALLER_WRITE_SECTOR: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint8 logical = (uint8)arg1;
+            uint32 lba = (uint32)arg2;
+            const void* user_buf = (const void*)arg3;
+            if (!user_buf) { regs->eax = (uint32)-1; break; }
+            uint8 physical = ata_logical_to_physical(logical);
+            if (physical == 0xFFu) { regs->eax = (uint32)-1; break; }
+
+            uint8 sector[512];
+            if (copyin(sector, user_buf, sizeof(sector)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (ata_write_sector(physical, lba, sector) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_INSTALLER_GET_PARTITIONS: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint8 logical = (uint8)arg1;
+            void* user_out = (void*)arg2;
+            int out_len = (int)arg3;
+            if (!user_out || out_len < (int)sizeof(syscall_installer_partitions_t)) { regs->eax = (uint32)-1; break; }
+
+            disk_info_t disk;
+            uint8 physical = 0;
+            if (syscall_installer_get_disk_table(logical, &disk, &physical) != 0) { regs->eax = (uint32)-1; break; }
+
+            syscall_installer_partitions_t out;
+            memset(&out, 0, sizeof(out));
+            out.logical_drive = logical;
+            out.physical_drive = physical;
+            out.partition_count = disk.partition_count;
+            for (int i = 0; i < 4; ++i) {
+                out.partitions[i].present = (disk.partitions[i].type != PART_TYPE_EMPTY && disk.partitions[i].sector_count > 0) ? 1u : 0u;
+                out.partitions[i].type = disk.partitions[i].type;
+                out.partitions[i].bootable = disk.partitions[i].bootable ? 1u : 0u;
+                out.partitions[i].lba_start = disk.partitions[i].lba_start;
+                out.partitions[i].sector_count = disk.partitions[i].sector_count;
+            }
+
+            if (copyout(user_out, &out, sizeof(out)) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = 0;
             break;
         }
         case SYSCALL_DRIVE_SET_LOGICAL: {
@@ -2841,8 +3081,15 @@ uint32 syscall_dispatch(regs_t* regs) {
             const char* cwd = vterm_get_cwd(g_user_task_term);
             if (!cwd || cwd[0] != '/') cwd = "/";
 
+            uint8 drive = g_current_drive;
+            const char* explicit_path = NULL;
             char abspath[128];
-            resolve_path(path, cwd, abspath, sizeof(abspath));
+            if (syscall_parse_explicit_drive_prefix(path, &drive, &explicit_path)) {
+                strncpy(abspath, explicit_path, sizeof(abspath) - 1);
+                abspath[sizeof(abspath) - 1] = '\0';
+            } else {
+                resolve_path(path, cwd, abspath, sizeof(abspath));
+            }
 
             if (strcmp(abspath, "/") == 0) {
                 vterm_set_cwd(g_user_task_term, "/");
@@ -2851,7 +3098,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             }
 
             vfs_stat_t st;
-            if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_DIR) {
+            if (vfs_stat(drive, abspath, &st) != 0 || st.type != VFS_NODE_DIR) {
                 regs->eax = (uint32)-1;
                 break;
             }
@@ -3162,8 +3409,15 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (g_user_task_active) {
                 cwd = vterm_get_cwd(g_user_task_term);
             }
+            uint8 drive = g_current_drive;
+            const char* explicit_path = NULL;
             char abspath[128];
-            resolve_path(path, cwd, abspath, sizeof(abspath));
+            if (syscall_parse_explicit_drive_prefix(path, &drive, &explicit_path)) {
+                strncpy(abspath, explicit_path, sizeof(abspath) - 1);
+                abspath[sizeof(abspath) - 1] = '\0';
+            } else {
+                resolve_path(path, cwd, abspath, sizeof(abspath));
+            }
 
             int fifo_id = user_pipe_get_or_create_fifo(abspath);
             if (fifo_id >= 0) {
@@ -3182,15 +3436,13 @@ uint32 syscall_dispatch(regs_t* regs) {
                 ufd->offset = 0;
                 ufd->dir_pos = 0;
                 ufd->path[0] = '\0';
-                ufd->drive = g_current_drive;
+                ufd->drive = drive;
                 if (ufd->pipe_end == USER_PIPE_END_WRITE) g_user_pipes[fifo_id].writer_refs++;
                 else g_user_pipes[fifo_id].reader_refs++;
 
                 regs->eax = (uint32)fd;
                 break;
             }
-
-            uint8 drive = g_current_drive;
 
                  // Log the open request even on failure (stdout goes to vterm, but
                  // these diagnostics go to serial so we can see what's happening).
@@ -3232,11 +3484,18 @@ uint32 syscall_dispatch(regs_t* regs) {
             ufd->size = st.size;
 
             /* Pre-populate the EYNFS block cursor so sequential reads pay
-             * zero traversal overhead after the first call.              */
+             * zero traversal overhead after the first call.
+             *
+             * SECURITY-INVARIANT: This fast-path is ATA-backed EYNFS only.
+             * RAM:/ is served by the VFS RAM backend and must not call
+             * eynfs_read_superblock()/eynfs_traverse_path(), which assume an
+             * ATA-readable superblock LBA and can fault in kernel mode when
+             * given a non-ATA pseudo-drive.
+             */
             ufd->eynfs_first_block = 0;
             ufd->cur_block = 0;
             ufd->cur_block_off = 0;
-            if (!ufd->is_dir) {
+            if (!ufd->is_dir && fs == VFS_FS_EYNFS && drive != VFS_DRIVE_RAM) {
                 eynfs_superblock_t sb_tmp;
                 eynfs_dir_entry_t ent_tmp;
                 uint32_t pb_tmp = 0, ei_tmp = 0;

@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-13 17:43:00
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-13 23:18:53
 
 **Total Commands:** 81
 
@@ -988,22 +988,6 @@ calc 2+3*4
 
 ---
 
-### chibicc
-
-**Binary:** `testdir/binaries/chibicc`
-
-**Metadata Source:** `testdir/code/(metadata not found)`
-
-**Description:**
-Run the chibicc command.
-
-**Example:**
-```bash
-chibicc
-```
-
----
-
 ### diskmgr
 
 **Binary:** `testdir/binaries/diskmgr`
@@ -1160,6 +1144,22 @@ Show or clear command history.
 **Example:**
 ```bash
 history
+```
+
+---
+
+### installer
+
+**Binary:** `testdir/binaries/installer`
+
+**Metadata Source:** `testdir/code/installer_uelf.c`
+
+**Description:**
+EYN-OS graphical installer.
+
+**Example:**
+```bash
+installer
 ```
 
 ---
