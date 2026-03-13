@@ -3,6 +3,8 @@
 
 #include <misc/types.h>
 
+typedef struct regs_t regs_t;
+
 // Minimal ELF32 loader that maps PT_LOAD segments into user space and enters ring3.
 // Returns 0 on success (does not return to caller if user mode is entered), -1 on failure.
 int user_elf_run(uint8 drive, const char* abspath);
@@ -24,6 +26,7 @@ void user_task_notify_exit(int status);
 int user_task_continue_or_schedule(void);
 void user_task_request_schedule(void);
 int user_task_poll_scheduler(void);
+void user_task_capture_syscall_frame(const regs_t* regs);
 
 // Mapping ownership accessors used by abort/cleanup logic.
 void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* stack_page);

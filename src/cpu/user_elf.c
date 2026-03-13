@@ -553,6 +553,8 @@ typedef struct {
     int started;
     user_task_runtime_t runtime;
     user_task_image_t* image;
+    int has_syscall_frame;
+    regs_t last_syscall_frame;
 } user_task_slot_t;
 
 /*
@@ -741,6 +743,18 @@ int user_task_poll_scheduler(void) {
     return ran;
 }
 
+void user_task_capture_syscall_frame(const regs_t* regs) {
+    if (!regs) return;
+    int pid = (int)g_user_task_running_pid;
+    if (pid <= 0) return;
+
+    user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
+    if (!slot) return;
+
+    slot->last_syscall_frame = *regs;
+    slot->has_syscall_frame = 1;
+}
+
 void user_task_notify_exit(int status) {
     int pid = (int)g_user_task_running_pid;
     if (pid > 0) {
@@ -775,6 +789,7 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->exited = 0;
     slot->status = 0;
     slot->started = 0;
+    slot->has_syscall_frame = 0;
     user_task_request_schedule();
     return pid;
 }

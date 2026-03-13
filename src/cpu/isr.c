@@ -2185,6 +2185,10 @@ uint32 syscall_dispatch(regs_t* regs) {
     uint32 arg2 = regs->ecx;
     uint32 arg3 = regs->edx;
 
+    if (g_user_task_active) {
+        user_task_capture_syscall_frame(regs);
+    }
+
     switch (syscall_num) {
         case SYSCALL_EYNFS_STREAM_BEGIN: {
             if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
