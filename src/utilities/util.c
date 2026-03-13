@@ -14,6 +14,7 @@
 #include <misc/sched.h>
 #include <mm/slab.h>
 #include <utilities/shell/pipeline.h>
+#include <cpu/user_elf.h>
 
 volatile int g_user_interrupt = 0;
 volatile int g_user_task_active = 0;
@@ -44,9 +45,10 @@ volatile uint32 g_user_stack_page = 0;
 
 void user_task_cleanup_mappings(void) {
     // Best-effort cleanup; safe to call repeatedly.
-    uint32 base = g_user_code_base;
-    uint32 pages = g_user_code_pages;
-    uint32 stack_page = g_user_stack_page;
+    uint32 base = 0;
+    uint32 pages = 0;
+    uint32 stack_page = 0;
+    user_task_get_current_mapping_state(&base, &pages, &stack_page);
     uint32 stack_bottom = vmm_kernel_as.stack_bottom;
 
     vm_tlb_defer_begin();
@@ -68,6 +70,8 @@ void user_task_cleanup_mappings(void) {
         (void)vmm_unmap_page(&vmm_kernel_as, stack_page);
     }
 
+    user_task_clear_current_mapping_state();
+    // Legacy mirrors for code paths still reading singleton globals.
     g_user_code_base = 0;
     g_user_code_pages = 0;
     g_user_stack_page = 0;

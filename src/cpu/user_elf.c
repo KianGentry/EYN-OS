@@ -36,7 +36,6 @@ static int user_elf_ctx_allow(uint32 caps, uint32 cost) {
     }
     return 1;
 }
-
 // Minimal ELF32 structures for parsing 32-bit little-endian ELF files
 typedef struct {
     unsigned char e_ident[16];
@@ -355,9 +354,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     vterm_stdin_clear(g_user_task_term);
 
     // Record mappings incrementally so any mid-loop OOM can be cleaned up.
-    g_user_code_base = map_start;
-    g_user_code_pages = 0;
-    g_user_stack_page = 0;
+    user_task_set_current_mapping_state(map_start, 0, 0);
     vmm_kernel_as.stack_bottom = USER_STACK_TOP - PAGE_SIZE;
 
     /* Low-RAM-friendly program image mapping:
@@ -380,7 +377,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
         *pde |= PTE_USER;
         *pte = PTE_DEMAND | PTE_USER | PTE_RW;
     }
-    g_user_code_pages = pages;
+    user_task_set_current_mapping_state(map_start, pages, 0);
 
     // Map user stack (initial N pages; can grow further on page faults).
     const uint32 user_stack_pages = USER_ELF_INITIAL_STACK_PAGES;
@@ -389,7 +386,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 
     // Enable VMM stack growth for the current address space.
     vmm_kernel_as.stack_bottom = user_stack_page;
-    g_user_stack_page = user_stack_page;
+    user_task_set_current_mapping_state(map_start, pages, user_stack_page);
 
     for (uint32 spi = 0; spi < user_stack_pages; ++spi) {
         uint32 va = user_stack_page + spi * PAGE_SIZE;
@@ -533,10 +530,17 @@ int user_elf_run(uint8 drive, const char* abspath) {
 }
 
 typedef struct {
+    uint32 code_base;
+    uint32 code_pages;
+    uint32 stack_page;
+} user_task_runtime_t;
+
+typedef struct {
     int used;
     int pid;
     int exited;
     int status;
+    user_task_runtime_t runtime;
 } user_task_slot_t;
 
 /*
@@ -554,6 +558,34 @@ typedef struct {
 
 static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static int g_user_task_next_pid = 1;
+static user_task_slot_t* g_user_task_active_slot = NULL;
+
+void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* stack_page) {
+    if (g_user_task_active_slot) {
+        if (base) *base = g_user_task_active_slot->runtime.code_base;
+        if (pages) *pages = g_user_task_active_slot->runtime.code_pages;
+        if (stack_page) *stack_page = g_user_task_active_slot->runtime.stack_page;
+        return;
+    }
+    if (base) *base = g_user_code_base;
+    if (pages) *pages = g_user_code_pages;
+    if (stack_page) *stack_page = g_user_stack_page;
+}
+
+void user_task_set_current_mapping_state(uint32 base, uint32 pages, uint32 stack_page) {
+    if (g_user_task_active_slot) {
+        g_user_task_active_slot->runtime.code_base = base;
+        g_user_task_active_slot->runtime.code_pages = pages;
+        g_user_task_active_slot->runtime.stack_page = stack_page;
+    }
+    g_user_code_base = base;
+    g_user_code_pages = pages;
+    g_user_stack_page = stack_page;
+}
+
+void user_task_clear_current_mapping_state(void) {
+    user_task_set_current_mapping_state(0, 0, 0);
+}
 
 static user_task_slot_t* user_task_find_slot_by_pid(int pid) {
     if (pid <= 0) return NULL;
@@ -581,11 +613,13 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
 
     // Current implementation runs immediately; this API is the compatibility
     // surface for future fully concurrent user-task scheduling.
+    g_user_task_active_slot = slot;
     g_user_task_pending_pid = slot->pid;
     int rc = user_elf_run_argv(drive, abspath, argc, argv);
 
     // If the loader failed before entering ring3, finalize the slot here.
     if (rc != 0) {
+        g_user_task_active_slot = NULL;
         if (g_user_task_pending_pid == slot->pid) g_user_task_pending_pid = 0;
         if (g_user_task_running_pid == slot->pid) g_user_task_running_pid = 0;
         slot->exited = 1;
@@ -604,6 +638,7 @@ void user_task_notify_exit(int status) {
             slot->status = status;
         }
     }
+    g_user_task_active_slot = NULL;
     g_user_task_running_pid = 0;
     g_user_task_pending_pid = 0;
 }
