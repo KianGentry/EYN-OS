@@ -1,187 +1,180 @@
 # Contributing to EYN-OS
 
-Welcome to EYN-OS! This guide will help you get started with contributing to our freestanding kernel operating system.
+Thank you for helping improve EYN-OS. This project is a freestanding 32-bit x86 kernel and userland stack, so changes should prioritize correctness, clarity, and low-memory behavior.
 
-## Quick Start
+## Before You Start
 
 ### Prerequisites
-- GCC with 32-bit support (`gcc-multilib` on Ubuntu/Debian)
-- NASM assembler
-- QEMU for testing
-- Python 3 (for development tools)
+- GCC with 32-bit support (`gcc -m32`), or `i686-elf-gcc`
+- NASM
+- QEMU
+- GRUB tooling (`grub2-mkrescue` or `grub-mkrescue`)
+- Python 3
 
-### Building EYN-OS
-```bash
-make clean
-make
-make run  # Runs in QEMU
-```
+### Useful Entry Points
+- Kernel entry: `src/entry/kernel.c`
+- Linker script: `src/boot/link.ld`
+- Interrupt/syscall path: `src/cpu/idt.c`, `src/cpu/isr.c`, `src/cpu/syscall.asm`
+- Shell dispatcher: `src/utilities/shell/shell.c`
 
-## Adding New Commands
+## Build, Run, Debug
 
-EYN-OS uses a unified command registration system. Adding a new command is simple:
-
-### 1. Create Your Command Handler
-
-Create a new file in `src/utilities/shell/` or add to an existing file:
-
-```c
-// In your .c file
-#include <shell_command_info.h>
-#include <vga.h>
-#include <string.h>
-
-void custom_command_handler(string arg) {
-    // Parse arguments
-    uint8 i = 0;
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
-        printf("%cUsage: custom_command <argument>\n", 255, 255, 255);
-        return;
-    }
-    
-    // Your command logic here
-    printf("%cExecuting custom_command with: %s\n", 0, 255, 0, arg + i);
-}
-
-// Register the command
-REGISTER_SHELL_COMMAND(custom_command, "custom_command", custom_command_handler, CMD_STREAMING, 
-    "My custom command that does something useful.\nUsage: custom_command <argument>", 
-    "custom_command example");
-```
-
-### 2. Add to Makefile (if new file)
-
-If you created a new `.c` file, add it to the `OBJS` list in `Makefile`:
-
-```makefile
-OBJS = ... obj/my_new_command.o
-```
-
-### 3. Build and Test
+- Build full artifacts (kernel + ramdisk + EYNFS image + docs + ISO):
 
 ```bash
-make clean && make
+make build
+```
+
+- Run in QEMU:
+
+```bash
 make run
 ```
 
-Your command will automatically appear in the help system and be available in the shell!
+- Run with serial and CPU/interrupt logging:
 
-## Command Types
-
-- **CMD_ESSENTIAL**: Always loaded, core system commands (init, exit, help, etc.)
-- **CMD_STREAMING**: Loaded on demand, regular commands
-- **CMD_DISABLED**: Not available (for future use)
-
-## Code Style Guidelines
-
-### C Code
-- Use `uint8`, `uint32`, etc. from `types.h` instead of standard types
-- Include headers with `#include <header.h>` (not relative paths)
-- Functions should have descriptive names: `custom_command_handler()`
-- Use `printf("%c", r, g, b, ...)` for coloured output
-- Keep functions focused and under 100 lines when possible
-
-### Command Handlers
-- Always validate input arguments
-- Provide helpful usage messages
-- Use consistent error handling
-- Return early on invalid input
-
-### Example Command Structure
-```c
-void example_cmd(string arg) {
-    // 1. Parse arguments
-    uint8 i = 0;
-    while (arg[i] && arg[i] != ' ') i++;
-    while (arg[i] && arg[i] == ' ') i++;
-    
-    if (!arg[i]) {
-        printf("%cUsage: example <required_arg>\n", 255, 255, 255);
-        return;
-    }
-    
-    // 2. Extract arguments
-    char param[64];
-    uint8 j = 0;
-    while (arg[i] && arg[i] != ' ' && j < 63) {
-        param[j++] = arg[i++];
-    }
-    param[j] = '\0';
-    
-    // 3. Validate and execute
-    if (strlen(param) == 0) {
-        printf("%cError: Invalid parameter\n", 255, 0, 0);
-        return;
-    }
-    
-    // 4. Your logic here
-    printf("%cProcessing: %s\n", 0, 255, 0, param);
-}
+```bash
+make qemu-debug
+# logs: tmp/qemu-debug.log
 ```
 
-## File Organization
+- Start halted for GDB (`target remote :1234`):
 
-### Source Files
-- `src/entry/`: Kernel entry point
-- `src/cpu/`: CPU-related code (IDT, ISR, system calls)
-- `src/drivers/`: Hardware drivers (VGA, keyboard, disk)
-- `src/utilities/shell/`: Shell commands and utilities
-- `src/utilities/games/`: Game engine and games
-- `src/utilities/tui/`: Text UI components
+```bash
+make qemu-gdb
+```
 
-### Headers
-- `include/`: All public headers
-- Use `#include <header.h>`
+- Rebuild userland binaries from `testdir/code/*_uelf.c`:
 
-## Testing Your Changes
+```bash
+make userland
+```
 
-### Basic Testing
-1. Build: `make clean && make`
-2. Run: `make run`
-3. Test your command in the shell
-4. Check help system: `help`
+- Rebuild filesystem image from `testdir/`:
 
-### Debugging
-- Use `printf()` for debugging (avoid debug prints in final code)
-- Test edge cases (empty args, invalid input, etc.)
-- Verify command appears in help system
+```bash
+make eynfsimg
+```
 
-## Common Issues
+- Static analysis pass:
 
-### Build Errors
-- **"undefined reference"**: Check if your `.c` file is in the `OBJS` list
-- **"undeclared function"**: Add forward declaration for your handler
-- **"redefinition"**: Check for duplicate includes or definitions
+```bash
+make analyze
+```
 
-### Runtime Issues
-- **Command not found**: Verify `REGISTER_SHELL_COMMAND` macro is correct
-- **Crash**: Check argument parsing and validation
-- **Wrong output**: Verify `printf()` colour parameters
+## Current Command Contribution Model
 
-## Getting Help
+User-facing shell commands are now primarily userland binaries loaded from `/binaries`.
 
-- Check existing commands in `src/utilities/shell/` for examples
-- Look at similar commands for patterns
-- Test thoroughly before submitting
+### Add a New User Command
+1. Create source at `testdir/code/<name>_uelf.c`.
+2. Add command metadata near the top:
 
-## Submitting Changes
+```c
+#include <eynos_cmdmeta.h>
+EYN_CMDMETA_V1("Describe what this command does.", "<name> --example");
+```
 
-1. Test your changes thoroughly
-2. Ensure your command follows the style guidelines
-3. Update documentation if needed
-4. Submit a pull request
+3. Build it to `testdir/binaries/<name>` using one of:
 
-## Development Tips
+```bash
+bash devtools/build_user_c.sh testdir/code/<name>_uelf.c testdir/binaries/<name>
+```
 
-- Start with simple commands to learn the system
-- Use existing commands as templates
-- Test with various input types (empty, long, special characters)
-- Keep commands focused and well-documented
-- Consider error cases and edge conditions
+4. Repack and run:
 
----
+```bash
+make eynfsimg
+make run
+```
 
-Thank you for contributing to EYN-OS! Your contributions help make this operating system better for everyone. 
+5. Regenerate command docs/help text:
+
+```bash
+make docs
+```
+
+Notes:
+- The shell resolves commands from `/binaries` first.
+- Extensionless binaries are preferred (`/binaries/view`), but `.uelf` remains supported for compatibility.
+
+## Coding Standards
+
+### C and Build Conventions
+- Use project types from `include/misc/types.h` (`uint8`, `uint32`, `string`, etc.) where appropriate.
+- Use angle-bracket includes resolved by include paths, for example `#include <fs/vfs.h>`.
+- Add function prototypes for new non-`static` functions in appropriate headers.
+- Keep function names and variable names descriptive.
+- Keep functions small and focused (target under ~100 lines when practical).
+- Prefer small bounded buffers and streaming patterns over unbounded allocations.
+- In hot paths (especially paging/interrupt handling), avoid noisy logging.
+
+### Low-Memory Requirements
+- Assume low-memory operation is a first-class target.
+- Avoid large static/global arrays, especially in kernel `.bss`.
+- Prefer lazy/on-demand allocation and free resources promptly.
+- Be careful when introducing per-fault/per-iteration logs in frequently hit code.
+
+### Debugging-Conscious Behavior
+- Kernel-mode page faults are bugs and should fail fast.
+- User-mode non-present faults may be expected under demand paging/swap.
+- In long-running loops, periodically call `watchdog_kick("...")` where stalls are possible.
+
+## Commenting and Invariant Documentation
+
+Comments are part of the kernel specification. Keep them precise and synchronized with behavior.
+
+### Required Invariant Tags
+Use these tags on relevant paths:
+- `SECURITY-INVARIANT:` for privilege/resource/security boundaries.
+- `ABI-INVARIANT:` for user-visible or binary-compatibility contracts.
+- `FS-INVARIANT:` for on-disk filesystem structures and compatibility rules.
+- `CAPABILITY-REQUIRED:` for capability enforcement/permission gates.
+
+### Sensitive Constants Must Be Documented
+Any architecture/security/ABI/disk-format relevant constant must include:
+- Why this value exists.
+- Which invariant it preserves.
+- What breaks if it changes.
+- Whether it is ABI-sensitive.
+- Whether it is disk-format-sensitive.
+- Whether it is security-critical.
+
+### Translation-Grade Comments
+For bitfields, masks, flags, and on-disk formats, document:
+- Bit layout and semantic meaning.
+- Endianness assumptions.
+- Alignment assumptions.
+- Versioning and backward-compatibility constraints.
+
+### Comment Quality Rules
+- Explain why, constraints, and failure semantics, not obvious mechanics.
+- Remove or update comments immediately when behavior changes.
+- Do not use vague comments such as "magic number", "temporary fix", or "just works".
+
+## Testing Expectations
+
+Before opening a PR:
+1. Build with `make build`.
+2. Boot test with `make run` (or `make qemu-debug` when debugging).
+3. Run focused manual tests for changed behavior.
+4. If you touched user commands, rebuild binaries and regenerate docs (`make userland`, `make eynfsimg`, `make docs`).
+5. If practical, run `make analyze` for extra static checks.
+
+## Documentation Expectations
+
+When behavior changes, update docs in the same PR.
+
+- Command changes: regenerate `docs/command-reference.md` and `docs/help-text.txt` via `make docs`.
+- API/ABI/syscall changes: update relevant files under `docs/api/`.
+- Memory/paging/boot behavior changes: update `docs/general/low-memory.md` and related docs.
+
+## Pull Request Checklist
+
+- Scope is small and focused.
+- New/changed invariants are documented in code comments.
+- No stale debug output remains.
+- Build and runtime sanity checks were performed.
+- Documentation is updated in the same PR.
+
+Thanks for contributing to EYN-OS.
