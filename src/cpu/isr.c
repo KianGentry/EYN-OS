@@ -31,6 +31,7 @@
 #include <run_command.h>
 #include <paging.h>
 #include <drivers/mouse.h>
+#include <cpu/user_elf.h>
 
 extern background_process_t g_background_processes[MAX_BACKGROUND_PROCESSES];
 
@@ -523,6 +524,8 @@ uint32 get_last_error_eip() {
 #define SYSCALL_FD_SET_INHERIT 128
 #define SYSCALL_FD_SET_STDIO 129
 #define SYSCALL_FD_SET_NONBLOCK 130
+#define SYSCALL_SPAWN 131
+#define SYSCALL_WAITPID 132
 
 #define FIFO_METADATA_MARKER "EYNFIFO1\n"
 #define FIFO_METADATA_MARKER_LEN 9
@@ -3434,6 +3437,72 @@ uint32 syscall_dispatch(regs_t* regs) {
             int fd = (int)arg1;
             int enabled = (int)arg2;
             regs->eax = (syscall_kernel_set_user_fd_nonblock(fd, enabled ? 1 : 0) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_SPAWN: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+
+            const char* user_path = (const char*)arg1;
+            const char* const* user_argv = (const char* const*)arg2;
+            int argc = (int)arg3;
+            if (!user_path || argc < 0) { regs->eax = (uint32)-1; break; }
+            if (argc > 0 && !user_argv) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
+
+            const int max_args = 16;
+            const int max_arg_len = 64;
+            char arg_buf[16][64];
+            const char* kargv[16];
+            int kargc = 0;
+
+            if (argc > max_args) argc = max_args;
+            for (int i = 0; i < argc; ++i) {
+                const char* user_arg_ptr = NULL;
+                if (copyin(&user_arg_ptr, user_argv + i, sizeof(user_arg_ptr)) != 0) {
+                    regs->eax = (uint32)-1;
+                    return regs->eax;
+                }
+                if (!user_arg_ptr) continue;
+                if (copyin_cstr(arg_buf[kargc], (size_t)max_arg_len, user_arg_ptr) != 0) {
+                    regs->eax = (uint32)-1;
+                    return regs->eax;
+                }
+                kargv[kargc] = arg_buf[kargc];
+                kargc++;
+            }
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                const char* t = vterm_get_cwd(g_user_task_term);
+                if (t && t[0] == '/') cwd = t;
+            }
+
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            int pid = user_task_spawn_argv(g_current_drive, abspath, kargc, kargv);
+            regs->eax = (pid > 0) ? (uint32)pid : (uint32)-1;
+            break;
+        }
+        case SYSCALL_WAITPID: {
+            int pid = (int)arg1;
+            int* user_status = (int*)arg2;
+            int flags = (int)arg3;
+            int status = 0;
+            int waited = user_task_waitpid(pid, &status, flags);
+            if (waited < 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            if (waited > 0 && user_status) {
+                if (copyout(user_status, &status, sizeof(status)) != 0) {
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+            }
+            regs->eax = (uint32)waited;
             break;
         }
         case SYSCALL_CAP_MINT_FD: {

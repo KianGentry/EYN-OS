@@ -13,6 +13,8 @@
 #include <misc/sched.h>
 #include <cpu/isr.h>
 #include <serial.h>
+#include <fs/vfs.h>
+#include <cpu/user_elf.h>
 
 // Temporary runtime diagnostics for pipeline debugging.
 #ifndef PIPELINE_DEBUG
@@ -50,6 +52,8 @@ typedef struct {
 } pipeline_runtime_t;
 
 static pipeline_runtime_t g_pipeline_rt = {0};
+
+extern uint8 g_current_drive;
 
 static int pipeline_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -819,6 +823,35 @@ static void build_command_string(command_t* cmd, char* out, int out_cap, const c
     }
 }
 
+static int pipeline_try_spawn_user_program(command_t* cmd, const char* extra_arg) {
+    if (!cmd || !cmd->name || !cmd->name[0]) return 0;
+
+    char target[128];
+    vfs_stat_t st;
+
+    int n = snprintf(target, sizeof(target), "/binaries/%s", cmd->name);
+    if (n <= 0 || n >= (int)sizeof(target)) return 0;
+    if (vfs_stat(g_current_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) {
+        n = snprintf(target, sizeof(target), "/binaries/%s.uelf", cmd->name);
+        if (n <= 0 || n >= (int)sizeof(target)) return 0;
+        if (vfs_stat(g_current_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) return 0;
+    }
+
+    const char* argv[32];
+    int argc = 0;
+    for (int i = 1; i < cmd->argc && cmd->args[i] && argc < (int)(sizeof(argv) / sizeof(argv[0])); ++i) {
+        argv[argc++] = cmd->args[i];
+    }
+    if (extra_arg && extra_arg[0] && argc < (int)(sizeof(argv) / sizeof(argv[0]))) {
+        argv[argc++] = extra_arg;
+    }
+
+    int pid = user_task_spawn_argv(g_current_drive, target, argc, argv);
+    if (pid <= 0) return 0;
+    (void)user_task_waitpid(pid, NULL, 0);
+    return 1;
+}
+
 // Execute pipeline (improved implementation)
 int execute_pipeline(pipeline_t* pipeline) {
     if (!pipeline || !pipeline->first) return -1;
@@ -910,13 +943,17 @@ int pipeline_resume_pending(void) {
         if (g_pipeline_rt.pending_close_in_fd <= 2) g_pipeline_rt.pending_close_in_fd = -1;
 
         if (g_pipeline_rt.pending_close_in_fd > 2 && cmd->name && strcmp(cmd->name, "search") == 0 && !command_has_arg(cmd, "--stdin")) {
-            char cmd_str[640];
-            build_command_string(cmd, cmd_str, (int)sizeof(cmd_str), "--stdin");
-            PIPE_DBG("resume stage %d exec via handle_shell_command: %s", stage_idx, cmd_str);
-            handle_shell_command(cmd_str);
+            if (!pipeline_try_spawn_user_program(cmd, "--stdin")) {
+                char cmd_str[640];
+                build_command_string(cmd, cmd_str, (int)sizeof(cmd_str), "--stdin");
+                PIPE_DBG("resume stage %d exec via handle_shell_command: %s", stage_idx, cmd_str);
+                handle_shell_command(cmd_str);
+            }
         } else {
             PIPE_DBG("resume stage %d exec command path: '%s'", stage_idx, cmd->name ? cmd->name : "(null)");
-            (void)execute_command(cmd);
+            if (!pipeline_try_spawn_user_program(cmd, NULL)) {
+                (void)execute_command(cmd);
+            }
         }
 
         // If execution returns normally (e.g., kernel-side command), continue

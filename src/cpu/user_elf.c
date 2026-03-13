@@ -13,6 +13,7 @@
 #include <isr.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <watchdog.h>
 
 // Defined in src/boot/kernel.asm; this is the top of the kernel stack.
 extern uint32 stack_space;
@@ -520,4 +521,79 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 
 int user_elf_run(uint8 drive, const char* abspath) {
     return user_elf_run_argv(drive, abspath, 0, NULL);
+}
+
+typedef struct {
+    int used;
+    int pid;
+    int exited;
+    int status;
+} user_task_slot_t;
+
+/*
+ * ABI-INVARIANT: Maximum tracked spawned user tasks.
+ *
+ * Why: Bounds static kernel state for task lifecycle bookkeeping.
+ * Invariant: PIDs are tracked in a fixed slot table; waitpid relies on this.
+ * Breakage if changed:
+ *   - Increasing grows .bss linearly.
+ *   - Decreasing reduces number of concurrent tracked tasks.
+ * ABI-sensitive: Yes (spawn failure behavior under load).
+ * Security-critical: Yes (resource exhaustion boundary).
+ */
+#define USER_TASK_MAX 16
+
+static user_task_slot_t g_user_tasks[USER_TASK_MAX];
+static int g_user_task_next_pid = 1;
+
+static user_task_slot_t* user_task_find_slot_by_pid(int pid) {
+    if (pid <= 0) return NULL;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        if (g_user_tasks[i].used && g_user_tasks[i].pid == pid) return &g_user_tasks[i];
+    }
+    return NULL;
+}
+
+static user_task_slot_t* user_task_alloc_slot(void) {
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        if (!g_user_tasks[i].used) return &g_user_tasks[i];
+    }
+    return NULL;
+}
+
+int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
+    user_task_slot_t* slot = user_task_alloc_slot();
+    if (!slot) return -1;
+
+    memset(slot, 0, sizeof(*slot));
+    slot->used = 1;
+    slot->pid = g_user_task_next_pid++;
+    if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
+
+    // Current implementation runs immediately; this API is the compatibility
+    // surface for future fully concurrent user-task scheduling.
+    int rc = user_elf_run_argv(drive, abspath, argc, argv);
+    slot->exited = 1;
+    slot->status = (rc == 0) ? 0 : -1;
+
+    return slot->pid;
+}
+
+int user_task_waitpid(int pid, int* out_status, int flags) {
+    user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
+    if (!slot) return -1;
+
+    while (!slot->exited) {
+        if (flags & USER_TASK_WAIT_NOHANG) return 0;
+        watchdog_kick("waitpid");
+        __asm__ __volatile__("sti");
+        __asm__ __volatile__("hlt");
+    }
+
+    if (out_status) *out_status = slot->status;
+    slot->used = 0;
+    slot->pid = 0;
+    slot->exited = 0;
+    slot->status = 0;
+    return pid;
 }

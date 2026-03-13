@@ -50,6 +50,21 @@ int fd_set_nonblock(int fd, int enabled) {
     return eyn_syscall3_iii(EYN_SYSCALL_FD_SET_NONBLOCK, fd, enabled ? 1 : 0, 0);
 }
 
+int spawn(const char* path, const char* const* argv, int argc) {
+    if (!path || argc < 0) return -1;
+    return eyn_syscall3_ppi(EYN_SYSCALL_SPAWN,
+                            path,
+                            (const void*)argv,
+                            argc);
+}
+
+int waitpid(int pid, int* status, int options) {
+    return eyn_syscall3_iii(EYN_SYSCALL_WAITPID,
+                            pid,
+                            (int)(uintptr_t)status,
+                            options);
+}
+
 int writefile(const char* path, const void* buf, size_t len) {
     if (!path || !buf) return -1;
     if (len > 0x7fffffffU) len = 0x7fffffffU;

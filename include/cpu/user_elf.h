@@ -11,4 +11,11 @@ int user_elf_run(uint8 drive, const char* abspath);
 // argc may be 0; argv may be NULL.
 int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv);
 
+// Spawn/wait API used by syscall layer and shell pipeline runtime.
+// USER_TASK_WAIT_NOHANG requests non-blocking wait semantics.
+#define USER_TASK_WAIT_NOHANG 1
+
+int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char* const* argv);
+int user_task_waitpid(int pid, int* out_status, int flags);
+
 #endif

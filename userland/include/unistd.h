@@ -27,6 +27,10 @@ int fd_set_inherit(int enabled);
 int fd_set_stdio(int stdin_fd, int stdout_fd, int stderr_fd);
 int fd_set_nonblock(int fd, int enabled);
 
+#define WNOHANG 1
+int spawn(const char* path, const char* const* argv, int argc);
+int waitpid(int pid, int* status, int options);
+
 // Create/overwrite a file with given contents.
 int writefile(const char* path, const void* buf, size_t len);
 

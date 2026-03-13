@@ -161,6 +161,32 @@ Toggle non-blocking behavior on an open FD.
 **Returns:**
 - EAX: `0` on success, `-1` on failure
 
+#### Spawn user program (syscall 131)
+Spawn a user program with argv.
+
+**Arguments:**
+- EBX: `const char* path`
+- ECX: `const char* const* argv`
+- EDX: `argc`
+
+**Returns:**
+- EAX: `pid` on success, `-1` on failure
+
+Notes:
+- The spawn/wait ABI is stable and intended for concurrent task scheduling.
+- Current implementation executes spawned tasks through the existing single-user-task runtime; API compatibility is provided now so userland and shell pipeline code do not need to change when full concurrency lands.
+
+#### Wait for spawned PID (syscall 132)
+Wait for a previously spawned PID.
+
+**Arguments:**
+- EBX: `pid`
+- ECX: `int* out_status` (optional, may be null)
+- EDX: options (`1` = `WNOHANG`)
+
+**Returns:**
+- EAX: `pid` when reaped, `0` for `WNOHANG` with no completion, or `-1` on error
+
 #### Get directory entries (syscall 7)
 Read directory entries from an open directory fd.
 

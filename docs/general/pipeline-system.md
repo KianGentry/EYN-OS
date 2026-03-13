@@ -9,6 +9,7 @@ EYN-OS includes a Unix-like pipeline and redirection system that enables command
 - **Append Redirection**: Append to files with `>>` operator  
 - **Kernel Pipe Chaining**: `|` uses kernel pipe FDs for multi-stage command composition
 - **Bounded Spool Fallback**: Pipeline-created pipes enable bounded temporary spool memory when the ring buffer fills
+- **Spawn-Compatible Stage Launch**: Pipeline stage runner uses the spawn/wait task API for `/binaries` commands
 - **Universal Search Command**: Enhanced `search` command that works in multiple modes
 
 ### **In Development**
@@ -16,6 +17,9 @@ EYN-OS includes a Unix-like pipeline and redirection system that enables command
 - **Background Execution**: Run commands in background with `&`
 - **Expanded FD Ops**: Additional `dup`/`poll`-style primitives
 - **True Concurrent Spawn**: Run pipeline stages concurrently with independent ring3 task contexts
+
+Current implementation note:
+The spawn/wait ABI is now in place and pipeline uses it for userland stage launch. The underlying ring3 runtime is still single-active-task, so stage execution remains serialized until per-task address-space/lifecycle scheduling is introduced.
 
 ### **Planned Features**
 - **Process Substitution**: `<()` and `>()` operators

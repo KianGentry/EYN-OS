@@ -264,6 +264,10 @@ enum {
     EYN_SYSCALL_FD_SET_STDIO = 129,
     // Toggle non-blocking mode for a specific FD: args (int fd, int enabled)
     EYN_SYSCALL_FD_SET_NONBLOCK = 130,
+    // Spawn a user program: args (const char* path, const char* const* argv, int argc)
+    EYN_SYSCALL_SPAWN = 131,
+    // Wait for a spawned PID: args (int pid, int* out_status, int flags)
+    EYN_SYSCALL_WAITPID = 132,
 };
 
 typedef struct {
