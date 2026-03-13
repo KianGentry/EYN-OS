@@ -535,12 +535,24 @@ typedef struct {
     uint32 stack_page;
 } user_task_runtime_t;
 
+#define USER_TASK_MAX_SPAWN_ARGC 16
+
+typedef struct {
+    uint8 drive;
+    int argc;
+    char* path;
+    const char* argv[USER_TASK_MAX_SPAWN_ARGC];
+    char* arg_storage[USER_TASK_MAX_SPAWN_ARGC];
+} user_task_image_t;
+
 typedef struct {
     int used;
     int pid;
     int exited;
     int status;
+    int started;
     user_task_runtime_t runtime;
+    user_task_image_t* image;
 } user_task_slot_t;
 
 /*
@@ -559,6 +571,76 @@ typedef struct {
 static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static int g_user_task_next_pid = 1;
 static user_task_slot_t* g_user_task_active_slot = NULL;
+
+static user_task_image_t* user_task_image_build(uint8 drive,
+                                                const char* abspath,
+                                                int argc,
+                                                const char* const* argv) {
+    if (!abspath || !abspath[0]) return NULL;
+    if (argc < 0) return NULL;
+    if (argc > 0 && !argv) return NULL;
+    if (argc > USER_TASK_MAX_SPAWN_ARGC) argc = USER_TASK_MAX_SPAWN_ARGC;
+
+    user_task_image_t* image = (user_task_image_t*)malloc(sizeof(user_task_image_t));
+    if (!image) return NULL;
+    memset(image, 0, sizeof(*image));
+    image->drive = drive;
+    image->argc = argc;
+
+    size_t path_len = strlen(abspath) + 1;
+    image->path = (char*)malloc(path_len);
+    if (!image->path) {
+        free(image);
+        return NULL;
+    }
+    memcpy(image->path, abspath, path_len);
+
+    for (int i = 0; i < argc; ++i) {
+        const char* s = argv[i] ? argv[i] : "";
+        size_t len = strlen(s) + 1;
+        image->arg_storage[i] = (char*)malloc(len);
+        if (!image->arg_storage[i]) {
+            for (int j = 0; j < i; ++j) free(image->arg_storage[j]);
+            free(image->path);
+            free(image);
+            return NULL;
+        }
+        memcpy(image->arg_storage[i], s, len);
+        image->argv[i] = image->arg_storage[i];
+    }
+
+    return image;
+}
+
+static void user_task_image_free(user_task_image_t* image) {
+    if (!image) return;
+    for (int i = 0; i < image->argc && i < USER_TASK_MAX_SPAWN_ARGC; ++i) {
+        if (image->arg_storage[i]) free(image->arg_storage[i]);
+    }
+    if (image->path) free(image->path);
+    free(image);
+}
+
+static int user_task_launch_slot(user_task_slot_t* slot) {
+    if (!slot || !slot->image) return -1;
+
+    slot->started = 1;
+    g_user_task_active_slot = slot;
+    g_user_task_pending_pid = slot->pid;
+
+    int rc = user_elf_run_argv(slot->image->drive,
+                               slot->image->path,
+                               slot->image->argc,
+                               slot->image->argv);
+
+    // Returning here means load failed before entering ring3.
+    g_user_task_active_slot = NULL;
+    if (g_user_task_pending_pid == slot->pid) g_user_task_pending_pid = 0;
+    if (g_user_task_running_pid == slot->pid) g_user_task_running_pid = 0;
+    slot->exited = 1;
+    slot->status = (rc == 0) ? 0 : -1;
+    return rc;
+}
 
 void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* stack_page) {
     if (g_user_task_active_slot) {
@@ -606,27 +688,39 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     user_task_slot_t* slot = user_task_alloc_slot();
     if (!slot) return -1;
 
+    user_task_image_t* image = user_task_image_build(drive, abspath, argc, argv);
+    if (!image) return -1;
+
     memset(slot, 0, sizeof(*slot));
     slot->used = 1;
     slot->pid = g_user_task_next_pid++;
+    slot->image = image;
     if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
 
-    // Current implementation runs immediately; this API is the compatibility
-    // surface for future fully concurrent user-task scheduling.
-    g_user_task_active_slot = slot;
-    g_user_task_pending_pid = slot->pid;
-    int rc = user_elf_run_argv(drive, abspath, argc, argv);
-
-    // If the loader failed before entering ring3, finalize the slot here.
-    if (rc != 0) {
-        g_user_task_active_slot = NULL;
-        if (g_user_task_pending_pid == slot->pid) g_user_task_pending_pid = 0;
-        if (g_user_task_running_pid == slot->pid) g_user_task_running_pid = 0;
-        slot->exited = 1;
-        slot->status = -1;
+    /*
+     * Scheduler handoff model:
+     * - If no ring3 task is active, launch immediately.
+     * - If a task is active, leave this slot queued; abort continuation will
+     *   launch it when the current task exits.
+     */
+    if (!g_user_task_active) {
+        if (user_task_launch_slot(slot) != 0) {
+            return slot->pid;
+        }
     }
 
     return slot->pid;
+}
+
+int user_task_continue_or_schedule(void) {
+    // Prefer runnable queued tasks over UI fallback.
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used || slot->exited || slot->started) continue;
+        (void)user_task_launch_slot(slot);
+        return 1;
+    }
+    return 0;
 }
 
 void user_task_notify_exit(int status) {
@@ -655,9 +749,12 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     }
 
     if (out_status) *out_status = slot->status;
+    user_task_image_free(slot->image);
+    slot->image = NULL;
     slot->used = 0;
     slot->pid = 0;
     slot->exited = 0;
     slot->status = 0;
+    slot->started = 0;
     return pid;
 }

@@ -114,6 +114,12 @@ void user_task_abort_continue(void) {
     g_user_task_colour_state = 0;
     g_user_task_icon_state = 0;
 
+    // Scheduler-first continuation: run queued spawned tasks before UI fallback.
+    if (user_task_continue_or_schedule()) {
+        // If a queued task is launched this path does not normally return;
+        // if it does (load failure), continue to pipeline/UI fallback.
+    }
+
     // Continue any pipeline stage that was armed before this user task exited.
     // This path is reached via non-local abort return from SYSCALL_EXIT.
     (void)pipeline_resume_pending();
