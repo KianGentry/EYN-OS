@@ -88,7 +88,7 @@ void user_task_cleanup_mappings(void) {
     syscall_reset_user_streams();
 }
 
-void ui_return_from_user_task(void) {
+void user_task_abort_continue(void) {
     // Best-effort cleanup and clear state before re-entering the UI.
     command_context_clear();
     // If a UELF task exited or crashed while a redirect was active (e.g. the
@@ -125,6 +125,10 @@ void ui_return_from_user_task(void) {
     for (;;) {
         __asm__ __volatile__("hlt");
     }
+}
+
+void ui_return_from_user_task(void) {
+    user_task_abort_continue();
 }
 
 static int mem_ctx_allow(void) {

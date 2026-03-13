@@ -32,6 +32,10 @@ void user_task_cleanup_mappings(void);
 // Chooses the tiling-manager UI when available; otherwise falls back to the classic shell.
 void ui_return_from_user_task(void);
 
+// Central abort/exit continuation hook used by ISR/syscall assembly stubs.
+// This decouples low-level abort control flow from the UI-specific fallback.
+void user_task_abort_continue(void);
+
 // Memory management (standardized names, standard signatures)
 void *malloc(size_t nbytes);
 void free(void *ptr);

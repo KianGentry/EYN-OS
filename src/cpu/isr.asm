@@ -9,7 +9,7 @@ extern g_abort_to_shell
 extern g_user_task_active
 extern stack_space
 extern isr_abort_stack_top
-extern ui_return_from_user_task
+extern user_task_abort_continue
 
 section .text
 
@@ -50,7 +50,7 @@ isr_common_stub:
     mov ss, ax
     mov esp, isr_abort_stack_top
     sti
-    call ui_return_from_user_task
+    call user_task_abort_continue
 .halt:
     hlt
     jmp .halt

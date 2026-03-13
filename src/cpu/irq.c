@@ -6,6 +6,7 @@
 #include <tile_manager.h>
 #include <watchdog.h>
 #include <misc/sched.h>
+#include <cpu/user_elf.h>
 
 extern void poll_keyboard_for_ctrl_c();
 
@@ -154,6 +155,7 @@ static void irq_dispatch_core(int irq_number, int send_eoi) {
 
         if (g_user_interrupt) {
             g_user_interrupt = 0;
+            user_task_notify_exit(-130);
             g_user_task_active = 0;
             g_user_task_term = -1;
             g_user_task_ui_dirty = 0;

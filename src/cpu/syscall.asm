@@ -11,7 +11,7 @@ extern stack_space
 extern stack_bottom
 extern isr_abort_stack_top
 extern isr_abort_stack_bottom
-extern ui_return_from_user_task
+extern user_task_abort_continue
 
 section .text
 syscall_entry:
@@ -62,7 +62,7 @@ syscall_entry:
     mov ss, ax
     mov esp, isr_abort_stack_top
     sti
-    call ui_return_from_user_task
+    call user_task_abort_continue
 .halt:
     hlt
     jmp .halt

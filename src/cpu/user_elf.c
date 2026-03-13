@@ -22,6 +22,10 @@ volatile uint16 g_user_segdom_cs = GDT_USER_CS;
 volatile uint16 g_user_segdom_ds = GDT_USER_DS;
 static segdom_t g_user_segdom;
 
+// PID bookkeeping for spawned tasks crossing non-local abort-to-kernel flow.
+static volatile int g_user_task_pending_pid = 0;
+static volatile int g_user_task_running_pid = 0;
+
 static int user_elf_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
     if (ctx && !cap_check(ctx->caps, caps)) return 0;
@@ -511,6 +515,11 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     g_user_segdom_ds = g_user_segdom.user_ds;
     segdom_load(&g_user_segdom);
 
+    // Commit pending spawn PID (if any) so SYSCALL_EXIT/abort can report
+    // completion to waitpid slot tracking.
+    g_user_task_running_pid = g_user_task_pending_pid;
+    g_user_task_pending_pid = 0;
+
     // Enter ring3 at ELF entry.
     // printf("%c[elfrun] entering user mode: %s (entry=0x%X)\n", 0, 255, 0, abspath, (unsigned)entry);
     tss_set_kernel_stack((uint32)&stack_space);
@@ -572,11 +581,31 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
 
     // Current implementation runs immediately; this API is the compatibility
     // surface for future fully concurrent user-task scheduling.
+    g_user_task_pending_pid = slot->pid;
     int rc = user_elf_run_argv(drive, abspath, argc, argv);
-    slot->exited = 1;
-    slot->status = (rc == 0) ? 0 : -1;
+
+    // If the loader failed before entering ring3, finalize the slot here.
+    if (rc != 0) {
+        if (g_user_task_pending_pid == slot->pid) g_user_task_pending_pid = 0;
+        if (g_user_task_running_pid == slot->pid) g_user_task_running_pid = 0;
+        slot->exited = 1;
+        slot->status = -1;
+    }
 
     return slot->pid;
+}
+
+void user_task_notify_exit(int status) {
+    int pid = (int)g_user_task_running_pid;
+    if (pid > 0) {
+        user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
+        if (slot) {
+            slot->exited = 1;
+            slot->status = status;
+        }
+    }
+    g_user_task_running_pid = 0;
+    g_user_task_pending_pid = 0;
 }
 
 int user_task_waitpid(int pid, int* out_status, int flags) {

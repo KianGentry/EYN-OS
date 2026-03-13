@@ -4936,6 +4936,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_EXIT: {
+            user_task_notify_exit((int)arg1);
             // Clean up any GUI resources created by this user task.
             syscall_reset_user_guis();
             g_user_task_active = 0;

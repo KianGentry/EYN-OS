@@ -18,4 +18,8 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char* const* argv);
 int user_task_waitpid(int pid, int* out_status, int flags);
 
+// Record completion status for the currently running spawned user task.
+// Called from syscall/interrupt abort paths that terminate ring3 execution.
+void user_task_notify_exit(int status);
+
 #endif
