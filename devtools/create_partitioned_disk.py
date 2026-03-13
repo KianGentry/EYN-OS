@@ -2,10 +2,10 @@
 """
 create_partitioned_disk.py - Create a partitioned disk image for EYN-OS
 
-Creates a 10MB disk image with:
+Creates a 50MB disk image with:
 - MBR partition table
-- Partition 1: 5MB EYNFS (user files)
-- Partition 2: 5MB Swap
+- Partition 1: 40MB EYNFS (user files)
+- Partition 2: 10MB Swap
 
 Usage: python3 create_partitioned_disk.py [output.img]
 """

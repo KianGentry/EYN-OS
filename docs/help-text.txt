@@ -81,6 +81,7 @@ Utility Commands:
 ----------------
   alias           - Create or remove command aliases.
   calc            - Integer calculator supporting + - * /.
+  chibicc         - Run the chibicc command.
   diskmgr         - Manage logical drives from userland.
   download        - Download a file over HTTP/1.1 (GET only) with DNS support.
   echo            - Print arguments to stdout.

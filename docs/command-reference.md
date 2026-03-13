@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-13 00:58:35
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-13 17:43:00
 
-**Total Commands:** 80
+**Total Commands:** 81
 
 ## Table of Contents
 
@@ -988,6 +988,22 @@ calc 2+3*4
 
 ---
 
+### chibicc
+
+**Binary:** `testdir/binaries/chibicc`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the chibicc command.
+
+**Example:**
+```bash
+chibicc
+```
+
+---
+
 ### diskmgr
 
 **Binary:** `testdir/binaries/diskmgr`
@@ -1318,5 +1334,5 @@ xeyes
 | Memory Commands | 7 |
 | GUI/Window Commands | 10 |
 | Development Commands | 10 |
-| Utility Commands | 22 |
+| Utility Commands | 23 |
 

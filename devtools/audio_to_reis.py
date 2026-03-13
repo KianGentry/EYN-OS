@@ -1,36 +1,4 @@
 #!/usr/bin/env python3
-"""
-Convert WAV/MP3 audio files to the REIS (.reis) format used by EYN-OS.
-
-Usage
------
-    python3 audio_to_reis.py input.wav -o output.reis
-    python3 audio_to_reis.py input.mp3 -o output.reis
-    python3 audio_to_reis.py input.wav --compress -o compressed.reis
-    python3 audio_to_reis.py --test -o test_tone.reis
-
-Notes
------
-    By default, output is uncompressed (COMP_NONE).  The EYN-OS viewer
-    streams COMP_NONE files directly from disk, so arbitrarily large audio
-    files play without loading into the 1 MB userland heap.
-
-    PackBits RLE (--compress) barely helps with audio data and produces
-    files that cannot be streamed; they must fit in the heap to decode.
-
-Dependencies
-------------
-    WAV:  Python standard library (wave module) -- no external deps.
-    MP3:  Requires ffmpeg on $PATH (converts to temp WAV first).
-
-REIS format summary (see include/drivers/reis.h)
---------------------------------------------------
-    32-byte header (little-endian):
-      magic(4) version(2) channels(1) bits(1) sample_rate(4) frame_count(4)
-      data_offset(4) data_size(4) flags(4) reserved(4)
-
-    Followed by PCM payload: raw interleaved or PackBits-RLE compressed.
-"""
 
 import sys
 import struct
