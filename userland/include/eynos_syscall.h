@@ -254,6 +254,14 @@ enum {
     EYN_SYSCALL_PIPE = 124,
     // MKFIFO: args (const char* path) -> 0 or -1 (kernel-runtime FIFO namespace)
     EYN_SYSCALL_MKFIFO = 125,
+    // DUP: args (int oldfd) -> new fd or -1
+    EYN_SYSCALL_DUP = 126,
+    // DUP2: args (int oldfd, int newfd) -> newfd or -1
+    EYN_SYSCALL_DUP2 = 127,
+    // FD inheritance mode for run/spawn flows: args (int enabled) -> previous mode
+    EYN_SYSCALL_FD_SET_INHERIT = 128,
+    // Explicit stdio remap for next/active task: args (int in_fd, int out_fd, int err_fd)
+    EYN_SYSCALL_FD_SET_STDIO = 129,
 };
 
 typedef struct {

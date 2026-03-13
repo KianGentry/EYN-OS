@@ -19,6 +19,14 @@ int close(int fd) {
     return eyn_syscall1(EYN_SYSCALL_CLOSE, fd);
 }
 
+int dup(int oldfd) {
+    return eyn_syscall1(EYN_SYSCALL_DUP, oldfd);
+}
+
+int dup2(int oldfd, int newfd) {
+    return eyn_syscall3_iii(EYN_SYSCALL_DUP2, oldfd, newfd, 0);
+}
+
 int pipe(int pipefd[2]) {
     if (!pipefd) return -1;
     return eyn_syscall1(EYN_SYSCALL_PIPE, (int)(uintptr_t)pipefd);
@@ -28,6 +36,14 @@ int mkfifo(const char* path, mode_t mode) {
     (void)mode;
     if (!path) return -1;
     return eyn_syscall1(EYN_SYSCALL_MKFIFO, (int)(uintptr_t)path);
+}
+
+int fd_set_inherit(int enabled) {
+    return eyn_syscall1(EYN_SYSCALL_FD_SET_INHERIT, enabled ? 1 : 0);
+}
+
+int fd_set_stdio(int stdin_fd, int stdout_fd, int stderr_fd) {
+    return eyn_syscall3_iii(EYN_SYSCALL_FD_SET_STDIO, stdin_fd, stdout_fd, stderr_fd);
 }
 
 int writefile(const char* path, const void* buf, size_t len) {

@@ -94,6 +94,10 @@ enum {
     // IPC primitives
     EYN_SYSCALL_PIPE = 124,
     EYN_SYSCALL_MKFIFO = 125,
+    EYN_SYSCALL_DUP = 126,
+    EYN_SYSCALL_DUP2 = 127,
+    EYN_SYSCALL_FD_SET_INHERIT = 128,
+    EYN_SYSCALL_FD_SET_STDIO = 129,
 };
 
 enum {

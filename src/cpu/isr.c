@@ -518,6 +518,13 @@ uint32 get_last_error_eip() {
 /* IPC primitives */
 #define SYSCALL_PIPE 124
 #define SYSCALL_MKFIFO 125
+#define SYSCALL_DUP 126
+#define SYSCALL_DUP2 127
+#define SYSCALL_FD_SET_INHERIT 128
+#define SYSCALL_FD_SET_STDIO 129
+
+#define FIFO_METADATA_MARKER "EYNFIFO1\n"
+#define FIFO_METADATA_MARKER_LEN 9
 
 /* open(2) flag bits used by SYSCALL_OPEN for FIFO endpoint selection. */
 #define OPEN_FLAG_WRONLY 0x0001
@@ -820,6 +827,17 @@ static int user_pipe_read(int pipe_id, void* user_dst, int maxlen) {
     if (!p->used) return -1;
     if (maxlen == 0) return 0;
 
+    while (p->bytes_used == 0) {
+        if (p->writer_refs == 0) {
+            // POSIX-style EOF: no writers and no buffered bytes.
+            return 0;
+        }
+        if (g_user_interrupt) return -1;
+        watchdog_kick("pipe-read");
+        __asm__ __volatile__("sti");
+        __asm__ __volatile__("hlt");
+    }
+
     int n = 0;
     while (n < maxlen && p->bytes_used > 0) {
         uint8 b = p->buffer[p->read_pos];
@@ -837,8 +855,25 @@ static int user_pipe_write(int pipe_id, const void* user_src, int len) {
     if (!p->used) return -1;
     if (len == 0) return 0;
 
+    if (p->reader_refs == 0) {
+        // POSIX-like broken pipe behavior: no readers present.
+        return -1;
+    }
+
     int n = 0;
-    while (n < len && p->bytes_used < USER_PIPE_BUFFER_BYTES) {
+    while (n < len) {
+        while (p->bytes_used >= USER_PIPE_BUFFER_BYTES) {
+            if (p->reader_refs == 0) {
+                return (n > 0) ? n : -1;
+            }
+            if (g_user_interrupt) {
+                return (n > 0) ? n : -1;
+            }
+            watchdog_kick("pipe-write");
+            __asm__ __volatile__("sti");
+            __asm__ __volatile__("hlt");
+        }
+
         uint8 b = 0;
         if (copyin(&b, (const uint8*)user_src + n, 1) != 0) return -1;
         p->buffer[p->write_pos] = b;
@@ -886,6 +921,62 @@ static int user_fd_release(int fd) {
     ufd->cur_block = 0;
     ufd->cur_block_off = 0;
     return 0;
+}
+
+static int user_fd_duplicate_into(int oldfd, int newfd) {
+    if (oldfd < 0 || oldfd >= USER_FD_MAX || newfd < 0 || newfd >= USER_FD_MAX) return -1;
+    if (!g_user_fds[oldfd].used) return -1;
+    if (newfd <= 2) return -1;
+
+    if (oldfd == newfd) return newfd;
+    if (g_user_fds[newfd].used) {
+        if (user_fd_release(newfd) != 0) return -1;
+    }
+
+    user_fd_t* src = &g_user_fds[oldfd];
+    user_fd_t* dst = &g_user_fds[newfd];
+    memset(dst, 0, sizeof(*dst));
+
+    dst->used = 1;
+    dst->is_dir = src->is_dir;
+    dst->kind = src->kind;
+    dst->pipe_id = src->pipe_id;
+    dst->pipe_end = src->pipe_end;
+    dst->offset = src->offset;
+    dst->dir_pos = src->dir_pos;
+    dst->size = src->size;
+    dst->drive = src->drive;
+    dst->eynfs_first_block = src->eynfs_first_block;
+    dst->cur_block = src->cur_block;
+    dst->cur_block_off = src->cur_block_off;
+    dst->kbuf = NULL;
+    dst->kbuf_size = 0;
+    strncpy(dst->path, src->path, sizeof(dst->path) - 1);
+    dst->path[sizeof(dst->path) - 1] = '\0';
+
+    if (dst->kind == USER_FD_KIND_PIPE && dst->pipe_id >= 0 && dst->pipe_id < USER_PIPE_MAX) {
+        user_pipe_t* p = &g_user_pipes[dst->pipe_id];
+        if (!p->used) {
+            memset(dst, 0, sizeof(*dst));
+            return -1;
+        }
+        if (dst->pipe_end == USER_PIPE_END_READ) p->reader_refs++;
+        else if (dst->pipe_end == USER_PIPE_END_WRITE) p->writer_refs++;
+    }
+
+    return newfd;
+}
+
+static int user_pipe_get_or_create_fifo(const char* path) {
+    int fifo_id = user_pipe_find_fifo_by_path(path);
+    if (fifo_id >= 0) return fifo_id;
+
+    vfs_stat_t st;
+    if (vfs_stat(get_current_physical_drive(), path, &st) != 0 || st.type != VFS_NODE_FIFO) {
+        return -1;
+    }
+
+    return user_pipe_alloc(1, path);
 }
 
 void syscall_set_user_fd_inherit_mode(int enabled) {
@@ -2977,7 +3068,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             char abspath[128];
             resolve_path(path, cwd, abspath, sizeof(abspath));
 
-            int fifo_id = user_pipe_find_fifo_by_path(abspath);
+            int fifo_id = user_pipe_get_or_create_fifo(abspath);
             if (fifo_id >= 0) {
                 int fd = user_fd_alloc();
                 if (fd < 0) { regs->eax = (uint32)-1; break; }
@@ -3073,6 +3164,69 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = (user_fd_release(fd) == 0) ? 0u : (uint32)-1;
             break;
         }
+        case SYSCALL_DUP: {
+            int oldfd_req = (int)arg1;
+            int oldfd = oldfd_req;
+            if (oldfd_req == 0) oldfd = g_user_stdio_stdin_fd;
+            else if (oldfd_req == 1) oldfd = g_user_stdio_stdout_fd;
+            else if (oldfd_req == 2) oldfd = g_user_stdio_stderr_fd;
+
+            if (oldfd <= 2 || oldfd < 0 || oldfd >= USER_FD_MAX || !g_user_fds[oldfd].used) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            int newfd = -1;
+            for (int i = 3; i < USER_FD_MAX; ++i) {
+                if (!g_user_fds[i].used) {
+                    newfd = i;
+                    break;
+                }
+            }
+            if (newfd < 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            regs->eax = (uint32)user_fd_duplicate_into(oldfd, newfd);
+            break;
+        }
+        case SYSCALL_DUP2: {
+            int oldfd_req = (int)arg1;
+            int newfd = (int)arg2;
+            int oldfd = oldfd_req;
+            if (oldfd_req == 0) oldfd = g_user_stdio_stdin_fd;
+            else if (oldfd_req == 1) oldfd = g_user_stdio_stdout_fd;
+            else if (oldfd_req == 2) oldfd = g_user_stdio_stderr_fd;
+
+            if (oldfd <= 2 || oldfd < 0 || oldfd >= USER_FD_MAX || !g_user_fds[oldfd].used) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            if (newfd < 0 || newfd >= USER_FD_MAX) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            if (newfd == 0) {
+                g_user_stdio_stdin_fd = oldfd;
+                regs->eax = 0;
+                break;
+            }
+            if (newfd == 1) {
+                g_user_stdio_stdout_fd = oldfd;
+                regs->eax = 1;
+                break;
+            }
+            if (newfd == 2) {
+                g_user_stdio_stderr_fd = oldfd;
+                regs->eax = 2;
+                break;
+            }
+
+            regs->eax = (uint32)user_fd_duplicate_into(oldfd, newfd);
+            break;
+        }
         case SYSCALL_PIPE: {
             int* user_pipefd = (int*)arg1;
             if (!user_pipefd) { regs->eax = (uint32)-1; break; }
@@ -3095,6 +3249,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_MKFIFO: {
+            if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             const char* user_path = (const char*)arg1;
             if (!user_path) { regs->eax = (uint32)-1; break; }
 
@@ -3108,6 +3263,18 @@ uint32 syscall_dispatch(regs_t* regs) {
             }
             char abspath[128];
             resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            vfs_stat_t existing;
+            if (vfs_stat(g_current_drive, abspath, &existing) == 0) {
+                if (existing.type == VFS_NODE_FIFO) {
+                    if (user_pipe_get_or_create_fifo(abspath) >= 0) {
+                        regs->eax = 0;
+                        break;
+                    }
+                }
+                regs->eax = (uint32)-1;
+                break;
+            }
 
             if (user_pipe_find_fifo_by_path(abspath) >= 0) {
                 regs->eax = 0;
@@ -3132,8 +3299,43 @@ uint32 syscall_dispatch(regs_t* regs) {
                 break;
             }
 
+            int marker_rc = vfs_write_file(g_current_drive,
+                                           abspath,
+                                           FIFO_METADATA_MARKER,
+                                           FIFO_METADATA_MARKER_LEN);
+            if (marker_rc < 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
             int pipe_id = user_pipe_alloc(1, abspath);
             regs->eax = (pipe_id >= 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_FD_SET_INHERIT: {
+            int prev = g_user_fd_inherit_mode;
+            syscall_set_user_fd_inherit_mode(((int)arg1) != 0 ? 1 : 0);
+            regs->eax = (uint32)prev;
+            break;
+        }
+        case SYSCALL_FD_SET_STDIO: {
+            int in_fd = (int)arg1;
+            int out_fd = (int)arg2;
+            int err_fd = (int)arg3;
+
+            if (in_fd < 0 || in_fd >= USER_FD_MAX ||
+                out_fd < 0 || out_fd >= USER_FD_MAX ||
+                err_fd < 0 || err_fd >= USER_FD_MAX) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            if (in_fd > 2 && !g_user_fds[in_fd].used) { regs->eax = (uint32)-1; break; }
+            if (out_fd > 2 && !g_user_fds[out_fd].used) { regs->eax = (uint32)-1; break; }
+            if (err_fd > 2 && !g_user_fds[err_fd].used) { regs->eax = (uint32)-1; break; }
+
+            syscall_set_user_stdio_fds(in_fd, out_fd, err_fd);
+            regs->eax = 0;
             break;
         }
         case SYSCALL_CAP_MINT_FD: {

@@ -15,10 +15,16 @@ ssize_t write(int fd, const void* buf, size_t len);
 ssize_t read(int fd, void* buf, size_t len);
 
 int close(int fd);
+int dup(int oldfd);
+int dup2(int oldfd, int newfd);
 
 // IPC primitives
 int pipe(int pipefd[2]);
 int mkfifo(const char* path, mode_t mode);
+
+// Explicit FD inheritance controls for spawn/run workflows.
+int fd_set_inherit(int enabled);
+int fd_set_stdio(int stdin_fd, int stdout_fd, int stderr_fd);
 
 // Create/overwrite a file with given contents.
 int writefile(const char* path, const void* buf, size_t len);

@@ -75,7 +75,7 @@ Open a file or directory for reading.
 - EDX: mode (unused today)
 
 Notes:
-- Paths registered through `mkfifo` resolve to runtime FIFO objects.
+- Paths created by `mkfifo` resolve to persistent FIFO metadata files (`VFS_NODE_FIFO`) and runtime FIFO objects.
 - For FIFO paths, `O_RDONLY` opens the read end, `O_WRONLY`/`O_RDWR` open the write end.
 
 #### Close (syscall 5)
@@ -96,7 +96,7 @@ Create an anonymous unidirectional byte-stream pipe.
 On success, `pipefd[0]` is the read end and `pipefd[1]` is the write end.
 
 #### Named pipe create (syscall 125)
-Create/register a named FIFO endpoint in the kernel runtime IPC namespace.
+Create a named FIFO endpoint and persist its metadata in the filesystem.
 
 **Arguments:**
 - EBX: `const char* path`
@@ -106,7 +106,49 @@ Create/register a named FIFO endpoint in the kernel runtime IPC namespace.
 
 Notes:
 - FIFO names are opened with `open(path, O_RDONLY|O_WRONLY|O_RDWR, ...)`.
-- FIFO registration is kernel-runtime metadata, not an on-disk EYNFS file type.
+- FIFO metadata is persisted as a marker file and surfaced as `VFS_NODE_FIFO` by `vfs_stat`.
+
+#### Duplicate file descriptor (syscall 126)
+Create a duplicate of an open file descriptor.
+
+**Arguments:**
+- EBX: `oldfd`
+
+**Returns:**
+- EAX: `newfd` on success, `-1` on failure
+
+#### Duplicate to target descriptor (syscall 127)
+Duplicate `oldfd` into a caller-selected descriptor.
+
+**Arguments:**
+- EBX: `oldfd`
+- ECX: `newfd`
+
+**Returns:**
+- EAX: `newfd` on success, `-1` on failure
+
+Notes:
+- `newfd` values `0`, `1`, `2` remap stdin/stdout/stderr to the duplicated endpoint.
+
+#### Set FD inheritance mode (syscall 128)
+Control whether ring3 FD table entries survive `exit`/`run` transitions.
+
+**Arguments:**
+- EBX: `enabled` (`0` or `1`)
+
+**Returns:**
+- EAX: previous mode (`0` or `1`)
+
+#### Set stdio FD mapping (syscall 129)
+Explicitly set the active stdin/stdout/stderr backing descriptors.
+
+**Arguments:**
+- EBX: stdin fd
+- ECX: stdout fd
+- EDX: stderr fd
+
+**Returns:**
+- EAX: `0` on success, `-1` on failure
 
 #### Get directory entries (syscall 7)
 Read directory entries from an open directory fd.

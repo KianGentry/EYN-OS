@@ -17,6 +17,7 @@ typedef enum {
 	VFS_NODE_NONE = 0,
 	VFS_NODE_FILE = 1,
 	VFS_NODE_DIR  = 2,
+	VFS_NODE_FIFO = 3,
 } vfs_node_type_t;
 
 typedef struct {
@@ -39,6 +40,11 @@ int vfs_get_file_size(uint8 drive, const char* path, uint32* out_size);
 
 // Stat: get node type and size
 int vfs_stat(uint8 drive, const char* path, vfs_stat_t* st);
+
+typedef int (*vfs_listdir_typed_cb_t)(const char* name, vfs_node_type_t type, uint32 size, void* user);
+
+// List directory entries with explicit node type information.
+int vfs_listdir_typed(uint8 drive, const char* path, vfs_listdir_typed_cb_t cb, void* user);
 
 // List directory entries via callback; callback returns 0 to continue, non-zero to stop
 // name: entry name, is_dir: 1 if directory, size: file size for files

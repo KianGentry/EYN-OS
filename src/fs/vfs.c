@@ -10,6 +10,8 @@
 #include <utilities/shell/shell_args.h>
 
 #define EYNFS_SUPERBLOCK_LBA 2048
+#define VFS_FIFO_MARKER "EYNFIFO1\n"
+#define VFS_FIFO_MARKER_LEN 9
 
 static int vfs_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -28,6 +30,30 @@ static void vfs_ctx_account(uint32 cost) {
     scheduler_account(ctx->wo, cost);
     scheduler_yield_if_needed(ctx->wo);
     if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
+static int vfs_is_fifo_marker_file(uint8 drive, const char* path) {
+    if (!path || !path[0]) return 0;
+
+    char marker[VFS_FIFO_MARKER_LEN];
+    int n = vfs_read_file_at(drive, path, marker, VFS_FIFO_MARKER_LEN, 0);
+    if (n != VFS_FIFO_MARKER_LEN) return 0;
+    for (int i = 0; i < VFS_FIFO_MARKER_LEN; ++i) {
+        if (marker[i] != VFS_FIFO_MARKER[i]) return 0;
+    }
+    return 1;
+}
+
+static int vfs_join_child_path(const char* parent, const char* name, char out[256]) {
+    if (!name || !name[0] || !out) return -1;
+
+    if (!parent || !parent[0] || strcmp(parent, "/") == 0) {
+        int n = snprintf(out, 256, "/%s", name);
+        return (n > 0 && n < 256) ? 0 : -1;
+    }
+
+    int n = snprintf(out, 256, "%s/%s", parent, name);
+    return (n > 0 && n < 256) ? 0 : -1;
 }
 
 // Internal: FAT32 helpers for absolute path traversal (8.3 only for now)
@@ -298,7 +324,12 @@ int vfs_stat(uint8 drive, const char* path, vfs_stat_t* st) {
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; if (eynfs_traverse_path(drive, &sb, path, &ent, NULL, NULL) != 0) return -2;
         st->type = (ent.type == EYNFS_TYPE_DIR) ? VFS_NODE_DIR : VFS_NODE_FILE;
-        st->size = ent.size; return 0;
+        st->size = ent.size;
+        if (st->type == VFS_NODE_FILE && vfs_is_fifo_marker_file(drive, path)) {
+            st->type = VFS_NODE_FIFO;
+            st->size = 0;
+        }
+        return 0;
     }
     uint32 part_lba = fat32_get_partition_lba_start(drive);
     struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -3;
@@ -310,28 +341,38 @@ int vfs_stat(uint8 drive, const char* path, vfs_stat_t* st) {
     }
     struct fat32_dir_entry dent; uint32 clus;
     if (fat32_path_to_entry(drive, &bpb, path, &dent, &clus) != 0) return -4;
-    if (dent.Attr & 0x10) { st->type = VFS_NODE_DIR; st->size = 0; }
-    else { st->type = VFS_NODE_FILE; st->size = dent.FileSize; }
+    if (dent.Attr & 0x10) {
+        st->type = VFS_NODE_DIR;
+        st->size = 0;
+    } else {
+        st->type = VFS_NODE_FILE;
+        st->size = dent.FileSize;
+        if (vfs_is_fifo_marker_file(drive, path)) {
+            st->type = VFS_NODE_FIFO;
+            st->size = 0;
+        }
+    }
     return 0;
 }
 
-int vfs_listdir(uint8 drive, const char* path,
-                int (*cb)(const char* name, int is_dir, uint32 size, void* user),
-                void* user) {
+int vfs_listdir_typed(uint8 drive, const char* path, vfs_listdir_typed_cb_t cb, void* user) {
     if (!path || !cb) return -1;
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
-        // Resolve path to directory
-        eynfs_dir_entry_t dir; if (strcmp(path, "/") == 0) { dir.type = EYNFS_TYPE_DIR; dir.first_block = sb.root_dir_block; }
-        else if (eynfs_traverse_path(drive, &sb, path, &dir, NULL, NULL) != 0 || dir.type != EYNFS_TYPE_DIR) return -2;
+        eynfs_dir_entry_t dir;
+        if (strcmp(path, "/") == 0) {
+            dir.type = EYNFS_TYPE_DIR;
+            dir.first_block = sb.root_dir_block;
+        } else if (eynfs_traverse_path(drive, &sb, path, &dir, NULL, NULL) != 0 || dir.type != EYNFS_TYPE_DIR) {
+            return -2;
+        }
 
-        // Stream the directory table by walking the on-disk block chain.
-        // This avoids a fixed MAX_ENTRIES cap and keeps memory usage constant.
         uint32_t current_block = dir.first_block;
         uint8 buf[512];
         int block_count = 0;
-        const int max_blocks = 4096; // safety bound; still allows tens of thousands of entries
+        const int max_blocks = 4096;
 
         while (current_block && block_count < max_blocks) {
             if ((block_count & 0xF) == 0) vfs_ctx_account(SCHED_COST_FS);
@@ -348,8 +389,17 @@ int vfs_listdir(uint8 drive, const char* path,
                 memcpy(name, entries[i].name, EYNFS_NAME_MAX);
                 name[EYNFS_NAME_MAX - 1] = '\0';
 
-                int stop = cb(name, entries[i].type == EYNFS_TYPE_DIR, entries[i].size, user);
-                if (stop) return 0;
+                vfs_node_type_t type = (entries[i].type == EYNFS_TYPE_DIR) ? VFS_NODE_DIR : VFS_NODE_FILE;
+                uint32 size = entries[i].size;
+                if (type == VFS_NODE_FILE) {
+                    char child_path[256];
+                    if (vfs_join_child_path(path, name, child_path) == 0 && vfs_is_fifo_marker_file(drive, child_path)) {
+                        type = VFS_NODE_FIFO;
+                        size = 0;
+                    }
+                }
+
+                if (cb(name, type, size, user)) return 0;
             }
 
             current_block = next_block;
@@ -358,14 +408,14 @@ int vfs_listdir(uint8 drive, const char* path,
 
         return 0;
     }
-    // FAT32 dir list
+
     uint32 part_lba = fat32_get_partition_lba_start(drive);
     struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -4;
     struct fat32_dir_entry dent; uint32 clus;
     if (fat32_path_to_entry(drive, &bpb, path, &dent, &clus) != 0) {
-        // If path is root '/'
         if (strcmp(path, "/") == 0) clus = bpb.RootClus; else return -5;
     }
+
     uint32 byts_per_sec = bpb.BytsPerSec;
     uint32 sec_per_clus = bpb.SecPerClus;
     uint32 first_data_sec = bpb.RsvdSecCnt + (bpb.NumFATs * bpb.FATSz32);
@@ -378,26 +428,66 @@ int vfs_listdir(uint8 drive, const char* path,
             struct fat32_dir_entry* entries = (struct fat32_dir_entry*)sector;
             int per = byts_per_sec / sizeof(struct fat32_dir_entry);
             for (int i = 0; i < per; ++i) {
-                if (entries[i].Name[0] == 0x00) return 0; // end of dir
-                if ((entries[i].Attr & 0x0F) == 0x0F) continue; // skip LFN for now
-                if (entries[i].Attr & 0x08) continue; // skip volume label
-                if (entries[i].Name[0] == 0xE5) continue; // deleted
-                // Build friendly 8.3 display name
-                char name_base[9]; int bi=0; for (int j=0;j<8 && entries[i].Name[j] != ' '; ++j) name_base[bi++] = entries[i].Name[j]; name_base[bi] = '\0';
-                char ext[4]; int ei=0; for (int j=0;j<3 && entries[i].Name[8+j] != ' '; ++j) ext[ei++] = entries[i].Name[8+j]; ext[ei] = '\0';
-                char disp[13]; disp[0]='\0';
-                strncpy(disp, name_base, sizeof(disp)-1); disp[sizeof(disp)-1]='\0';
-                if (ei > 0) { strncat(disp, ".", sizeof(disp)-strlen(disp)-1); strncat(disp, ext, sizeof(disp)-strlen(disp)-1); }
-                if (disp[0] == '.' && (disp[1] == '\0' || (disp[1]=='.' && disp[2]=='\0'))) continue; // skip . and ..
-                int is_dir = (entries[i].Attr & 0x10) ? 1 : 0;
-                uint32 size = is_dir ? 0 : entries[i].FileSize;
-                int stop = cb(disp, is_dir, size, user);
-                if (stop) return 0;
+                if (entries[i].Name[0] == 0x00) return 0;
+                if ((entries[i].Attr & 0x0F) == 0x0F) continue;
+                if (entries[i].Attr & 0x08) continue;
+                if (entries[i].Name[0] == 0xE5) continue;
+
+                char name_base[9]; int bi = 0;
+                for (int j = 0; j < 8 && entries[i].Name[j] != ' '; ++j) name_base[bi++] = entries[i].Name[j];
+                name_base[bi] = '\0';
+                char ext[4]; int ei = 0;
+                for (int j = 0; j < 3 && entries[i].Name[8 + j] != ' '; ++j) ext[ei++] = entries[i].Name[8 + j];
+                ext[ei] = '\0';
+
+                char disp[13];
+                disp[0] = '\0';
+                strncpy(disp, name_base, sizeof(disp) - 1);
+                disp[sizeof(disp) - 1] = '\0';
+                if (ei > 0) {
+                    strncat(disp, ".", sizeof(disp) - strlen(disp) - 1);
+                    strncat(disp, ext, sizeof(disp) - strlen(disp) - 1);
+                }
+
+                if (disp[0] == '.' && (disp[1] == '\0' || (disp[1] == '.' && disp[2] == '\0'))) continue;
+
+                vfs_node_type_t type = (entries[i].Attr & 0x10) ? VFS_NODE_DIR : VFS_NODE_FILE;
+                uint32 size = (type == VFS_NODE_DIR) ? 0 : entries[i].FileSize;
+                if (type == VFS_NODE_FILE) {
+                    char child_path[256];
+                    if (vfs_join_child_path(path, disp, child_path) == 0 && vfs_is_fifo_marker_file(drive, child_path)) {
+                        type = VFS_NODE_FIFO;
+                        size = 0;
+                    }
+                }
+
+                if (cb(disp, type, size, user)) return 0;
             }
         }
         clus = fat32_next_cluster_sector(drive, part_lba, &bpb, clus);
     }
     return 0;
+}
+
+typedef struct {
+    int (*cb)(const char* name, int is_dir, uint32 size, void* user);
+    void* user;
+} vfs_listdir_compat_ctx_t;
+
+static int vfs_listdir_compat_cb(const char* name, vfs_node_type_t type, uint32 size, void* user) {
+    vfs_listdir_compat_ctx_t* ctx = (vfs_listdir_compat_ctx_t*)user;
+    if (!ctx || !ctx->cb) return 1;
+    return ctx->cb(name, (type == VFS_NODE_DIR) ? 1 : 0, size, ctx->user);
+}
+
+int vfs_listdir(uint8 drive, const char* path,
+                int (*cb)(const char* name, int is_dir, uint32 size, void* user),
+                void* user) {
+    if (!cb) return -1;
+    vfs_listdir_compat_ctx_t ctx;
+    ctx.cb = cb;
+    ctx.user = user;
+    return vfs_listdir_typed(drive, path, vfs_listdir_compat_cb, &ctx);
 }
 
 static void vfs_split_path(const char* abspath, char* parent_out, size_t parent_sz, char* base_out, size_t base_sz) {
