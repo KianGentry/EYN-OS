@@ -22,6 +22,8 @@ int user_task_waitpid(int pid, int* out_status, int flags);
 // Called from syscall/interrupt abort paths that terminate ring3 execution.
 void user_task_notify_exit(int status);
 int user_task_continue_or_schedule(void);
+void user_task_request_schedule(void);
+int user_task_poll_scheduler(void);
 
 // Mapping ownership accessors used by abort/cleanup logic.
 void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* stack_page);

@@ -571,6 +571,7 @@ typedef struct {
 static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static int g_user_task_next_pid = 1;
 static user_task_slot_t* g_user_task_active_slot = NULL;
+static volatile int g_user_task_schedule_request = 0;
 
 static user_task_image_t* user_task_image_build(uint8 drive,
                                                 const char* abspath,
@@ -642,6 +643,10 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
     return rc;
 }
 
+void user_task_request_schedule(void) {
+    g_user_task_schedule_request = 1;
+}
+
 void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* stack_page) {
     if (g_user_task_active_slot) {
         if (base) *base = g_user_task_active_slot->runtime.code_base;
@@ -707,6 +712,8 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
         if (user_task_launch_slot(slot) != 0) {
             return slot->pid;
         }
+    } else {
+        user_task_request_schedule();
     }
 
     return slot->pid;
@@ -723,6 +730,17 @@ int user_task_continue_or_schedule(void) {
     return 0;
 }
 
+int user_task_poll_scheduler(void) {
+    if (!g_user_task_schedule_request) return 0;
+    if (g_user_task_active) return 0;
+
+    int ran = user_task_continue_or_schedule();
+    if (!ran) {
+        g_user_task_schedule_request = 0;
+    }
+    return ran;
+}
+
 void user_task_notify_exit(int status) {
     int pid = (int)g_user_task_running_pid;
     if (pid > 0) {
@@ -735,6 +753,7 @@ void user_task_notify_exit(int status) {
     g_user_task_active_slot = NULL;
     g_user_task_running_pid = 0;
     g_user_task_pending_pid = 0;
+    user_task_request_schedule();
 }
 
 int user_task_waitpid(int pid, int* out_status, int flags) {
@@ -756,5 +775,6 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->exited = 0;
     slot->status = 0;
     slot->started = 0;
+    user_task_request_schedule();
     return pid;
 }

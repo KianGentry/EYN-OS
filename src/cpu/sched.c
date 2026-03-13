@@ -3,6 +3,7 @@
 #include <irq.h>
 #include <watchdog.h>
 #include <stddef.h>
+#include <cpu/user_elf.h>
 
 #define SCHED_WORK_MAX 64
 /*
@@ -84,6 +85,7 @@ void sched_init(void) {
 void sched_yield(void) {
     // cooperative yield: no-op for now
     g_current_slice = 0; // force timeslice end handling on next tick
+    (void)user_task_poll_scheduler();
 }
 
 void sched_sleep_us(uint32 microseconds) {
@@ -99,6 +101,7 @@ void sched_sleep_us(uint32 microseconds) {
     uint32 start_ticks = g_ticks;
     uint32 target_ticks = start_ticks + needed_ticks;
     while ((uint32)g_ticks < target_ticks) {
+        (void)user_task_poll_scheduler();
         // halt until next interrupt to save cpu; track for idle time estimation
         __asm__ __volatile__("hlt");
     }
