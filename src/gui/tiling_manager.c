@@ -23,6 +23,7 @@ static int g_tm_initialized = 0;
 #include <fs/vfs.h>
 #include <cpu/user_elf.h>
 #include <multiboot.h>
+#include <ata.h>
 
 extern uint8_t g_current_drive;
 static int g_tm_boot_installer_attempted = 0;
@@ -69,6 +70,22 @@ static int tm_boot_installer_requested(void) {
     return tm_str_contains(cmdline, "installer=1") || tm_str_contains(cmdline, "installer");
 }
 
+static int tm_disk_has_installer_binary(void) {
+    uint8 logical_count = ata_get_num_logical_drives();
+    for (uint8 logical = 0; logical < logical_count; ++logical) {
+        if (!ata_logical_drive_present(logical)) continue;
+        uint8 physical = ata_logical_to_physical(logical);
+        if (physical == 0xFFu) continue;
+        if (vfs_detect(physical) != VFS_FS_EYNFS) continue;
+
+        vfs_stat_t st;
+        if (vfs_stat(physical, "/binaries/installer", &st) == 0 && st.type == VFS_NODE_FILE) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* -- Main compositor loop and runtime configuration -------------------- */
 
 void start_tiling_manager() {
@@ -88,12 +105,15 @@ void start_tiling_manager() {
         printf("[installer] tm boot check: current_drive=0x%X fs=%d ram_fs=%d installer=%d\n",
                (unsigned)g_current_drive, (int)drive_fs, (int)ram_fs, installer_requested);
 
-        if (installer_requested && ram_fs == VFS_FS_EYNFS) {
+        int disk_has_installer = tm_disk_has_installer_binary();
+        if (installer_requested && ram_fs == VFS_FS_EYNFS && !disk_has_installer) {
             g_current_drive = VFS_DRIVE_RAM;
             printf("[installer] forcing current drive to RAM:/ due to installer boot flag\n");
-        } else if (drive_fs == VFS_FS_NONE && ram_fs == VFS_FS_EYNFS) {
+        } else if (drive_fs == VFS_FS_NONE && ram_fs == VFS_FS_EYNFS && !disk_has_installer) {
             g_current_drive = VFS_DRIVE_RAM;
             printf("[installer] switched current drive to RAM:/ because disk fs is NONE\n");
+        } else if (installer_requested && disk_has_installer) {
+            printf("[installer] disk /binaries/installer present; skipping RAM auto-fallback\n");
         }
 
         // initialize screen dimensions from global framebuffer if available
@@ -209,6 +229,7 @@ void start_tiling_manager() {
             printf("[installer] tm launch check: drive=0x%X stat=%d type=%d\n",
                    (unsigned)g_current_drive, installer_stat, (int)st.type);
             if (g_current_drive == VFS_DRIVE_RAM &&
+                !tm_disk_has_installer_binary() &&
                 installer_stat == 0 &&
                 st.type == VFS_NODE_FILE) {
                 printf("[installer] launching RAM:/binaries/installer\n");

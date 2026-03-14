@@ -77,10 +77,18 @@ def build_grub_core_image(repo_root: str, out_core: str, kernel_bin: str) -> boo
     return os.path.isfile(out_core)
 
 
-def copy_tree(src: str, dst: str) -> None:
+def copy_tree(src: str, dst: str, prune_dev: bool = True) -> None:
     if not os.path.isdir(src):
         return
+
+    pruned_top_dirs = {"code"} if prune_dev else set()
+
     for root, dirs, files in os.walk(src):
+        if prune_dev:
+            rel = os.path.relpath(root, src)
+            if rel == ".":
+                dirs[:] = [d for d in dirs if d not in pruned_top_dirs]
+
         rel = os.path.relpath(root, src)
         out_root = dst if rel == "." else os.path.join(dst, rel)
         os.makedirs(out_root, exist_ok=True)
@@ -99,8 +107,12 @@ def main() -> int:
     testdir = os.path.join(repo_root, "testdir")
     kernel_bin = os.path.join(repo_root, "tmp_user", "boot", "kernel.bin")
 
+    prune_dev = os.environ.get("EYN_INSTALLER_RAMDISK_PRUNE", "1") != "0"
+    if prune_dev:
+        print("Installer ramdisk: pruning dev-only payload (excluding testdir/code)")
+
     with tempfile.TemporaryDirectory(prefix="installer_ramdisk_src_") as stage:
-        copy_tree(testdir, stage)
+        copy_tree(testdir, stage, prune_dev=prune_dev)
 
         # Ensure installer payload includes kernel for installed target.
         if os.path.isfile(kernel_bin):

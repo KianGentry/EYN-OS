@@ -77,6 +77,11 @@ New wrappers:
 The shell auto-launches installer on boot when this file exists in RAM media:
 - `RAM:/binaries/installer`
 
+Auto-start policy:
+- RAM installer auto-start is now fallback-only.
+- If any EYNFS disk already contains `/binaries/installer`, boot stays on disk
+  flow and RAM installer is not auto-launched.
+
 ## Installer Program
 
 Source:
@@ -98,5 +103,13 @@ Note:
   (`multiboot (hd0)1024+<sectors>`).
 - The partition table is rebuilt from installer partition metadata so MBR boot
   code installation does not erase partition entries.
-- `core.img` is generated during host build using `grub-mkstandalone` and
+- `core.img` is generated during host build using `grub-mkimage` and
   packed into installer RAM media.
+
+## RAM Media Size
+
+Installer ramdisk build now prunes dev-only payload by default:
+- Excludes `testdir/code` from RAM media staging.
+- Toggle with environment variable:
+  - `EYN_INSTALLER_RAMDISK_PRUNE=1` (default): prune dev-only content
+  - `EYN_INSTALLER_RAMDISK_PRUNE=0`: include full `testdir/`

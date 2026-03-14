@@ -20,6 +20,7 @@
 #include <misc/sched.h>
 #include <stdint.h>
 #include <utilities/shell/shell_script.h>
+#include <ata.h>
 #define COMMAND_HASH_SIZE 256
 typedef struct {
     const char* name;                 // command name key
@@ -29,6 +30,22 @@ static command_hash_entry_t g_command_hash_table[COMMAND_HASH_SIZE];
 static int g_command_hash_initialized = 0;
 static int g_command_hash_disabled = 0; // Fallback to linear search when table would be full
 static int g_boot_installer_autorun_done = 0;
+
+static int shell_disk_has_installer_binary(void) {
+    uint8 logical_count = ata_get_num_logical_drives();
+    for (uint8 logical = 0; logical < logical_count; ++logical) {
+        if (!ata_logical_drive_present(logical)) continue;
+        uint8 physical = ata_logical_to_physical(logical);
+        if (physical == 0xFFu) continue;
+        if (vfs_detect(physical) != VFS_FS_EYNFS) continue;
+
+        vfs_stat_t st;
+        if (vfs_stat(physical, "/binaries/installer", &st) == 0 && st.type == VFS_NODE_FILE) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 static size_t shell_command_count(void) {
     uintptr_t start = (uintptr_t)__start_shellcmds;
@@ -342,14 +359,15 @@ void launch_shell(int n) {
     // Initialize pipeline system
     init_pipeline_system();
 
-    if (vfs_detect(g_current_drive) == VFS_FS_NONE && vfs_detect(VFS_DRIVE_RAM) == VFS_FS_EYNFS) {
+    int disk_has_installer = shell_disk_has_installer_binary();
+    if (!disk_has_installer && vfs_detect(g_current_drive) == VFS_FS_NONE && vfs_detect(VFS_DRIVE_RAM) == VFS_FS_EYNFS) {
         g_current_drive = VFS_DRIVE_RAM;
         strncpy(shell_current_path, "/", sizeof(shell_current_path) - 1);
         shell_current_path[sizeof(shell_current_path) - 1] = '\0';
         printf("%c[installer] defaulting shell drive to RAM:/\n", 140, 220, 255);
     }
 
-    if (!g_boot_installer_autorun_done) {
+    if (!disk_has_installer && !g_boot_installer_autorun_done) {
         vfs_stat_t st;
         if (vfs_stat(VFS_DRIVE_RAM, "/binaries/installer", &st) == 0 && st.type == VFS_NODE_FILE) {
             g_boot_installer_autorun_done = 1;
