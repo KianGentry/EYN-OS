@@ -90,9 +90,16 @@ Source:
 Current flow:
 1. GUI drive selection
 2. Partition + EYNFS format via `INSTALLER_PREPARE_DRIVE`
-3. Recursive copy from `RAM:/` to target drive
+3. Apply packaged payload archive from `RAM:/installer/payload.eynpkg`
+4. Fallback to recursive `RAM:/` copy only if archive is missing
 4. Write `/boot/grub/grub.cfg`
 5. Embed GRUB BIOS bootloader to disk
+
+Installer UX progress reporting:
+- During install phases, the GUI now repaints continuously from the worker path
+  (no "frozen" look while copy/write is in progress).
+- A progress bar is shown during payload apply/copy and bootloader stages.
+- Live status text below the bar shows the current file/directory/action.
 
 Note:
 - Installer bootloader install now writes:
@@ -113,3 +120,41 @@ Installer ramdisk build now prunes dev-only payload by default:
 - Toggle with environment variable:
   - `EYN_INSTALLER_RAMDISK_PRUNE=1` (default): prune dev-only content
   - `EYN_INSTALLER_RAMDISK_PRUNE=0`: include full `testdir/`
+
+Installer ramdisk image sizing is now dynamic:
+- The builder sizes EYNFS and swap partitions from staged installer content,
+  instead of always creating a fixed 28MB module.
+- Default low-RAM profile is small swap and conservative EYNFS headroom.
+
+Size tuning environment variables:
+- `EYN_INSTALLER_RAMDISK_HEADROOM` (default `0.10`): metadata/expansion
+  multiplier used when picking EYNFS partition size.
+- `EYN_INSTALLER_RAMDISK_MIN_EYNFS_SECTORS` (default `6144`, ~3MB): lower
+  bound for EYNFS partition size.
+- `EYN_INSTALLER_RAMDISK_SWAP_MB` (default `0`): swap partition size in MB.
+- `EYN_INSTALLER_RAMDISK_PART1_START_SECTOR` (default `1`): partition start
+  LBA in the installer ramdisk image (reduces module file bytes vs 2048).
+- `EYN_INSTALLER_RAMDISK_PRUNE_EXTRA` (default `1`): additionally prunes
+  heavy optional content (`testdir/programs`, `testdir/images`) from installer
+  payload to improve low-RAM boot success.
+- `EYN_INSTALLER_RAMDISK_INCLUDE_HEADERS` (default `0`): include
+  `userland/include` in payload.
+- `EYN_INSTALLER_RAMDISK_INCLUDE_FONTS` (default `0`): include fonts in
+  payload (`EYN_INSTALLER_RAMDISK_FONT_PROFILE=none|minimal|full`, default
+  `minimal` when enabled).
+
+Build integration note:
+- Installer ramdisk build explicitly disables `copy_testdir_to_eynfs.py`
+  repo-level auto-injection of `/fonts` and `/include` (`EYNFS_COPY_FONTS=0`,
+  `EYNFS_COPY_HEADERS=0`) to keep module size bounded.
+
+Installer media now supports a two-stage payload model:
+- Host build creates `installer/payload.eynpkg` from staged payload content.
+- Payload archive supports file/dir entries and optional RLE compression.
+- Installer applies archive entries via EYNFS stream writes on target.
+
+Minimal-vs-full stage toggle:
+- `EYN_INSTALLER_RAMDISK_FULL=0` (default): keep stage minimal (installer +
+  required boot assets + packaged payload)
+- `EYN_INSTALLER_RAMDISK_FULL=1`: also copy full staged payload tree into RAM
+  media (legacy-heavy mode)

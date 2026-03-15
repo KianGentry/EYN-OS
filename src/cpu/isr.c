@@ -2095,6 +2095,7 @@ static int syscall_read_file(user_fd_t* ufd, char* user_dst, int maxlen) {
     if ((uint32)maxlen > ufd->kbuf_size) {
         uint32 target = (uint32)maxlen;
         if (target > SYSCALL_IO_MAX) target = SYSCALL_IO_MAX;
+        if (target < 256u) target = 256u;
 
         if (ufd->kbuf) { free(ufd->kbuf); ufd->kbuf = NULL; }
 

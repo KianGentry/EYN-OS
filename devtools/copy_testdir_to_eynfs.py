@@ -317,9 +317,10 @@ def main():
 
         # Also copy the repository's top-level fonts/ directory (if present)
         # into /fonts so default system fonts are available in the image.
+        copy_repo_fonts = os.environ.get('EYNFS_COPY_FONTS', '1') != '0'
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         fonts_dir = os.path.join(repo_root, 'fonts')
-        if os.path.isdir(fonts_dir):
+        if copy_repo_fonts and os.path.isdir(fonts_dir):
             for root, dirs, files in os.walk(fonts_dir):
                 rel_dir = os.path.relpath(root, fonts_dir)
                 eynfs_path = 'fonts' if rel_dir == '.' else ('fonts/' + rel_dir.replace('\\', '/'))
@@ -336,8 +337,9 @@ def main():
 
         # Also copy userland/include into /include so userland compilers can
         # resolve #include <...> without depending on repo layout.
+        copy_repo_headers = os.environ.get('EYNFS_COPY_HEADERS', '1') != '0'
         userland_include_dir = os.path.join(repo_root, 'userland', 'include')
-        if os.path.isdir(userland_include_dir):
+        if copy_repo_headers and os.path.isdir(userland_include_dir):
             for root, dirs, files in os.walk(userland_include_dir):
                 rel_dir = os.path.relpath(root, userland_include_dir)
                 eynfs_path = 'include' if rel_dir == '.' else ('include/' + rel_dir.replace('\\', '/'))
