@@ -7,3 +7,4 @@ EYNOS.iso
 eynfs_format
 /.venv/
 /devtools/__pycache__/
+/.vscode/
