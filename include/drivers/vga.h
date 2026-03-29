@@ -33,17 +33,30 @@ void drawCharAt(int x, int y, int charnum, int r, int g, int b);
 // font_handle 0 is the built-in fallback font.
 void drawCharAt_font(int font_handle, int x, int y, int charnum, int r, int g, int b);
 
-// Acquire a bitmap font from a .hex file via the VFS. Returns a font handle (>0) on success.
+// Acquire a bitmap font from disk via the VFS. Supported formats:
+// - .hex bitmap fonts (8x8 / 8x16)
+// - .otf and .ttf scalable fonts (rasterized to 8xN at load time)
 // The returned handle is refcounted; call vga_font_release() when no longer needed.
 // On failure returns <0.
 int vga_font_acquire_hex(uint8 drive, const char* path);
+// Preferred alias for vga_font_acquire_hex() when format-agnostic semantics are desired.
+int vga_font_acquire_path(uint8 drive, const char* path);
 // Release a previously-acquired font handle (safe no-op for handle <= 0).
 void vga_font_release(int font_handle);
 
 // Return the glyph height (in pixels) of a font handle.
-// Returns 8 for built-in/8x8 fonts, 16 for 8x16 fonts.
+// Built-in fallback returns 8; scalable fonts may return other valid pixel heights.
 // Safe for handle <= 0 (returns 8).
 int vga_font_glyph_height(int font_handle);
+// Return the recommended line step (in pixels) for a font handle.
+// Safe for handle <= 0 (returns 8).
+int vga_font_line_height(int font_handle);
+// Return a nominal glyph advance width for a font handle (max per-glyph advance).
+// Safe for handle <= 0 (returns 8).
+int vga_font_advance_width(int font_handle);
+// Return per-character advance width for a font handle.
+// Safe for handle <= 0 (returns 8).
+int vga_font_char_advance(int font_handle, int charnum);
 
 // Acquire the system default font handle (refcounted). Returns >0 when the
 // configured system font is available; returns 0 to indicate the built-in
@@ -58,10 +71,10 @@ int vga_system_font_acquire(void);
 int vga_system_font_set(uint8 drive, const char* path);
 
 // Text cell metrics for the currently active system font used by drawText/drawCharAt.
-// Width is always 8; height is 8 or 16 depending on the loaded system font.
+// Width is always 8; height matches the loaded system font's glyph height.
 int vga_text_cell_w(void);
 int vga_text_cell_h(void);
-// Query glyph height (8 or 16) for a specific font handle (0 = built-in).
+// Query glyph height for a specific font handle (0 = built-in).
 int vga_font_glyph_h(int font_handle);
 void drawText_bold(int charnum, int r, int g, int b);
 void drawText_italic(int charnum, int r, int g, int b);

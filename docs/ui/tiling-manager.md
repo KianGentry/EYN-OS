@@ -208,7 +208,10 @@ int gui_present(int handle);                        // submit frame to screen
 ```c
 int gui_get_content_size(int handle, gui_size_t* out);  // content area size
 int gui_get_font_metrics(int handle, gui_font_metrics_t* out); // char w/h
-int gui_set_font(int handle, const char* hex_path);     // NULL resets to kernel font
+int gui_set_font(int handle, const char* font_path);    // .hex/.otf/.ttf, NULL resets to kernel font
+int gui_load_font(int handle, const char* font_path);   // returns font id [1..8]
+int gui_draw_text_font(int handle, const gui_text_font_t* t); // text with specific font id
+int gui_draw_char_font(int handle, const gui_char_font_t* c); // char with specific font id
 int gui_set_continuous_redraw(int handle, int enabled); // animation mode
 ```
 
@@ -282,7 +285,7 @@ The `theme` shell command provides an interactive picker.
 | `kwin_test` | Open a compositor test window |
 | `setbg <file.rei>` | Set background image for the focused tile (Tile/Scale/Center chooser) |
 | `clearbg` | Remove the background for the focused tile |
-| `setfont <file.hex>` | Load a bitmap font system-wide |
+| `setfont <file.hex|file.otf|file.ttf>` | Load a system font |
 | `theme` | Interactive theme (title bar colour) picker |
 | `stats` / `kstats` | Show system stats overlay |
 
@@ -391,5 +394,33 @@ gui_get_font_metrics(handle, &m);
 // m.char_w, m.char_h
 ```
 
-Use `setfont` to load a `.hex` bitmap font system-wide. Pass `NULL` to `gui_set_font()` to reset to the kernel default.
+Use `setfont` to load a `.hex`, `.otf`, or `.ttf` font system-wide. Pass `NULL` to `gui_set_font()` to reset to the kernel default.
+
+## Multiple fonts in one window
+
+Applications can mix multiple fonts in a single GUI handle:
+
+1. Set a default window font with `gui_set_font()`.
+2. Load extra fonts once with `gui_load_font()` and store returned font ids.
+3. Use `gui_draw_text_font()` / `gui_draw_char_font()` per draw call.
+4. Pass `font_id = 0` to use the default window font.
+
+Example:
+
+```c
+int h = gui_attach("Font Mix", NULL);
+gui_set_font(h, "/fonts/unscii-16.otf@16");
+int title_font = gui_load_font(h, "/fonts/unscii-16.otf@24");
+
+gui_begin(h);
+gui_clear(h, &(gui_rgb_t){30, 30, 30, 0});
+
+gui_text_font_t title = { title_font, 8, 8, 220, 220, 220, 0, "Header" };
+gui_draw_text_font(h, &title);
+
+gui_text_font_t body = { 0, 8, 40, 180, 200, 255, 0, "Body text using default font" };
+gui_draw_text_font(h, &body);
+
+gui_present(h);
+```
 

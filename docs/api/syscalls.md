@@ -415,7 +415,7 @@ These syscalls support userland ports of shell commands that need kernel-owned s
 | 91 | `TILING_START` | Start the tiling manager (GUI entry point) |
 | 92 | `SETBG_PATH` | Set tile background from a REI file path |
 | 93 | `CLEARBG_FOCUSED` | Clear background for the focused tile |
-| 94 | `SETFONT_PATH` | Load a `.hex` bitmap font system-wide |
+| 94 | `SETFONT_PATH` | Load a `.hex`, `.otf`, or `.ttf` font system-wide |
 | 95 | `CHDIR` | Change working directory |
 | 96 | `RUN` | Execute a UELF binary by path |
 | 97 | `WRITE_EDITOR` | Open the text editor on a file |
@@ -463,6 +463,44 @@ Query the character cell size for the active font on a GUI handle.
 
 **Returns:**
 - EAX: 0 on success, -1 on invalid handle
+
+#### GUI load additional font (syscall 137)
+Load an extra font for an existing GUI handle.
+
+**Arguments:**
+- EBX: GUI handle
+- ECX: `const char* font_path` (`.hex`, `.otf`, `.ttf`; scalable sizes can use `@N` suffix)
+
+**Returns:**
+- EAX: font id in `[1..8]` on success, `-1` on failure
+
+Notes:
+- Font id `0` always means "use the window default font".
+- Loaded fonts are tied to the GUI handle lifetime and released automatically on close.
+
+#### GUI draw text with font id (syscall 138)
+Draw text using a specific loaded font id.
+
+**Arguments:**
+- EBX: GUI handle
+- ECX: Pointer to `gui_text_font_t { int font_id; int x, y; uint8 r,g,b,_pad; const char* text; }`
+
+**Returns:**
+- EAX: 0 on success, -1 on failure
+
+Notes:
+- `font_id = 0` uses the handle's default font (`gui_set_font`).
+- `font_id > 0` uses an id previously returned by syscall 137.
+
+#### GUI draw char with font id (syscall 139)
+Draw a single character using a specific loaded font id.
+
+**Arguments:**
+- EBX: GUI handle
+- ECX: Pointer to `gui_char_font_t { int font_id; int x, y, ch; uint8 r,g,b,_pad; }`
+
+**Returns:**
+- EAX: 0 on success, -1 on failure
 
 ## Capability-based GUI syscalls (28–46)
 

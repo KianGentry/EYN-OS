@@ -33,7 +33,7 @@ enum {
     EYN_SYSCALL_GUI_DRAW_LINE        = 18,
     EYN_SYSCALL_GUI_GET_CONTENT_SIZE = 19,
 
-    // Set the active bitmap font for a GUI handle (path to .hex). Empty/NULL resets.
+    // Set the active font for a GUI handle (path to .hex/.otf/.ttf). Empty/NULL resets.
     EYN_SYSCALL_GUI_SET_FONT = 20,
 
     // Write an entire file (create/overwrite) from ring3.
@@ -274,6 +274,14 @@ enum {
     EYN_SYSCALL_INSTALLER_FORMAT_EYNFS_PARTITION = 134,
     EYN_SYSCALL_INSTALLER_WRITE_SECTOR = 135,
     EYN_SYSCALL_INSTALLER_GET_PARTITIONS = 136,
+
+    // GUI per-window multi-font support
+    // load: args (int handle, const char* font_path) -> font_id [1..8] or -1
+    EYN_SYSCALL_GUI_LOAD_FONT = 137,
+    // draw text with a specific loaded font id (0 = window default)
+    EYN_SYSCALL_GUI_DRAW_TEXT_FONT = 138,
+    // draw char with a specific loaded font id (0 = window default)
+    EYN_SYSCALL_GUI_DRAW_CHAR_FONT = 139,
 };
 
 typedef struct {

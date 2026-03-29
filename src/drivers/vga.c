@@ -14,6 +14,7 @@
 #include <mm/vmm.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <drivers/otf_font.h>
 
 extern multiboot_info_t *g_mbi;
 
@@ -22,13 +23,31 @@ int vga_default_r = 255, vga_default_g = 255, vga_default_b = 255; // Default to
 // When non-zero, drawText operates in a minimal glyph-draw mode used by drawCharAt.
 static int g_drawCharAt_mode = 0;
 
-// Bitmap font registry (8xN, 256 glyphs)
-// Supports 8x8 and 8x16 .hex fonts.
-#define VGA_FONT_GLYPH_W 8
+// Bitmap font registry (up to 64xN, 256 glyphs)
+// Supports .hex bitmaps and rasterized scalable fonts.
+#define VGA_FONT_DEFAULT_ADVANCE 8
+#define VGA_FONT_GLYPH_W_MAX 64
 #define VGA_FONT_GLYPH_H_8 8
 #define VGA_FONT_GLYPH_H_16 16
 #define VGA_FONT_GLYPHS 256
 #define VGA_FONT_MAX 12
+
+/*
+ * ABI-INVARIANT: Supported scalable font pixel-height bounds.
+ *
+ * Why: The text pipeline assumes fixed-width 8px glyph rows but permits
+ *      variable row counts for vertical scaling. Bounds keep per-font memory
+ *      usage predictable on low-RAM boots.
+ * Invariant: Scalable glyph_h must be in [VGA_SCALABLE_GLYPH_H_MIN, VGA_SCALABLE_GLYPH_H_MAX].
+ * Breakage if changed:
+ *   - Increasing raises per-font heap cost (VGA_FONT_GLYPHS * glyph_h bytes).
+ *   - Decreasing rejects previously-valid size hints and can change UI layout.
+ * ABI-sensitive: Yes (user-visible accepted @N values in font paths).
+ * Disk-format-sensitive: No.
+ * Security-critical: Yes (bounds memory allocations from user-supplied font paths).
+ */
+#define VGA_SCALABLE_GLYPH_H_MIN 6
+#define VGA_SCALABLE_GLYPH_H_MAX 64
 
 // System default font (used by drawText/drawCharAt when callers don't specify one).
 #define VGA_SYSTEM_FONT_DRIVE 0
@@ -55,8 +74,11 @@ typedef struct {
 	uint8 drive;
 	uint16 refcount;
 	char path[128];
-	uint8 glyph_h;  // 8 or 16
-	uint8* bitmap;  // VGA_FONT_GLYPHS * glyph_h
+	uint8 glyph_h;                  // rendered glyph bitmap height in pixels
+	uint8 line_h;                   // recommended line step in pixels
+	uint8 max_advance;              // widest per-glyph advance in pixels
+	uint8 advance[VGA_FONT_GLYPHS]; // per-glyph horizontal advance
+	uint64* rows;                   // VGA_FONT_GLYPHS * glyph_h rows (bit63 = left)
 } vga_font_entry_t;
 
 // Handle 0 = built-in font.
@@ -77,21 +99,45 @@ static vga_font_entry_t* vga_font_entry_from_handle(int handle) {
 	return &g_vga_fonts[idx];
 }
 
-static const unsigned char* vga_font_bitmap_or_builtin(int handle) {
-	vga_font_entry_t* e = vga_font_entry_from_handle(handle);
-	if (!e || !e->bitmap) return vga_builtin_font();
-	return (const unsigned char*)e->bitmap;
-}
-
 static uint8 vga_font_glyph_h_or_builtin(int handle) {
 	vga_font_entry_t* e = vga_font_entry_from_handle(handle);
-	if (!e || !e->bitmap) return (uint8)VGA_FONT_GLYPH_H_8;
-	if (e->glyph_h != VGA_FONT_GLYPH_H_16) return (uint8)VGA_FONT_GLYPH_H_8;
-	return (uint8)VGA_FONT_GLYPH_H_16;
+	if (!e || !e->rows) return (uint8)VGA_FONT_GLYPH_H_8;
+	if (e->glyph_h == 0) return (uint8)VGA_FONT_GLYPH_H_8;
+	return e->glyph_h;
+}
+
+static uint8 vga_font_line_h_or_builtin(int handle) {
+	vga_font_entry_t* e = vga_font_entry_from_handle(handle);
+	if (!e || !e->rows) return (uint8)VGA_FONT_GLYPH_H_8;
+	if (e->line_h == 0) return vga_font_glyph_h_or_builtin(handle);
+	return e->line_h;
+}
+
+static uint8 vga_font_advance_or_builtin(int handle, int charnum) {
+	vga_font_entry_t* e = vga_font_entry_from_handle(handle);
+	if (!e || !e->rows || charnum < 0) return (uint8)VGA_FONT_DEFAULT_ADVANCE;
+	unsigned int c = (unsigned int)(unsigned char)charnum;
+	uint8 adv = e->advance[c];
+	if (adv == 0) adv = (e->max_advance > 0) ? e->max_advance : (uint8)VGA_FONT_DEFAULT_ADVANCE;
+	return adv;
 }
 
 int vga_font_glyph_height(int font_handle) {
 	return (int)vga_font_glyph_h_or_builtin(font_handle);
+}
+
+int vga_font_line_height(int font_handle) {
+	return (int)vga_font_line_h_or_builtin(font_handle);
+}
+
+int vga_font_advance_width(int font_handle) {
+	vga_font_entry_t* e = vga_font_entry_from_handle(font_handle);
+	if (!e || !e->rows || e->max_advance == 0) return VGA_FONT_DEFAULT_ADVANCE;
+	return (int)e->max_advance;
+}
+
+int vga_font_char_advance(int font_handle, int charnum) {
+	return (int)vga_font_advance_or_builtin(font_handle, charnum);
 }
 
 static void vga_try_init_system_font(void) {
@@ -100,7 +146,7 @@ static void vga_try_init_system_font(void) {
 	// Only attempt after a filesystem is detectable.
 	if (vfs_detect(g_vga_system_font_drive) == VFS_FS_NONE) return;
 	g_vga_system_font_attempted = 1;
-	int h = vga_font_acquire_hex(g_vga_system_font_drive, g_vga_system_font_path);
+	int h = vga_font_acquire_path(g_vga_system_font_drive, g_vga_system_font_path);
 	if (h > 0) g_vga_system_font_handle = h;
 }
 
@@ -112,7 +158,7 @@ static int vga_get_system_font_handle_raw(void) {
 int vga_system_font_acquire(void) {
 	vga_try_init_system_font();
 	if (g_vga_system_font_handle > 0) {
-		return vga_font_acquire_hex(g_vga_system_font_drive, g_vga_system_font_path);
+		return vga_font_acquire_path(g_vga_system_font_drive, g_vga_system_font_path);
 	}
 	return 0;
 }
@@ -132,7 +178,7 @@ int vga_system_font_set(uint8 drive, const char* path) {
 		return 0;
 	}
 
-	int new_handle = vga_font_acquire_hex(drive, path);
+	int new_handle = vga_font_acquire_path(drive, path);
 	if (new_handle <= 0) return -1;
 
 	int old = g_vga_system_font_handle;
@@ -147,18 +193,27 @@ int vga_system_font_set(uint8 drive, const char* path) {
 }
 
 int vga_text_cell_w(void) {
-	return VGA_FONT_GLYPH_W;
+	int h = vga_get_system_font_handle_raw();
+	vga_font_entry_t* e = vga_font_entry_from_handle(h);
+	if (!e || !e->rows || e->max_advance == 0) return VGA_FONT_DEFAULT_ADVANCE;
+	return (int)e->max_advance;
 }
 
 int vga_text_cell_h(void) {
-	// Use the system font if it exists; otherwise, fall back to the built-in height.
-	int h = (int)vga_font_glyph_h_or_builtin(vga_get_system_font_handle_raw());
-	return (h == VGA_FONT_GLYPH_H_16) ? VGA_FONT_GLYPH_H_16 : VGA_FONT_GLYPH_H_8;
+	// Use recommended line height so larger scalable fonts do not overlap lines.
+	int h = (int)vga_font_line_h_or_builtin(vga_get_system_font_handle_raw());
+	if (h <= 0) return VGA_FONT_GLYPH_H_8;
+	return h;
 }
 
 int vga_font_glyph_h(int font_handle) {
 	int h = (int)vga_font_glyph_h_or_builtin(font_handle);
-	return (h == VGA_FONT_GLYPH_H_16) ? VGA_FONT_GLYPH_H_16 : VGA_FONT_GLYPH_H_8;
+	if (h <= 0) return VGA_FONT_GLYPH_H_8;
+	return h;
+}
+
+static int vga_is_scalable_glyph_h_valid(int glyph_h) {
+	return (glyph_h >= VGA_SCALABLE_GLYPH_H_MIN && glyph_h <= VGA_SCALABLE_GLYPH_H_MAX) ? 1 : 0;
 }
 
 static int vga_hex_nibble(char c) {
@@ -166,6 +221,60 @@ static int vga_hex_nibble(char c) {
 	if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
 	if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
 	return -1;
+}
+
+static char vga_ascii_tolower(char c) {
+	if (c >= 'A' && c <= 'Z') return (char)('a' + (c - 'A'));
+	return c;
+}
+
+static int vga_str_ends_with_icase(const char* s, const char* suffix) {
+	if (!s || !suffix) return 0;
+	size_t sl = strlen(s);
+	size_t su = strlen(suffix);
+	if (su == 0 || sl < su) return 0;
+	const char* tail = s + (sl - su);
+	for (size_t i = 0; i < su; ++i) {
+		if (vga_ascii_tolower(tail[i]) != vga_ascii_tolower(suffix[i])) return 0;
+	}
+	return 1;
+}
+
+static uint8 vga_font_pick_glyph_h_for_path(const char* path) {
+	if (!path) return (uint8)VGA_FONT_GLYPH_H_16;
+	if (strstr(path, "-8.") || strstr(path, "_8.") || strstr(path, "8x8")) return (uint8)VGA_FONT_GLYPH_H_8;
+	if (strstr(path, "-16.") || strstr(path, "_16.") || strstr(path, "8x16")) return (uint8)VGA_FONT_GLYPH_H_16;
+	return (uint8)VGA_FONT_GLYPH_H_16;
+}
+
+// Parse optional scalable-font size suffix from a path.
+// Supported suffix at the end of the string:
+//   @N where N is a decimal size in [VGA_SCALABLE_GLYPH_H_MIN, VGA_SCALABLE_GLYPH_H_MAX]
+// Example: /fonts/unscii-16.otf@14
+static int vga_font_prepare_open_path(const char* path, char* out_open_path, size_t out_cap, uint8* out_hint_h, int* out_has_hint) {
+	if (!path || !out_open_path || out_cap == 0 || !out_hint_h || !out_has_hint) return -1;
+	*out_hint_h = 0;
+	*out_has_hint = 0;
+	strncpy(out_open_path, path, out_cap - 1);
+	out_open_path[out_cap - 1] = '\0';
+	if (strncmp(path, out_open_path, out_cap) != 0) return -1;
+
+	char* at = strrchr(out_open_path, '@');
+	if (!at) return 0;
+	if (*(at + 1) == '\0') return 0;
+
+	int glyph_h = 0;
+	for (char* p = at + 1; *p; ++p) {
+		if (*p < '0' || *p > '9') return 0;
+		glyph_h = glyph_h * 10 + (*p - '0');
+		if (glyph_h > VGA_SCALABLE_GLYPH_H_MAX) return 0;
+	}
+	if (!vga_is_scalable_glyph_h_valid(glyph_h)) return 0;
+
+	*at = '\0';
+	*out_hint_h = (uint8)glyph_h;
+	*out_has_hint = 1;
+	return 0;
 }
 
 static int vga_hex_parse_u32(const char* s, int max_chars, uint32* out) {
@@ -399,6 +508,14 @@ static int vga_font_load_hex_stream(uint8 drive, const char* path, uint8* out_bi
 int vga_font_acquire_hex(uint8 drive, const char* path) {
 	if (!vga_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
 	if (!path || !path[0]) return -1;
+	char open_path[128];
+	uint8 hint_h = 0;
+	int has_hint = 0;
+	if (vga_font_prepare_open_path(path, open_path, sizeof(open_path), &hint_h, &has_hint) != 0) return -1;
+	int is_hex = vga_str_ends_with_icase(open_path, ".hex");
+	int is_otf = vga_str_ends_with_icase(open_path, ".otf");
+	int is_ttf = vga_str_ends_with_icase(open_path, ".ttf");
+	if (!is_hex && !is_otf && !is_ttf) return -1;
 	// Reuse already-loaded fonts.
 	for (int i = 0; i < VGA_FONT_MAX; ++i) {
 		vga_font_entry_t* e = &g_vga_fonts[i];
@@ -418,17 +535,64 @@ int vga_font_acquire_hex(uint8 drive, const char* path) {
 	vga_font_entry_t* e = &g_vga_fonts[slot];
 	memset(e, 0, sizeof(*e));
 	uint8 glyph_h = 0;
-	if (vga_font_probe_hex_glyph_h(drive, path, &glyph_h) != 0) {
-		memset(e, 0, sizeof(*e));
-		return -1;
+	if (is_hex) {
+		if (vga_font_probe_hex_glyph_h(drive, open_path, &glyph_h) != 0) {
+			memset(e, 0, sizeof(*e));
+			return -1;
+		}
+	} else {
+		glyph_h = has_hint ? hint_h : vga_font_pick_glyph_h_for_path(open_path);
 	}
-	int bitmap_bytes = VGA_FONT_GLYPHS * (int)glyph_h;
-	e->bitmap = (uint8*)malloc((size_t)bitmap_bytes);
-	if (!e->bitmap) { memset(e, 0, sizeof(*e)); return -1; }
-	if (vga_font_load_hex_stream(drive, path, e->bitmap, glyph_h) != 0) {
-		free(e->bitmap);
-		memset(e, 0, sizeof(*e));
-		return -1;
+	int row_count = VGA_FONT_GLYPHS * (int)glyph_h;
+	e->rows = (uint64*)malloc((size_t)row_count * sizeof(uint64));
+	if (!e->rows) { memset(e, 0, sizeof(*e)); return -1; }
+	memset(e->rows, 0, (size_t)row_count * sizeof(uint64));
+	e->line_h = glyph_h;
+	e->max_advance = (uint8)VGA_FONT_DEFAULT_ADVANCE;
+	for (int i = 0; i < VGA_FONT_GLYPHS; ++i) e->advance[i] = (uint8)VGA_FONT_DEFAULT_ADVANCE;
+
+	if (is_hex) {
+		uint8* packed_rows = (uint8*)malloc((size_t)row_count);
+		if (!packed_rows) {
+			free(e->rows);
+			memset(e, 0, sizeof(*e));
+			return -1;
+		}
+		if (vga_font_load_hex_stream(drive, open_path, packed_rows, glyph_h) != 0) {
+			free(packed_rows);
+			free(e->rows);
+			memset(e, 0, sizeof(*e));
+			return -1;
+		}
+		for (int cp = 0; cp < VGA_FONT_GLYPHS; ++cp) {
+			e->advance[cp] = (uint8)VGA_FONT_DEFAULT_ADVANCE;
+			for (int row = 0; row < glyph_h; ++row) {
+				uint8 bits8 = packed_rows[(cp * (int)glyph_h) + row];
+				uint64 row_bits = 0;
+				for (int x = 0; x < VGA_FONT_DEFAULT_ADVANCE; ++x) {
+					if (bits8 & (0x80u >> (unsigned)x)) {
+						row_bits |= (uint64)1uLL << (63u - (unsigned)x);
+					}
+				}
+				e->rows[(cp * (int)glyph_h) + row] = row_bits;
+			}
+		}
+		free(packed_rows);
+	} else {
+		int line_h = (int)glyph_h;
+		if (otf_font_rasterize_mono_from_vfs(drive, open_path, (int)glyph_h, (uint64_t*)e->rows, VGA_FONT_GLYPHS, e->advance, VGA_FONT_GLYPHS, &line_h) != 0) {
+			free(e->rows);
+			memset(e, 0, sizeof(*e));
+			return -1;
+		}
+		if (line_h < (int)glyph_h) line_h = (int)glyph_h;
+		if (line_h > 255) line_h = 255;
+		e->line_h = (uint8)line_h;
+		uint8 max_adv = (uint8)VGA_FONT_DEFAULT_ADVANCE;
+		for (int cp = 0; cp < VGA_FONT_GLYPHS; ++cp) {
+			if (e->advance[cp] > max_adv) max_adv = e->advance[cp];
+		}
+		e->max_advance = max_adv;
 	}
 	e->used = 1;
 	e->drive = drive;
@@ -439,12 +603,16 @@ int vga_font_acquire_hex(uint8 drive, const char* path) {
 	return slot + 1;
 }
 
+int vga_font_acquire_path(uint8 drive, const char* path) {
+	return vga_font_acquire_hex(drive, path);
+}
+
 void vga_font_release(int font_handle) {
 	vga_font_entry_t* e = vga_font_entry_from_handle(font_handle);
 	if (!e) return;
 	if (e->refcount > 0) e->refcount--;
 	if (e->refcount == 0) {
-		if (e->bitmap) free(e->bitmap);
+		if (e->rows) free(e->rows);
 		memset(e, 0, sizeof(*e));
 	}
 }
@@ -495,22 +663,37 @@ static void vga_free_backbuffer(void) {
 	g_backbuffer_pages = 0;
 }
 
-static void vga_draw_glyph8xN_at(const unsigned char* font, int glyph_h, int x0, int y0, int charnum, int rr, int gg, int bb) {
-	if (!font) font = vga_builtin_font();
-	if (charnum < 0) return;
-	if (glyph_h != VGA_FONT_GLYPH_H_16) glyph_h = VGA_FONT_GLYPH_H_8;
+static int vga_draw_glyph8xN_at(int font_handle, int x0, int y0, int charnum, int rr, int gg, int bb) {
+	if (charnum < 0) return 0;
+	vga_font_entry_t* e = vga_font_entry_from_handle(font_handle);
+	int glyph_h = (int)vga_font_glyph_h_or_builtin(font_handle);
+	if (glyph_h <= 0) glyph_h = VGA_FONT_GLYPH_H_8;
 	unsigned int c = (unsigned int)(unsigned char)charnum;
+	int draw_w = (int)vga_font_advance_or_builtin(font_handle, charnum);
+	if (draw_w <= 0) draw_w = VGA_FONT_DEFAULT_ADVANCE;
+	if (draw_w > VGA_FONT_GLYPH_W_MAX) draw_w = VGA_FONT_GLYPH_W_MAX;
+
+	int use_builtin = (!e || !e->rows);
+	const unsigned char* font = NULL;
+	if (use_builtin) font = vga_builtin_font();
+
 	// draw into backbuffer if present
 	if (g_backbuffer) {
 		for (int k = 0; k < glyph_h; k++) {
 			int yy = y0 + k;
 			if (yy < 0 || yy >= g_backbuffer_h) continue;
-			unsigned char rowbits = font[c * (unsigned)glyph_h + (unsigned)k];
-			for (int i = 0; i < 8; i++) {
+			for (int i = 0; i < draw_w; i++) {
 				int xx = x0 + i;
 				if (xx < 0 || xx >= g_backbuffer_w) continue;
-				// .hex fonts encode each row byte MSB->LSB (left->right)
-				if (rowbits & (0x80u >> (unsigned)i)) {
+				int on = 0;
+				if (use_builtin) {
+					unsigned char rowbits = font[c * (unsigned)glyph_h + (unsigned)k];
+					on = (rowbits & (0x80u >> (unsigned)i)) ? 1 : 0;
+				} else {
+					uint64 rowbits = e->rows[c * (unsigned)glyph_h + (unsigned)k];
+					on = (rowbits & ((uint64)1uLL << (63u - (unsigned)i))) ? 1 : 0;
+				}
+				if (on) {
 					unsigned char *px = g_backbuffer + ((size_t)yy * (size_t)g_backbuffer_w + (size_t)xx) * 4;
 					px[0] = (unsigned char)bb;
 					px[1] = (unsigned char)gg;
@@ -519,23 +702,29 @@ static void vga_draw_glyph8xN_at(const unsigned char* font, int glyph_h, int x0,
 				}
 			}
 		}
-		vga_mark_dirty_rect(x0, y0, 8, glyph_h);
-		return;
+		vga_mark_dirty_rect(x0, y0, draw_w, glyph_h);
+		return draw_w;
 	}
 	// fallback to framebuffer pixel drawing
 	for (int k = 0; k < glyph_h; k++) {
-		for (int i = 0; i < 8; i++) {
-			if (font[c * (unsigned)glyph_h + (unsigned)k] & (0x80u >> (unsigned)i)) {
+		for (int i = 0; i < draw_w; i++) {
+			int on = 0;
+			if (use_builtin) {
+				on = (font[c * (unsigned)glyph_h + (unsigned)k] & (0x80u >> (unsigned)i)) ? 1 : 0;
+			} else {
+				uint64 rowbits = e->rows[c * (unsigned)glyph_h + (unsigned)k];
+				on = (rowbits & ((uint64)1uLL << (63u - (unsigned)i))) ? 1 : 0;
+			}
+			if (on) {
 				drawPixel(x0 + i, k + y0, rr, gg, bb);
 			}
 		}
 	}
+	return draw_w;
 }
 
 void drawCharAt_font(int font_handle, int x, int y, int charnum, int rr, int gg, int bb) {
-	const unsigned char* font = vga_font_bitmap_or_builtin(font_handle);
-	int glyph_h = (int)vga_font_glyph_h_or_builtin(font_handle);
-	vga_draw_glyph8xN_at(font, glyph_h, x, y, charnum, rr, gg, bb);
+	(void)vga_draw_glyph8xN_at(font_handle, x, y, charnum, rr, gg, bb);
 }
 // Optional exclusion rect for swap (e.g., software cursor overlay)
 static int g_exclude_x = -1, g_exclude_y = -1, g_exclude_w = 0, g_exclude_h = 0;
@@ -850,18 +1039,15 @@ static const unsigned char* vga_builtin_font(void) {
 void drawText(int charnum, int r, int g, int b)
 {
 	int font_handle = vga_get_system_font_handle_raw();
-	const unsigned char* font = vga_font_bitmap_or_builtin(font_handle);
 	int glyph_h = (int)vga_font_glyph_h_or_builtin(font_handle);
-
-	int i; // column number in the 8x8 pattern
-	int k; // row number in the 8x8 pattern
-	int w; // horizontal position of the pixel in the 8x8 pattern
-	int h; // vertical position of the pixel in the 8x8 pattern
+	int line_h = (int)vga_font_line_h_or_builtin(font_handle);
+	int nominal_w = (int)vga_font_advance_or_builtin(font_handle, 'W');
+	if (nominal_w <= 0) nominal_w = VGA_FONT_DEFAULT_ADVANCE;
 
 	// Minimal side-effect-free path for drawCharAt to prevent console scrolling/wrapping side effects.
 	if (g_drawCharAt_mode) {
 		if (charnum >= 0) {
-			vga_draw_glyph8xN_at(font, glyph_h, width, height, charnum, r, g, b);
+			(void)vga_draw_glyph8xN_at(font_handle, width, height, charnum, r, g, b);
 		}
 		return;
 	}
@@ -896,44 +1082,45 @@ void drawText(int charnum, int r, int g, int b)
 
 	// charnum = charnum + 1;
 	// Moving the cursor to the next line when we reached the end of the existing line
-	if (width > (int)(g_mbi->framebuffer_width - 20))
+	if (width > (int)(g_mbi->framebuffer_width - nominal_w - 4))
     {
 		width = 0;
-		height = height + glyph_h;
+		height = height + line_h;
 	}
 	
 	if (width < -2 && height > 34)
     {
 		width = g_mbi->framebuffer_width - 30;
-		height = height - glyph_h;
+		height = height - line_h;
 	}
 	
 	if (charnum == -1)
     {
-		drawRect(width, height, 16, 16, 0, 0, 0);
-		width=width+16;
+		drawRect(width, height, nominal_w, line_h, 0, 0, 0);
+		width = width + nominal_w;
 	}
 
 	else if (charnum==10) // enter
     {
-		drawText(-1, r, g, b);
 		width = 0;
-		height = height + glyph_h;
+		height = height + line_h;
 	}
 
 	else if (charnum== 8) // backspace
     {
         if (width > 0) {  // Only backspace if we're not at the start of a line
-            width = width - 8;  // Move back one character width
+			width = width - nominal_w;
+			if (width < 0) width = 0;
             // Draw a black rectangle to erase the previous character
-			drawRect(width, height, 8, glyph_h, 0, 0, 0);
+			drawRect(width, height, nominal_w, line_h, 0, 0, 0);
         }
     }
 
 	else // drawing characters in 8x8
     {
-		vga_draw_glyph8xN_at(font, glyph_h, width, height, charnum, r, g, b);
-		width = width + 8; // move to draw the next character
+		int adv = vga_draw_glyph8xN_at(font_handle, width, height, charnum, r, g, b);
+		if (adv <= 0) adv = nominal_w;
+		width = width + adv;
 	}
 }
 
@@ -2005,7 +2192,8 @@ int vga_restore_fb_region(int x, int y, int w, int h, const unsigned char* in_bu
 void drawTextAt(int x, int y, const char* text, int rr, int gg, int bb)
 {
 	if (!text) return;
-	int glyph_h = (int)vga_font_glyph_h_or_builtin(vga_get_system_font_handle_raw());
+	int font_handle = vga_get_system_font_handle_raw();
+	int line_h = (int)vga_font_line_h_or_builtin(font_handle);
 	int old_w = width;
 	int old_h = height;
 	int cx = x;
@@ -2014,12 +2202,12 @@ void drawTextAt(int x, int y, const char* text, int rr, int gg, int bb)
 	for (const char* p = text; *p; ++p) {
 		if (*p == '\n') {
 			cx = x;
-			cy += glyph_h;
+			cy += line_h;
 			continue;
 		}
-		// draw a single char at the pixel position with colour
-		drawCharAt(cx, cy, (int)(unsigned char)*p, rr, gg, bb);
-		cx += 8;
+		int adv = vga_draw_glyph8xN_at(font_handle, cx, cy, (int)(unsigned char)*p, rr, gg, bb);
+		if (adv <= 0) adv = VGA_FONT_DEFAULT_ADVANCE;
+		cx += adv;
 	}
 
 	// restore previous cursor

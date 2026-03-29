@@ -95,9 +95,9 @@ EYN-OS renders text using a bitmap **system font** provided by the VGA driver.
 
 - Default system font path: `/fonts/unscii-16.hex` (8×16)
 - Fonts live in the EYNFS image under `/fonts/` (the build tooling copies the repository `fonts/` directory into the disk image)
-- The active system font can be switched at runtime via the `setfont` shell command (see docs/command-reference.md)
+- The active system font can be switched at runtime via the `setfont` shell command (supports `.hex`, `.otf`, and `.ttf`; see docs/command-reference.md)
 
-Important limitation: most UI/terminal code renders **bytes (0–255)** as glyph indices. Unicode-indexed `.hex` fonts are supported for loading, but full Unicode text rendering/mapping is not yet implemented.
+Important limitation: most UI/terminal code renders **bytes (0–255)** as glyph indices. Unicode-indexed fonts are supported for loading, but full Unicode text rendering/mapping is not yet implemented.
 
 ### Development Tools
 - **Assembler**: Built-in NASM-compatible assembler for assembly development

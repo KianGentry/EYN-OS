@@ -65,6 +65,7 @@ OBJS += obj/netstack.o
 OBJS += obj/shell_script.o
 OBJS += obj/ac97.o
 OBJS += obj/reis.o
+OBJS += obj/otf_font.o
 OUTPUT = $(BOOTDIR)/kernel.bin
 
 # Source files to object files
@@ -209,6 +210,10 @@ obj/reiv.o:src/drivers/reiv.c
 
 obj/reis.o:src/drivers/reis.c
 	$(COMPILER) $(CFLAGS) src/drivers/reis.c -o obj/reis.o
+
+OTF_CFLAGS = $(KERNEL_CFLAGS) -Wno-shadow -Wno-switch-enum -Wno-switch-default -Wno-old-style-definition -Wno-strict-prototypes -Wno-missing-prototypes
+obj/otf_font.o:src/drivers/otf_font.c include/drivers/otf_font.h include/third_party/stb_truetype.h
+	$(COMPILER) $(OTF_CFLAGS) src/drivers/otf_font.c -o obj/otf_font.o
 
 obj/ac97.o:src/drivers/ac97.c
 	$(COMPILER) $(CFLAGS) src/drivers/ac97.c -o obj/ac97.o

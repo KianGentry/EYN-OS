@@ -431,6 +431,9 @@ uint32 get_last_error_eip() {
  * Security: Same capability requirements as gui_warp_mouse.
  */
 #define SYSCALL_GUI_SET_CURSOR_VISIBLE 112
+#define SYSCALL_GUI_LOAD_FONT 137
+#define SYSCALL_GUI_DRAW_TEXT_FONT 138
+#define SYSCALL_GUI_DRAW_CHAR_FONT 139
 
 /*
  * SYSCALL_AUDIO_PROBE (113): Detect whether an AC97 audio controller is
@@ -633,6 +636,7 @@ typedef struct {
     uint8 r;
     uint8 g;
     uint8 b;
+    int font_slot;
     char text[64];
 } user_gui_cmd_t;
 
@@ -1171,6 +1175,22 @@ typedef struct {
     // Current font handle for this GUI context (0 = built-in fallback).
     int font_handle;
 
+    /*
+     * SECURITY-INVARIANT: Per-window additional GUI font slots.
+     *
+     * Why: Allows mixed-font rendering in one window while bounding kernel
+     * memory and open-font references on low-RAM systems.
+     * Invariant: Valid user slot ids are 1..USER_GUI_EXTRA_FONTS and map to
+     *            extra_font_handles[slot-1]. Slot 0 means the window default.
+     * Breakage if changed:
+     *   - Increasing grows per-window retained font references and memory.
+     *   - Decreasing can break user programs relying on higher slot ids.
+     * ABI-sensitive: Yes (user-visible slot range and behavior).
+     * Security-critical: Yes (resource-exhaustion boundary).
+     */
+#define USER_GUI_EXTRA_FONTS 8
+    int extra_font_handles[USER_GUI_EXTRA_FONTS];
+
     // Immediate-mode command list. Draw callback replays this list.
     /*
      * SECURITY-INVARIANT: Per-GUI command buffer upper bound.
@@ -1214,15 +1234,33 @@ static user_gui_t g_user_guis[USER_GUI_MAX];
 static char* g_user_self_title = NULL;
 static int g_user_self_tile_idx = -1;
 
+static void user_gui_release_fonts(user_gui_t* e) {
+    if (!e) return;
+    if (e->font_handle > 0) {
+        vga_font_release(e->font_handle);
+        e->font_handle = 0;
+    }
+    for (int i = 0; i < USER_GUI_EXTRA_FONTS; ++i) {
+        if (e->extra_font_handles[i] > 0) {
+            vga_font_release(e->extra_font_handles[i]);
+            e->extra_font_handles[i] = 0;
+        }
+    }
+}
+
+static int user_gui_font_handle_from_slot(const user_gui_t* e, int slot) {
+    if (!e) return 0;
+    if (slot <= 0) return e->font_handle;
+    if (slot > USER_GUI_EXTRA_FONTS) return 0;
+    return e->extra_font_handles[slot - 1];
+}
+
 static void user_gui_free_entry(user_gui_t* e) {
     if (!e) return;
 
     cap_revoke_object(e, CAP_OBJ_USER_GUI);
 
-	if (e->font_handle > 0) {
-		vga_font_release(e->font_handle);
-		e->font_handle = 0;
-	}
+    user_gui_release_fonts(e);
     if (e->blit_buf) {
         free(e->blit_buf);
         e->blit_buf = NULL;
@@ -1336,6 +1374,11 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
     if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return;
     if (content_w <= 0 || content_h <= 0) return;
 
+    int clip_l = content_x;
+    int clip_t = content_y;
+    int clip_r = content_x + content_w;
+    int clip_b = content_y + content_h;
+
     if (e->blit_buf && e->blit_w > 0 && e->blit_h > 0) {
         int dst_w = (e->blit_dst_w > 0) ? e->blit_dst_w : content_w;
         int dst_h = (e->blit_dst_h > 0) ? e->blit_dst_h : content_h;
@@ -1369,8 +1412,22 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
         if (c->type == USER_GUI_CMD_TEXT) {
             int x = content_x + c->x;
             int y = content_y + c->y;
+            int draw_font = user_gui_font_handle_from_slot(e, c->font_slot);
+            int line_h = vga_font_line_height(draw_font);
+            if (line_h <= 0) line_h = 8;
+            if (y < clip_t || y + line_h > clip_b) {
+                continue;
+            }
+            int pen_x = x;
             for (int j = 0; c->text[j] && j < (int)sizeof(c->text); ++j) {
-                drawCharAt_font(e->font_handle, x + j * 8, y, (int)(unsigned char)c->text[j], c->r, c->g, c->b);
+                int ch = (int)(unsigned char)c->text[j];
+                int adv = vga_font_char_advance(draw_font, ch);
+                if (adv <= 0) adv = 8;
+                if (pen_x >= clip_r) break;
+                if (pen_x >= clip_l && pen_x + adv <= clip_r) {
+                    drawCharAt_font(draw_font, pen_x, y, ch, c->r, c->g, c->b);
+                }
+                pen_x += adv;
             }
             continue;
         }
@@ -1399,7 +1456,14 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
         if (c->type == USER_GUI_CMD_CHAR) {
             int x = content_x + c->x;
             int y = content_y + c->y;
-            drawCharAt_font(e->font_handle, x, y, c->w, c->r, c->g, c->b);
+            int draw_font = user_gui_font_handle_from_slot(e, c->font_slot);
+            int line_h = vga_font_line_height(draw_font);
+            if (line_h <= 0) line_h = 8;
+            int adv = vga_font_char_advance(draw_font, c->w);
+            if (adv <= 0) adv = 8;
+            if (x >= clip_l && x + adv <= clip_r && y >= clip_t && y + line_h <= clip_b) {
+                drawCharAt_font(draw_font, x, y, c->w, c->r, c->g, c->b);
+            }
             continue;
         }
         if (c->type == USER_GUI_CMD_ICON) {
@@ -1512,10 +1576,7 @@ void syscall_reset_user_guis(void) {
             tile_unregister_gui_client(tile_idx0);
         }
         cap_revoke_object(&g_user_guis[0], CAP_OBJ_USER_GUI);
-        if (g_user_guis[0].font_handle > 0) {
-            vga_font_release(g_user_guis[0].font_handle);
-            g_user_guis[0].font_handle = 0;
-        }
+        user_gui_release_fonts(&g_user_guis[0]);
         if (g_user_guis[0].blit_buf) {
             free(g_user_guis[0].blit_buf);
             g_user_guis[0].blit_buf = NULL;
@@ -4322,10 +4383,7 @@ uint32 syscall_dispatch(regs_t* regs) {
                 if (e->status_left) free(e->status_left);
                 e->title = NULL;
                 e->status_left = NULL;
-				if (e->font_handle > 0) {
-					vga_font_release(e->font_handle);
-					e->font_handle = 0;
-				}
+                user_gui_release_fonts(e);
                 if (e->blit_buf) {
                     free(e->blit_buf);
                     e->blit_buf = NULL;
@@ -4385,10 +4443,7 @@ uint32 syscall_dispatch(regs_t* regs) {
                 if (e->status_left) free(e->status_left);
                 e->title = NULL;
                 e->status_left = NULL;
-                if (e->font_handle > 0) {
-                    vga_font_release(e->font_handle);
-                    e->font_handle = 0;
-                }
+                user_gui_release_fonts(e);
                 if (e->blit_buf) {
                     free(e->blit_buf);
                     e->blit_buf = NULL;
@@ -4510,6 +4565,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             c->r = t.r;
             c->g = t.g;
             c->b = t.b;
+            c->font_slot = 0;
             if (copyin_cstr(c->text, sizeof(c->text), t.text) != 0) {
                 c->text[0] = '\0';
             }
@@ -4646,6 +4702,107 @@ uint32 syscall_dispatch(regs_t* regs) {
             c->r = cc.r;
             c->g = cc.g;
             c->b = cc.b;
+            c->font_slot = 0;
+            e->frame_pending = 1;
+            regs->eax = 0;
+            break;
+        }
+
+        case SYSCALL_GUI_LOAD_FONT: {
+            if (!syscall_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY | CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE))
+                { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            const char* user_path = (const char*)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!user_gui_active(e) || !user_path)
+                { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), user_path) != 0)
+                { regs->eax = (uint32)-1; break; }
+            if (!path[0])
+                { regs->eax = (uint32)-1; break; }
+
+            int new_font = vga_font_acquire_path(0, path);
+            if (new_font <= 0)
+                { regs->eax = (uint32)-1; break; }
+
+            for (int i = 0; i < USER_GUI_EXTRA_FONTS; ++i) {
+                if (e->extra_font_handles[i] == new_font) {
+                    vga_font_release(new_font);
+                    regs->eax = (uint32)(i + 1);
+                    break;
+                }
+            }
+            if ((int32)regs->eax > 0) break;
+
+            int slot = -1;
+            for (int i = 0; i < USER_GUI_EXTRA_FONTS; ++i) {
+                if (e->extra_font_handles[i] <= 0) { slot = i; break; }
+            }
+            if (slot < 0) {
+                vga_font_release(new_font);
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            e->extra_font_handles[slot] = new_font;
+            regs->eax = (uint32)(slot + 1);
+            break;
+        }
+
+        case SYSCALL_GUI_DRAW_TEXT_FONT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            const void* user_cmd = (const void*)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!user_gui_active(e) || !user_cmd) { regs->eax = (uint32)-1; break; }
+            typedef struct { int32 font_id; int32 x, y; uint8 r, g, b, _pad; const char* text; } textcmd_font_t;
+            textcmd_font_t t;
+            if (copyin(&t, user_cmd, sizeof(t)) != 0) { regs->eax = (uint32)-1; break; }
+            if (!t.text) { regs->eax = (uint32)-1; break; }
+            if (t.font_id < 0 || t.font_id > USER_GUI_EXTRA_FONTS) { regs->eax = (uint32)-1; break; }
+            if (t.font_id > 0 && user_gui_font_handle_from_slot(e, (int)t.font_id) <= 0) { regs->eax = (uint32)-1; break; }
+            if (e->cmd_count >= (int)(sizeof(e->cmds) / sizeof(e->cmds[0]))) { regs->eax = (uint32)-1; break; }
+
+            user_gui_cmd_t* c = &e->cmds[e->cmd_count++];
+            memset(c, 0, sizeof(*c));
+            c->type = USER_GUI_CMD_TEXT;
+            c->font_slot = (int)t.font_id;
+            c->x = (int)t.x;
+            c->y = (int)t.y;
+            c->r = t.r;
+            c->g = t.g;
+            c->b = t.b;
+            if (copyin_cstr(c->text, sizeof(c->text), t.text) != 0) c->text[0] = '\0';
+            e->frame_pending = 1;
+            regs->eax = 0;
+            break;
+        }
+
+        case SYSCALL_GUI_DRAW_CHAR_FONT: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            int handle = (int)arg1;
+            const void* user_cmd = (const void*)arg2;
+            user_gui_t* e = user_gui_get(handle);
+            if (!user_gui_active(e) || !user_cmd) { regs->eax = (uint32)-1; break; }
+            typedef struct { int32 font_id; int32 x, y, ch; uint8 r, g, b, _pad; } charcmd_font_t;
+            charcmd_font_t cc;
+            if (copyin(&cc, user_cmd, sizeof(cc)) != 0) { regs->eax = (uint32)-1; break; }
+            if (cc.font_id < 0 || cc.font_id > USER_GUI_EXTRA_FONTS) { regs->eax = (uint32)-1; break; }
+            if (cc.font_id > 0 && user_gui_font_handle_from_slot(e, (int)cc.font_id) <= 0) { regs->eax = (uint32)-1; break; }
+            if (e->cmd_count >= (int)(sizeof(e->cmds) / sizeof(e->cmds[0]))) { regs->eax = (uint32)-1; break; }
+
+            user_gui_cmd_t* c = &e->cmds[e->cmd_count++];
+            memset(c, 0, sizeof(*c));
+            c->type = USER_GUI_CMD_CHAR;
+            c->font_slot = (int)cc.font_id;
+            c->x = (int)cc.x;
+            c->y = (int)cc.y;
+            c->w = (int)cc.ch;
+            c->r = cc.r;
+            c->g = cc.g;
+            c->b = cc.b;
             e->frame_pending = 1;
             regs->eax = 0;
             break;
@@ -4669,12 +4826,12 @@ uint32 syscall_dispatch(regs_t* regs) {
             typedef struct { int32 char_w, char_h; } font_metrics_t;
             font_metrics_t m;
             /*
-             * The font system uses 8px-wide glyphs. Height depends on the
-             * loaded .hex font: 8 for built-in or 8x8 .hex, 16 for 8x16 .hex.
-             * vga_font_glyph_height() returns the active height for a handle.
+             * For scalable fonts, width is the nominal max advance and height
+             * is the active line step for the handle.
              */
-            m.char_w = 8;
-            m.char_h = (int32)vga_font_glyph_height(e->font_handle);
+            m.char_w = (int32)vga_font_advance_width(e->font_handle);
+            m.char_h = (int32)vga_font_line_height(e->font_handle);
+            if (m.char_w <= 0) m.char_w = 8;
             if (m.char_h <= 0) m.char_h = 8; /* fallback for built-in */
             if (copyout(user_out, &m, sizeof(m)) != 0)
                 { regs->eax = (uint32)-1; break; }
@@ -4752,7 +4909,7 @@ uint32 syscall_dispatch(regs_t* regs) {
                         char abspath[128];
                         resolve_path(path, cwd, abspath, sizeof(abspath));
                         uint8 drive = g_current_drive;
-                        int h = vga_font_acquire_hex(drive, abspath);
+                        int h = vga_font_acquire_path(drive, abspath);
                         if (h > 0) new_font = h;
                     }
                 }
@@ -5080,7 +5237,7 @@ uint32 syscall_dispatch(regs_t* regs) {
                         char abspath[128];
                         resolve_path(path, cwd, abspath, sizeof(abspath));
                         uint8 drive = g_current_drive;
-                        int h = vga_font_acquire_hex(drive, abspath);
+                        int h = vga_font_acquire_path(drive, abspath);
                         if (h > 0) new_font = h;
                     }
                 }

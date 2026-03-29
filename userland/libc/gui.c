@@ -45,6 +45,18 @@ int gui_set_font(int handle, const char* hex_path) {
     return eyn_syscall3(EYN_SYSCALL_GUI_SET_FONT, handle, hex_path, 0);
 }
 
+int gui_load_font(int handle, const char* font_path) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_LOAD_FONT, handle, font_path, 0);
+}
+
+int gui_draw_text_font(int handle, const gui_text_font_t* cmd) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_DRAW_TEXT_FONT, handle, cmd, 0);
+}
+
+int gui_draw_char_font(int handle, const gui_char_font_t* cmd) {
+    return eyn_syscall3(EYN_SYSCALL_GUI_DRAW_CHAR_FONT, handle, cmd, 0);
+}
+
 int gui_set_continuous_redraw(int handle, int enabled) {
     return eyn_syscall3(EYN_SYSCALL_GUI_SET_CONTINUOUS_REDRAW, handle, (const void*)enabled, 0);
 }

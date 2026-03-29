@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-15 14:12:09
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-29 22:05:44
 
-**Total Commands:** 81
+**Total Commands:** 82
 
 ## Table of Contents
 
@@ -735,11 +735,11 @@ setbg /images/eynos.rei
 **Metadata Source:** `testdir/code/setfont_uelf.c`
 
 **Description:**
-Set runtime system font.
+Set runtime system font (.hex/.otf/.ttf).
 
 **Example:**
 ```bash
-setfont /fonts/unscii-16.hex
+setfont /fonts/unscii-16.otf
 ```
 
 ---
@@ -1084,6 +1084,22 @@ files [/path]
 
 ---
 
+### fontpreview
+
+**Binary:** `testdir/binaries/fontpreview`
+
+**Metadata Source:** `testdir/code/fontpreview_uelf.c`
+
+**Description:**
+Preview an OTF/TTF font in multiple sizes.
+
+**Example:**
+```bash
+fontpreview /fonts/unscii-16.otf
+```
+
+---
+
 ### format
 
 **Binary:** `testdir/binaries/format`
@@ -1334,5 +1350,5 @@ xeyes
 | Memory Commands | 7 |
 | GUI/Window Commands | 10 |
 | Development Commands | 10 |
-| Utility Commands | 23 |
+| Utility Commands | 24 |
 

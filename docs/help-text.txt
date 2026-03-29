@@ -59,7 +59,7 @@ GUI/Window Commands:
   kwin_test       - Legacy kernel window-test command (migrated default is userland 'win_test').
   rect            - Draw a rectangle.
   setbg           - Set background image for focused tile.
-  setfont         - Set runtime system font.
+  setfont         - Set runtime system font (.hex/.otf/.ttf).
   stats           - Open the stats GUI.
   theme           - Open the theme editor.
   view            - Open an REI, BMP image, REIV video, REIS audio, or WAV audio viewer.
@@ -87,6 +87,7 @@ Utility Commands:
   edit            - Graphical text editor.
   fdisk           - Run the fdisk command.
   files           - Graphical file explorer.
+  fontpreview     - Preview an OTF/TTF font in multiple sizes.
   format          - Run the format command.
   gui_demo        - Run the gui_demo command.
   hello           - Run the hello command.

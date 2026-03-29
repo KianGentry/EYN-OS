@@ -61,9 +61,30 @@ int gui_present(int handle);
 
 int gui_get_content_size(int handle, gui_size_t* out_size);
 
-// Set the bitmap font for a GUI handle from a .hex file path.
+// Set the font for a GUI handle from a .hex/.otf/.ttf file path.
 // Passing NULL or an empty string resets to the built-in kernel font.
-int gui_set_font(int handle, const char* hex_path);
+int gui_set_font(int handle, const char* font_path);
+
+// Load an additional font for this GUI handle and return a font id in [1..8].
+// Font id 0 always refers to the handle's default font (set via gui_set_font).
+int gui_load_font(int handle, const char* font_path);
+
+// Draw text using a specific loaded font id (0 = default handle font).
+typedef struct {
+	int font_id;
+	int x, y;
+	unsigned char r, g, b, _pad;
+	const char* text;
+} gui_text_font_t;
+int gui_draw_text_font(int handle, const gui_text_font_t* cmd);
+
+// Draw a single char using a specific loaded font id (0 = default handle font).
+typedef struct {
+	int font_id;
+	int x, y, ch;
+	unsigned char r, g, b, _pad;
+} gui_char_font_t;
+int gui_draw_char_font(int handle, const gui_char_font_t* cmd);
 
 // Enable or disable continuous redraw for animated clients.
 int gui_set_continuous_redraw(int handle, int enabled);

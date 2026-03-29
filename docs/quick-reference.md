@@ -182,7 +182,7 @@ e1000 udp-drain
 |---------|-------------|---------|
 | `tile` | Tiling manager control | `tile focus 1` |
 | `theme` | Customize UI theme | `theme colour fg 255 255 255` |
-| `setfont` | Change system font | `setfont /fonts/unscii-16.hex` |
+| `setfont` | Change system font | `setfont /fonts/unscii-16.otf` |
 | `setbg` | Set background image | `setbg image.rei` |
 | `clearbg` | Clear background | `clearbg` |
 
