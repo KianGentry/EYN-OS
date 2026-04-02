@@ -15,9 +15,6 @@ static volatile int g_panic_in_progress = 0;
 
 int panic_is_in_progress(void) { return g_panic_in_progress; }
 
-// Render a Blue Screen of Diagnostics (BSOD) with details; avoid printf during panic
-// (Logo intentionally omitted per design preference)
-
 static unsigned fnv1a_hash(const char* a, const char* b2, int line) {
     unsigned int h = 2166136261u;
     if (a) { for (const char* p=a; *p; ++p) { h ^= (unsigned char)(*p); h *= 16777619u; } }
@@ -51,8 +48,8 @@ static const char* category_label(panic_cat_t c) {
 
 static void pick_bg_colour_for_category(panic_cat_t c, unsigned hash, int* pr, int* pg, int* pb) {
     (void)c; (void)hash;
-    // Dark, calm background similar to #3d4872
-    *pr = 61; *pg = 72; *pb = 114;
+    // Background colour
+    *pr = 80; *pg = 80; *pb = 80;
 }
 
 static void render_bsod(const char* title, const char* msg, const char* file, int line) {
@@ -67,7 +64,7 @@ static void render_bsod(const char* title, const char* msg, const char* file, in
     vga_init_double_buffer();
     vga_begin_frame();
 
-    // Choose a soothing dark pastel colour by category
+    // Choose a colour by category (sort of unused, currently only one category)
     int br=16, bg=32, bb=96;
     unsigned h = fnv1a_hash(msg, file, line);
     panic_cat_t cat = classify_category(title, msg);
@@ -87,7 +84,7 @@ static void render_bsod(const char* title, const char* msg, const char* file, in
     }
 
     // Title and summary
-    drawTextAt(24, 24, ":( EYN-OS encountered a critical error.", 255, 255, 255);
+    drawTextAt(24, 24, "EYN-OS encountered a critical error.", 255, 255, 255);
     if (title && *title) {
         drawTextAt(24, 24 + 18, title, 255, 255, 255);
     }
@@ -174,7 +171,7 @@ static void backtrace_to_serial(void) {
         uint32_t* frame = (uint32_t*)ebp;
         uint32_t next_ebp = frame[0];
         uint32_t ret = frame[1];
-        // Format:  "  #nn 0xXXXXXXXX\n" (avoid relying on snprintf formatting)
+        // Format:  "  #nn 0xXXXXXXXX\n" (no snprintf)
         char linebuf[32];
         int pos = 0;
         linebuf[pos++] = ' ';

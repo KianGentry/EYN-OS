@@ -40,17 +40,17 @@ EYN_CMDMETA_V1("Search for text in filenames and file contents.", "search hello 
 #define SEARCH_READ_CHUNK 256
 #define SEARCH_CARRY_MAX 127
 
-#define SEARCH_COLOR_DEFAULT_R 200
-#define SEARCH_COLOR_DEFAULT_G 200
-#define SEARCH_COLOR_DEFAULT_B 200
-#define SEARCH_COLOR_MATCH_R 255
-#define SEARCH_COLOR_MATCH_G 120
-#define SEARCH_COLOR_MATCH_B 120
+#define SEARCH_COLOUR_DEFAULT_R 200
+#define SEARCH_COLOUR_DEFAULT_G 200
+#define SEARCH_COLOUR_DEFAULT_B 200
+#define SEARCH_COLOUR_MATCH_R 255
+#define SEARCH_COLOUR_MATCH_G 120
+#define SEARCH_COLOUR_MATCH_B 120
 
 typedef struct {
     int filename;
     int content;
-    int color_enabled;
+    int colour_enabled;
     const char* needle;
 } search_opts_t;
 
@@ -60,7 +60,7 @@ static void usage(void) {
     puts("  -c  search in file contents only");
     puts("  -a  search in both (default)");
     puts("  --stdin  filter piped stdin lines for <pattern>");
-    puts("  --no-color  disable highlighted matches");
+    puts("  --no-colour  disable highlighted matches");
 }
 
 static int streq(const char* a, const char* b) {
@@ -90,17 +90,17 @@ static void emit_rgb(uint8_t r, uint8_t g, uint8_t b) {
     write_all(seq, sizeof(seq));
 }
 
-static void print_highlighted_text(const char* text, const char* needle, int color_enabled) {
+static void print_highlighted_text(const char* text, const char* needle, int colour_enabled) {
     if (!text) {
-        if (color_enabled) {
-            emit_rgb(SEARCH_COLOR_DEFAULT_R, SEARCH_COLOR_DEFAULT_G, SEARCH_COLOR_DEFAULT_B);
+        if (colour_enabled) {
+            emit_rgb(SEARCH_COLOUR_DEFAULT_R, SEARCH_COLOUR_DEFAULT_G, SEARCH_COLOUR_DEFAULT_B);
         }
         return;
     }
-    if (!color_enabled || !needle || needle[0] == '\0') {
+    if (!colour_enabled || !needle || needle[0] == '\0') {
         write_all(text, strlen(text));
-        if (color_enabled) {
-            emit_rgb(SEARCH_COLOR_DEFAULT_R, SEARCH_COLOR_DEFAULT_G, SEARCH_COLOR_DEFAULT_B);
+        if (colour_enabled) {
+            emit_rgb(SEARCH_COLOUR_DEFAULT_R, SEARCH_COLOUR_DEFAULT_G, SEARCH_COLOUR_DEFAULT_B);
         }
         return;
     }
@@ -119,29 +119,29 @@ static void print_highlighted_text(const char* text, const char* needle, int col
             write_all(cursor, (size_t)(hit - cursor));
         }
 
-        emit_rgb(SEARCH_COLOR_MATCH_R, SEARCH_COLOR_MATCH_G, SEARCH_COLOR_MATCH_B);
+        emit_rgb(SEARCH_COLOUR_MATCH_R, SEARCH_COLOUR_MATCH_G, SEARCH_COLOUR_MATCH_B);
         write_all(hit, needle_len);
-        emit_rgb(SEARCH_COLOR_DEFAULT_R, SEARCH_COLOR_DEFAULT_G, SEARCH_COLOR_DEFAULT_B);
+        emit_rgb(SEARCH_COLOUR_DEFAULT_R, SEARCH_COLOUR_DEFAULT_G, SEARCH_COLOUR_DEFAULT_B);
 
         cursor = hit + needle_len;
     }
 
-    emit_rgb(SEARCH_COLOR_DEFAULT_R, SEARCH_COLOR_DEFAULT_G, SEARCH_COLOR_DEFAULT_B);
+    emit_rgb(SEARCH_COLOUR_DEFAULT_R, SEARCH_COLOUR_DEFAULT_G, SEARCH_COLOUR_DEFAULT_B);
 }
 
-static void print_highlighted_line(const char* line, const char* needle, int color_enabled) {
-    print_highlighted_text(line, needle, color_enabled);
+static void print_highlighted_line(const char* line, const char* needle, int colour_enabled) {
+    print_highlighted_text(line, needle, colour_enabled);
     write_all("\n", 1);
 }
 
-static void print_highlighted_labeled_path(const char* label, const char* path, int is_dir, const char* needle, int color_enabled) {
+static void print_highlighted_labeled_path(const char* label, const char* path, int is_dir, const char* needle, int colour_enabled) {
     if (label) write_all(label, strlen(label));
-    print_highlighted_text(path, needle, color_enabled);
+    print_highlighted_text(path, needle, colour_enabled);
     if (is_dir) write_all("/", 1);
     write_all("\n", 1);
 }
 
-static void stdin_filter_matches(const char* needle, int color_enabled) {
+static void stdin_filter_matches(const char* needle, int colour_enabled) {
     char chunk[SEARCH_READ_CHUNK];
     char line[SEARCH_PATH_MAX];
     int line_len = 0;
@@ -164,7 +164,7 @@ static void stdin_filter_matches(const char* needle, int color_enabled) {
             if (ch == '\n') {
                 line[line_len] = '\0';
                 if (line_contains(line, needle)) {
-                    print_highlighted_line(line, needle, color_enabled);
+                    print_highlighted_line(line, needle, colour_enabled);
                 }
                 line_len = 0;
                 continue;
@@ -180,7 +180,7 @@ static void stdin_filter_matches(const char* needle, int color_enabled) {
     if (line_len > 0) {
         line[line_len] = '\0';
         if (line_contains(line, needle)) {
-            print_highlighted_line(line, needle, color_enabled);
+            print_highlighted_line(line, needle, colour_enabled);
         }
     }
 }
@@ -251,13 +251,13 @@ static int file_contains_needle(const char* path, const char* needle) {
 static void maybe_report_name_match(const char* path, int is_dir, const search_opts_t* opts) {
     if (!opts->filename) return;
     if (strstr(path, opts->needle) == NULL) return;
-    print_highlighted_labeled_path("name: ", path, is_dir, opts->needle, opts->color_enabled);
+    print_highlighted_labeled_path("name: ", path, is_dir, opts->needle, opts->colour_enabled);
 }
 
 static void maybe_report_content_match(const char* path, const search_opts_t* opts) {
     if (!opts->content) return;
     if (!file_contains_needle(path, opts->needle)) return;
-    print_highlighted_labeled_path("text: ", path, 0, opts->needle, opts->color_enabled);
+    print_highlighted_labeled_path("text: ", path, 0, opts->needle, opts->colour_enabled);
 }
 
 static void walk_path(const char* path, int depth, const search_opts_t* opts) {
@@ -333,7 +333,7 @@ int main(int argc, char** argv) {
     search_opts_t opts;
     opts.filename = 1;
     opts.content = 1;
-    opts.color_enabled = 1;
+    opts.colour_enabled = 1;
     opts.needle = argv[1];
     int use_stdin = 0;
 
@@ -353,15 +353,15 @@ int main(int argc, char** argv) {
             opts.content = 1;
         } else if (streq(a, "--stdin")) {
             use_stdin = 1;
-        } else if (streq(a, "--no-color")) {
-            opts.color_enabled = 0;
+        } else if (streq(a, "--no-colour")) {
+            opts.colour_enabled = 0;
         } else {
             path = a;
         }
     }
 
     if (use_stdin) {
-        stdin_filter_matches(opts.needle, opts.color_enabled);
+        stdin_filter_matches(opts.needle, opts.colour_enabled);
         return 0;
     }
 

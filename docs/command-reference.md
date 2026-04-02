@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-02 10:33:09
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-02 11:05:32
 
-**Total Commands:** 85
+**Total Commands:** 84
 
 ## Table of Contents
 
@@ -1372,22 +1372,6 @@ xeyes
 
 ---
 
-### xeyes-2
-
-**Binary:** `testdir/binaries/xeyes-2`
-
-**Metadata Source:** `testdir/code/(metadata not found)`
-
-**Description:**
-Run the xeyes-2 command.
-
-**Example:**
-```bash
-xeyes-2
-```
-
----
-
 ## Command Statistics
 
 | Category | Count |
@@ -1398,5 +1382,5 @@ xeyes-2
 | Memory Commands | 7 |
 | GUI/Window Commands | 10 |
 | Development Commands | 10 |
-| Utility Commands | 27 |
+| Utility Commands | 26 |
 

@@ -105,5 +105,4 @@ Utility Commands:
   view_backend_bmp - Run the view_backend_bmp command.
   view_backend_rei - Run the view_backend_rei command.
   xeyes           - X11 xeyes - eyes that follow the mouse pointer.
-  xeyes-2         - Run the xeyes-2 command.
 
