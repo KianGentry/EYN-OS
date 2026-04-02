@@ -1,0 +1,6 @@
+name=wav
+kind=audio
+extensions=.wav
+magic32=0x46464952
+submagic32@8=0x45564157
+exec=/binaries/view_backend_builtin

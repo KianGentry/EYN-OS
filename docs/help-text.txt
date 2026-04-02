@@ -62,7 +62,7 @@ GUI/Window Commands:
   setfont         - Set runtime system font (.hex/.otf/.ttf).
   stats           - Open the stats GUI.
   theme           - Open the theme editor.
-  view            - Open an REI, BMP image, REIV video, REIS audio, or WAV audio viewer.
+  view            - Dispatch a file to a view backend from /.view.
 
 Development Commands:
 --------------------
@@ -102,5 +102,8 @@ Utility Commands:
   sort            - Sort strings alphabetically.
   spam            - Spam 'EYN-OS' to stdout 100 times.
   tiling          - Launch the tiling manager.
+  view_backend_bmp - Run the view_backend_bmp command.
+  view_backend_rei - Run the view_backend_rei command.
   xeyes           - X11 xeyes - eyes that follow the mouse pointer.
+  xeyes-2         - Run the xeyes-2 command.
 

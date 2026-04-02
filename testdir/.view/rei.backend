@@ -1,0 +1,6 @@
+name=rei
+kind=image
+extensions=.rei
+magic32=0x52454900
+protocol=frame-v1
+exec=/binaries/view_backend_rei

@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-03-29 22:05:44
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-02 10:33:09
 
-**Total Commands:** 82
+**Total Commands:** 85
 
 ## Table of Contents
 
@@ -783,7 +783,7 @@ theme /fonts/unscii-16.hex
 **Metadata Source:** `testdir/code/view_uelf.c`
 
 **Description:**
-Open an REI, BMP image, REIV video, REIS audio, or WAV audio viewer.
+Dispatch a file to a view backend from /.view.
 
 **Example:**
 ```bash
@@ -1324,6 +1324,38 @@ tiling
 
 ---
 
+### view_backend_bmp
+
+**Binary:** `testdir/binaries/view_backend_bmp`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the view_backend_bmp command.
+
+**Example:**
+```bash
+view_backend_bmp
+```
+
+---
+
+### view_backend_rei
+
+**Binary:** `testdir/binaries/view_backend_rei`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the view_backend_rei command.
+
+**Example:**
+```bash
+view_backend_rei
+```
+
+---
+
 ### xeyes
 
 **Binary:** `testdir/binaries/xeyes`
@@ -1340,6 +1372,22 @@ xeyes
 
 ---
 
+### xeyes-2
+
+**Binary:** `testdir/binaries/xeyes-2`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the xeyes-2 command.
+
+**Example:**
+```bash
+xeyes-2
+```
+
+---
+
 ## Command Statistics
 
 | Category | Count |
@@ -1350,5 +1398,5 @@ xeyes
 | Memory Commands | 7 |
 | GUI/Window Commands | 10 |
 | Development Commands | 10 |
-| Utility Commands | 24 |
+| Utility Commands | 27 |
 
