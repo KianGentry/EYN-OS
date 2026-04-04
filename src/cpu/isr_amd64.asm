@@ -3,15 +3,13 @@
 ; ABI-INVARIANT: Exceptions that push an error code must discard that word
 ; before iretq. Returning without popping it makes iretq consume err_code as RIP.
 ;
-; The C-side bridge (isr_amd64_dispatch) receives:
-;   (vector, err_code, rip, cs, rflags)
-; and synthesizes a regs_t for the existing exception handling pipeline.
+; The C-side bridge consumes amd64_interrupt_frame_t generated in each stub.
 
 bits 64
 
 default rel
 
-extern isr_amd64_dispatch
+extern isr_amd64_dispatch_frame
 
 section .text
 
@@ -55,12 +53,19 @@ section .text
 global isr%1
 isr%1:
     PUSH_GPRS
-    mov edi, %1
-    xor esi, esi
-    mov rdx, [rsp + 120]
-    mov rcx, [rsp + 128]
-    mov r8,  [rsp + 136]
-    call isr_amd64_dispatch
+    mov rbp, rsp
+    sub rsp, 40
+    mov qword [rsp + 0], %1
+    mov qword [rsp + 8], 0
+    mov rax, [rbp + 120]
+    mov [rsp + 16], rax
+    mov rax, [rbp + 128]
+    mov [rsp + 24], rax
+    mov rax, [rbp + 136]
+    mov [rsp + 32], rax
+    mov rdi, rsp
+    call isr_amd64_dispatch_frame
+    add rsp, 40
     POP_GPRS
     iretq
 %endmacro
@@ -69,12 +74,20 @@ isr%1:
 global isr%1
 isr%1:
     PUSH_GPRS
-    mov edi, %1
-    mov rsi, [rsp + 120]
-    mov rdx, [rsp + 128]
-    mov rcx, [rsp + 136]
-    mov r8,  [rsp + 144]
-    call isr_amd64_dispatch
+    mov rbp, rsp
+    sub rsp, 40
+    mov qword [rsp + 0], %1
+    mov rax, [rbp + 120]
+    mov [rsp + 8], rax
+    mov rax, [rbp + 128]
+    mov [rsp + 16], rax
+    mov rax, [rbp + 136]
+    mov [rsp + 24], rax
+    mov rax, [rbp + 144]
+    mov [rsp + 32], rax
+    mov rdi, rsp
+    call isr_amd64_dispatch_frame
+    add rsp, 40
     POP_GPRS
     add rsp, 8
     iretq

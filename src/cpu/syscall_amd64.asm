@@ -9,7 +9,7 @@ bits 64
 default rel
 
 global syscall_entry
-extern syscall_dispatch_amd64
+extern syscall_dispatch_amd64_frame
 
 section .text
 syscall_entry:
@@ -29,15 +29,34 @@ syscall_entry:
     push r14
     push r15
 
+    mov rbp, rsp
+    sub rsp, 72
+
     ; Legacy int 0x80 convention: eax=sysno, ebx/ecx/edx=args1..3.
-    ; Pass two extra args (saved rsi/rdi) for forward compatibility.
-    mov rdi, [rsp + 112] ; saved rax (syscall number)
-    mov rsi, [rsp + 88]  ; saved rbx
-    mov rdx, [rsp + 104] ; saved rcx
-    mov rcx, [rsp + 96]  ; saved rdx
-    mov r8,  [rsp + 72]  ; saved rsi
-    mov r9,  [rsp + 64]  ; saved rdi
-    call syscall_dispatch_amd64
+    ; We also pass saved RSI/RDI and return frame metadata.
+    mov rax, [rbp + 112]
+    mov [rsp + 0], rax
+    mov rax, [rbp + 88]
+    mov [rsp + 8], rax
+    mov rax, [rbp + 104]
+    mov [rsp + 16], rax
+    mov rax, [rbp + 96]
+    mov [rsp + 24], rax
+    mov rax, [rbp + 72]
+    mov [rsp + 32], rax
+    mov rax, [rbp + 64]
+    mov [rsp + 40], rax
+    mov rax, [rbp + 120]
+    mov [rsp + 48], rax
+    mov rax, [rbp + 128]
+    mov [rsp + 56], rax
+    mov rax, [rbp + 136]
+    mov [rsp + 64], rax
+
+    mov rdi, rsp
+    call syscall_dispatch_amd64_frame
+
+    add rsp, 72
 
     ; Place syscall return value into saved RAX slot.
     mov [rsp + 112], rax

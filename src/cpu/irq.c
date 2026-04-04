@@ -81,22 +81,22 @@ void irq_init(void) {
     pic_remap();
 
     // install IDT gates for IRQs 0..15 at 0x20..0x2F
-    set_idt_gate(32, (uint32)irq0);
-    set_idt_gate(33, (uint32)irq1);
-    set_idt_gate(34, (uint32)irq2);
-    set_idt_gate(35, (uint32)irq3);
-    set_idt_gate(36, (uint32)irq4);
-    set_idt_gate(37, (uint32)irq5);
-    set_idt_gate(38, (uint32)irq6);
-    set_idt_gate(39, (uint32)irq7);
-    set_idt_gate(40, (uint32)irq8);
-    set_idt_gate(41, (uint32)irq9);
-    set_idt_gate(42, (uint32)irq10);
-    set_idt_gate(43, (uint32)irq11);
-    set_idt_gate(44, (uint32)irq12);
-    set_idt_gate(45, (uint32)irq13);
-    set_idt_gate(46, (uint32)irq14);
-    set_idt_gate(47, (uint32)irq15);
+    set_idt_gate(32, (uintptr)irq0);
+    set_idt_gate(33, (uintptr)irq1);
+    set_idt_gate(34, (uintptr)irq2);
+    set_idt_gate(35, (uintptr)irq3);
+    set_idt_gate(36, (uintptr)irq4);
+    set_idt_gate(37, (uintptr)irq5);
+    set_idt_gate(38, (uintptr)irq6);
+    set_idt_gate(39, (uintptr)irq7);
+    set_idt_gate(40, (uintptr)irq8);
+    set_idt_gate(41, (uintptr)irq9);
+    set_idt_gate(42, (uintptr)irq10);
+    set_idt_gate(43, (uintptr)irq11);
+    set_idt_gate(44, (uintptr)irq12);
+    set_idt_gate(45, (uintptr)irq13);
+    set_idt_gate(46, (uintptr)irq14);
+    set_idt_gate(47, (uintptr)irq15);
 
     // unmask PIT on PIC (IRQ0)
     uint8 mask1 = inportb(PIC1_DATA);
