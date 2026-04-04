@@ -1768,3 +1768,7 @@ void vmm_enable_paging(void) {
     
     printf("VMM: Paging enabled\n");
 }
+
+void vmm_mark_paging_enabled(void) {
+    paging_enabled = 1;
+}

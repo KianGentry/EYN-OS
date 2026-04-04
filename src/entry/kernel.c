@@ -61,8 +61,13 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
         printf("[boot] multiboot modules: none (flags=0x%X)\n", (unsigned)mbi->flags);
     }
 
-    // Install our own GDT (kernel/user segments) + TSS before setting up IDT gates.
+    // Install our own GDT/TSS before IDT on i386. amd64 currently keeps the
+    // bootstrap long-mode GDT until the amd64 TSS/LDT path is fully ported.
+#if defined(EYNOS_ARCH_AMD64)
+    printf("[boot] amd64: using bootstrap GDT (kernel gdt_init pending amd64 port)\n");
+#else
     gdt_init();
+#endif
     if (mbi->flags & MULTIBOOT_INFO_MODS && mbi->mods_count > 0) {
         multiboot_module_t* mods = (multiboot_module_t*)kernel_u32_to_ptr((uint32)mbi->mods_addr);
         if (mods) { // Add null check
@@ -91,7 +96,12 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     vmm_init(ram);
         printf("Frames: %u total, %u free\n",
             (unsigned)vmm_get_total_frames(), (unsigned)vmm_get_free_frames());
+#if defined(EYNOS_ARCH_AMD64)
+    vmm_mark_paging_enabled();
+    printf("VMM: Paging already active (amd64 bootstrap)\n");
+#else
     vmm_enable_paging();
+#endif
     printf("Done.\n");
 
     // Initialize capability secret/registry before any user-facing objects.
@@ -183,12 +193,22 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     native_exec_init();
     printf("Done.\n");
     
-    // Launch tiling manager by default; it provides the graphical shell UI
+    // Launch interactive UI/shell on i386. amd64 bring-up is not yet ready for
+    // user-mode transitions (GDT/LDT/TSS path), so keep kernel alive in a
+    // watchdog-safe idle loop after core init.
+#if defined(EYNOS_ARCH_AMD64)
+    printf("[amd64] Core init complete; user-mode shell path is temporarily disabled during bring-up.\n");
+    for (;;) {
+        watchdog_kick("amd64-idle");
+        arch_halt();
+    }
+#else
     printf("Starting Tiling Manager...");
     start_tiling_manager();
 
     // If tiling manager exits (e.g., user closes it), fall back to classic shell
     launch_shell(0);
+#endif
     
     return 0;
 }

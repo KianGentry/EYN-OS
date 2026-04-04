@@ -240,6 +240,7 @@ void vmm_init(uint32 total_ram_bytes);
  */
 uint32 vmm_get_boot_alloc_end(void);
 void vmm_enable_paging(void);
+void vmm_mark_paging_enabled(void);
 
 /* Frame allocator */
 uint32 frame_alloc(void);                    /* Returns physical address or 0 */

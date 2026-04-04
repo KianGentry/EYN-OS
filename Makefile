@@ -81,6 +81,10 @@ ARCH_IRQ_STUB_SRC_i386 = src/cpu/irq.asm
 ARCH_IRQ_STUB_SRC_amd64 = src/cpu/irq_amd64.asm
 ARCH_SYSCALL_STUB_SRC_i386 = src/cpu/syscall.asm
 ARCH_SYSCALL_STUB_SRC_amd64 = src/cpu/syscall_amd64.asm
+ARCH_BOOT_SRC_i386 = src/boot/kernel.asm
+ARCH_BOOT_SRC_amd64 = src/boot/kernel_amd64.asm
+ARCH_MEM_ASM_SRC_i386 = src/misc/mem386.asm
+ARCH_MEM_ASM_SRC_amd64 = src/misc/mem_amd64.asm
 
 ARCH_EMULATOR_i386 = qemu-system-i386
 ARCH_EMULATOR_amd64 = qemu-system-x86_64
@@ -143,9 +147,9 @@ preflight-arch:
 docs: all
 	python3 devtools/generate_command_docs.py src/
 
-$(OBJDIR)/kasm.o:src/boot/kernel.asm
+$(OBJDIR)/kasm.o:$(ARCH_BOOT_SRC_$(ARCH))
 	mkdir $(OBJDIR)/ -p
-	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/kasm.o src/boot/kernel.asm
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/kasm.o $(ARCH_BOOT_SRC_$(ARCH))
 
 $(OBJDIR)/syscall.o:$(ARCH_SYSCALL_STUB_SRC_$(ARCH))
 	mkdir $(OBJDIR)/ -p
@@ -159,9 +163,9 @@ $(OBJDIR)/irq_stubs.o:$(ARCH_IRQ_STUB_SRC_$(ARCH))
 	mkdir $(OBJDIR)/ -p
 	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/irq_stubs.o $(ARCH_IRQ_STUB_SRC_$(ARCH))
 
-$(OBJDIR)/mem386.o:src/misc/mem386.asm
+$(OBJDIR)/mem386.o:$(ARCH_MEM_ASM_SRC_$(ARCH))
 	mkdir $(OBJDIR)/ -p
-	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/mem386.o src/misc/mem386.asm
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/mem386.o $(ARCH_MEM_ASM_SRC_$(ARCH))
 	
 $(OBJDIR)/kc.o:src/entry/kernel.c
 	$(COMPILER) $(CFLAGS) src/entry/kernel.c -o $(OBJDIR)/kc.o 
