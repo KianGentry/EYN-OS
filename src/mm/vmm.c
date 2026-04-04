@@ -61,29 +61,29 @@ static uint32 g_kernel_phys_alias_bytes = 16u * 1024u * 1024u;
 
 // LOW-LEVEL CR REGISTER ACCESS
 
-static inline uint32 read_cr0(void) {
-    uint32 val;
+static inline uintptr read_cr0(void) {
+    uintptr val;
     asm volatile("mov %%cr0, %0" : "=r"(val));
     return val;
 }
 
-static inline void write_cr0(uint32 val) {
+static inline void write_cr0(uintptr val) {
     asm volatile("mov %0, %%cr0" :: "r"(val));
 }
 
-static inline uint32 read_cr2(void) {
-    uint32 val;
+static inline uintptr read_cr2(void) {
+    uintptr val;
     asm volatile("mov %%cr2, %0" : "=r"(val));
     return val;
 }
 
-static inline uint32 read_cr3(void) {
-    uint32 val;
+static inline uintptr read_cr3(void) {
+    uintptr val;
     asm volatile("mov %%cr3, %0" : "=r"(val));
     return val;
 }
 
-static inline void write_cr3(uint32 val) {
+static inline void write_cr3(uintptr val) {
     asm volatile("mov %0, %%cr3" :: "r"(val));
 }
 
@@ -1728,7 +1728,7 @@ void vmm_enable_paging(void) {
     write_cr3(vmm_kernel_as.pd_phys);
     
     /* Enable paging by setting CR0.PG (bit 31) */
-    uint32 cr0 = read_cr0();
+    uintptr cr0 = read_cr0();
     cr0 |= 0x80000000;  /* Set PG bit */
     write_cr0(cr0);
     

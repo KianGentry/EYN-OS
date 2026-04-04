@@ -37,7 +37,7 @@ static void serial_put_hex32(uint32 v) {
 
 /* Legacy page fault handler signature used by ISR 14. */
 void page_fault_handler(regs_t* r) {
-    uint32 fault_addr;
+    uintptr fault_addr;
     asm volatile("mov %%cr2, %0" : "=r"(fault_addr));
 
     if (!r) {
@@ -57,7 +57,7 @@ void page_fault_handler(regs_t* r) {
     if (r && ((r->cs & 3u) != 3u)) {
         // Emit a minimal serial line first in case VGA output is unavailable.
         serial_puts_unsafe("[PF] addr=");
-        serial_put_hex32(fault_addr);
+        serial_put_hex32((uint32)fault_addr);
         serial_puts_unsafe(" eip=");
         serial_put_hex32(r->eip);
         serial_puts_unsafe(" err=");
@@ -71,7 +71,7 @@ void page_fault_handler(regs_t* r) {
                (unsigned)r->cs,
                (unsigned)r->esp);
     }
-    vmm_page_fault_handler(r->err_code, fault_addr, r->eip);
+    vmm_page_fault_handler(r->err_code, (uint32)fault_addr, r->eip);
 }
 
 /* Legacy guard: ensure page 0 is unmapped. */

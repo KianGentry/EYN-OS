@@ -110,6 +110,22 @@ $(OBJS): | preflight
 preflight:
 	@mkdir -p $(OBJDIR)/
 
+.PHONY: preflight-arch
+preflight-arch:
+	@echo "[preflight] ARCH=$(ARCH)"
+	@echo "[preflight] CFLAGS: $(ARCH_KERNEL_CFLAGS_$(ARCH))"
+	@echo "[preflight] ASFLAGS: $(ARCH_ASFLAGS_$(ARCH))"
+	@echo "[preflight] LDFORMAT: $(ARCH_LDFORMAT_$(ARCH))"
+	@echo "[preflight] LINK_SCRIPT: $(ARCH_LINK_SCRIPT_$(ARCH))"
+	@if [ ! -f "$(ARCH_LINK_SCRIPT_$(ARCH))" ]; then \
+		echo "[preflight] ERROR: missing linker script $(ARCH_LINK_SCRIPT_$(ARCH))"; \
+		exit 1; \
+	fi
+	@if [ "$(ARCH)" = "amd64" ]; then \
+		echo "[preflight] amd64 compile/link scaffolding: ready"; \
+		echo "[preflight] amd64 runtime note: long-mode interrupt/syscall/user ABI paths are still in progress"; \
+	fi
+
 docs: all
 	python3 devtools/generate_command_docs.py src/
 
