@@ -63,6 +63,13 @@ static int is_recoverable_error(int isr_num);
 static void log_error(int isr_num, error_context_t* ctx);
 static void attempt_recovery(error_context_t* ctx);
 extern void fpu_handle_nm(void);
+static uint32 syscall_dispatch_core(regs_t* regs,
+                                    uint32 syscall_num,
+                                    uintptr arg1,
+                                    uintptr arg2,
+                                    uintptr arg3,
+                                    uintptr arg4,
+                                    uintptr arg5);
 
 extern void isr_install() 
 {
@@ -251,7 +258,6 @@ void isr_dispatch(regs_t* regs) {
 
     /* Page faults should be handled by the VMM (demand paging / COW / swap). */
     if (regs->int_no == 14) {
-        extern void page_fault_handler(regs_t* r);
         page_fault_handler(regs);
         return;
     }
@@ -315,7 +321,13 @@ uint64 syscall_dispatch_amd64_frame(const amd64_syscall_frame_t* frame) {
     synthetic_regs.cs = (uint32)frame->cs;
     synthetic_regs.eflags = (uint32)frame->rflags;
 
-    return (uint64)syscall_dispatch(&synthetic_regs);
+    return (uint64)syscall_dispatch_core(&synthetic_regs,
+                                         (uint32)frame->syscall_no,
+                                         (uintptr)frame->arg1,
+                                         (uintptr)frame->arg2,
+                                         (uintptr)frame->arg3,
+                                         (uintptr)frame->arg4,
+                                         (uintptr)frame->arg5);
 }
 #endif
 
@@ -2004,9 +2016,6 @@ static void syscall_console_write(const char* buf, int len) {
     extern volatile uint8 g_user_task_colour_bytes[3];
     extern volatile uint8 g_user_task_icon_state;
     extern volatile uint8 g_user_task_icon_bytes[16];
-    extern int shell_redirect_colour_r;
-    extern int shell_redirect_colour_g;
-    extern int shell_redirect_colour_b;
 
     int prev_r = shell_redirect_colour_r;
     int prev_g = shell_redirect_colour_g;
@@ -2484,11 +2493,15 @@ typedef struct {
 extern uint8 g_current_drive;
 
 // C dispatcher called by the assembly stub. Returns value in EAX to user.
-uint32 syscall_dispatch(regs_t* regs) {
-    uint32 syscall_num = regs->eax;
-    uint32 arg1 = regs->ebx;
-    uint32 arg2 = regs->ecx;
-    uint32 arg3 = regs->edx;
+static uint32 syscall_dispatch_core(regs_t* regs,
+                                    uint32 syscall_num,
+                                    uintptr arg1,
+                                    uintptr arg2,
+                                    uintptr arg3,
+                                    uintptr arg4,
+                                    uintptr arg5) {
+    (void)arg4;
+    (void)arg5;
 
     if (g_user_task_active) {
         user_task_capture_syscall_frame(regs);
@@ -5639,6 +5652,20 @@ uint32 syscall_dispatch(regs_t* regs) {
 
     (void)user_task_try_resume_from_syscall(regs);
     return regs->eax;
+}
+
+uint32 syscall_dispatch(regs_t* regs) {
+    if (!regs) {
+        return (uint32)-1;
+    }
+
+    return syscall_dispatch_core(regs,
+                                 regs->eax,
+                                 (uintptr)regs->ebx,
+                                 (uintptr)regs->ecx,
+                                 (uintptr)regs->edx,
+                                 0,
+                                 0);
 }
 
 
