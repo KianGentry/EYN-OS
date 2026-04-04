@@ -48,22 +48,22 @@ start:
         rep stosd
 
         mov eax, pdpt_table
-        or eax, 0x3
+        or eax, 0x7
         mov [pml4_table + 0], eax
         mov dword [pml4_table + 4], 0
 
         mov eax, pd_table0
-        or eax, 0x3
+        or eax, 0x7
         mov [pdpt_table + 0], eax
         mov dword [pdpt_table + 4], 0
 
         mov eax, pd_table1
-        or eax, 0x3
+        or eax, 0x7
         mov [pdpt_table + 8], eax
         mov dword [pdpt_table + 12], 0
 
         mov eax, pd_table2
-        or eax, 0x3
+        or eax, 0x7
         mov [pdpt_table + 16], eax
         mov dword [pdpt_table + 20], 0
 
@@ -85,7 +85,10 @@ start:
 .map_pd_identity_base:
         mov eax, ebx
         shl eax, 30
-        or eax, 0x83
+        ; SECURITY-INVARIANT: Keep 0xC0000000+ alias supervisor-only (ebx==3),
+        ; but mark lower identity map user-accessible during amd64 bring-up so
+        ; ring3 ELFs can execute before full amd64 VMM page-table ownership lands.
+        or eax, 0x87
 .map_pd_base_ready:
         mov ecx, 512
 .map_2m_pages:
@@ -141,7 +144,9 @@ long_mode_start:
 
         mov rsp, stack_space
         and rsp, -16
-        sub rsp, 8
+        ; ABI-INVARIANT: SysV amd64 requires caller RSP to be 16-byte aligned
+        ; before call so the callee sees RSP%16==8 after the return address push.
+        ; Violating this causes aligned XMM stack stores (movaps) to fault.
 
         mov edi, dword [rel mb_magic]
         mov esi, dword [rel mb_info]

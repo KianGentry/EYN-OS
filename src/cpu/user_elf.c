@@ -20,7 +20,9 @@ extern uint32 stack_space;
 
 volatile uint16 g_user_segdom_cs = GDT_USER_CS;
 volatile uint16 g_user_segdom_ds = GDT_USER_DS;
+#if !defined(EYNOS_ARCH_AMD64)
 static segdom_t g_user_segdom;
+#endif
 
 // PID bookkeeping for spawned tasks crossing non-local abort-to-kernel flow.
 static volatile int g_user_task_pending_pid = 0;
@@ -123,6 +125,10 @@ typedef struct {
  */
 #define USER_ELF_INITIAL_STACK_PAGES 8u  // 32KB
 
+#if defined(EYNOS_ARCH_AMD64)
+#define USER_ELF_AMD64_STACK_TOP 0x02000000u
+#endif
+
 static inline uint32 align_down(uint32 v, uint32 a) { return v & ~(a - 1); }
 static inline uint32 align_up(uint32 v, uint32 a) { return (v + a - 1) & ~(a - 1); }
 
@@ -143,7 +149,9 @@ static inline uint32 user_elf_ptr_to_u32(const void* pointer) {
 #define USER_ELF_MAX_ARGC 32
 #define USER_ELF_MAX_ARG_BYTES 2048
 
-static uint32 user_stack_build_argv(uint32 user_stack_top, const char* prog_abspath,
+static uint32 user_stack_build_argv(uint32 user_stack_top,
+                                   uint32 user_stack_floor,
+                                   const char* prog_abspath,
                                    int argc, const char* const* argv) {
     // Build a SysV-like initial stack:
     //   argc
@@ -180,7 +188,7 @@ static uint32 user_stack_build_argv(uint32 user_stack_top, const char* prog_absp
         if (total_bytes > USER_ELF_MAX_ARG_BYTES) return 0;
 
         sp -= len;
-        if (sp < USER_STACK_BASE) return 0;
+        if (sp < user_stack_floor) return 0;
         memcpy(user_elf_user_ptr(sp), s, len);
         argv_ptrs[i] = sp;
     }
@@ -190,19 +198,19 @@ static uint32 user_stack_build_argv(uint32 user_stack_top, const char* prog_absp
 
     // Push argv NULL terminator.
     sp -= 4;
-    if (sp < USER_STACK_BASE) return 0;
+    if (sp < user_stack_floor) return 0;
     *(uint32*)user_elf_user_ptr(sp) = 0;
 
     // Push argv pointers.
     for (int i = local_argc - 1; i >= 0; i--) {
         sp -= 4;
-        if (sp < USER_STACK_BASE) return 0;
+        if (sp < user_stack_floor) return 0;
         *(uint32*)user_elf_user_ptr(sp) = argv_ptrs[i];
     }
 
     // Push argc.
     sp -= 4;
-    if (sp < USER_STACK_BASE) return 0;
+    if (sp < user_stack_floor) return 0;
     *(uint32*)user_elf_user_ptr(sp) = (uint32)local_argc;
 
     return sp;
@@ -399,8 +407,13 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 
     // Map user stack (initial N pages; can grow further on page faults).
     const uint32 user_stack_pages = USER_ELF_INITIAL_STACK_PAGES;
-    const uint32 user_stack_page = USER_STACK_TOP - user_stack_pages * PAGE_SIZE;
-    const uint32 user_stack_top = USER_STACK_TOP - 0x10;
+#if defined(EYNOS_ARCH_AMD64)
+    const uint32 user_stack_limit = USER_ELF_AMD64_STACK_TOP;
+#else
+    const uint32 user_stack_limit = USER_STACK_TOP;
+#endif
+    const uint32 user_stack_page = user_stack_limit - user_stack_pages * PAGE_SIZE;
+    const uint32 user_stack_top = user_stack_limit - 0x10;
 
     // Enable VMM stack growth for the current address space.
     vmm_kernel_as.stack_bottom = user_stack_page;
@@ -498,7 +511,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     free(file);
 
     // Build initial user stack with argv.
-    uint32 user_esp = user_stack_build_argv(user_stack_top, abspath, argc, argv);
+    uint32 user_esp = user_stack_build_argv(user_stack_top, user_stack_page, abspath, argc, argv);
     if (user_esp == 0) {
         printf("%cError: argv too large.\n", 255, 0, 0);
         user_task_cleanup_mappings();
@@ -523,12 +536,17 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
         }
     }
 
+#if defined(EYNOS_ARCH_AMD64)
+    g_user_segdom_cs = GDT_USER_CS;
+    g_user_segdom_ds = GDT_USER_DS;
+#else
     uint32 seg_base = 0;
     uint32 seg_limit = USER_STACK_TOP;
     segdom_init(&g_user_segdom, seg_base, seg_limit);
     g_user_segdom_cs = g_user_segdom.user_cs;
     g_user_segdom_ds = g_user_segdom.user_ds;
     segdom_load(&g_user_segdom);
+#endif
 
     // Commit pending spawn PID (if any) so SYSCALL_EXIT/abort can report
     // completion to waitpid slot tracking.
@@ -544,7 +562,11 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
         return -1;
     }
     tss_set_kernel_stack(kernel_stack_u32);
+#if defined(EYNOS_ARCH_AMD64)
+    enter_user_mode(entry, user_esp);
+#else
     enter_user_mode_segdom(entry, user_esp, g_user_segdom_cs, g_user_segdom_ds);
+#endif
 
     return 0;
 }

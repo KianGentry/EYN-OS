@@ -61,13 +61,8 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
         printf("[boot] multiboot modules: none (flags=0x%X)\n", (unsigned)mbi->flags);
     }
 
-    // Install our own GDT/TSS before IDT on i386. amd64 currently keeps the
-    // bootstrap long-mode GDT until the amd64 TSS/LDT path is fully ported.
-#if defined(EYNOS_ARCH_AMD64)
-    printf("[boot] amd64: using bootstrap GDT (kernel gdt_init pending amd64 port)\n");
-#else
+    // Install kernel/user code-data descriptors plus TSS before IDT setup.
     gdt_init();
-#endif
     if (mbi->flags & MULTIBOOT_INFO_MODS && mbi->mods_count > 0) {
         multiboot_module_t* mods = (multiboot_module_t*)kernel_u32_to_ptr((uint32)mbi->mods_addr);
         if (mods) { // Add null check
@@ -193,22 +188,12 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     native_exec_init();
     printf("Done.\n");
     
-    // Launch interactive UI/shell on i386. amd64 bring-up is not yet ready for
-    // user-mode transitions (GDT/LDT/TSS path), so keep kernel alive in a
-    // watchdog-safe idle loop after core init.
-#if defined(EYNOS_ARCH_AMD64)
-    printf("[amd64] Core init complete; user-mode shell path is temporarily disabled during bring-up.\n");
-    for (;;) {
-        watchdog_kick("amd64-idle");
-        arch_halt();
-    }
-#else
+    // Launch interactive UI path.
     printf("Starting Tiling Manager...");
     start_tiling_manager();
 
     // If tiling manager exits (e.g., user closes it), fall back to classic shell
     launch_shell(0);
-#endif
     
     return 0;
 }

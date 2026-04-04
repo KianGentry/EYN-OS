@@ -85,6 +85,10 @@ ARCH_BOOT_SRC_i386 = src/boot/kernel.asm
 ARCH_BOOT_SRC_amd64 = src/boot/kernel_amd64.asm
 ARCH_MEM_ASM_SRC_i386 = src/misc/mem386.asm
 ARCH_MEM_ASM_SRC_amd64 = src/misc/mem_amd64.asm
+ARCH_GDT_SRC_i386 = src/cpu/gdt.c
+ARCH_GDT_SRC_amd64 = src/cpu/gdt_amd64.c
+ARCH_GDT_ASM_SRC_i386 = src/cpu/gdt.asm
+ARCH_GDT_ASM_SRC_amd64 = src/cpu/gdt_amd64.asm
 
 ARCH_EMULATOR_i386 = qemu-system-i386
 ARCH_EMULATOR_amd64 = qemu-system-x86_64
@@ -176,12 +180,12 @@ $(OBJDIR)/idt.o:$(ARCH_IDT_SRC_$(ARCH))
 $(OBJDIR)/fpu.o:$(ARCH_FPU_SRC_$(ARCH))
 	$(COMPILER) $(CFLAGS) $(ARCH_FPU_SRC_$(ARCH)) -o $(OBJDIR)/fpu.o
 
-$(OBJDIR)/gdt.o:src/cpu/gdt.c
-	$(COMPILER) $(CFLAGS) src/cpu/gdt.c -o $(OBJDIR)/gdt.o
+$(OBJDIR)/gdt.o:$(ARCH_GDT_SRC_$(ARCH))
+	$(COMPILER) $(CFLAGS) $(ARCH_GDT_SRC_$(ARCH)) -o $(OBJDIR)/gdt.o
 
-$(OBJDIR)/gdt_asm.o:src/cpu/gdt.asm
+$(OBJDIR)/gdt_asm.o:$(ARCH_GDT_ASM_SRC_$(ARCH))
 	mkdir $(OBJDIR)/ -p
-	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/gdt_asm.o src/cpu/gdt.asm
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/gdt_asm.o $(ARCH_GDT_ASM_SRC_$(ARCH))
 
 $(OBJDIR)/kb.o:src/drivers/kb.c
 	$(COMPILER) $(CFLAGS) src/drivers/kb.c -o $(OBJDIR)/kb.o
