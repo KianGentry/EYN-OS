@@ -31,6 +31,10 @@
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
 
+static inline void* kernel_u32_to_ptr(uint32 address) {
+    return (void*)(uintptr)address;
+}
+
 int kmain(uint32 magic, multiboot_info_t *mbi)
 {
     // Validate multiboot information
@@ -47,11 +51,11 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     if (mbi->flags & MULTIBOOT_INFO_MODS) {
         printf("[boot] multiboot modules: %u\n", (unsigned)mbi->mods_count);
         if (mbi->mods_count > 0 && mbi->mods_addr) {
-            multiboot_module_t* mods = (multiboot_module_t*)mbi->mods_addr;
+            multiboot_module_t* mods = (multiboot_module_t*)kernel_u32_to_ptr((uint32)mbi->mods_addr);
             printf("[boot] mod0: start=0x%X end=0x%X cmdline=%s\n",
                    (unsigned)mods[0].mod_start,
                    (unsigned)mods[0].mod_end,
-                   mods[0].cmdline ? (const char*)mods[0].cmdline : "(null)");
+                   mods[0].cmdline ? (const char*)kernel_u32_to_ptr((uint32)mods[0].cmdline) : "(null)");
         }
     } else {
         printf("[boot] multiboot modules: none (flags=0x%X)\n", (unsigned)mbi->flags);
@@ -60,9 +64,9 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     // Install our own GDT (kernel/user segments) + TSS before setting up IDT gates.
     gdt_init();
     if (mbi->flags & MULTIBOOT_INFO_MODS && mbi->mods_count > 0) {
-        multiboot_module_t* mods = (multiboot_module_t*)mbi->mods_addr;
+        multiboot_module_t* mods = (multiboot_module_t*)kernel_u32_to_ptr((uint32)mbi->mods_addr);
         if (mods) { // Add null check
-            fat32_disk_img = (void*)mods[0].mod_start;
+            fat32_disk_img = kernel_u32_to_ptr((uint32)mods[0].mod_start);
         }
     }
 

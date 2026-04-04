@@ -87,8 +87,10 @@ void paging_protect_kernel_text_ro(void) {
     extern uint32 __kernel_rodata_start;
     extern uint32 __kernel_rodata_end;
 
-    uint32 start = ((uint32)&__kernel_text_start) & ~(PAGE_SIZE - 1);
-    uint32 end   = ((uint32)&__kernel_text_end);
+    uintptr text_start_ptr = (uintptr)&__kernel_text_start;
+    uintptr text_end_ptr = (uintptr)&__kernel_text_end;
+    uint32 start = (uint32)(text_start_ptr & ~((uintptr)PAGE_SIZE - 1u));
+    uint32 end = (uint32)text_end_ptr;
 
     for (uint32 va = start; va < end; va += PAGE_SIZE) {
         pte_t* pte = vmm_walk_page_tables(&vmm_kernel_as, va, 0);
@@ -97,10 +99,12 @@ void paging_protect_kernel_text_ro(void) {
         }
     }
 
-    vm_invalidate_range((void*)start, (size_t)(end - start));
+    vm_invalidate_range((void*)(uintptr)start, (size_t)(end - start));
 
-    start = ((uint32)&__kernel_rodata_start) & ~(PAGE_SIZE - 1);
-    end   = ((uint32)&__kernel_rodata_end);
+    uintptr rodata_start_ptr = (uintptr)&__kernel_rodata_start;
+    uintptr rodata_end_ptr = (uintptr)&__kernel_rodata_end;
+    start = (uint32)(rodata_start_ptr & ~((uintptr)PAGE_SIZE - 1u));
+    end = (uint32)rodata_end_ptr;
 
     for (uint32 va = start; va < end; va += PAGE_SIZE) {
         pte_t* pte = vmm_walk_page_tables(&vmm_kernel_as, va, 0);
@@ -109,5 +113,5 @@ void paging_protect_kernel_text_ro(void) {
         }
     }
 
-    vm_invalidate_range((void*)start, (size_t)(end - start));
+    vm_invalidate_range((void*)(uintptr)start, (size_t)(end - start));
 }

@@ -1440,7 +1440,7 @@ static int user_gui_pop_event(user_gui_t* e, user_gui_event_t* out) {
 }
 
 static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
-    int handle = (int)(uint32)userdata;
+    int handle = (int)(uintptr)userdata;
     user_gui_t* e = user_gui_get(handle);
     /* tile_idx carries win_id when called from the floating window manager */
     if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return;
@@ -1549,7 +1549,7 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
 }
 
 static void user_gui_key_cb(int tile_idx, int key, void* userdata) {
-    int handle = (int)(uint32)userdata;
+    int handle = (int)(uintptr)userdata;
     user_gui_t* e = user_gui_get(handle);
     if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return;
     user_gui_event_t ev;
@@ -1578,7 +1578,7 @@ static void user_gui_key_cb(int tile_idx, int key, void* userdata) {
  * the user program is expected to call exit() when ready.
  */
 static int user_gui_close_cb(int tile_idx, void* userdata) {
-    int handle = (int)(uint32)userdata;
+    int handle = (int)(uintptr)userdata;
     user_gui_t* e = user_gui_get(handle);
     if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return 1; /* not ours -- allow close */
     user_gui_event_t ev;
@@ -1593,7 +1593,7 @@ static int user_gui_close_cb(int tile_idx, void* userdata) {
 
 static void user_gui_mouse_cb(int tile_idx, const mouse_event_t* me, void* userdata) {
     if (!me) return;
-    int handle = (int)(uint32)userdata;
+    int handle = (int)(uintptr)userdata;
     user_gui_t* e = user_gui_get(handle);
     if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return;
 
@@ -1856,6 +1856,23 @@ static void trim_trailing_crlf(char* s) {
     }
 }
 
+/*
+ * ABI-INVARIANT: User syscall address values are 32-bit virtual addresses.
+ *
+ * Why: Userland ABI remains i386-sized even when the kernel is built amd64.
+ * Invariant: Any pointer returned to or consumed from user syscall arguments
+ * must round-trip through uint32 without loss.
+ * Breakage if violated: Silent truncation can retarget memory operations to
+ * the wrong object/address.
+ */
+static int syscall_addr_to_u32(uintptr addr, uint32* out) {
+    if (!out) return -1;
+    uint32 narrowed = (uint32)addr;
+    if ((uintptr)narrowed != addr) return -1;
+    *out = narrowed;
+    return 0;
+}
+
 static char* kstrdup_bounded(const char* s, size_t max_len) {
     if (!s) return NULL;
     size_t n = 0;
@@ -1900,11 +1917,11 @@ static user_fd_t* user_fd_get(int fd) {
 
 static int user_fd_index_from_ptr(const user_fd_t* ptr) {
     if (!ptr) return -1;
-    uint32 base = (uint32)(uint32)&g_user_fds[0];
-    uint32 end = (uint32)(uint32)&g_user_fds[USER_FD_MAX];
-    uint32 p = (uint32)(uint32)ptr;
+    uintptr base = (uintptr)&g_user_fds[0];
+    uintptr end = (uintptr)&g_user_fds[USER_FD_MAX];
+    uintptr p = (uintptr)ptr;
     if (p < base || p >= end) return -1;
-    uint32 off = p - base;
+    uintptr off = p - base;
     if (off % sizeof(user_fd_t) != 0) return -1;
     int idx = (int)(off / sizeof(user_fd_t));
     if (idx < 0 || idx >= USER_FD_MAX) return -1;
@@ -1919,7 +1936,7 @@ static int syscall_cap_copyin(const void* user_cap_ptr, cap_t* out) {
 
 static user_fd_t* user_fd_from_cap(const cap_t* cap, uint32 required_rights, int* out_fd) {
     if (!cap) return NULL;
-    user_fd_t* ufd = (user_fd_t*)(uint32)cap->obj;
+    user_fd_t* ufd = (user_fd_t*)(uintptr)cap->obj;
     int idx = user_fd_index_from_ptr(ufd);
     if (idx < 0) return NULL;
     if (!g_user_fds[idx].used) return NULL;
@@ -1930,11 +1947,11 @@ static user_fd_t* user_fd_from_cap(const cap_t* cap, uint32 required_rights, int
 
 static int user_gui_index_from_ptr(const user_gui_t* ptr) {
     if (!ptr) return -1;
-    uint32 base = (uint32)(uint32)&g_user_guis[0];
-    uint32 end = (uint32)(uint32)&g_user_guis[USER_GUI_MAX];
-    uint32 p = (uint32)(uint32)ptr;
+    uintptr base = (uintptr)&g_user_guis[0];
+    uintptr end = (uintptr)&g_user_guis[USER_GUI_MAX];
+    uintptr p = (uintptr)ptr;
     if (p < base || p >= end) return -1;
-    uint32 off = p - base;
+    uintptr off = p - base;
     if (off % sizeof(user_gui_t) != 0) return -1;
     int idx = (int)(off / sizeof(user_gui_t));
     if (idx < 0 || idx >= USER_GUI_MAX) return -1;
@@ -1944,7 +1961,7 @@ static int user_gui_index_from_ptr(const user_gui_t* ptr) {
 
 static user_gui_t* user_gui_from_cap(const cap_t* cap, uint32 required_rights, int* out_handle) {
     if (!cap) return NULL;
-    user_gui_t* e = (user_gui_t*)(uint32)cap->obj;
+    user_gui_t* e = (user_gui_t*)(uintptr)cap->obj;
     int idx = user_gui_index_from_ptr(e);
     if (idx < 0) return NULL;
     if (!g_user_guis[idx].used) return NULL;
@@ -3286,18 +3303,29 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 break;
             }
 
-            regs->eax = (uint32)(uintptr_t)mapped_addr;
+            uint32 user_addr = 0;
+            if (syscall_addr_to_u32((uintptr)mapped_addr, &user_addr) != 0) {
+                (void)eynfs_munmap(mapped_addr, mapped_size);
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            regs->eax = user_addr;
             break;
         }
         case SYSCALL_MUNMAP: {
             if (!syscall_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) { regs->eax = (uint32)-1; break; }
-            void* addr = (void*)(uintptr_t)arg1;
+            uint32 user_addr = 0;
+            if (syscall_addr_to_u32(arg1, &user_addr) != 0) { regs->eax = (uint32)-1; break; }
+            void* addr = (void*)(uintptr)user_addr;
             regs->eax = (eynfs_munmap(addr, 0) == 0) ? 0u : (uint32)-1;
             break;
         }
         case SYSCALL_MSYNC: {
             if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
-            void* addr = (void*)(uintptr_t)arg1;
+            uint32 user_addr = 0;
+            if (syscall_addr_to_u32(arg1, &user_addr) != 0) { regs->eax = (uint32)-1; break; }
+            void* addr = (void*)(uintptr)user_addr;
             regs->eax = (eynfs_msync(addr, 0) == 0) ? 0u : (uint32)-1;
             break;
         }
@@ -3319,7 +3347,10 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if ((int)arg3 != 1) { regs->eax = (uint32)-1; break; }
 
-            uint32 addr = (uint32)arg1;
+            uint32 user_addr = 0;
+            if (syscall_addr_to_u32(arg1, &user_addr) != 0) { regs->eax = (uint32)-1; break; }
+
+            uintptr addr = (uintptr)user_addr;
             int mode = (int)arg2;
             if (mode == 1) {
                 *(volatile uint32*)addr = 0x12345678u;
@@ -4277,7 +4308,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             e->cmd_count = 0;
             e->ev_head = 0;
             e->ev_tail = 0;
-            wm_register_gui_client2(new_win, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)handle);
+            wm_register_gui_client2(new_win, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uintptr)handle);
             wm_register_gui_close_cb(new_win, user_gui_close_cb);
             wm_invalidate_window(new_win);
             regs->eax = (uint32)handle;
@@ -4332,7 +4363,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             e->cmd_count = 0;
             e->ev_head = 0;
             e->ev_tail = 0;
-            wm_register_gui_client2(cap_win, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)handle);
+            wm_register_gui_client2(cap_win, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uintptr)handle);
             wm_register_gui_close_cb(cap_win, user_gui_close_cb);
             wm_invalidate_window(cap_win);
 

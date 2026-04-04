@@ -11,6 +11,24 @@
 // Very small per-process FD table for now
 #define LINUX_MAX_FD 32
 
+/*
+ * ABI-INVARIANT: Linux-compat user pointers are 32-bit guest virtual addrs.
+ *
+ * Why: Native/Linux shim processes currently run with i386-style pointer ABI.
+ * Invariant: Pointer arguments that feed native_process_t address fields must
+ * round-trip through uint32.
+ * Breakage if violated: Silent truncation can move process break bookkeeping
+ * to unrelated addresses.
+ */
+static int linux_addr_to_u32(const void* addr, uint32* out) {
+    if (!out) return -1;
+    uintptr raw = (uintptr)addr;
+    uint32 narrowed = (uint32)raw;
+    if ((uintptr)narrowed != raw) return -1;
+    *out = narrowed;
+    return 0;
+}
+
 static int linux_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
     if (ctx && !cap_check(ctx->caps, caps)) return 0;
@@ -269,7 +287,10 @@ static int sys_brk(native_process_t* proc, void* addr) {
     // Minimal brk: track a single top pointer. If addr==0, return current.
     if (proc->brk_end == 0) proc->brk_end = proc->stack_start + 0x100000; // put heap below stack as placeholder
     if (addr == 0) return (int)proc->brk_end;
-    uint32 new_end = (uint32)(uintptr)addr;
+    uint32 new_end = 0;
+    if (linux_addr_to_u32(addr, &new_end) != 0) {
+        return (int)proc->brk_end;
+    }
     // No real allocation; just accept within a conservative range
     if (new_end > proc->brk_end && new_end < proc->brk_end + 0x400000) {
         proc->brk_end = new_end;
