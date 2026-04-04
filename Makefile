@@ -67,6 +67,12 @@ ARCH_FPU_SRC_i386 = src/cpu/fpu.c
 ARCH_FPU_SRC_amd64 = src/cpu/fpu_amd64.c
 ARCH_CPU_ARCH_SRC_i386 = src/cpu/arch.c
 ARCH_CPU_ARCH_SRC_amd64 = src/cpu/arch_amd64.c
+ARCH_ISR_STUB_SRC_i386 = src/cpu/isr.asm
+ARCH_ISR_STUB_SRC_amd64 = src/cpu/isr_amd64.asm
+ARCH_IRQ_STUB_SRC_i386 = src/cpu/irq.asm
+ARCH_IRQ_STUB_SRC_amd64 = src/cpu/irq_amd64.asm
+ARCH_SYSCALL_STUB_SRC_i386 = src/cpu/syscall.asm
+ARCH_SYSCALL_STUB_SRC_amd64 = src/cpu/syscall_amd64.asm
 
 ARCH_EMULATOR_i386 = qemu-system-i386
 ARCH_EMULATOR_amd64 = qemu-system-x86_64
@@ -133,17 +139,17 @@ $(OBJDIR)/kasm.o:src/boot/kernel.asm
 	mkdir $(OBJDIR)/ -p
 	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/kasm.o src/boot/kernel.asm
 
-$(OBJDIR)/syscall.o:src/cpu/syscall.asm
+$(OBJDIR)/syscall.o:$(ARCH_SYSCALL_STUB_SRC_$(ARCH))
 	mkdir $(OBJDIR)/ -p
-	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/syscall.o src/cpu/syscall.asm
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/syscall.o $(ARCH_SYSCALL_STUB_SRC_$(ARCH))
 
-$(OBJDIR)/isr_stubs.o:src/cpu/isr.asm
+$(OBJDIR)/isr_stubs.o:$(ARCH_ISR_STUB_SRC_$(ARCH))
 	mkdir $(OBJDIR)/ -p
-	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/isr_stubs.o src/cpu/isr.asm
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/isr_stubs.o $(ARCH_ISR_STUB_SRC_$(ARCH))
 
-$(OBJDIR)/irq_stubs.o:src/cpu/irq.asm
+$(OBJDIR)/irq_stubs.o:$(ARCH_IRQ_STUB_SRC_$(ARCH))
 	mkdir $(OBJDIR)/ -p
-	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/irq_stubs.o src/cpu/irq.asm
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/irq_stubs.o $(ARCH_IRQ_STUB_SRC_$(ARCH))
 
 $(OBJDIR)/mem386.o:src/misc/mem386.asm
 	mkdir $(OBJDIR)/ -p

@@ -166,8 +166,8 @@ __attribute__((weak)) void *memcpy(void *dest, const void *src, size_t n) {
     if (n <= 0) return dest;
     
     // Check if we can do word-aligned copying (both pointers aligned to 4-byte boundary)
-    uint32_t src_addr = (uint32_t)src;
-    uint32_t dest_addr = (uint32_t)dest;
+    uintptr src_addr = (uintptr)src;
+    uintptr dest_addr = (uintptr)dest;
     
     // Copy unaligned bytes at the beginning
     size_t unaligned_start = 0;
@@ -210,7 +210,7 @@ __attribute__((weak)) void *memset(void *s, int c, size_t n) {
     uint8_t val = (uint8_t)c;
     
     // Check if we can do word-aligned setting
-    uint32_t addr = (uint32_t)ptr;
+    uintptr addr = (uintptr)ptr;
     size_t unaligned_start = 0;
     
     if (addr % 4 != 0) {
@@ -472,13 +472,13 @@ static int validate_block(block_header_t* block, uint32 offset) {
     }
 
     // Validate heap_start/heap_size before touching any block fields.
-    uint32 heap_begin = (uint32)heap_start;
+    uintptr heap_begin = (uintptr)heap_start;
     if (!heap_begin || heap_begin < 0x100000 || heap_size < HEAP_SIZE_MIN) {
         printf("%c[MEMORY] Heap base corrupt (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
         memory_errors++;
         return 0;
     }
-    uint32 heap_end = heap_begin + heap_size;
+    uintptr heap_end = heap_begin + heap_size;
     if (heap_end <= heap_begin) {
         printf("%c[MEMORY] Heap bounds overflow (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
         memory_errors++;
@@ -486,7 +486,7 @@ static int validate_block(block_header_t* block, uint32 offset) {
     }
 
     // Ensure the block pointer itself is within the heap before dereferencing.
-    uint32 block_addr = (uint32)block;
+    uintptr block_addr = (uintptr)block;
     if (block_addr < heap_begin || block_addr + sizeof(block_header_t) > heap_end) {
         printf("%c[MEMORY] Block pointer out of heap (block=0x%X heap=[0x%X..0x%X))\n", 255, 0, 0, block_addr, heap_begin, heap_end);
         memory_errors++;
@@ -554,12 +554,13 @@ void init_memory_manager() {
             heap_phys_start = boot_end;
         } else {
             // Fallback (should only happen if malloc is used before vmm_init())
-            uint32 end = (uint32)&__kernel_end;
+            uint32 end = (uint32)(uintptr)&__kernel_end;
             heap_phys_start = align_up_u32(end + 0x10000, 0x1000);
         }
     }
     if (!heap_start || heap_start == (uint8*)0) {
-        heap_start = (uint8*)(KERNEL_BASE + heap_phys_start);
+        uintptr heap_alias = (uintptr)KERNEL_BASE + (uintptr)heap_phys_start;
+        heap_start = (uint8*)heap_alias;
     }
     
     // Try to detect available memory and adjust heap size accordingly
@@ -770,7 +771,7 @@ static void* heap_malloc(size_t nbytes) {
     
     // Safety check: ensure heap_start is valid
     if (!heap_start || heap_start == (uint8*)0) {
-        printf("%c[MEMORY] Critical: heap_start is corrupted (0x%X)\n", 255, 0, 0, (uint32)heap_start);
+        printf("%c[MEMORY] Critical: heap_start is corrupted (0x%X)\n", 255, 0, 0, (uint32)(uintptr)heap_start);
         return NULL;
     }
     
@@ -807,7 +808,7 @@ static void heap_free(void* ptr) {
     
     // Safety check: ensure heap_start is valid
     if (!heap_start || heap_start == (uint8*)0) {
-        printf("%c[MEMORY] Critical: heap_start is corrupted (0x%X)\n", 255, 0, 0, (uint32)heap_start);
+        printf("%c[MEMORY] Critical: heap_start is corrupted (0x%X)\n", 255, 0, 0, (uint32)(uintptr)heap_start);
         memory_errors++;
         return;
     }
@@ -816,7 +817,7 @@ static void heap_free(void* ptr) {
     
     // Validate pointer bounds
     if (block_offset >= heap_size) {
-        printf("%c[MEMORY] Invalid pointer: 0x%X (heap_start: 0x%X, offset: %d)\n", 255, 0, 0, (uint32)ptr, (uint32)heap_start, block_offset);
+        printf("%c[MEMORY] Invalid pointer: 0x%X (heap_start: 0x%X, offset: %d)\n", 255, 0, 0, (uint32)(uintptr)ptr, (uint32)(uintptr)heap_start, block_offset);
         memory_errors++;
         return;
     }
@@ -829,7 +830,7 @@ static void heap_free(void* ptr) {
     }
     
     if (!block->used) {
-        printf("%c[MEMORY] Double free detected: 0x%X\n", 255, 0, 0, (uint32)ptr);
+        printf("%c[MEMORY] Double free detected: 0x%X\n", 255, 0, 0, (uint32)(uintptr)ptr);
         memory_errors++;
         return;
     }
@@ -897,7 +898,7 @@ void* realloc(void* ptr, size_t new_size) {
     
     // Validate pointer bounds
     if (block_offset >= heap_size) {
-        printf("%c[MEMORY] Invalid pointer in realloc: 0x%X\n", 255, 0, 0, (uint32)ptr);
+        printf("%c[MEMORY] Invalid pointer in realloc: 0x%X\n", 255, 0, 0, (uint32)(uintptr)ptr);
         memory_errors++;
         return NULL;
     }

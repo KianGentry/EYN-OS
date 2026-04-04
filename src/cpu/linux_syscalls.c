@@ -30,6 +30,37 @@ typedef struct {
     uint32 size; // known size if file
 } linux_fd;
 
+static int linux_user_range_in_segment(uint32 start, uint32 size, uint32 seg_base, uint32 seg_size) {
+    uint64 begin = (uint64)start;
+    uint64 end = begin + (uint64)size;
+    uint64 seg_begin = (uint64)seg_base;
+    uint64 seg_end = seg_begin + (uint64)seg_size;
+    return begin >= seg_begin && end <= seg_end;
+}
+
+static void* linux_translate_user_ptr(native_process_t* proc, uint32 user_addr, uint32 size) {
+    if (user_addr == 0) return NULL;
+    if (!proc || proc->segment_count <= 0) return (void*)(uintptr)user_addr;
+    if (user_addr < proc->elf_vaddr_min || user_addr >= proc->elf_vaddr_max) {
+        return (void*)(uintptr)user_addr;
+    }
+
+    for (int s = 0; s < proc->segment_count; s++) {
+        uint32 sv = proc->segments[s].vaddr;
+        uint32 sm = proc->segments[s].memsz;
+        if (linux_user_range_in_segment(user_addr, size, sv, sm)) {
+            uintptr base = (uintptr)proc->segments[s].mem;
+            return (void*)(base + (uintptr)(user_addr - sv));
+        }
+    }
+
+    return (void*)(uintptr)user_addr;
+}
+
+static const void* linux_translate_user_const_ptr(native_process_t* proc, uint32 user_addr, uint32 size) {
+    return (const void*)linux_translate_user_ptr(proc, user_addr, size);
+}
+
 static linux_fd* get_fd_table(native_process_t* p) {
     if (!p->linux_fd_table) {
         if (!linux_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
@@ -238,7 +269,7 @@ static int sys_brk(native_process_t* proc, void* addr) {
     // Minimal brk: track a single top pointer. If addr==0, return current.
     if (proc->brk_end == 0) proc->brk_end = proc->stack_start + 0x100000; // put heap below stack as placeholder
     if (addr == 0) return (int)proc->brk_end;
-    uint32 new_end = (uint32)addr;
+    uint32 new_end = (uint32)(uintptr)addr;
     // No real allocation; just accept within a conservative range
     if (new_end > proc->brk_end && new_end < proc->brk_end + 0x400000) {
         proc->brk_end = new_end;
@@ -326,40 +357,19 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
 
     switch (eax) {
         case __NR_write: {
-            // ecx = buf (ELF vaddr), translate via segments
-            const void* kbuf = (const void*)ecx;
-            if (proc->segment_count && ecx >= proc->elf_vaddr_min && ecx < proc->elf_vaddr_max) {
-                for (int s = 0; s < proc->segment_count; s++) {
-                    uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                    if (ecx >= sv && ecx + edx <= sv + sm) { kbuf = (const void*)((uint32)proc->segments[s].mem + (ecx - sv)); break; }
-                }
-            }
+            const void* kbuf = linux_translate_user_const_ptr(proc, ecx, edx);
             int ret = sys_write(proc, ebx, kbuf, edx);
             regs[0] = ret;
             return ret;
         }
         case __NR_read: {
-            void* kbuf = (void*)ecx;
-            // translate destination if needed
-            if (proc->segment_count && ecx >= proc->elf_vaddr_min && ecx + edx <= proc->elf_vaddr_max) {
-                for (int s = 0; s < proc->segment_count; s++) {
-                    uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                    if (ecx >= sv && ecx + edx <= sv + sm) { kbuf = (void*)((uint32)proc->segments[s].mem + (ecx - sv)); break; }
-                }
-            }
+            void* kbuf = linux_translate_user_ptr(proc, ecx, edx);
             int ret = sys_read(proc, ebx, kbuf, edx);
             regs[0] = ret;
             return ret;
         }
         case __NR_open: {
-            // ecx: flags, edx: mode; translate filename pointer
-            const char* path = (const char*)ebx;
-            if (proc->segment_count && ebx >= proc->elf_vaddr_min && ebx < proc->elf_vaddr_max) {
-                for (int s = 0; s < proc->segment_count; s++) {
-                    uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                    if (ebx >= sv && ebx < sv + sm) { path = (const char*)((uint32)proc->segments[s].mem + (ebx - sv)); break; }
-                }
-            }
+            const char* path = (const char*)linux_translate_user_const_ptr(proc, ebx, 1u);
             int ret = sys_open(proc, path, (int)ecx, (int)edx);
             regs[0] = ret;
             return ret;
@@ -370,37 +380,19 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             return ret;
         }
         case __NR_fstat: {
-            void* kbuf = (void*)ecx;
-            if (proc->segment_count && ecx >= proc->elf_vaddr_min && ecx + sizeof(uint64) <= proc->elf_vaddr_max) {
-                for (int s = 0; s < proc->segment_count; s++) {
-                    uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                    if (ecx >= sv && ecx < sv + sm) { kbuf = (void*)((uint32)proc->segments[s].mem + (ecx - sv)); break; }
-                }
-            }
+            void* kbuf = linux_translate_user_ptr(proc, ecx, (uint32)sizeof(uint64));
             int ret = sys_fstat(proc, ebx, kbuf);
             regs[0] = ret;
             return ret;
         }
         case __NR_set_thread_area: {
-            void* kbuf = (void*)ebx;
-            if (proc->segment_count && ebx >= proc->elf_vaddr_min && ebx < proc->elf_vaddr_max) {
-                for (int s = 0; s < proc->segment_count; s++) {
-                    uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                    if (ebx >= sv && ebx < sv + sm) { kbuf = (void*)((uint32)proc->segments[s].mem + (ebx - sv)); break; }
-                }
-            }
+            void* kbuf = linux_translate_user_ptr(proc, ebx, 1u);
             int ret = sys_set_thread_area(proc, kbuf);
             regs[0] = ret;
             return ret;
         }
         case __NR_uname: {
-            void* kbuf = (void*)ebx;
-            if (proc->segment_count && ebx >= proc->elf_vaddr_min && ebx < proc->elf_vaddr_max) {
-                for (int s = 0; s < proc->segment_count; s++) {
-                    uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                    if (ebx >= sv && ebx < sv + sm) { kbuf = (void*)((uint32)proc->segments[s].mem + (ebx - sv)); break; }
-                }
-            }
+            void* kbuf = linux_translate_user_ptr(proc, ebx, 65u * 5u);
             int ret = sys_uname(proc, kbuf);
             regs[0] = ret;
             return ret;
@@ -411,45 +403,20 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             return ret;
         }
         case __NR_time: {
-            uint32* kptr = (uint32*)ebx;
-            if (proc->segment_count && ebx && ebx >= proc->elf_vaddr_min && ebx < proc->elf_vaddr_max) {
-                for (int s = 0; s < proc->segment_count; s++) {
-                    uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                    if (ebx >= sv && ebx < sv + sm) { kptr = (uint32*)((uint32)proc->segments[s].mem + (ebx - sv)); break; }
-                }
-            }
+            uint32* kptr = (uint32*)linux_translate_user_ptr(proc, ebx, (uint32)sizeof(uint32));
             int ret = sys_time(proc, kptr);
             regs[0] = ret;
             return ret;
         }
         case __NR_gettimeofday: {
-            void* ktv = (void*)ebx; void* ktz = (void*)ecx;
-            if (proc->segment_count) {
-                if (ebx && ebx >= proc->elf_vaddr_min && ebx < proc->elf_vaddr_max) {
-                    for (int s = 0; s < proc->segment_count; s++) {
-                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                        if (ebx >= sv && ebx < sv + sm) { ktv = (void*)((uint32)proc->segments[s].mem + (ebx - sv)); break; }
-                    }
-                }
-                if (ecx && ecx >= proc->elf_vaddr_min && ecx < proc->elf_vaddr_max) {
-                    for (int s = 0; s < proc->segment_count; s++) {
-                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                        if (ecx >= sv && ecx < sv + sm) { ktz = (void*)((uint32)proc->segments[s].mem + (ecx - sv)); break; }
-                    }
-                }
-            }
+            void* ktv = linux_translate_user_ptr(proc, ebx, (uint32)(2u * sizeof(uint32)));
+            void* ktz = linux_translate_user_ptr(proc, ecx, 1u);
             int ret = sys_gettimeofday(proc, ktv, ktz);
             regs[0] = ret;
             return ret;
         }
         case __NR_clock_gettime: {
-            void* kts = (void*)ecx;
-            if (proc->segment_count && ecx >= proc->elf_vaddr_min && ecx < proc->elf_vaddr_max) {
-                for (int s = 0; s < proc->segment_count; s++) {
-                    uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                    if (ecx >= sv && ecx < sv + sm) { kts = (void*)((uint32)proc->segments[s].mem + (ecx - sv)); break; }
-                }
-            }
+            void* kts = linux_translate_user_ptr(proc, ecx, (uint32)(2u * sizeof(uint32)));
             int ret = sys_clock_gettime(proc, (int)ebx, kts);
             regs[0] = ret;
             return ret;
@@ -466,7 +433,7 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             return 0;
         }
         case __NR_brk: {
-            int ret = sys_brk(proc, (void*)ebx);
+            int ret = sys_brk(proc, (void*)(uintptr)ebx);
             regs[0] = ret;
             return ret;
         }
@@ -488,30 +455,8 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             uint32 esi = regs[6];
             uint32 edi = regs[7];
             
-            const char* dst_ip_str = (const char*)ecx;
-            const void* buf = (const void*)esi;
-            
-            // Translate pointers if needed
-            if (proc->segment_count) {
-                if (ecx >= proc->elf_vaddr_min && ecx < proc->elf_vaddr_max) {
-                    for (int s = 0; s < proc->segment_count; s++) {
-                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                        if (ecx >= sv && ecx < sv + sm) { 
-                            dst_ip_str = (const char*)((uint32)proc->segments[s].mem + (ecx - sv)); 
-                            break; 
-                        }
-                    }
-                }
-                if (esi >= proc->elf_vaddr_min && esi < proc->elf_vaddr_max) {
-                    for (int s = 0; s < proc->segment_count; s++) {
-                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                        if (esi >= sv && esi + edi <= sv + sm) { 
-                            buf = (const void*)((uint32)proc->segments[s].mem + (esi - sv)); 
-                            break; 
-                        }
-                    }
-                }
-            }
+            const char* dst_ip_str = (const char*)linux_translate_user_const_ptr(proc, ecx, 1u);
+            const void* buf = linux_translate_user_const_ptr(proc, esi, edi);
             
             int ret = sys_net_sendto(proc, (int)ebx, dst_ip_str, (uint16)edx, buf, edi);
             regs[0] = ret;
@@ -522,40 +467,9 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             uint32 esi = regs[6];
             uint32 edi = regs[7];
             
-            void* buf = (void*)ecx;
-            void* src_ip_out = (void*)esi;
-            void* src_port_out = (void*)edi;
-            
-            // Translate pointers
-            if (proc->segment_count) {
-                if (ecx >= proc->elf_vaddr_min && ecx + edx <= proc->elf_vaddr_max) {
-                    for (int s = 0; s < proc->segment_count; s++) {
-                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                        if (ecx >= sv && ecx + edx <= sv + sm) { 
-                            buf = (void*)((uint32)proc->segments[s].mem + (ecx - sv)); 
-                            break; 
-                        }
-                    }
-                }
-                if (esi && esi >= proc->elf_vaddr_min && esi < proc->elf_vaddr_max) {
-                    for (int s = 0; s < proc->segment_count; s++) {
-                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                        if (esi >= sv && esi < sv + sm) { 
-                            src_ip_out = (void*)((uint32)proc->segments[s].mem + (esi - sv)); 
-                            break; 
-                        }
-                    }
-                }
-                if (edi && edi >= proc->elf_vaddr_min && edi < proc->elf_vaddr_max) {
-                    for (int s = 0; s < proc->segment_count; s++) {
-                        uint32 sv = proc->segments[s].vaddr, sm = proc->segments[s].memsz;
-                        if (edi >= sv && edi < sv + sm) { 
-                            src_port_out = (void*)((uint32)proc->segments[s].mem + (edi - sv)); 
-                            break; 
-                        }
-                    }
-                }
-            }
+            void* buf = linux_translate_user_ptr(proc, ecx, edx);
+            void* src_ip_out = linux_translate_user_ptr(proc, esi, 4u);
+            void* src_port_out = linux_translate_user_ptr(proc, edi, (uint32)sizeof(uint16));
             
             int ret = sys_net_recvfrom(proc, (int)ebx, buf, edx, src_ip_out, src_port_out);
             regs[0] = ret;

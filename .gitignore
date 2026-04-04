@@ -1,5 +1,10 @@
 *.img
 /.github/
+!/.github/
+/.github/*
+!/.github/workflows/
+!/.github/workflows/*.yml
+!/.github/workflows/*.yaml
 /obj/
 /tmp/
 /tmp_user/
