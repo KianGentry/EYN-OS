@@ -148,6 +148,33 @@ Build integration note:
   repo-level auto-injection of `/fonts` and `/include` (`EYNFS_COPY_FONTS=0`,
   `EYNFS_COPY_HEADERS=0`) to keep module size bounded.
 
+## Host Build Menu Configuration
+
+EYN-OS host builds now support a Linux-style text configuration screen:
+
+- `make menuconfig`
+
+This writes `.eynosconfig` at the repository root. The Makefile auto-loads
+that file and applies options to both kernel build and installer ramdisk build.
+
+Current keys:
+- `ARCH`: target architecture (`i386` or `amd64`)
+- `CONFIG_INSTALLER_RAMDISK_PRUNE`: pass-through to
+  `EYN_INSTALLER_RAMDISK_PRUNE`
+- `CONFIG_INSTALLER_RAMDISK_FULL`: pass-through to
+  `EYN_INSTALLER_RAMDISK_FULL`
+- `CONFIG_INSTALLER_RAMDISK_INCLUDE_FONTS`: pass-through to
+  `EYN_INSTALLER_RAMDISK_INCLUDE_FONTS`
+- `CONFIG_INSTALLER_RAMDISK_INCLUDE_HEADERS`: pass-through to
+  `EYN_INSTALLER_RAMDISK_INCLUDE_HEADERS`
+- `CONFIG_INSTALLER_APPS`: comma-separated list of binaries to preinstall in
+  installer payload `testdir/binaries` snapshot
+
+Binary filtering notes:
+- The installer ramdisk builder now respects `EYN_INSTALLER_APPS`.
+- `installer` is always forced into the payload even if deselected.
+- Empty or `all` means no filtering (keep all binaries).
+
 Installer media now supports a two-stage payload model:
 - Host build creates `installer/payload.eynpkg` from staged payload content.
 - Payload archive supports file/dir entries and optional RLE compression.

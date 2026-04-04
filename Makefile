@@ -2,11 +2,20 @@ COMPILER = gcc
 LINKER = ld
 ASSEMBLER = nasm
 
+CONFIG_FILE ?= .eynosconfig
+-include $(CONFIG_FILE)
+
 # Target architecture selection for portability work.
 # Milestone A keeps i386 as the runnable default while introducing amd64 plumbing.
 ARCH ?= i386
 SUPPORTED_ARCHES := i386 amd64
 OBJDIR := obj/$(ARCH)
+
+CONFIG_INSTALLER_RAMDISK_PRUNE ?= 1
+CONFIG_INSTALLER_RAMDISK_FULL ?= 0
+CONFIG_INSTALLER_RAMDISK_INCLUDE_FONTS ?= 0
+CONFIG_INSTALLER_RAMDISK_INCLUDE_HEADERS ?= 0
+CONFIG_INSTALLER_APPS ?=
 
 ifeq ($(filter $(ARCH),$(SUPPORTED_ARCHES)),)
 $(error Unsupported ARCH '$(ARCH)'. Supported values: $(SUPPORTED_ARCHES))
@@ -344,11 +353,20 @@ build: all installer_ramdisk eynfsimg docs
 	bash devtools/build_iso.sh "$(GRUB_MKRESCUE)"
 
 .PHONY: installer_userland installer_ramdisk
+menuconfig:
+	python3 devtools/menuconfig.py $(CONFIG_FILE)
+
+.PHONY: installer_userland installer_ramdisk menuconfig
 installer_userland:
 	bash devtools/build_user_c.sh testdir/code/installer_uelf.c testdir/binaries/installer
 
 installer_ramdisk: installer_userland
 	mkdir -p tmp_user/boot
+	EYN_INSTALLER_RAMDISK_PRUNE=$(CONFIG_INSTALLER_RAMDISK_PRUNE) \
+	EYN_INSTALLER_RAMDISK_FULL=$(CONFIG_INSTALLER_RAMDISK_FULL) \
+	EYN_INSTALLER_RAMDISK_INCLUDE_FONTS=$(CONFIG_INSTALLER_RAMDISK_INCLUDE_FONTS) \
+	EYN_INSTALLER_RAMDISK_INCLUDE_HEADERS=$(CONFIG_INSTALLER_RAMDISK_INCLUDE_HEADERS) \
+	EYN_INSTALLER_APPS="$(CONFIG_INSTALLER_APPS)" \
 	python3 devtools/build_installer_ramdisk.py tmp_user/boot/installer_ramdisk.img
 
 clean:

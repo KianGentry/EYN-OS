@@ -57,6 +57,7 @@ The codebase is organized by domain (CPU, drivers, misc, utilities, network) wit
 Build from a Linux host with standard toolchain components (GCC, NASM, GRUB):
 
 ```bash
+make menuconfig # configure architecture and installer payload options
 make build      # build ISO and disk images
 make run        # build and run in QEMU
 make qemu-gdb   # launch with GDB support (halted at startup, attach to :1234)
@@ -70,8 +71,6 @@ help            # interactive help system
 e1000 init      # initialize network (if e1000 NIC present)
 chibicc --help  # C compiler help (chibicc.uelf needs to be in root)
 xeyes           # run the X11 compatibility demo
-build_doom      # compile the unity-build DOOM source inside EYN-OS
-doom -iwad /DOOM1.WAD   # run the host-built DOOM port
 run hello.uelf  # run a userland program
 ```
 

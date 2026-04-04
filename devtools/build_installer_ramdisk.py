@@ -84,6 +84,43 @@ def build_grub_core_image(repo_root: str, out_core: str, kernel_bin: str) -> boo
     return os.path.isfile(out_core)
 
 
+def parse_selected_apps(raw_value: str) -> set[str] | None:
+    text = (raw_value or "").strip()
+    if not text:
+        return None
+    if text.lower() == "all":
+        return None
+    return {item.strip() for item in text.split(",") if item.strip()}
+
+
+def apply_binary_filter(payload_root: str, selected_apps: set[str] | None) -> None:
+    if selected_apps is None:
+        return
+
+    binaries_dir = os.path.join(payload_root, "binaries")
+    if not os.path.isdir(binaries_dir):
+        return
+
+    keep = set(selected_apps)
+    keep.add("installer")
+
+    removed = 0
+    kept = 0
+    for name in sorted(os.listdir(binaries_dir)):
+        path = os.path.join(binaries_dir, name)
+        if not os.path.isfile(path):
+            continue
+        if name.startswith("."):
+            continue
+        if name in keep:
+            kept += 1
+            continue
+        os.remove(path)
+        removed += 1
+
+    print(f"Installer ramdisk: binary filter kept={kept} removed={removed}")
+
+
 def copy_tree(src: str, dst: str, prune_dev: bool = True) -> None:
     if not os.path.isdir(src):
         return
@@ -265,11 +302,13 @@ def main() -> int:
 
     prune_dev = os.environ.get("EYN_INSTALLER_RAMDISK_PRUNE", "1") != "0"
     full_stage = os.environ.get("EYN_INSTALLER_RAMDISK_FULL", "0") == "1"
+    selected_apps = parse_selected_apps(os.environ.get("EYN_INSTALLER_APPS", ""))
     if prune_dev:
         print("Installer ramdisk: pruning dev-only payload")
 
     with tempfile.TemporaryDirectory(prefix="installer_ramdisk_src_") as stage, tempfile.TemporaryDirectory(prefix="installer_payload_src_") as payload_src:
         copy_tree(testdir, payload_src, prune_dev=prune_dev)
+        apply_binary_filter(payload_src, selected_apps)
 
         include_fonts = os.environ.get("EYN_INSTALLER_RAMDISK_INCLUDE_FONTS", "0") != "0"
         fonts_dir = os.path.join(repo_root, "fonts")
