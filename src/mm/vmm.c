@@ -59,6 +59,18 @@ static int paging_enabled = 0;
  */
 static uint32 g_kernel_phys_alias_bytes = 16u * 1024u * 1024u;
 
+static inline uint32 vmm_ptr_to_u32(const void* pointer) {
+    return (uint32)(uintptr)pointer;
+}
+
+static inline void* vmm_u32_to_ptr(uint32 address) {
+    return (void*)(uintptr)address;
+}
+
+static inline void* vmm_kphys_to_ptr(uint32 phys_addr) {
+    return (void*)((uintptr)KERNEL_BASE + (uintptr)phys_addr);
+}
+
 // LOW-LEVEL CR REGISTER ACCESS
 
 static inline uintptr read_cr0(void) {
@@ -136,9 +148,9 @@ void vm_invalidate_page(void* addr) {
 void vm_invalidate_range(void* start, size_t len) {
     if (!start || len == 0) return;
 
-    uint32 s = ((uint32)start) & PAGE_MASK;
-    uint32 end_addr = (uint32)start + (uint32)len - 1u;
-    if (end_addr < (uint32)start) {
+    uintptr start_addr = (uintptr)start;
+    uintptr end_addr_full = start_addr + (uintptr)len - 1u;
+    if (end_addr_full < start_addr || start_addr > 0xFFFFFFFFu || end_addr_full > 0xFFFFFFFFu) {
         /* overflow -> conservatively flush all */
         if (!CONFIG_CPU_HAS_INVLPG && g_tlb_defer_depth) {
             g_tlb_flush_pending = 1;
@@ -147,11 +159,13 @@ void vm_invalidate_range(void* start, size_t len) {
         }
         return;
     }
+    uint32 s = ((uint32)start_addr) & PAGE_MASK;
+    uint32 end_addr = (uint32)end_addr_full;
     uint32 e = end_addr & PAGE_MASK;
 
 #if CONFIG_CPU_HAS_INVLPG
     for (uint32 va = s; va <= e; va += PAGE_SIZE) {
-        vm_invalidate_page((void*)va);
+        vm_invalidate_page(vmm_u32_to_ptr(va));
     }
 #else
     /* 80386: range invalidation collapses to a single full flush. */
@@ -166,7 +180,7 @@ void vm_invalidate_range(void* start, size_t len) {
 }
 
 void invalidate_tlb_entry(uint32 va) {
-    vm_invalidate_page((void*)va);
+    vm_invalidate_page(vmm_u32_to_ptr(va));
 }
 
 void invalidate_tlb_all(void) {
@@ -224,36 +238,36 @@ static void frame_reserve_range_bytes(uint32 start, uint32 end_exclusive) {
 static void frame_reserve_multiboot_ranges(void) {
     if (!g_mbi) return;
 
-    frame_reserve_range_bytes((uint32)(uintptr_t)g_mbi,
-                              (uint32)(uintptr_t)g_mbi + sizeof(multiboot_info_t));
+    frame_reserve_range_bytes(vmm_ptr_to_u32(g_mbi),
+                              vmm_ptr_to_u32(g_mbi) + (uint32)sizeof(multiboot_info_t));
 
     if ((g_mbi->flags & MULTIBOOT_INFO_MEM_MAP) && g_mbi->mmap_addr && g_mbi->mmap_length) {
-        frame_reserve_range_bytes((uint32)g_mbi->mmap_addr,
+        frame_reserve_range_bytes((uint32)(uintptr)g_mbi->mmap_addr,
                                   (uint32)g_mbi->mmap_addr + (uint32)g_mbi->mmap_length);
     }
 
     if ((g_mbi->flags & MULTIBOOT_INFO_CMDLINE) && g_mbi->cmdline) {
-        uint32 cmd = (uint32)g_mbi->cmdline;
+        uint32 cmd = (uint32)(uintptr)g_mbi->cmdline;
         uint32 len = 0;
-        while (((const char*)(uintptr_t)cmd)[len] && len < 4096u) len++;
+        while (((const char*)(uintptr)cmd)[len] && len < 4096u) len++;
         frame_reserve_range_bytes(cmd, cmd + len + 1u);
     }
 
     if ((g_mbi->flags & MULTIBOOT_INFO_MODS) && g_mbi->mods_addr && g_mbi->mods_count) {
-        uint32 mods_start = (uint32)g_mbi->mods_addr;
+        uint32 mods_start = (uint32)(uintptr)g_mbi->mods_addr;
         uint32 mods_size = (uint32)g_mbi->mods_count * (uint32)sizeof(multiboot_module_t);
         frame_reserve_range_bytes(mods_start, mods_start + mods_size);
 
-        multiboot_module_t* mods = (multiboot_module_t*)(uintptr_t)g_mbi->mods_addr;
+        multiboot_module_t* mods = (multiboot_module_t*)(uintptr)g_mbi->mods_addr;
         for (uint32 i = 0; i < g_mbi->mods_count; ++i) {
             if (mods[i].mod_end > mods[i].mod_start) {
-                frame_reserve_range_bytes((uint32)mods[i].mod_start,
-                                          (uint32)mods[i].mod_end);
+                frame_reserve_range_bytes((uint32)(uintptr)mods[i].mod_start,
+                                          (uint32)(uintptr)mods[i].mod_end);
             }
             if (mods[i].cmdline) {
-                uint32 cmd = (uint32)mods[i].cmdline;
+                uint32 cmd = (uint32)(uintptr)mods[i].cmdline;
                 uint32 len = 0;
-                while (((const char*)(uintptr_t)cmd)[len] && len < 4096u) len++;
+                while (((const char*)(uintptr)cmd)[len] && len < 4096u) len++;
                 frame_reserve_range_bytes(cmd, cmd + len + 1u);
             }
         }
@@ -279,43 +293,43 @@ static void boot_range_extend(uint32* max_end, uint32 start, uint32 end_exclusiv
  * kernel image and all known multiboot metadata/module spans.
  */
 static uint32 compute_boot_alloc_base(void) {
-    uint32 max_end = (uint32)&__kernel_end;
+    uint32 max_end = vmm_ptr_to_u32(&__kernel_end);
 
     if (!g_mbi) {
         return (max_end + PAGE_SIZE - 1u) & PAGE_MASK;
     }
 
     boot_range_extend(&max_end,
-                      (uint32)(uintptr_t)g_mbi,
-                      (uint32)(uintptr_t)g_mbi + (uint32)sizeof(multiboot_info_t));
+                      vmm_ptr_to_u32(g_mbi),
+                      vmm_ptr_to_u32(g_mbi) + (uint32)sizeof(multiboot_info_t));
 
     if ((g_mbi->flags & MULTIBOOT_INFO_MEM_MAP) && g_mbi->mmap_addr && g_mbi->mmap_length) {
         boot_range_extend(&max_end,
-                          (uint32)g_mbi->mmap_addr,
+                          (uint32)(uintptr)g_mbi->mmap_addr,
                           (uint32)g_mbi->mmap_addr + (uint32)g_mbi->mmap_length);
     }
 
     if ((g_mbi->flags & MULTIBOOT_INFO_CMDLINE) && g_mbi->cmdline) {
-        uint32 cmd = (uint32)g_mbi->cmdline;
+        uint32 cmd = (uint32)(uintptr)g_mbi->cmdline;
         uint32 len = 0;
-        while (((const char*)(uintptr_t)cmd)[len] && len < 4096u) len++;
+        while (((const char*)(uintptr)cmd)[len] && len < 4096u) len++;
         boot_range_extend(&max_end, cmd, cmd + len + 1u);
     }
 
     if ((g_mbi->flags & MULTIBOOT_INFO_MODS) && g_mbi->mods_addr && g_mbi->mods_count) {
-        uint32 mods_start = (uint32)g_mbi->mods_addr;
+        uint32 mods_start = (uint32)(uintptr)g_mbi->mods_addr;
         uint32 mods_end = mods_start + ((uint32)g_mbi->mods_count * (uint32)sizeof(multiboot_module_t));
         boot_range_extend(&max_end, mods_start, mods_end);
 
-        multiboot_module_t* mods = (multiboot_module_t*)(uintptr_t)g_mbi->mods_addr;
+        multiboot_module_t* mods = (multiboot_module_t*)(uintptr)g_mbi->mods_addr;
         for (uint32 i = 0; i < g_mbi->mods_count; ++i) {
             if (mods[i].mod_end > mods[i].mod_start) {
-                boot_range_extend(&max_end, (uint32)mods[i].mod_start, (uint32)mods[i].mod_end);
+                boot_range_extend(&max_end, (uint32)(uintptr)mods[i].mod_start, (uint32)(uintptr)mods[i].mod_end);
             }
             if (mods[i].cmdline) {
-                uint32 cmd = (uint32)mods[i].cmdline;
+                uint32 cmd = (uint32)(uintptr)mods[i].cmdline;
                 uint32 len = 0;
-                while (((const char*)(uintptr_t)cmd)[len] && len < 4096u) len++;
+                while (((const char*)(uintptr)cmd)[len] && len < 4096u) len++;
                 boot_range_extend(&max_end, cmd, cmd + len + 1u);
             }
         }
@@ -341,7 +355,7 @@ static void frame_alloc_init(uint32 total_ram_bytes) {
     }
     
     /* Reserve frames occupied by kernel (1MB to kernel_end) */
-    uint32 kernel_end_frame = ((uint32)&__kernel_end) / PAGE_SIZE + 1;
+    uint32 kernel_end_frame = vmm_ptr_to_u32(&__kernel_end) / PAGE_SIZE + 1;
     for (uint32 i = 256; i <= kernel_end_frame && i < g_frame_alloc.total_frames; i++) {
         frame_set(i);
         g_frame_alloc.free_frames--;
@@ -487,11 +501,11 @@ static void* early_alloc(uint32 size, uint32 alignment) {
     /* Align up */
     early_heap_ptr = (early_heap_ptr + alignment - 1) & ~(alignment - 1);
     
-    void* ptr = (void*)early_heap_ptr;
+    void* ptr = vmm_u32_to_ptr(early_heap_ptr);
     early_heap_ptr += size;
     
     /* Mark allocated frames as used */
-    uint32 start_frame = ((uint32)ptr) / PAGE_SIZE;
+    uint32 start_frame = vmm_ptr_to_u32(ptr) / PAGE_SIZE;
     uint32 end_frame = (early_heap_ptr - 1) / PAGE_SIZE;
     for (uint32 f = start_frame; f <= end_frame; f++) {
         if (f < g_frame_alloc.total_frames) {
@@ -542,11 +556,11 @@ pte_t* vmm_walk_page_tables(address_space_t* as, uint32 va, int create) {
                 return 0;  /* Out of memory */
             }
             /* Map the new page table temporarily to access it */
-            pt = (page_table_t*)(KERNEL_BASE + pt_phys);
+            pt = (page_table_t*)vmm_kphys_to_ptr(pt_phys);
         } else {
             /* Before paging: allocate from early heap */
             pt = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
-            pt_phys = (uint32)pt;
+            pt_phys = vmm_ptr_to_u32(pt);
         }
         
         memset(pt, 0, sizeof(page_table_t));
@@ -566,13 +580,13 @@ pte_t* vmm_walk_page_tables(address_space_t* as, uint32 va, int create) {
          * are being created on-demand.
          */
         if (pt_phys < g_kernel_phys_alias_bytes) {
-            pt = (page_table_t*)(KERNEL_BASE + pt_phys);
+            pt = (page_table_t*)vmm_kphys_to_ptr(pt_phys);
         } else {
-            pt = (page_table_t*)PT_VA(pdi);
+            pt = (page_table_t*)(uintptr)PT_VA(pdi);
         }
     } else {
         /* Before paging: physical = virtual */
-        pt = (page_table_t*)pt_phys;
+        pt = (page_table_t*)vmm_u32_to_ptr(pt_phys);
     }
     
     return &pt->entries[pti];
@@ -609,7 +623,7 @@ int vmm_map_page(address_space_t* as, uint32 va, uint32 pa, uint32 flags) {
      * Also avoid touching the TLB for inactive address spaces.
      */
     if (as == vmm_current_as && was_present) {
-        vm_invalidate_page((void*)va);
+        vm_invalidate_page(vmm_u32_to_ptr(va));
     }
     return 0;
 }
@@ -629,14 +643,14 @@ int vmm_unmap_page(address_space_t* as, uint32 va) {
             swap_free_slot(slot);
             *pte = 0;
             if (as == vmm_current_as) {
-                vm_invalidate_page((void*)va);
+                vm_invalidate_page(vmm_u32_to_ptr(va));
             }
             return 0;
         }
         if (*pte & PTE_DEMAND) {
             *pte = 0;
             if (as == vmm_current_as) {
-                vm_invalidate_page((void*)va);
+                vm_invalidate_page(vmm_u32_to_ptr(va));
             }
             return 0;
         }
@@ -655,7 +669,7 @@ int vmm_unmap_page(address_space_t* as, uint32 va) {
     
     *pte = 0;
     if (as == vmm_current_as) {
-        vm_invalidate_page((void*)va);
+        vm_invalidate_page(vmm_u32_to_ptr(va));
     }
     
     return 0;
@@ -677,7 +691,7 @@ address_space_t* create_address_space(void) {
         return 0;
     }
     
-    as->pd = (page_directory_t*)(KERNEL_BASE + pd_phys);
+    as->pd = (page_directory_t*)vmm_kphys_to_ptr(pd_phys);
     as->pd_phys = pd_phys;
     memset(as->pd, 0, sizeof(page_directory_t));
     
@@ -715,7 +729,7 @@ void destroy_address_space(address_space_t* as) {
         }
         
         /* Walk page table and free frames */
-        page_table_t* pt = (page_table_t*)(KERNEL_BASE + (pde & PTE_FRAME_MASK));
+        page_table_t* pt = (page_table_t*)vmm_kphys_to_ptr(pde & PTE_FRAME_MASK);
         for (int pti = 0; pti < ENTRIES_PER_TABLE; pti++) {
             pte_t pte = pt->entries[pti];
             if (pte & PTE_PRESENT) {
@@ -766,7 +780,7 @@ address_space_t* clone_address_space(address_space_t* src) {
         }
         
         /* Create corresponding page table in destination */
-        page_table_t* src_pt = (page_table_t*)(KERNEL_BASE + (src_pde & PTE_FRAME_MASK));
+        page_table_t* src_pt = (page_table_t*)vmm_kphys_to_ptr(src_pde & PTE_FRAME_MASK);
         
         /* Allocate destination page table */
         uint32 dst_pt_phys = frame_alloc();
@@ -775,7 +789,7 @@ address_space_t* clone_address_space(address_space_t* src) {
             return 0;
         }
         
-        page_table_t* dst_pt = (page_table_t*)(KERNEL_BASE + dst_pt_phys);
+        page_table_t* dst_pt = (page_table_t*)vmm_kphys_to_ptr(dst_pt_phys);
         dst->pd->entries[pdi] = dst_pt_phys | (src_pde & 0xFFF);
         
         /* Copy PTEs, marking writable pages as COW */
@@ -865,7 +879,7 @@ void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
             }
             
             /* Zero the new page for security */
-            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+            memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
             
             /* Map with original permissions (restore RW if it was set) */
             uint32 flags = (entry & 0xFFF) & ~PTE_DEMAND;
@@ -923,7 +937,7 @@ void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
                 goto segfault;
             }
 
-            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+            memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
             vmm_map_page(as, new_page, frame, PTE_USER | PTE_RW);
 
             if (new_page < as->stack_bottom) {
@@ -941,7 +955,7 @@ void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
                 goto segfault;
             }
             
-            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+            memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
             vmm_map_page(as, page_va, frame, PTE_USER | PTE_RW);
             return;
         }
@@ -1020,7 +1034,7 @@ int vmm_fault_in_user_write(uint32 va_start, size_t len) {
             if (entry & PTE_DEMAND) {
                 uint32 frame = frame_alloc();
                 if (frame == 0) return -1;
-                memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+                memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
                 uint32 flags = (entry & 0xFFFu) & ~PTE_DEMAND;
                 flags |= PTE_PRESENT;
                 *pte = (frame & PTE_FRAME_MASK) | flags;
@@ -1043,7 +1057,7 @@ int vmm_fault_in_user_write(uint32 va_start, size_t len) {
         if (page >= USER_STACK_BASE && page < USER_STACK_TOP) {
             uint32 frame = frame_alloc();
             if (frame == 0) return -1;
-            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+            memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
             vmm_map_page(as, page, frame, PTE_USER | PTE_RW);
             if (page < as->stack_bottom) as->stack_bottom = page;
             continue;
@@ -1053,7 +1067,7 @@ int vmm_fault_in_user_write(uint32 va_start, size_t len) {
         if (page >= USER_HEAP_BASE && page < as->heap_break) {
             uint32 frame = frame_alloc();
             if (frame == 0) return -1;
-            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+            memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
             vmm_map_page(as, page, frame, PTE_USER | PTE_RW);
             continue;
         }
@@ -1078,8 +1092,8 @@ int vmm_handle_cow_fault(address_space_t* as, uint32 va, pte_t* pte) {
     }
     
     /* Copy page contents */
-    memcpy((void*)(KERNEL_BASE + new_frame), 
-           (void*)(KERNEL_BASE + old_frame), 
+        memcpy((void*)vmm_kphys_to_ptr(new_frame), 
+            (void*)vmm_kphys_to_ptr(old_frame), 
            PAGE_SIZE);
     
     /* Update PTE: new frame, writable, clear COW flag */
@@ -1198,7 +1212,7 @@ static int swap_out_page_reclaim_frame(pte_t* pte, uint32 va) {
         return -1;
     }
 
-    if (swap_write_page(slot, (void*)(KERNEL_BASE + frame)) != 0) {
+    if (swap_write_page(slot, (void*)vmm_kphys_to_ptr(frame)) != 0) {
         swap_free_slot(slot);
         return -1;
     }
@@ -1224,7 +1238,7 @@ uint32 swap_out_page(pte_t* pte, uint32 va, address_space_t* as) {
     }
     
     /* Write page to swap */
-    if (swap_write_page(slot, (void*)(KERNEL_BASE + frame)) != 0) {
+    if (swap_write_page(slot, (void*)vmm_kphys_to_ptr(frame)) != 0) {
         swap_free_slot(slot);
         return SWAP_SLOT_NONE;
     }
@@ -1253,7 +1267,7 @@ int swap_in_page(address_space_t* as, uint32 va, uint32 swap_slot) {
     }
     
     /* Read from swap */
-    if (swap_read_page(swap_slot, (void*)(KERNEL_BASE + frame)) != 0) {
+    if (swap_read_page(swap_slot, (void*)vmm_kphys_to_ptr(frame)) != 0) {
         frame_free(frame);
         return -1;
     }
@@ -1409,7 +1423,7 @@ void vmm_update_working_set(address_space_t* as) {
             continue;
         }
         
-        page_table_t* pt = (page_table_t*)PT_VA(pdi);
+        page_table_t* pt = (page_table_t*)(uintptr)PT_VA(pdi);
         for (int pti = 0; pti < ENTRIES_PER_TABLE; pti++) {
             pte_t pte = pt->entries[pti];
             if ((pte & PTE_PRESENT) && (pte & PTE_ACCESSED)) {
@@ -1496,13 +1510,13 @@ void* vmm_kmalloc_page(void) {
     }
     
     /* Kernel pages are identity-mapped at KERNEL_BASE + phys */
-    return (void*)(KERNEL_BASE + frame);
+    return (void*)vmm_kphys_to_ptr(frame);
 }
 
 void vmm_kfree_page(void* ptr) {
     if (!ptr) return;
     
-    uint32 va = (uint32)ptr;
+    uint32 va = vmm_ptr_to_u32(ptr);
     if (va < KERNEL_BASE) return;
     
     uint32 phys = va - KERNEL_BASE;
@@ -1515,7 +1529,7 @@ void* vmm_kmalloc_aligned(uint32 size) {
     if (phys == 0) {
         return 0;
     }
-    return (void*)(KERNEL_BASE + phys);
+    return (void*)vmm_kphys_to_ptr(phys);
 }
 
 // QUERY FUNCTIONS
@@ -1572,7 +1586,7 @@ void vmm_init(uint32 total_ram_bytes) {
     memset(kernel_pd, 0, sizeof(page_directory_t));
     
     vmm_kernel_as.pd = kernel_pd;
-    vmm_kernel_as.pd_phys = (uint32)kernel_pd;  /* Before paging: virt == phys */
+    vmm_kernel_as.pd_phys = vmm_ptr_to_u32(kernel_pd);  /* Before paging: virt == phys */
     vmm_kernel_as.refcount = 1;
     
     /*
@@ -1615,10 +1629,10 @@ void vmm_init(uint32 total_ram_bytes) {
         }
 
         /* Low mapping (0x00000000+) */
-        kernel_pd->entries[pdi] = (uint32)pt_low | PTE_PRESENT | PTE_RW;
+        kernel_pd->entries[pdi] = vmm_ptr_to_u32(pt_low) | PTE_PRESENT | PTE_RW;
 
         /* High mapping (0xC0000000+) - kernel's preferred addresses */
-        kernel_pd->entries[768 + pdi] = (uint32)pt_high | PTE_PRESENT | PTE_RW;
+        kernel_pd->entries[768 + pdi] = vmm_ptr_to_u32(pt_high) | PTE_PRESENT | PTE_RW;
     }
     
     /*
@@ -1687,16 +1701,16 @@ void vmm_init(uint32 total_ram_bytes) {
                     pt->entries[pti] = pa | PTE_PRESENT | PTE_RW | PTE_PCD | PTE_PWT;
                 }
 
-                kernel_pd->entries[pdi] = (uint32)pt | PTE_PRESENT | PTE_RW;
+                kernel_pd->entries[pdi] = vmm_ptr_to_u32(pt) | PTE_PRESENT | PTE_RW;
             }
         }
     }
     
     /* Set up recursive mapping: PD[1023] points to PD itself */
-    kernel_pd->entries[RECURSIVE_PD_INDEX] = (uint32)kernel_pd | PTE_PRESENT | PTE_RW;
+    kernel_pd->entries[RECURSIVE_PD_INDEX] = vmm_ptr_to_u32(kernel_pd) | PTE_PRESENT | PTE_RW;
     
     /* Set null page as not-present (null pointer guard) */
-    page_table_t* pt0 = (page_table_t*)(kernel_pd->entries[0] & PTE_FRAME_MASK);
+    page_table_t* pt0 = (page_table_t*)vmm_u32_to_ptr(kernel_pd->entries[0] & PTE_FRAME_MASK);
     pt0->entries[0] = 0;  /* First page not present - dereferencing NULL faults */
 
     /* IMPORTANT: Reserve all boot-time early_alloc() memory in the frame bitmap.
