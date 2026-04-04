@@ -96,4 +96,10 @@ void syscall_reset_user_guis(void);
 // CPU exception C dispatcher (called from src/cpu/isr.asm)
 void isr_dispatch(regs_t* regs);
 
+#if defined(EYNOS_ARCH_AMD64)
+/* amd64 assembly stubs bridge into the legacy regs_t dispatch pipeline. */
+void isr_amd64_dispatch(uint64 int_no, uint64 err_code, uint64 rip, uint64 cs, uint64 rflags);
+uint64 syscall_dispatch_amd64(uint64 syscall_no, uint64 arg1, uint64 arg2, uint64 arg3, uint64 arg4, uint64 arg5);
+#endif
+
 #endif

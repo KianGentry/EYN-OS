@@ -259,6 +259,40 @@ void isr_dispatch(regs_t* regs) {
     generic_isr_handler(regs);
 }
 
+#if defined(EYNOS_ARCH_AMD64)
+void isr_amd64_dispatch(uint64 int_no, uint64 err_code, uint64 rip, uint64 cs, uint64 rflags) {
+    regs_t synthetic_regs;
+    memset(&synthetic_regs, 0, sizeof(synthetic_regs));
+
+    synthetic_regs.int_no = (uint32)int_no;
+    synthetic_regs.err_code = (uint32)err_code;
+    synthetic_regs.eip = (uint32)rip;
+    synthetic_regs.cs = (uint32)cs;
+    synthetic_regs.eflags = (uint32)rflags;
+
+    isr_dispatch(&synthetic_regs);
+}
+
+uint64 syscall_dispatch_amd64(uint64 syscall_no,
+                              uint64 arg1,
+                              uint64 arg2,
+                              uint64 arg3,
+                              uint64 arg4,
+                              uint64 arg5) {
+    (void)arg4;
+    (void)arg5;
+
+    regs_t synthetic_regs;
+    memset(&synthetic_regs, 0, sizeof(synthetic_regs));
+    synthetic_regs.eax = (uint32)syscall_no;
+    synthetic_regs.ebx = (uint32)arg1;
+    synthetic_regs.ecx = (uint32)arg2;
+    synthetic_regs.edx = (uint32)arg3;
+
+    return (uint64)syscall_dispatch(&synthetic_regs);
+}
+#endif
+
 // Error status functions for shell commands
 int get_system_error_count() {
     return system_error_count;
