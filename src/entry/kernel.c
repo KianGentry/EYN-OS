@@ -35,6 +35,50 @@ static inline void* kernel_u32_to_ptr(uint32 address) {
     return (void*)(uintptr)address;
 }
 
+#if defined(EYNOS_ARCH_AMD64)
+extern uint64 pd_table3[512];
+
+static uint32 align_down_2m(uint32 value) {
+    return value & 0xFFE00000u;
+}
+
+static uint32 align_up_2m(uint32 value) {
+    return (value + 0x001FFFFFu) & 0xFFE00000u;
+}
+
+static void amd64_patch_bootstrap_framebuffer_mapping(multiboot_info_t* mbi) {
+    if (!mbi || !mbi->framebuffer_addr) return;
+
+    uint32 fb_addr = (uint32)mbi->framebuffer_addr;
+    if (fb_addr < 0xC0000000u) return;
+
+    uint32 fb_size = 0;
+    if (mbi->framebuffer_pitch && mbi->framebuffer_height) {
+        fb_size = mbi->framebuffer_pitch * mbi->framebuffer_height;
+    }
+    if (fb_size == 0) {
+        fb_size = 2u * 1024u * 1024u;
+    }
+
+    uint32 start = align_down_2m(fb_addr);
+    uint32 end = align_up_2m(fb_addr + fb_size);
+
+    for (uint32 va = start; va < end; va += 0x00200000u) {
+        uint32 index = (va - 0xC0000000u) >> 21;
+        if (index >= 512u) break;
+        pd_table3[index] = ((uint64)va & 0xFFFFFFFFFFE00000ull) | 0x83ull;
+    }
+
+    uintptr cr3 = 0;
+    asm volatile("mov %%cr3, %0" : "=r"(cr3));
+    asm volatile("mov %0, %%cr3" :: "r"(cr3));
+
+    printf("[boot] amd64: patched bootstrap framebuffer mapping at 0x%X (%u bytes)\n",
+           (unsigned)fb_addr,
+           (unsigned)fb_size);
+}
+#endif
+
 int kmain(uint32 magic, multiboot_info_t *mbi)
 {
     // Validate multiboot information
@@ -60,6 +104,10 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     } else {
         printf("[boot] multiboot modules: none (flags=0x%X)\n", (unsigned)mbi->flags);
     }
+
+#if defined(EYNOS_ARCH_AMD64)
+    amd64_patch_bootstrap_framebuffer_mapping(mbi);
+#endif
 
     // Install kernel/user code-data descriptors plus TSS before IDT setup.
     gdt_init();

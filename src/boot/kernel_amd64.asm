@@ -32,6 +32,7 @@ global stack_bottom
 global isr_abort_stack_top
 global isr_abort_stack_bottom
 global Shutdown
+global pd_table3
 
 start:
         cli
