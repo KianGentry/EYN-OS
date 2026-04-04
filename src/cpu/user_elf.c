@@ -36,6 +36,11 @@ static int user_elf_ctx_allow(uint32 caps, uint32 cost) {
     }
     return 1;
 }
+
+static inline void* user_elf_kphys_alias_ptr(uint32 phys_addr) {
+    return (void*)((uintptr)KERNEL_BASE + (uintptr)phys_addr);
+}
+
 // Minimal ELF32 structures for parsing 32-bit little-endian ELF files
 typedef struct {
     unsigned char e_ident[16];
@@ -121,6 +126,19 @@ typedef struct {
 static inline uint32 align_down(uint32 v, uint32 a) { return v & ~(a - 1); }
 static inline uint32 align_up(uint32 v, uint32 a) { return (v + a - 1) & ~(a - 1); }
 
+static inline void* user_elf_user_ptr(uint32 address) {
+    return (void*)(uintptr)address;
+}
+
+static inline uint32 user_elf_ptr_to_u32(const void* pointer) {
+    uintptr raw = (uintptr)pointer;
+    uint32 narrowed = (uint32)raw;
+    if ((uintptr)narrowed != raw) {
+        return 0;
+    }
+    return narrowed;
+}
+
 // Bounds for argv copying to user stack. Keep small for low-memory configs.
 #define USER_ELF_MAX_ARGC 32
 #define USER_ELF_MAX_ARG_BYTES 2048
@@ -163,7 +181,7 @@ static uint32 user_stack_build_argv(uint32 user_stack_top, const char* prog_absp
 
         sp -= len;
         if (sp < USER_STACK_BASE) return 0;
-        memcpy((void*)sp, s, len);
+        memcpy(user_elf_user_ptr(sp), s, len);
         argv_ptrs[i] = sp;
     }
 
@@ -173,19 +191,19 @@ static uint32 user_stack_build_argv(uint32 user_stack_top, const char* prog_absp
     // Push argv NULL terminator.
     sp -= 4;
     if (sp < USER_STACK_BASE) return 0;
-    *(uint32*)sp = 0;
+    *(uint32*)user_elf_user_ptr(sp) = 0;
 
     // Push argv pointers.
     for (int i = local_argc - 1; i >= 0; i--) {
         sp -= 4;
         if (sp < USER_STACK_BASE) return 0;
-        *(uint32*)sp = argv_ptrs[i];
+        *(uint32*)user_elf_user_ptr(sp) = argv_ptrs[i];
     }
 
     // Push argc.
     sp -= 4;
     if (sp < USER_STACK_BASE) return 0;
-    *(uint32*)sp = (uint32)local_argc;
+    *(uint32*)user_elf_user_ptr(sp) = (uint32)local_argc;
 
     return sp;
 }
@@ -399,7 +417,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
             return -1;
         }
 
-        memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+        memset(user_elf_kphys_alias_ptr(frame), 0, PAGE_SIZE);
 
         if (vmm_map_page(&vmm_kernel_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
             printf("%cError: failed to map user stack.\n", 255, 0, 0);
@@ -447,7 +465,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
             }
 
             /* Zero via kernel mapping so we don't touch user VAs unnecessarily. */
-            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+            memset(user_elf_kphys_alias_ptr(frame), 0, PAGE_SIZE);
 
             if (vmm_map_page(&vmm_kernel_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
                 printf("%cError: failed to map ELF segment page.\n", 255, 0, 0);
@@ -463,7 +481,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 
         /* Copy file-backed bytes into the now-present mappings. */
         if (ph->p_filesz) {
-            memcpy((void*)ph->p_vaddr, file + ph->p_offset, ph->p_filesz);
+            memcpy(user_elf_user_ptr(ph->p_vaddr), file + ph->p_offset, ph->p_filesz);
         }
     }
 
@@ -519,7 +537,13 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 
     // Enter ring3 at ELF entry.
     // printf("%c[elfrun] entering user mode: %s (entry=0x%X)\n", 0, 255, 0, abspath, (unsigned)entry);
-    tss_set_kernel_stack((uint32)&stack_space);
+    uint32 kernel_stack_u32 = user_elf_ptr_to_u32(&stack_space);
+    if (kernel_stack_u32 == 0) {
+        printf("%cError: kernel stack pointer exceeds 32-bit TSS ABI.\n", 255, 0, 0);
+        user_task_cleanup_mappings();
+        return -1;
+    }
+    tss_set_kernel_stack(kernel_stack_u32);
     enter_user_mode_segdom(entry, user_esp, g_user_segdom_cs, g_user_segdom_ds);
 
     return 0;

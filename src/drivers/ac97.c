@@ -141,8 +141,17 @@ static void nabm_write32(uint16_t off, uint32_t val) {
 
 static int ac97_hw_in_flight(void);
 
+static uint32_t ac97_ptr_to_u32(const void* ptr) {
+    uintptr raw = (uintptr)ptr;
+    uint32_t narrowed = (uint32_t)raw;
+    if ((uintptr)narrowed != raw) {
+        return 0;
+    }
+    return narrowed;
+}
+
 static uint32_t ac97_dma_phys(const void* ptr) {
-    return vmm_virt_to_phys(&vmm_kernel_as, (uint32_t)(uintptr_t)ptr);
+    return vmm_virt_to_phys(&vmm_kernel_as, ac97_ptr_to_u32(ptr));
 }
 
 static void ac97_debug_dump_runtime(const char* tag, int slot) {

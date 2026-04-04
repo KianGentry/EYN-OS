@@ -39,6 +39,10 @@ static int vfs_ctx_allow(uint32 caps, uint32 cost) {
     return 1;
 }
 
+static inline const void* vfs_u32_to_ptr(uint32 address) {
+    return (const void*)(uintptr)address;
+}
+
 static void vfs_ctx_account(uint32 cost) {
     command_context_t* ctx = current_command_context;
     if (!ctx) return;
@@ -93,10 +97,10 @@ static int vfs_ramdisk_pick_module(multiboot_module_t** out_mod) {
     if (!out_mod || !g_mbi) return -1;
     if (!(g_mbi->flags & MULTIBOOT_INFO_MODS) || g_mbi->mods_count == 0 || !g_mbi->mods_addr) return -1;
 
-    multiboot_module_t* mods = (multiboot_module_t*)g_mbi->mods_addr;
+    multiboot_module_t* mods = (multiboot_module_t*)vfs_u32_to_ptr(g_mbi->mods_addr);
     uint32 pick = 0;
     for (uint32 i = 0; i < g_mbi->mods_count; ++i) {
-        const char* cmdline = (const char*)mods[i].cmdline;
+        const char* cmdline = (const char*)vfs_u32_to_ptr(mods[i].cmdline);
         if (cmdline && vfs_str_contains_nocase(cmdline, "ramdisk")) {
             pick = i;
             break;
@@ -175,7 +179,7 @@ static int vfs_ramdisk_load(vfs_ramdisk_ctx_t* rd) {
      * reads use identity addresses, module bytes above 4MB can alias user
      * mappings and return corrupted data (observed at RAM:/binaries/stats).
      */
-    rd->base = (const uint8*)(uintptr_t)(KERNEL_BASE + (uint32)mod->mod_start);
+    rd->base = (const uint8*)((uintptr)KERNEL_BASE + (uintptr)mod->mod_start);
     uint32 bytes = (uint32)(mod->mod_end - mod->mod_start);
     rd->sectors = bytes / 512u;
     if (!rd->base || rd->sectors == 0) {

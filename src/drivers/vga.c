@@ -631,6 +631,19 @@ typedef enum {
 static vga_backbuffer_alloc_t g_backbuffer_alloc = VGA_BACKBUFFER_ALLOC_NONE;
 static uint32 g_backbuffer_pages = 0;
 
+static uint32 vga_ptr_to_u32(const void* ptr) {
+	uintptr raw = (uintptr)ptr;
+	uint32 narrowed = (uint32)raw;
+	if ((uintptr)narrowed != raw) {
+		return 0;
+	}
+	return narrowed;
+}
+
+static inline const void* vga_u32_to_ptr(uint32 address) {
+	return (const void*)(uintptr)address;
+}
+
 /*
  * RESOURCE-INVARIANT: Backbuffer allocation on low-RAM systems.
  *
@@ -645,7 +658,7 @@ static void vga_free_backbuffer(void) {
 	if (!g_backbuffer) return;
 
 	if (g_backbuffer_alloc == VGA_BACKBUFFER_ALLOC_CONTIG_FRAMES) {
-		uint32 va = (uint32)(uintptr_t)g_backbuffer;
+		uint32 va = vga_ptr_to_u32(g_backbuffer);
 		if (va >= KERNEL_BASE && g_backbuffer_pages) {
 			uint32 phys = va - KERNEL_BASE;
 			for (uint32 i = 0; i < g_backbuffer_pages; ++i) {
@@ -789,7 +802,7 @@ void init_dynamic_log_buffer() {
     if (g_mbi && (g_mbi->flags & MULTIBOOT_INFO_MEM_MAP)) {
         // Calculate total available memory from memory map
         uint32_t total_ram = 0;
-        multiboot_memory_map_t* mmap = (multiboot_memory_map_t*)g_mbi->mmap_addr;
+		multiboot_memory_map_t* mmap = (multiboot_memory_map_t*)vga_u32_to_ptr(g_mbi->mmap_addr);
         uint32_t entries = g_mbi->mmap_length / sizeof(multiboot_memory_map_t);
         
         for (uint32_t i = 0; i < entries && i < 50; i++) {
