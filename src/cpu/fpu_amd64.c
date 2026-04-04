@@ -1,7 +1,6 @@
 #include <cpu/fpu.h>
 
 /*
- * Milestone A amd64 scaffold:
  * Provide minimal FPU hooks so amd64 builds can progress while CR0/CR4 setup
  * is moved into arch-specific CPU init.
  */

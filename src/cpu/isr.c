@@ -266,6 +266,24 @@ void isr_dispatch(regs_t* regs) {
 }
 
 #if defined(EYNOS_ARCH_AMD64)
+/*
+ * ABI-INVARIANT: amd64 entry stubs bridge into 32-bit-compatible core paths.
+ *
+ * Why: Current paging/syscall core APIs and saved-reg compatibility structs are
+ * 32-bit shaped.
+ * Invariant: Values copied from 64-bit frames must round-trip through uint32
+ * before entering those paths.
+ * Breakage if violated: Silent truncation can misroute page-fault handling or
+ * syscall dispatch state.
+ */
+static int isr_amd64_u32_from_uintptr(uintptr value, uint32* out) {
+    if (!out) return -1;
+    uint32 narrowed = (uint32)value;
+    if ((uintptr)narrowed != value) return -1;
+    *out = narrowed;
+    return 0;
+}
+
 void isr_amd64_dispatch_frame(const amd64_interrupt_frame_t* frame) {
     if (!frame) {
         return;
@@ -280,26 +298,42 @@ void isr_amd64_dispatch_frame(const amd64_interrupt_frame_t* frame) {
         uintptr fault_addr;
         asm volatile("mov %%cr2, %0" : "=r"(fault_addr));
 
+        uint32 fault_addr32 = 0;
+        uint32 rip32 = 0;
+        if (isr_amd64_u32_from_uintptr(fault_addr, &fault_addr32) != 0 ||
+            isr_amd64_u32_from_uintptr((uintptr)frame->rip, &rip32) != 0) {
+            PANIC("amd64 page-fault frame exceeds 32-bit VMM contract");
+        }
+
         if ((frame->cs & 3u) != 3u) {
             PANICF("PAGE FAULT (kernel): addr=0x%08X rip=0x%08X err=0x%08X cs=0x%08X",
-                   (unsigned)((uint32)fault_addr),
-                   (unsigned)((uint32)frame->rip),
+                   (unsigned)fault_addr32,
+                   (unsigned)rip32,
                    (unsigned)((uint32)frame->error_code),
                    (unsigned)((uint32)frame->cs));
         }
 
         vmm_page_fault_handler((uint32)frame->error_code,
-                               (uint32)fault_addr,
-                               (uint32)frame->rip);
+                               fault_addr32,
+                               rip32);
         return;
     }
 
     regs_t synthetic_regs;
     memset(&synthetic_regs, 0, sizeof(synthetic_regs));
 
-    synthetic_regs.int_no = (uint32)frame->vector;
-    synthetic_regs.err_code = (uint32)frame->error_code;
-    synthetic_regs.eip = (uint32)frame->rip;
+    uint32 frame_vector32 = 0;
+    uint32 frame_error32 = 0;
+    uint32 frame_rip32 = 0;
+    if (isr_amd64_u32_from_uintptr((uintptr)frame->vector, &frame_vector32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->error_code, &frame_error32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->rip, &frame_rip32) != 0) {
+        PANIC("amd64 interrupt frame exceeds 32-bit register bridge contract");
+    }
+
+    synthetic_regs.int_no = frame_vector32;
+    synthetic_regs.err_code = frame_error32;
+    synthetic_regs.eip = frame_rip32;
     synthetic_regs.cs = (uint32)frame->cs;
     synthetic_regs.eflags = (uint32)frame->rflags;
 
@@ -313,16 +347,30 @@ uint64 syscall_dispatch_amd64_frame(const amd64_syscall_frame_t* frame) {
 
     regs_t synthetic_regs;
     memset(&synthetic_regs, 0, sizeof(synthetic_regs));
-    synthetic_regs.eax = (uint32)frame->syscall_no;
-    synthetic_regs.ebx = (uint32)frame->arg1;
-    synthetic_regs.ecx = (uint32)frame->arg2;
-    synthetic_regs.edx = (uint32)frame->arg3;
-    synthetic_regs.eip = (uint32)frame->rip;
+
+    uint32 syscall_no32 = 0;
+    uint32 arg1_32 = 0;
+    uint32 arg2_32 = 0;
+    uint32 arg3_32 = 0;
+    uint32 rip32 = 0;
+    if (isr_amd64_u32_from_uintptr((uintptr)frame->syscall_no, &syscall_no32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->arg1, &arg1_32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->arg2, &arg2_32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->arg3, &arg3_32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->rip, &rip32) != 0) {
+        return (uint64)-1;
+    }
+
+    synthetic_regs.eax = syscall_no32;
+    synthetic_regs.ebx = arg1_32;
+    synthetic_regs.ecx = arg2_32;
+    synthetic_regs.edx = arg3_32;
+    synthetic_regs.eip = rip32;
     synthetic_regs.cs = (uint32)frame->cs;
     synthetic_regs.eflags = (uint32)frame->rflags;
 
     return (uint64)syscall_dispatch_core(&synthetic_regs,
-                                         (uint32)frame->syscall_no,
+                                         syscall_no32,
                                          (uintptr)frame->arg1,
                                          (uintptr)frame->arg2,
                                          (uintptr)frame->arg3,

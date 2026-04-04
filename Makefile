@@ -6,7 +6,6 @@ CONFIG_FILE ?= .eynosconfig
 -include $(CONFIG_FILE)
 
 # Target architecture selection for portability work.
-# Milestone A keeps i386 as the runnable default while introducing amd64 plumbing.
 ARCH ?= i386
 SUPPORTED_ARCHES := i386 amd64
 OBJDIR := obj/$(ARCH)

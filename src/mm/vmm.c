@@ -59,8 +59,23 @@ static int paging_enabled = 0;
  */
 static uint32 g_kernel_phys_alias_bytes = 16u * 1024u * 1024u;
 
+/*
+ * ABI-INVARIANT: Core paging structures use 32-bit physical/virtual fields.
+ *
+ * Why: The current MM subsystem stores page-table addresses and many kernel VA
+ * values in uint32-era structures.
+ * Invariant: Any pointer converted through vmm_ptr_to_u32() must be losslessly
+ * representable in 32 bits.
+ * Breakage if violated: Silent truncation can target the wrong page tables and
+ * corrupt memory-management state.
+ */
 static inline uint32 vmm_ptr_to_u32(const void* pointer) {
-    return (uint32)(uintptr)pointer;
+    uintptr raw = (uintptr)pointer;
+    uint32 narrowed = (uint32)raw;
+    if ((uintptr)narrowed != raw) {
+        PANIC("vmm_ptr_to_u32 overflow: pointer exceeds 32-bit MM contract");
+    }
+    return narrowed;
 }
 
 static inline void* vmm_u32_to_ptr(uint32 address) {

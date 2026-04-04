@@ -44,21 +44,18 @@
 #define E1000_ICR_RXO    (1u << 6)
 #define E1000_ICR_RXT0   (1u << 7)
 
-// Use a fixed high kernel VA window for device MMIO.
-//
-// Why a fixed VA:
-// - Keeps bring-up simple and avoids depending on a full virtual allocator.
-// - Avoids colliding with the kernel heap (starts at 0xD0000000).
-//
-// This is intentionally narrow: we only map what we need for probing.
+/* Use a fixed high kernel VA window for device MMIO.
+ *
+ * Why a fixed VA:
+ * - Keeps bring-up simple and avoids depending on a full virtual allocator.
+ * - Avoids colliding with the kernel heap (starts at 0xD0000000).
+ *
+ * This is intentionally narrow: we only map what we need for probing.
+*/
 #define E1000_MMIO_VA_BASE   0xF0000000u
 #define E1000_MMIO_MAP_BYTES 0x7000u  /* covers up through RAH0 */
 
-// TX ring settings.
-//
-// Why small:
-// - This is a bring-up milestone, not a throughput benchmark.
-// - Small rings reduce RAM use and keep debugging simple.
+// TX ring settings
 #define E1000_TX_RING_COUNT 16u
 #define E1000_TX_BUF_SIZE   2048u
 
@@ -256,15 +253,25 @@ static void e1000_map_mmio(uint32 phys_base)
     }
 }
 
+static inline volatile uint32* e1000_mmio_reg_ptr(uint32 reg)
+{
+    return (volatile uint32*)(uintptr)(E1000_MMIO_VA_BASE + reg);
+}
+
+static inline void* e1000_kva_from_phys(uint32 phys)
+{
+    return (void*)((uintptr)KERNEL_BASE + (uintptr)phys);
+}
+
 static inline uint32 e1000_mmio_read32(uint32 reg)
 {
-    volatile uint32* p = (volatile uint32*)(E1000_MMIO_VA_BASE + reg);
+    volatile uint32* p = e1000_mmio_reg_ptr(reg);
     return *p;
 }
 
 static inline void e1000_mmio_write32(uint32 reg, uint32 value)
 {
-    volatile uint32* p = (volatile uint32*)(E1000_MMIO_VA_BASE + reg);
+    volatile uint32* p = e1000_mmio_reg_ptr(reg);
     *p = value;
 }
 
@@ -425,9 +432,9 @@ static int e1000_tx_init_once(void)
     if (buf_phys == 0) return -3;
 
     g_e1000.tx_ring_phys = ring_phys;
-    g_e1000.tx_ring = (e1000_tx_desc*)(KERNEL_BASE + ring_phys);
+    g_e1000.tx_ring = (e1000_tx_desc*)e1000_kva_from_phys(ring_phys);
     g_e1000.tx_buf_phys = buf_phys;
-    g_e1000.tx_bufs = (uint8*)(KERNEL_BASE + buf_phys);
+    g_e1000.tx_bufs = (uint8*)e1000_kva_from_phys(buf_phys);
     g_e1000.tx_tail = 0;
 
     memset(g_e1000.tx_ring, 0, ring_pages * PAGE_SIZE);
@@ -570,9 +577,9 @@ static int e1000_rx_init_once(void)
     if (buf_phys == 0) return -3;
 
     g_e1000.rx_ring_phys = ring_phys;
-    g_e1000.rx_ring = (e1000_rx_desc*)(KERNEL_BASE + ring_phys);
+    g_e1000.rx_ring = (e1000_rx_desc*)e1000_kva_from_phys(ring_phys);
     g_e1000.rx_buf_phys = buf_phys;
-    g_e1000.rx_bufs = (uint8*)(KERNEL_BASE + buf_phys);
+    g_e1000.rx_bufs = (uint8*)e1000_kva_from_phys(buf_phys);
     g_e1000.rx_cur = 0;
 
     memset(g_e1000.rx_ring, 0, ring_pages * PAGE_SIZE);

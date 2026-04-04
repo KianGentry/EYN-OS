@@ -1,4 +1,4 @@
-; amd64 syscall entry for int 0x80 compatibility during Milestone A.
+; amd64 syscall entry for int 0x80 compatibility
 ;
 ; ABI-INVARIANT: Preserve all interrupted GPRs and only replace return RAX.
 ; This keeps legacy userland expectations while the full amd64 user ABI is
