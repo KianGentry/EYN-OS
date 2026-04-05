@@ -10,6 +10,10 @@ default rel
 
 global syscall_entry
 extern syscall_dispatch_amd64_frame
+extern g_abort_to_shell
+extern g_user_task_active
+extern isr_abort_stack_top
+extern user_task_abort_continue
 
 section .text
 syscall_entry:
@@ -56,6 +60,25 @@ syscall_entry:
     mov rdi, rsp
     call syscall_dispatch_amd64_frame
 
+    cmp dword [rel g_abort_to_shell], 0
+    je .no_abort
+
+    mov dword [rel g_abort_to_shell], 0
+    mov dword [rel g_user_task_active], 0
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov rsp, isr_abort_stack_top
+    sti
+    call user_task_abort_continue
+.halt:
+    hlt
+    jmp .halt
+
+.no_abort:
     add rsp, 72
 
     ; Place syscall return value into saved RAX slot.

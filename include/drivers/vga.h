@@ -142,6 +142,11 @@ extern int shell_log_current_line_start;
 void vga_swap_buffers(void);
 // Initialize the software backbuffer (safe no-op if allocation fails)
 void vga_init_double_buffer(void);
+// Returns 1 when Bochs/QEMU VBE runtime mode switching is available.
+int vga_can_set_mode(void);
+// Attempt runtime hardware mode switch (e.g. 1024x768x32).
+// Returns 0 on success, -1 on unsupported/invalid/failure.
+int vga_set_mode(int width, int height, int bpp);
 // Mark a rectangle in the backbuffer as dirty (so swap will blit it)
 void vga_mark_dirty_rect(int x, int y, int w, int h);
 // Begin a new frame (reset dirty rect tracking)

@@ -282,6 +282,12 @@ enum {
     EYN_SYSCALL_GUI_DRAW_TEXT_FONT = 138,
     // draw char with a specific loaded font id (0 = window default)
     EYN_SYSCALL_GUI_DRAW_CHAR_FONT = 139,
+    // Set/get compositor workspace display profile (scale + aspect).
+    EYN_SYSCALL_SET_DISPLAY_PROFILE = 140,
+    EYN_SYSCALL_GET_DISPLAY_PROFILE = 141,
+    // Runtime hardware display mode switch/query.
+    EYN_SYSCALL_SET_DISPLAY_MODE = 142,
+    EYN_SYSCALL_GET_DISPLAY_MODE = 143,
 };
 
 typedef struct {
@@ -370,6 +376,36 @@ typedef struct {
     uint32_t partition_count;
     eyn_installer_partition_t partitions[4];
 } eyn_installer_partitions_t;
+
+typedef struct {
+    int32_t fb_w;
+    int32_t fb_h;
+    int32_t workspace_w;
+    int32_t workspace_h;
+    int32_t scale_pct;
+    int32_t aspect_mode;
+} eyn_display_profile_t;
+
+typedef struct {
+    int32_t width;
+    int32_t height;
+    int32_t bpp;
+    int32_t persist;
+} eyn_display_mode_set_t;
+
+typedef struct {
+    int32_t width;
+    int32_t height;
+    int32_t bpp;
+    int32_t can_switch;
+} eyn_display_mode_t;
+
+#define EYN_ASPECT_NATIVE 0
+#define EYN_ASPECT_4_3 1
+#define EYN_ASPECT_16_10 2
+#define EYN_ASPECT_16_9 3
+#define EYN_ASPECT_21_9 4
+#define EYN_ASPECT_1_1 5
 
 typedef struct {
     uint32_t obj_type;
@@ -764,6 +800,22 @@ static inline int eyn_sys_clearbg_focused(void) {
 
 static inline int eyn_sys_setfont_path(const char* path) {
     return eyn_syscall1(EYN_SYSCALL_SETFONT_PATH, (int)(uintptr_t)path);
+}
+
+static inline int eyn_sys_set_display_profile(int scale_pct, int aspect_mode, int persist) {
+    return eyn_syscall3_iii(EYN_SYSCALL_SET_DISPLAY_PROFILE, scale_pct, aspect_mode, persist ? 1 : 0);
+}
+
+static inline int eyn_sys_get_display_profile(eyn_display_profile_t* out) {
+    return eyn_syscall1(EYN_SYSCALL_GET_DISPLAY_PROFILE, (int)(uintptr_t)out);
+}
+
+static inline int eyn_sys_set_display_mode(const eyn_display_mode_set_t* req) {
+    return eyn_syscall1(EYN_SYSCALL_SET_DISPLAY_MODE, (int)(uintptr_t)req);
+}
+
+static inline int eyn_sys_get_display_mode(eyn_display_mode_t* out) {
+    return eyn_syscall1(EYN_SYSCALL_GET_DISPLAY_MODE, (int)(uintptr_t)out);
 }
 
 static inline int eyn_sys_chdir(const char* path) {

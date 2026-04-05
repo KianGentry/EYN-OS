@@ -107,6 +107,41 @@ void wm_set_continuous_redraw(int win_id, int enabled);
 // Close the window
 void wm_close_window(int win_id);
 
+// Force-close the window, bypassing close-veto callbacks.
+void wm_force_close_window(int win_id);
+
+// --- Display profile (workspace resolution + aspect) ---
+// Aspect mode values are stable for settings/syscall integration.
+#define TILER_ASPECT_NATIVE 0
+#define TILER_ASPECT_4_3 1
+#define TILER_ASPECT_16_10 2
+#define TILER_ASPECT_16_9 3
+#define TILER_ASPECT_21_9 4
+#define TILER_ASPECT_1_1 5
+
+typedef struct {
+	int fb_w;
+	int fb_h;
+	int workspace_w;
+	int workspace_h;
+	int scale_pct;
+	int aspect_mode;
+} tiler_display_profile_t;
+
+typedef struct {
+	int width;
+	int height;
+	int bpp;
+	int can_switch;
+} tiler_display_mode_t;
+
+// scale_pct is clamped to [50,100], aspect uses TILER_ASPECT_* constants.
+// If persist != 0, the profile is saved to /config/ui.cfg.
+int tiler_set_display_profile(int scale_pct, int aspect_mode, int persist);
+void tiler_get_display_profile(tiler_display_profile_t* out);
+int tiler_set_display_mode(int width, int height, int bpp, int persist);
+void tiler_get_display_mode(tiler_display_mode_t* out);
+
 //  Runtime GUI tuning (low-spec controls) 
 // Mode: 0=high (full features), 1=low (wireframe drag, simplified decor), 2=auto (based on RAM)
 void tiler_gui_set_mode(int mode);

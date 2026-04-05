@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-04 18:52:28
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-05 17:05:14
 
-**Total Commands:** 84
+**Total Commands:** 87
 
 ## Table of Contents
 
@@ -1276,6 +1276,22 @@ search hello -a
 
 ---
 
+### settings
+
+**Binary:** `testdir/binaries/settings`
+
+**Metadata Source:** `testdir/code/settings_uelf.c`
+
+**Description:**
+Open system settings (video + customization).
+
+**Example:**
+```bash
+settings
+```
+
+---
+
 ### sort
 
 **Binary:** `testdir/binaries/sort`
@@ -1356,6 +1372,38 @@ view_backend_rei
 
 ---
 
+### view_backend_reis
+
+**Binary:** `testdir/binaries/view_backend_reis`
+
+**Metadata Source:** `testdir/code/view_backend_reis_uelf.c`
+
+**Description:**
+Play a REIS audio file in a dedicated backend.
+
+**Example:**
+```bash
+view_backend_reis /audio/track.reis
+```
+
+---
+
+### view_backend_reiv
+
+**Binary:** `testdir/binaries/view_backend_reiv`
+
+**Metadata Source:** `testdir/code/view_backend_reiv_uelf.c`
+
+**Description:**
+Play a REIV video file in a dedicated backend.
+
+**Example:**
+```bash
+view_backend_reiv /videos/demo.reiv
+```
+
+---
+
 ### xeyes
 
 **Binary:** `testdir/binaries/xeyes`
@@ -1382,5 +1430,5 @@ xeyes
 | Memory Commands | 7 |
 | GUI/Window Commands | 10 |
 | Development Commands | 10 |
-| Utility Commands | 26 |
+| Utility Commands | 29 |
 

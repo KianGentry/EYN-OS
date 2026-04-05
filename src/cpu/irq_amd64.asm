@@ -5,6 +5,9 @@ bits 64
 default rel
 
 extern irq_dispatch_c
+extern g_abort_to_shell
+extern ui_return_from_user_task
+extern isr_abort_stack_top
 
 section .text
 
@@ -50,6 +53,22 @@ irq%1:
     PUSH_GPRS
     mov edi, %1
     call irq_dispatch_c
+    cmp dword [rel g_abort_to_shell], 0
+    je .no_abort_%1
+    mov dword [rel g_abort_to_shell], 0
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov rsp, isr_abort_stack_top
+    sti
+    call ui_return_from_user_task
+.halt_%1:
+    hlt
+    jmp .halt_%1
+.no_abort_%1:
     POP_GPRS
     iretq
 %endmacro

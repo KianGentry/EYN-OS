@@ -289,6 +289,20 @@ void isr_amd64_dispatch_frame(const amd64_interrupt_frame_t* frame) {
         return;
     }
 
+    if (frame->vector == 13u && (frame->cs & 3u) == 3u) {
+        printf("\n%c*** General Protection Fault (user) ***\n", 255, 0, 0);
+        printf("RIP: 0x%08X  ERR: 0x%08X\n",
+               (unsigned)((uint32)frame->rip),
+               (unsigned)((uint32)frame->error_code));
+        printf("Terminating user process\n");
+        user_task_notify_exit(-13);
+        g_user_task_active = 0;
+        g_user_task_term = -1;
+        g_user_interrupt = 0;
+        g_abort_to_shell = 1;
+        return;
+    }
+
     if (frame->vector == 7u) {
         fpu_handle_nm();
         return;
@@ -554,6 +568,10 @@ uint32 get_last_error_eip() {
 #define SYSCALL_GUI_LOAD_FONT 137
 #define SYSCALL_GUI_DRAW_TEXT_FONT 138
 #define SYSCALL_GUI_DRAW_CHAR_FONT 139
+#define SYSCALL_SET_DISPLAY_PROFILE 140
+#define SYSCALL_GET_DISPLAY_PROFILE 141
+#define SYSCALL_SET_DISPLAY_MODE 142
+#define SYSCALL_GET_DISPLAY_MODE 143
 
 /*
  * SYSCALL_AUDIO_PROBE (113): Detect whether an AC97 audio controller is
@@ -759,6 +777,44 @@ typedef struct {
     int font_slot;
     char text[64];
 } user_gui_cmd_t;
+
+typedef struct {
+    int fb_w;
+    int fb_h;
+    int workspace_w;
+    int workspace_h;
+    int scale_pct;
+    int aspect_mode;
+} syscall_display_profile_t;
+
+typedef struct {
+    int width;
+    int height;
+    int bpp;
+    int persist;
+} syscall_display_mode_set_t;
+
+typedef struct {
+    int width;
+    int height;
+    int bpp;
+    int can_switch;
+} syscall_display_mode_t;
+
+/*
+ * SECURITY-INVARIANT: Per-GUI command buffer slot count.
+ *
+ * Why: Bounds kernel memory per user GUI while allowing text-heavy clients
+ * (notably syntax-highlighting editors) to emit a full frame without dropping
+ * draw commands.
+ * Invariant: cmd_count must stay within [0, USER_GUI_CMD_MAX].
+ * Breakage if changed:
+ *   - Increasing raises per-handle kernel memory linearly.
+ *   - Decreasing can reintroduce silent draw drops/flicker in rich UIs.
+ * ABI-sensitive: Yes (user-visible per-frame draw throughput ceiling).
+ * Security-critical: Yes (resource exhaustion boundary).
+ */
+#define USER_GUI_CMD_MAX 512
 
 enum {
     USER_GUI_CMD_CLEAR = 1,
@@ -1320,14 +1376,13 @@ typedef struct {
      * Invariant: User programs that exceed this limit silently lose draw commands
      *            (syscall returns -1). Callers should minimise per-frame commands.
      * Breakage if changed:
-     *   - Increasing: linearly grows per-user-GUI kernel memory (~96 bytes/slot).
-     *     256 slots ≈ 24 KB -- acceptable on 9 MB target. Needed for text-heavy
-     *     applications (e.g. text editors drawing 30+ lines per frame).
+    *   - Increasing: linearly grows per-user-GUI kernel memory (~96 bytes/slot).
+    *     512 slots ≈ 48 KB -- acceptable on 9 MB target for current GUI load.
      *   - Decreasing: existing GUI programs may silently lose draw calls.
      * ABI-sensitive: Yes (user-visible limit on draw throughput per frame).
      */
     int cmd_count;
-    user_gui_cmd_t cmds[256];
+    user_gui_cmd_t cmds[USER_GUI_CMD_MAX];
     uint8 frame_pending;
 
     // Input event ring buffer.
@@ -3266,6 +3321,63 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             resolve_path(path, cwd, abspath, sizeof(abspath));
             regs->eax = (vga_system_font_set(g_current_drive, abspath) == 0) ? 0u : (uint32)-1;
             if (regs->eax == 0u) tile_render_once();
+            break;
+        }
+        case SYSCALL_SET_DISPLAY_PROFILE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            int scale_pct = (int)arg1;
+            int aspect_mode = (int)arg2;
+            int persist = (int)arg3;
+            regs->eax = (tiler_set_display_profile(scale_pct, aspect_mode, persist) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_GET_DISPLAY_PROFILE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            syscall_display_profile_t* user_out = (syscall_display_profile_t*)arg1;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+
+            tiler_display_profile_t profile;
+            memset(&profile, 0, sizeof(profile));
+            tiler_get_display_profile(&profile);
+
+            syscall_display_profile_t out;
+            out.fb_w = profile.fb_w;
+            out.fb_h = profile.fb_h;
+            out.workspace_w = profile.workspace_w;
+            out.workspace_h = profile.workspace_h;
+            out.scale_pct = profile.scale_pct;
+            out.aspect_mode = profile.aspect_mode;
+
+            regs->eax = (copyout(user_out, &out, sizeof(out)) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_SET_DISPLAY_MODE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            const syscall_display_mode_set_t* user_in = (const syscall_display_mode_set_t*)arg1;
+            if (!user_in) { regs->eax = (uint32)-1; break; }
+
+            syscall_display_mode_set_t in;
+            if (copyin(&in, user_in, sizeof(in)) != 0) { regs->eax = (uint32)-1; break; }
+
+            regs->eax = (tiler_set_display_mode(in.width, in.height, in.bpp, in.persist) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_GET_DISPLAY_MODE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            syscall_display_mode_t* user_out = (syscall_display_mode_t*)arg1;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+
+            tiler_display_mode_t mode;
+            memset(&mode, 0, sizeof(mode));
+            tiler_get_display_mode(&mode);
+
+            syscall_display_mode_t out;
+            out.width = mode.width;
+            out.height = mode.height;
+            out.bpp = mode.bpp;
+            out.can_switch = mode.can_switch;
+
+            regs->eax = (copyout(user_out, &out, sizeof(out)) == 0) ? 0u : (uint32)-1;
             break;
         }
         case SYSCALL_CHDIR: {

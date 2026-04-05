@@ -773,7 +773,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    (void)gui_set_continuous_redraw(app.handle, 1);
+    int need_redraw = 1;
 
     while (app.running) {
         gui_event_t ev;
@@ -782,16 +782,52 @@ int main(int argc, char** argv) {
                 app.running = 0;
                 break;
             }
-            if (ev.type == GUI_EVENT_KEY)
+            if (ev.type == GUI_EVENT_KEY) {
+                int old_selected = app.selected;
+                int old_scroll = app.scroll;
+                int old_entry_count = app.entry_count;
+                int old_at_drive_select = app.at_drive_select;
+                int old_running = app.running;
+                char old_path[MAX_PATH];
+                safe_strcpy(old_path, MAX_PATH, app.path);
                 handle_key(&app, ev.a);
-            else if (ev.type == GUI_EVENT_MOUSE)
+
+                if (app.selected != old_selected ||
+                    app.scroll != old_scroll ||
+                    app.entry_count != old_entry_count ||
+                    app.at_drive_select != old_at_drive_select ||
+                    app.running != old_running ||
+                    strcmp(app.path, old_path) != 0) {
+                    need_redraw = 1;
+                }
+            } else if (ev.type == GUI_EVENT_MOUSE) {
+                int old_selected = app.selected;
+                int old_scroll = app.scroll;
+                int old_entry_count = app.entry_count;
+                int old_at_drive_select = app.at_drive_select;
+                int old_running = app.running;
+                char old_path[MAX_PATH];
+                safe_strcpy(old_path, MAX_PATH, app.path);
                 handle_mouse(&app, &ev);
+
+                if (app.selected != old_selected ||
+                    app.scroll != old_scroll ||
+                    app.entry_count != old_entry_count ||
+                    app.at_drive_select != old_at_drive_select ||
+                    app.running != old_running ||
+                    strcmp(app.path, old_path) != 0) {
+                    need_redraw = 1;
+                }
+            }
         }
 
-        draw_ui(&app);
-        usleep(16000);
+        if (need_redraw) {
+            draw_ui(&app);
+            need_redraw = 0;
+        } else {
+            usleep(8000);
+        }
     }
 
-    (void)gui_set_continuous_redraw(app.handle, 0);
     return 0;
 }

@@ -189,6 +189,7 @@ typedef struct {
 
     /* Syntax: is C file */
     int is_c_file;
+
 } editor_t;
 
 
@@ -1807,24 +1808,54 @@ int main(int argc, char** argv) {
     }
 
     update_title(&ed);
-    gui_set_continuous_redraw(ed.handle, 1);
+    int need_redraw = 1;
 
     while (ed.running) {
         gui_event_t ev;
         while (gui_poll_event(ed.handle, &ev) > 0) {
-            if (ev.type == GUI_EVENT_KEY)
+            if (ev.type == GUI_EVENT_KEY) {
                 handle_key(&ed, ev.a);
-            else if (ev.type == GUI_EVENT_MOUSE)
+                if (ed.running) need_redraw = 1;
+            } else if (ev.type == GUI_EVENT_MOUSE) {
+                int old_scroll_y = ed.scroll_y;
+                int old_cur_line = ed.cur_line;
+                int old_cur_col = ed.cur_col;
+                int old_anchor_line = ed.sel_anchor_line;
+                int old_anchor_col = ed.sel_anchor_col;
                 handle_mouse(&ed, &ev);
-            else if (ev.type == GUI_EVENT_CLOSE)
+
+                if (ed.scroll_y != old_scroll_y ||
+                    ed.cur_line != old_cur_line ||
+                    ed.cur_col != old_cur_col ||
+                    ed.sel_anchor_line != old_anchor_line ||
+                    ed.sel_anchor_col != old_anchor_col) {
+                    need_redraw = 1;
+                }
+            } else if (ev.type == GUI_EVENT_CLOSE) {
+                int old_running = ed.running;
+                int old_status_timer = ed.status_timer;
+                char old_status_msg[80];
+                safe_strcpy(old_status_msg, (int)sizeof(old_status_msg), ed.status_msg);
                 handle_close(&ed);
+                if ((old_running && !ed.running) ||
+                    ed.status_timer != old_status_timer ||
+                    strcmp(old_status_msg, ed.status_msg) != 0) {
+                    need_redraw = 1;
+                }
+            }
         }
 
-        draw_editor(&ed);
-        usleep(16000);
+        if (need_redraw || ed.status_timer > 0) {
+            draw_editor(&ed);
+            need_redraw = 0;
+            if (ed.status_timer > 0) {
+                usleep(33000);
+            }
+        } else {
+            usleep(8000);
+        }
     }
 
-    gui_set_continuous_redraw(ed.handle, 0);
     free(ed.lines);
     return 0;
 }

@@ -99,10 +99,13 @@ Utility Commands:
   pipe            - Run a command pipeline from userspace command launcher.
   random          - Generate random numbers.
   search          - Search for text in filenames and file contents.
+  settings        - Open system settings (video + customization).
   sort            - Sort strings alphabetically.
   spam            - Spam 'EYN-OS' to stdout 100 times.
   tiling          - Launch the tiling manager.
   view_backend_bmp - Run the view_backend_bmp command.
   view_backend_rei - Run the view_backend_rei command.
+  view_backend_reis - Play a REIS audio file in a dedicated backend.
+  view_backend_reiv - Play a REIV video file in a dedicated backend.
   xeyes           - X11 xeyes - eyes that follow the mouse pointer.
 

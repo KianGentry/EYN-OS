@@ -299,6 +299,7 @@ static int wm_hit_test(int x, int y) {
     for (int oi = g_window_count - 1; oi >= 0; --oi) {
         int wi = g_window_order[oi];
         if (!g_windows[wi].used) continue;
+        if (g_windows[wi].minimized) continue;
         if (g_windows[wi].desktop != g_current_desktop) continue;
         if (point_in_rect(x, y, g_windows[wi].x, g_windows[wi].y, g_windows[wi].w, g_windows[wi].h)) return wi;
     }
@@ -597,6 +598,13 @@ void wm_close_window(int win_id) {
     gui_window_closed(win_id);
     g_force_full_redraw = 1;
     g_tiles_full_content_redraw = 1;
+}
+
+void wm_force_close_window(int win_id) {
+    if (win_id < 0 || win_id >= MAX_WINDOWS || !g_windows[win_id].used) return;
+    // Forceful close path: strip callbacks (including close veto) before close.
+    wm_unregister_gui_client(win_id);
+    wm_close_window(win_id);
 }
 
 // duplicate rects_intersect removed (defined earlier)

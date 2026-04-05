@@ -244,6 +244,8 @@ static int gui_continuous_redraw[MAX_TILES];
 
 static int screen_w = 640; // pixels
 static int screen_h = 480; // pixels
+static int g_fb_w = 640;   // physical framebuffer width
+static int g_fb_h = 480;   // physical framebuffer height
 // Periodic GUI heartbeat to allow time-driven GUI apps (like stats) to refresh without busy loops
 static uint32 g_last_gui_heartbeat_tick = 0;
 // Low-spec mode: enabled automatically on <8MB systems; also tunes frame pacing

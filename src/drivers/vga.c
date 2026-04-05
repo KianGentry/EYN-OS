@@ -23,6 +23,82 @@ int vga_default_r = 255, vga_default_g = 255, vga_default_b = 255; // Default to
 // When non-zero, drawText operates in a minimal glyph-draw mode used by drawCharAt.
 static int g_drawCharAt_mode = 0;
 
+/*
+ * ABI-INVARIANT: Bochs/QEMU VBE register interface (ports 0x01CE/0x01CF).
+ *
+ * Why: Enables runtime hardware mode switching without BIOS callbacks.
+ * Invariant: Register indices and IDs follow the Bochs VBE extension ABI.
+ * Breakage if changed: Mode switches stop working or program wrong registers.
+ * ABI-sensitive: Yes (hardware I/O contract).
+ */
+#define VBE_DISPI_IOPORT_INDEX 0x01CE
+#define VBE_DISPI_IOPORT_DATA 0x01CF
+
+#define VBE_DISPI_INDEX_ID 0x0
+#define VBE_DISPI_INDEX_XRES 0x1
+#define VBE_DISPI_INDEX_YRES 0x2
+#define VBE_DISPI_INDEX_BPP 0x3
+#define VBE_DISPI_INDEX_ENABLE 0x4
+#define VBE_DISPI_INDEX_X_OFFSET 0x8
+#define VBE_DISPI_INDEX_Y_OFFSET 0x9
+
+#define VBE_DISPI_DISABLED 0x00
+#define VBE_DISPI_ENABLED 0x01
+#define VBE_DISPI_LFB_ENABLED 0x40
+
+#define VBE_DISPI_ID0 0xB0C0
+#define VBE_DISPI_ID5 0xB0C5
+
+static void vbe_dispi_write(uint16 index, uint16 value) {
+	outw(VBE_DISPI_IOPORT_INDEX, index);
+	outw(VBE_DISPI_IOPORT_DATA, value);
+}
+
+static uint16 vbe_dispi_read(uint16 index) {
+	outw(VBE_DISPI_IOPORT_INDEX, index);
+	return inw(VBE_DISPI_IOPORT_DATA);
+}
+
+int vga_can_set_mode(void) {
+	uint16 id = vbe_dispi_read(VBE_DISPI_INDEX_ID);
+	return (id >= VBE_DISPI_ID0 && id <= VBE_DISPI_ID5) ? 1 : 0;
+}
+
+int vga_set_mode(int mode_w, int mode_h, int bpp) {
+	if (!g_mbi) return -1;
+	if (mode_w < 320 || mode_h < 200) return -1;
+	if (bpp != 16 && bpp != 24 && bpp != 32) return -1;
+	if (!vga_can_set_mode()) return -1;
+
+	vbe_dispi_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+	vbe_dispi_write(VBE_DISPI_INDEX_XRES, (uint16)mode_w);
+	vbe_dispi_write(VBE_DISPI_INDEX_YRES, (uint16)mode_h);
+	vbe_dispi_write(VBE_DISPI_INDEX_BPP, (uint16)bpp);
+	vbe_dispi_write(VBE_DISPI_INDEX_X_OFFSET, 0);
+	vbe_dispi_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
+	vbe_dispi_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+
+	int actual_w = (int)vbe_dispi_read(VBE_DISPI_INDEX_XRES);
+	int actual_h = (int)vbe_dispi_read(VBE_DISPI_INDEX_YRES);
+	int actual_bpp = (int)vbe_dispi_read(VBE_DISPI_INDEX_BPP);
+	if (actual_w <= 0 || actual_h <= 0) return -1;
+	if (actual_bpp != 16 && actual_bpp != 24 && actual_bpp != 32) return -1;
+
+	g_mbi->flags |= MULTIBOOT_INFO_FRAMEBUFFER_INFO;
+	g_mbi->framebuffer_width = (uint32)actual_w;
+	g_mbi->framebuffer_height = (uint32)actual_h;
+	g_mbi->framebuffer_bpp = (uint8)actual_bpp;
+	g_mbi->framebuffer_pitch = (uint32)(actual_w * (actual_bpp / 8));
+
+	vga_init_double_buffer();
+	clearScreen();
+	vga_begin_frame();
+	vga_mark_dirty_rect(0, 0, actual_w, actual_h);
+	vga_swap_buffers();
+
+	return 0;
+}
+
 // Bitmap font registry (up to 64xN, 256 glyphs)
 // Supports .hex bitmaps and rasterized scalable fonts.
 #define VGA_FONT_DEFAULT_ADVANCE 8

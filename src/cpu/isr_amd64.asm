@@ -10,6 +10,10 @@ bits 64
 default rel
 
 extern isr_amd64_dispatch_frame
+extern g_abort_to_shell
+extern g_user_task_active
+extern isr_abort_stack_top
+extern user_task_abort_continue
 
 section .text
 
@@ -65,6 +69,23 @@ isr%1:
     mov [rsp + 32], rax
     mov rdi, rsp
     call isr_amd64_dispatch_frame
+    cmp dword [rel g_abort_to_shell], 0
+    je .no_abort_%1
+    mov dword [rel g_abort_to_shell], 0
+    mov dword [rel g_user_task_active], 0
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov rsp, isr_abort_stack_top
+    sti
+    call user_task_abort_continue
+.halt_%1:
+    hlt
+    jmp .halt_%1
+.no_abort_%1:
     add rsp, 40
     POP_GPRS
     iretq
@@ -87,6 +108,23 @@ isr%1:
     mov [rsp + 32], rax
     mov rdi, rsp
     call isr_amd64_dispatch_frame
+    cmp dword [rel g_abort_to_shell], 0
+    je .no_abort_%1
+    mov dword [rel g_abort_to_shell], 0
+    mov dword [rel g_user_task_active], 0
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov rsp, isr_abort_stack_top
+    sti
+    call user_task_abort_continue
+.halt_%1:
+    hlt
+    jmp .halt_%1
+.no_abort_%1:
     add rsp, 40
     POP_GPRS
     add rsp, 8

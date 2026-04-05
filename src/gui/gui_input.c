@@ -646,6 +646,118 @@ int tile_pump_input_once(void) {
             }
 
             if (left_press) {
+                int taskbar_h = vga_text_cell_h() + 6;
+                int tb_cw = vga_text_cell_w();
+                int start_btn_w = tb_cw + 10;
+
+                if (me.y < taskbar_h) {
+                    // Keep taskbar app restore/focus usable while ring3 is active.
+                    if (me.x >= 2 && me.x < 2 + start_btn_w) {
+                        g_start_active = !g_start_active;
+                        g_dropdown_active = 0;
+                        g_ctx_active = 0;
+                        g_start_hover = -1;
+                        g_programs_active = 0;
+                        g_programs_hover = -1;
+                        g_programs_scanned = 0;
+                        g_force_full_redraw = 1;
+                        return 1;
+                    }
+
+                    if (g_tb_overflow_w > 0 && me.x >= g_tb_overflow_x && me.x < g_tb_overflow_x + g_tb_overflow_w) {
+                        g_dropdown_active = !g_dropdown_active;
+                        g_start_active = 0;
+                        g_dropdown_hover = -1;
+                        g_force_full_redraw = 1;
+                        return 1;
+                    }
+
+                    for (int bi = 0; bi < g_tb_button_count; ++bi) {
+                        if (me.x < g_tb_buttons[bi].x || me.x >= g_tb_buttons[bi].x + g_tb_buttons[bi].w) continue;
+
+                        if (g_tb_buttons[bi].kind == 0) {
+                            int ti2 = g_tb_buttons[bi].index;
+                            if (ti2 >= 0 && ti2 < tile_count) {
+                                if (tiles[ti2].minimized) {
+                                    tiles[ti2].minimized = 0;
+                                    tiles[ti2].static_drawn = 0;
+                                }
+                                focused = ti2;
+                                g_win_focused = -1;
+                                g_force_full_redraw = 1;
+                                g_tiles_full_content_redraw = 1;
+                            }
+                        } else {
+                            int wi2 = g_tb_buttons[bi].index;
+                            if (wi2 >= 0 && wi2 < MAX_WINDOWS && g_windows[wi2].used) {
+                                wm_bring_to_front(wi2);
+                                g_win_focused = wi2;
+                                if (g_windows[wi2].minimized) {
+                                    g_windows[wi2].minimized = 0;
+                                    g_windows[wi2].needs_redraw = 1;
+                                    g_windows[wi2].static_drawn = 0;
+                                }
+                                g_force_full_redraw = 1;
+                                g_tiles_full_content_redraw = 1;
+                            }
+                        }
+
+                        g_start_active = 0;
+                        g_dropdown_active = 0;
+                        return 1;
+                    }
+
+                    // Clicking empty taskbar space should not forward into app content.
+                    g_start_active = 0;
+                    g_dropdown_active = 0;
+                    g_force_full_redraw = 1;
+                    return 1;
+                }
+
+                if (g_dropdown_active && g_tb_overflow_count > 0) {
+                    int menu_w3 = 180;
+                    int item_h3 = vga_text_cell_h() + 6;
+                    int menu_h3 = g_tb_overflow_count * item_h3 + 4;
+                    int menu_x3 = g_tb_overflow_x;
+                    if (menu_x3 + menu_w3 > screen_w) menu_x3 = screen_w - menu_w3;
+                    if (me.x >= menu_x3 && me.x < menu_x3 + menu_w3 &&
+                        me.y >= taskbar_h && me.y < taskbar_h + menu_h3) {
+                        int idx3 = (me.y - taskbar_h - 2) / item_h3;
+                        if (idx3 >= 0 && idx3 < g_tb_overflow_count) {
+                            if (g_tb_overflow[idx3].kind == 0) {
+                                int ti3 = g_tb_overflow[idx3].index;
+                                if (ti3 >= 0 && ti3 < tile_count) {
+                                    if (tiles[ti3].minimized) {
+                                        tiles[ti3].minimized = 0;
+                                        tiles[ti3].static_drawn = 0;
+                                    }
+                                    focused = ti3;
+                                    g_win_focused = -1;
+                                }
+                            } else {
+                                int wi3 = g_tb_overflow[idx3].index;
+                                if (wi3 >= 0 && wi3 < MAX_WINDOWS && g_windows[wi3].used) {
+                                    wm_bring_to_front(wi3);
+                                    g_win_focused = wi3;
+                                    if (g_windows[wi3].minimized) {
+                                        g_windows[wi3].minimized = 0;
+                                        g_windows[wi3].needs_redraw = 1;
+                                        g_windows[wi3].static_drawn = 0;
+                                    }
+                                }
+                            }
+                            g_dropdown_active = 0;
+                            g_force_full_redraw = 1;
+                            g_tiles_full_content_redraw = 1;
+                        }
+                        return 1;
+                    }
+
+                    g_dropdown_active = 0;
+                    g_force_full_redraw = 1;
+                    return 1;
+                }
+
                 int w_hit = wm_hit_test(me.x, me.y);
                 if (w_hit >= 0) {
                     wm_bring_to_front(w_hit);
@@ -692,6 +804,7 @@ int tile_pump_input_once(void) {
                         if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
                             window_t* w = &g_windows[w_hit];
                             w->minimized = !w->minimized; w->needs_redraw = 1; w->static_drawn = 0;
+                            if (w->minimized) g_win_focused = -1;
                             g_tiles_full_content_redraw = 1;
                             did_btn = 1;
                         }
@@ -750,6 +863,9 @@ int tile_pump_input_once(void) {
             }
 
             // Route to focused window if any; else to the active user task's tile.
+            if (g_win_focused >= 0 && g_windows[g_win_focused].used && g_windows[g_win_focused].minimized) {
+                g_win_focused = -1;
+            }
             if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
                 window_t* wfocus = &g_windows[g_win_focused];
                 if (wfocus->mouse_cb) {
@@ -996,6 +1112,8 @@ int tile_pump_input_once(void) {
                     launch_program("files");
                 } else if (g_start_hover == 3) { /* Settings */
                     g_start_active = 0;
+                    g_programs_active = 0;
+                    launch_program("settings");
                 } else if (g_start_hover == 4) { /* Reboot */
                     g_start_active = 0;
                     outportb(0x64, 0xFE);

@@ -502,6 +502,79 @@ Draw a single character using a specific loaded font id.
 **Returns:**
 - EAX: 0 on success, -1 on failure
 
+#### Set display profile (syscall 140)
+Set the tiling manager workspace scale and aspect profile.
+
+This updates the logical desktop/workspace resolution, relayouts tiles, and can optionally persist the profile to `/config/ui.cfg`.
+It does not change the physical hardware mode.
+
+**Arguments:**
+- EBX: `scale_pct` (clamped to `50..100`)
+- ECX: `aspect_mode`
+    - `0=native`, `1=4:3`, `2=16:10`, `3=16:9`, `4=21:9`, `5=1:1`
+- EDX: `persist` (`0` apply only, non-zero apply and save)
+
+**Returns:**
+- EAX: 0 on success, -1 on error
+
+#### Get display profile (syscall 141)
+Get the current compositor display profile and framebuffer dimensions.
+
+**Arguments:**
+- EBX: pointer to output struct
+
+```c
+typedef struct {
+        int fb_w, fb_h;
+        int workspace_w, workspace_h;
+        int scale_pct;
+        int aspect_mode;
+} eyn_display_profile_t;
+```
+
+**Returns:**
+- EAX: 0 on success, -1 on error
+
+#### Set hardware display mode (syscall 142)
+Switch the physical framebuffer mode at runtime (for example `1024x768x32`) and optionally persist the preference.
+
+Notes:
+- Requires Bochs/QEMU VBE runtime mode support.
+- On unsupported hardware, returns `-1` and keeps the current mode.
+
+**Arguments:**
+- EBX: pointer to input struct
+
+```c
+typedef struct {
+    int width;
+    int height;
+    int bpp;     // 16, 24, or 32
+    int persist; // 0=apply only, non-zero=apply and save
+} eyn_display_mode_set_t;
+```
+
+**Returns:**
+- EAX: 0 on success, -1 on error/unsupported
+
+#### Get hardware display mode (syscall 143)
+Get the current physical framebuffer mode and whether runtime switching is available.
+
+**Arguments:**
+- EBX: pointer to output struct
+
+```c
+typedef struct {
+    int width;
+    int height;
+    int bpp;
+    int can_switch; // 1 if runtime mode switching is available
+} eyn_display_mode_t;
+```
+
+**Returns:**
+- EAX: 0 on success, -1 on error
+
 ## Capability-based GUI syscalls (28–46)
 
 The capability syscalls mirror the plain GUI calls but accept a capability token instead of a raw handle. They are intended for programs that have been given access to a GUI surface through a capability rather than creating one themselves.
