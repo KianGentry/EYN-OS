@@ -13,3 +13,5 @@ eynfs_format
 /.venv/
 /devtools/__pycache__/
 /.vscode/
+/testdir/doom.wad
+/testdir/helterskelter.reis
