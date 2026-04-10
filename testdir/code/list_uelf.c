@@ -9,7 +9,7 @@
 
 EYN_CMDMETA_V1("List directory entries with terminal icons.", "list [path]");
 
-#define LIST_MAX_ENTRIES 256
+#define LIST_MAX_ENTRIES 1024
 
 typedef struct {
     char name[56];
@@ -87,6 +87,7 @@ int main(int argc, char** argv) {
     eyn_dirent_t ents[16];
     list_entry_t entries[LIST_MAX_ENTRIES];
     int entry_count = 0;
+    int dropped_entries = 0;
     for (;;) {
         int rc = getdents(fd, ents, sizeof(ents));
         if (rc < 0) {
@@ -99,7 +100,10 @@ int main(int argc, char** argv) {
         int count = rc / (int)sizeof(eyn_dirent_t);
         for (int i = 0; i < count; ++i) {
             if (ents[i].name[0] == '\0') continue;
-            if (entry_count >= LIST_MAX_ENTRIES) continue;
+            if (entry_count >= LIST_MAX_ENTRIES) {
+                dropped_entries++;
+                continue;
+            }
 
             int n = 0;
             for (; n < (int)sizeof(entries[entry_count].name) - 1 && ents[i].name[n]; ++n)
@@ -130,6 +134,13 @@ int main(int argc, char** argv) {
             console_set_rgb(255, 255, 255);
             printf("  %s\n", entries[i].name);
         }
+    }
+
+    if (dropped_entries > 0) {
+        console_set_rgb(255, 200, 80);
+        printf("list: output truncated, %d entries omitted (limit=%d)\n",
+               dropped_entries,
+               LIST_MAX_ENTRIES);
     }
 
     (void)close(fd);

@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <dirent.h>
 
 #include <eynos_cmdmeta.h>
 
@@ -72,3 +73,9 @@ int main(int argc, char** argv) {
 #include "../../install/package.c"
 #include "../../install/index.c"
 #include "../../install/resolve.c"
+
+#define EXTRACT_EMBEDDED_MODE 1
+#define main install_embedded_extract_main
+#include "extract_uelf.c"
+#undef main
+#undef EXTRACT_EMBEDDED_MODE

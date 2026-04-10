@@ -3,7 +3,8 @@
 
 #include "package.h"
 
-#define INSTALL_INDEX_URL "http://192.168.122.251/index.json"
+#define INSTALL_INDEX_URL "http://eynos.duckdns.org/index.json"
+#define INSTALL_LOCAL_INDEX_PATH "/cache/index.json"
 #define INDEX_MAX_PACKAGES 128
 #define INDEX_MAX_JSON_BYTES (512u * 1024u)
 

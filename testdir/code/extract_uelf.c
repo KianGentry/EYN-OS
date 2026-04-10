@@ -8,7 +8,9 @@
 
 #include <eynos_cmdmeta.h>
 
+#ifndef EXTRACT_EMBEDDED_MODE
 EYN_CMDMETA_V1("Extract a TAR or TAR.GZ archive into a directory.", "extract /archive.tar.gz /out");
+#endif
 
 #define TAR_BLOCK_SIZE 512
 #define TAR_IO_CHUNK 1024

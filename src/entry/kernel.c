@@ -27,6 +27,7 @@
 #include <arch.h>
 #include <capabilities.h>
 #include <crashlog.h>
+#include <network/netstack.h>
 
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
@@ -224,6 +225,21 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     // the IRQ0 handler is registered. Without this, sched_get_tick_count()
     // never advances (breaking REIV playback timing and other tick-based code).
     __asm__ __volatile__("sti");
+
+    printf("Starting network stack...");
+    {
+        int net_rc = net_init_e1000_default();
+        if (net_rc == 0) {
+            printf("Done.\n");
+        } else {
+            /*
+             * Installer and userland may still proceed using local package cache.
+             * Keep boot non-fatal on platforms without a usable NIC.
+             */
+            printf("Skipped (rc=%d).\n", net_rc);
+        }
+    }
+
     // Initialize watchdog with a sensitive default (~250ms)
     printf("Starting watchdog...");
     uint32 hz = sched_get_tick_hz();

@@ -19,16 +19,23 @@ The stack is built in layers:
 
 ### Initialization
 
-```c
-void net_init(void);
-```
+Boot now performs eager network bring-up from kernel init:
+- `kmain` calls `net_init_e1000_default()` after IRQ/PIT setup.
+- Failure is non-fatal, so systems without a usable NIC still boot.
 
-Called after e1000 driver initialization. Sets up:
+Runtime initialization entry points:
+- `net_init_e1000_default()` (driver + stack)
+- `net_init(const netdev* dev)` (stack over a provided device)
+
+Sets up:
 - Network device reference (e1000)
 - Local MAC address
 - ARP cache
 - UDP receive queue
 - Statistics counters
+
+Many network operations still include lazy init calls as a fallback when boot
+did not initialize networking.
 
 ### Packet Reception Flow
 
@@ -229,9 +236,10 @@ struct net_tcp_stats {
 
 ### Initialization
 ```c
-void net_init(void);
+int net_init_e1000_default(void);
+int net_init(const netdev* dev);
 ```
-Initialize network stack (call after `e1000_init()`).
+Initialize the network stack (or no-op if already initialized).
 
 ### Polling
 ```c

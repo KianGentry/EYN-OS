@@ -15,10 +15,17 @@
 #define PKG_HTTP_MAX_HEADER 4096
 #define PKG_HTTP_RECV_BUF 1536
 #define PKG_HTTP_CHUNK_BUF 4096
+#define PKG_HTTP_IDLE_RECV_LIMIT 1500
 #define PKG_DOWNLOAD_DEFAULT_MAX (8u * 1024u * 1024u)
 #define PKG_INSTALL_PATH_CAP 256
 #define PKG_TEMP_PATH_CAP 320
 #define PKG_IO_CHUNK 1024
+
+#define PKG_LOCAL_CACHE_ROOT "/cache"
+#define PKG_LOCAL_PACKAGE_CACHE_DIR "/cache/pkg"
+#define PKG_LOCAL_BASE_ARCHIVE "/cache/base.pkg"
+#define PKG_INSTALLER_MEDIA_PACKAGE_CACHE_DIR "RAM:/installer/pkg"
+#define PKG_EYNFS_MAX_NAME_CHARS 31
 
 #define PKG_SHA256_BLOCK_SIZE 64
 #define PKG_SHA256_DIGEST_SIZE 32
@@ -37,6 +44,11 @@ typedef struct {
     uint8_t buffer[PKG_SHA256_BLOCK_SIZE];
     size_t buffer_len;
 } pkg_sha256_ctx_t;
+
+int install_embedded_extract_main(int argc, char** argv);
+
+static int g_package_confirm_mode = PACKAGE_CONFIRM_PROMPT;
+static int pkg_path_exists(const char* path);
 
 static const uint32_t pkg_sha256_k[64] = {
     0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u,
@@ -60,6 +72,125 @@ static const uint32_t pkg_sha256_k[64] = {
 static int pkg_ascii_lower(int ch) {
     if (ch >= 'A' && ch <= 'Z') return ch - 'A' + 'a';
     return ch;
+}
+
+int package_set_confirm_mode(int mode) {
+    int prev = g_package_confirm_mode;
+    if (mode == PACKAGE_CONFIRM_AUTO_ACCEPT) {
+        g_package_confirm_mode = PACKAGE_CONFIRM_AUTO_ACCEPT;
+    } else {
+        g_package_confirm_mode = PACKAGE_CONFIRM_PROMPT;
+    }
+    return prev;
+}
+
+static int pkg_prompt_confirm(const char* warning) {
+    if (!warning || !warning[0]) return 0;
+
+    if (g_package_confirm_mode == PACKAGE_CONFIRM_AUTO_ACCEPT) {
+        printf("install: warning: %s (auto-accepted)\n", warning);
+        return 1;
+    }
+
+    printf("install: warning: %s\n", warning);
+    printf("install: continue? [y/N]: ");
+    fflush(stdout);
+
+    char answer[8];
+    int used = 0;
+    while (used + 1 < (int)sizeof(answer)) {
+        char c = 0;
+        ssize_t n = read(0, &c, 1);
+        if (n <= 0) break;
+        if (c == '\r' || c == '\n') break;
+        answer[used++] = c;
+    }
+    answer[used] = '\0';
+
+    return answer[0] == 'y' || answer[0] == 'Y';
+}
+
+static int pkg_path_is_directory(const char* path) {
+    if (!path || !path[0]) return 0;
+
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0) return 0;
+
+    eyn_dirent_t entries[1];
+    int rc = getdents(fd, entries, sizeof(entries));
+    close(fd);
+    return rc >= 0;
+}
+
+static int pkg_is_first_level_dir(const char* path) {
+    if (!path || path[0] != '/') return 0;
+    if (path[1] == '\0') return 0;
+
+    size_t i = 1;
+    while (path[i] && path[i] != '/') i++;
+    if (path[i] == '\0') return 1;
+    return path[i] == '/' && path[i + 1] == '\0';
+}
+
+static int pkg_install_name_is_valid(const char* name) {
+    if (!name || !name[0]) return 0;
+
+    for (size_t i = 0; name[i]; i++) {
+        if (name[i] == '/' || name[i] == '\\' || name[i] == ':') return 0;
+    }
+    return 1;
+}
+
+static int pkg_install_dir_is_valid(const char* path) {
+    if (!path || path[0] != '/') return 0;
+    if (path[1] == '\0') return 0;
+
+    size_t seg_len = 0;
+    for (size_t i = 1; path[i]; i++) {
+        if (path[i] == '\\' || path[i] == ':') return 0;
+
+        if (path[i] == '/') {
+            if (seg_len == 0) return 0;
+
+            if (seg_len == 1 && path[i - 1] == '.') return 0;
+            if (seg_len == 2 && path[i - 1] == '.' && path[i - 2] == '.') return 0;
+            seg_len = 0;
+            continue;
+        }
+
+        seg_len++;
+    }
+
+    if (seg_len == 1 && path[strlen(path) - 1] == '.') return 0;
+    if (seg_len == 2 && path[strlen(path) - 1] == '.' && path[strlen(path) - 2] == '.') return 0;
+    return 1;
+}
+
+static int pkg_mkdir_recursive(const char* path) {
+    if (!path || !path[0]) return -1;
+
+    char work[PKG_INSTALL_PATH_CAP];
+    int needed = snprintf(work, sizeof(work), "%s", path);
+    if (needed <= 0 || needed >= (int)sizeof(work)) return -1;
+
+    size_t len = strlen(work);
+    while (len > 1 && work[len - 1] == '/') {
+        work[len - 1] = '\0';
+        len--;
+    }
+
+    for (size_t i = 1; work[i]; i++) {
+        if (work[i] != '/') continue;
+        work[i] = '\0';
+        if (mkdir(work, 0) != 0 && !pkg_path_is_directory(work)) {
+            work[i] = '/';
+            return -1;
+        }
+        work[i] = '/';
+    }
+
+    if (mkdir(work, 0) != 0 && !pkg_path_is_directory(work)) return -1;
+    return 0;
 }
 
 static int pkg_parse_ipv4_str(const char* s, uint8_t out[4]) {
@@ -307,6 +438,7 @@ static int pkg_http_get_stream(const char* url,
     int chunk_done = 0;
 
     size_t total_written = 0;
+    int idle_recv_polls = 0;
 
     for (;;) {
         uint8_t rx_buf[PKG_HTTP_RECV_BUF];
@@ -320,9 +452,17 @@ static int pkg_http_get_stream(const char* url,
         }
 
         if (rc == 0) {
+            idle_recv_polls++;
+            if (idle_recv_polls >= PKG_HTTP_IDLE_RECV_LIMIT) {
+                puts("install: HTTP receive timeout");
+                (void)eyn_sys_net_tcp_close();
+                return -1;
+            }
             usleep(10000);
             continue;
         }
+
+        idle_recv_polls = 0;
 
         if (!header_done) {
             if (header_len + (size_t)rc >= sizeof(header)) {
@@ -339,7 +479,7 @@ static int pkg_http_get_stream(const char* url,
             if (!marker) continue;
 
             size_t header_end = (size_t)(marker - header) + 4;
-            header[header_end] = '\0';
+            *marker = '\0';
             header_done = 1;
 
             status = pkg_parse_status_code(header);
@@ -722,10 +862,85 @@ static int pkg_install_sink_write(const uint8_t* data, size_t len, void* ctx) {
     return 0;
 }
 
-static int pkg_build_install_path(const char* name, char out_path[PKG_INSTALL_PATH_CAP]) {
-    if (!name || !out_path || !name[0]) return -1;
+static int pkg_get_install_dir(const Package* pkg, char out_dir[PKG_INSTALL_PATH_CAP]) {
+    if (!pkg || !out_dir) return -1;
 
-    int needed = snprintf(out_path, PKG_INSTALL_PATH_CAP, "/binaries/%s", name);
+    const char* raw = pkg->install_dir[0] ? pkg->install_dir : "/binaries";
+    int needed = snprintf(out_dir, PKG_INSTALL_PATH_CAP, "%s", raw);
+    if (needed <= 0 || needed >= PKG_INSTALL_PATH_CAP) return -1;
+
+    size_t len = strlen(out_dir);
+    while (len > 1 && out_dir[len - 1] == '/') {
+        out_dir[len - 1] = '\0';
+        len--;
+    }
+
+    if (!pkg_install_dir_is_valid(out_dir)) return -1;
+    return 0;
+}
+
+static int pkg_get_install_name(const Package* pkg, char out_name[MAX_NAME]) {
+    if (!pkg || !out_name) return -1;
+
+    const char* raw = pkg->install_name[0] ? pkg->install_name : pkg->name;
+    int needed = snprintf(out_name, MAX_NAME, "%s", raw);
+    if (needed <= 0 || needed >= MAX_NAME) return -1;
+    if (!pkg_install_name_is_valid(out_name)) return -1;
+    return 0;
+}
+
+static int pkg_prepare_install_dir(const Package* pkg,
+                                   const char* install_dir) {
+    if (!pkg || !install_dir || !install_dir[0]) return -1;
+
+    if (!pkg_is_first_level_dir(install_dir)) {
+        char warning[200];
+        int needed = snprintf(warning,
+                              sizeof(warning),
+                              "target directory '%s' is not first-level",
+                              install_dir);
+        if (needed <= 0 || needed >= (int)sizeof(warning)) return -1;
+        if (!pkg_prompt_confirm(warning)) {
+            puts("install: cancelled by user");
+            return -1;
+        }
+    }
+
+    if (pkg_path_exists(install_dir) && !pkg_path_is_directory(install_dir)) {
+        printf("install: target path is not a directory: %s\n", install_dir);
+        return -1;
+    }
+
+    if (!pkg_path_is_directory(install_dir)) {
+        char warning[220];
+        int needed = snprintf(warning,
+                              sizeof(warning),
+                              "target directory '%s' does not exist and will be created",
+                              install_dir);
+        if (needed <= 0 || needed >= (int)sizeof(warning)) return -1;
+        if (!pkg_prompt_confirm(warning)) {
+            puts("install: cancelled by user");
+            return -1;
+        }
+        if (pkg_mkdir_recursive(install_dir) != 0) {
+            printf("install: failed to create install directory: %s\n", install_dir);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int pkg_build_install_path(const Package* pkg,
+                                  char out_path[PKG_INSTALL_PATH_CAP]) {
+    if (!pkg || !out_path) return -1;
+
+    char install_dir[PKG_INSTALL_PATH_CAP];
+    char install_name[MAX_NAME];
+    if (pkg_get_install_dir(pkg, install_dir) != 0) return -1;
+    if (pkg_get_install_name(pkg, install_name) != 0) return -1;
+
+    int needed = snprintf(out_path, PKG_INSTALL_PATH_CAP, "%s/%s", install_dir, install_name);
     if (needed <= 0 || needed >= PKG_INSTALL_PATH_CAP) return -1;
     return 0;
 }
@@ -736,6 +951,8 @@ static int pkg_records_equal(const Package* left, const Package* right) {
     if (strcmp(left->version, right->version) != 0) return 0;
     if (strcmp(left->url, right->url) != 0) return 0;
     if (strcmp(left->sha256, right->sha256) != 0) return 0;
+    if (strcmp(left->install_dir, right->install_dir) != 0) return 0;
+    if (strcmp(left->install_name, right->install_name) != 0) return 0;
     return 1;
 }
 
@@ -766,6 +983,37 @@ static int pkg_path_exists(const char* path) {
     if (fd < 0) return 0;
     close(fd);
     return 1;
+}
+
+static int pkg_build_cache_archive_name(const Package* pkg,
+                                        char out_name[PKG_INSTALL_PATH_CAP]) {
+    if (!pkg || !out_name || !pkg->name[0]) return -1;
+
+    int needed = snprintf(out_name,
+                          PKG_INSTALL_PATH_CAP,
+                          "%s.pkg",
+                          pkg->name);
+    if (needed <= 0 || needed >= PKG_INSTALL_PATH_CAP) return -1;
+    if (needed > PKG_EYNFS_MAX_NAME_CHARS) return -1;
+    return 0;
+}
+
+static int pkg_build_cached_archive_path(const Package* pkg,
+                                         char out_path[PKG_TEMP_PATH_CAP]) {
+    if (!pkg || !out_path) return -1;
+
+    char archive_name[PKG_INSTALL_PATH_CAP];
+    if (pkg_build_cache_archive_name(pkg, archive_name) != 0) {
+        return -1;
+    }
+
+    int needed = snprintf(out_path,
+                          PKG_TEMP_PATH_CAP,
+                          "%s/%s",
+                          PKG_LOCAL_PACKAGE_CACHE_DIR,
+                          archive_name);
+    if (needed <= 0 || needed >= PKG_TEMP_PATH_CAP) return -1;
+    return 0;
 }
 
 static int pkg_ensure_dir_exists(const char* path) {
@@ -811,8 +1059,88 @@ static int pkg_measure_file_size(const char* path, size_t* out_size) {
     return 0;
 }
 
+static int pkg_copy_file_to_path(const char* src_path, const char* dst_path) {
+    if (!src_path || !dst_path) return -1;
+
+    int src_fd = open(src_path, O_RDONLY, 0);
+    if (src_fd < 0) return -1;
+
+    int stream_handle = eynfs_stream_begin(dst_path);
+    if (stream_handle < 0) {
+        close(src_fd);
+        return -1;
+    }
+
+    uint8_t buf[PKG_IO_CHUNK];
+    for (;;) {
+        ssize_t rd = read(src_fd, buf, sizeof(buf));
+        if (rd < 0) {
+            (void)close(src_fd);
+            (void)eynfs_stream_end(stream_handle);
+            (void)unlink(dst_path);
+            return -1;
+        }
+        if (rd == 0) break;
+
+        if (eynfs_stream_write(stream_handle, buf, (size_t)rd) != rd) {
+            (void)close(src_fd);
+            (void)eynfs_stream_end(stream_handle);
+            (void)unlink(dst_path);
+            return -1;
+        }
+    }
+
+    (void)close(src_fd);
+
+    if (eynfs_stream_end(stream_handle) != 0) {
+        (void)unlink(dst_path);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int pkg_build_media_archive_path(const Package* pkg,
+                                        char out_path[PKG_TEMP_PATH_CAP]) {
+    if (!pkg || !out_path) return -1;
+
+    char archive_name[PKG_INSTALL_PATH_CAP];
+    if (pkg_build_cache_archive_name(pkg, archive_name) != 0) {
+        return -1;
+    }
+
+    int needed = snprintf(out_path,
+                          PKG_TEMP_PATH_CAP,
+                          "%s/%s",
+                          PKG_INSTALLER_MEDIA_PACKAGE_CACHE_DIR,
+                          archive_name);
+    if (needed <= 0 || needed >= PKG_TEMP_PATH_CAP) return -1;
+    return 0;
+}
+
+static int pkg_extract_archive_embedded(const char* archive_path, const char* dest_dir) {
+    if (!archive_path || !dest_dir) return -1;
+
+    char* embedded_argv[3];
+    embedded_argv[0] = (char*)"extract";
+    embedded_argv[1] = (char*)archive_path;
+    embedded_argv[2] = (char*)dest_dir;
+
+    int embedded_rc = install_embedded_extract_main(3, embedded_argv);
+    if (embedded_rc != 0) {
+        printf("install: embedded extract failed (status=%d)\n", embedded_rc);
+        return -1;
+    }
+
+    return 0;
+}
+
 static int pkg_extract_archive(const char* archive_path, const char* dest_dir) {
     if (!archive_path || !dest_dir) return -1;
+
+#ifdef PKG_EXTRACT_EMBEDDED_ONLY
+    return pkg_extract_archive_embedded(archive_path, dest_dir);
+#endif
 
     const char* argv_local[2];
     argv_local[0] = archive_path;
@@ -822,9 +1150,9 @@ static int pkg_extract_archive(const char* archive_path, const char* dest_dir) {
     if (pid <= 0) {
         pid = spawn("extract", argv_local, 2);
     }
+
     if (pid <= 0) {
-        puts("install: failed to launch extract command");
-        return -1;
+        return pkg_extract_archive_embedded(archive_path, dest_dir);
     }
 
     int status = 0;
@@ -891,6 +1219,145 @@ static int pkg_download_verified_to_path(const Package* pkg,
     return 0;
 }
 
+static int pkg_sha256_file_hex(const char* path, char out_hex[MAX_SHA]) {
+    if (!path || !out_hex) return -1;
+
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0) return -1;
+
+    pkg_sha256_ctx_t sha;
+    pkg_sha256_init(&sha);
+
+    uint8_t buf[PKG_IO_CHUNK];
+    for (;;) {
+        ssize_t rd = read(fd, buf, sizeof(buf));
+        if (rd < 0) {
+            close(fd);
+            return -1;
+        }
+        if (rd == 0) break;
+
+        pkg_sha256_update(&sha, buf, (size_t)rd);
+    }
+
+    close(fd);
+
+    uint8_t digest[PKG_SHA256_DIGEST_SIZE];
+    pkg_sha256_final(&sha, digest);
+    pkg_sha256_hex(digest, out_hex);
+    return 0;
+}
+
+static int pkg_try_seed_local_cache_from_base_archive(void) {
+    static int seed_attempted = 0;
+    if (seed_attempted) return 0;
+    seed_attempted = 1;
+
+    if (!pkg_path_exists(PKG_LOCAL_BASE_ARCHIVE)) {
+        return 0;
+    }
+
+    if (pkg_ensure_dir_exists(PKG_LOCAL_CACHE_ROOT) != 0
+        || pkg_ensure_dir_exists(PKG_LOCAL_PACKAGE_CACHE_DIR) != 0) {
+        puts("install: failed to prepare local cache directories");
+        return 0;
+    }
+
+    puts("install: unpacking local base cache ...");
+    if (pkg_extract_archive(PKG_LOCAL_BASE_ARCHIVE, PKG_LOCAL_PACKAGE_CACHE_DIR) != 0) {
+        puts("install: failed to unpack local base cache; falling back to per-package media cache");
+        return 0;
+    }
+
+    return 0;
+}
+
+static int pkg_try_seed_archive_from_installer_media(const Package* pkg,
+                                                     const char* cache_archive_path) {
+    if (!pkg || !cache_archive_path) return -1;
+
+    char media_archive_path[PKG_TEMP_PATH_CAP];
+    if (pkg_build_media_archive_path(pkg, media_archive_path) != 0) {
+        return 1;
+    }
+
+    if (!pkg_path_exists(media_archive_path)) {
+        return 1;
+    }
+
+    if (pkg_ensure_dir_exists(PKG_LOCAL_CACHE_ROOT) != 0
+        || pkg_ensure_dir_exists(PKG_LOCAL_PACKAGE_CACHE_DIR) != 0) {
+        printf("install: failed to prepare cache for %s\n", pkg->name);
+        return 1;
+    }
+
+    if (pkg_copy_file_to_path(media_archive_path, cache_archive_path) != 0) {
+        printf("install: failed to seed %s from installer media\n", pkg->name);
+        return 1;
+    }
+
+    printf("install: seeded cached archive for %s from installer media\n", pkg->name);
+    return 0;
+}
+
+static int pkg_try_install_from_local_cache(const Package* pkg,
+                                            const char* out_path,
+                                            const char* install_dir,
+                                            size_t* out_bytes) {
+    if (!pkg || !out_path || !install_dir) return -1;
+
+    int installer_media_pkg_cache_available =
+        pkg_path_exists(PKG_INSTALLER_MEDIA_PACKAGE_CACHE_DIR);
+
+    char cache_archive_path[PKG_TEMP_PATH_CAP];
+    if (pkg_build_cached_archive_path(pkg, cache_archive_path) != 0) {
+        return 1;
+    }
+
+    if (!pkg_path_exists(cache_archive_path)) {
+        (void)pkg_try_seed_archive_from_installer_media(pkg, cache_archive_path);
+    }
+
+    if (!pkg_path_exists(cache_archive_path)) {
+        if (!installer_media_pkg_cache_available) {
+            (void)pkg_try_seed_local_cache_from_base_archive();
+        }
+    }
+
+    if (!pkg_path_exists(cache_archive_path)) {
+        return 1;
+    }
+
+    char digest_hex[MAX_SHA];
+    if (pkg_sha256_file_hex(cache_archive_path, digest_hex) != 0) {
+        printf("install: failed to hash cached archive for %s\n", pkg->name);
+        return 1;
+    }
+
+    if (!pkg_sha256_match_ci(pkg->sha256, digest_hex)) {
+        printf("install: cached archive checksum mismatch for %s; using network\n", pkg->name);
+        return 1;
+    }
+
+    if (pkg_extract_archive(cache_archive_path, install_dir) != 0) {
+        printf("install: cached archive extraction failed for %s; using network\n", pkg->name);
+        return 1;
+    }
+
+    if (!pkg_path_exists(out_path)) {
+        printf("install: cached archive missing payload for %s; using network\n", pkg->name);
+        return 1;
+    }
+
+    if (pkg_measure_file_size(out_path, out_bytes) != 0) {
+        printf("install: failed to inspect cached payload for %s\n", pkg->name);
+        return -1;
+    }
+
+    printf("install: using cached package for %s\n", pkg->name);
+    return 0;
+}
+
 int install_package(const struct PackageIndex* index, const Package* pkg) {
     if (!index || !pkg || !pkg->name[0]) return -1;
 
@@ -911,13 +1378,30 @@ int install_package(const struct PackageIndex* index, const Package* pkg) {
     }
 
     char out_path[PKG_INSTALL_PATH_CAP];
-    if (pkg_build_install_path(pkg->name, out_path) != 0) {
+    char install_dir[PKG_INSTALL_PATH_CAP];
+    char install_name[MAX_NAME];
+    if (pkg_get_install_dir(pkg, install_dir) != 0
+        || pkg_get_install_name(pkg, install_name) != 0
+        || pkg_build_install_path(pkg, out_path) != 0) {
         printf("install: output path too long for %s\n", pkg->name);
+        return -1;
+    }
+
+    if (pkg_prepare_install_dir(pkg, install_dir) != 0) {
         return -1;
     }
 
     size_t installed_bytes = 0;
     if (pkg_url_is_archive(pkg->url)) {
+        int cache_rc = pkg_try_install_from_local_cache(pkg, out_path, install_dir, &installed_bytes);
+        if (cache_rc == 0) {
+            printf("install: installed %s@%s (%lu bytes)\n",
+                   pkg->name,
+                   pkg->version,
+                   (unsigned long)installed_bytes);
+            return 0;
+        }
+
         char archive_path[PKG_TEMP_PATH_CAP];
 
         if (pkg_build_temp_archive_path(pkg->name, archive_path) != 0) {
@@ -925,7 +1409,7 @@ int install_package(const struct PackageIndex* index, const Package* pkg) {
             return -1;
         }
 
-        if (pkg_ensure_dir_exists("/tmp") != 0 || pkg_ensure_dir_exists("/binaries") != 0) {
+        if (pkg_ensure_dir_exists("/tmp") != 0 || pkg_ensure_dir_exists(install_dir) != 0) {
             puts("install: failed to prepare temporary install directory");
             return -1;
         }
@@ -935,15 +1419,33 @@ int install_package(const struct PackageIndex* index, const Package* pkg) {
             return -1;
         }
 
-        if (pkg_extract_archive(archive_path, "/binaries") != 0) {
+        if (pkg_extract_archive(archive_path, install_dir) != 0) {
             (void)unlink(archive_path);
             printf("install: extraction failed for %s\n", pkg->name);
             return -1;
         }
 
         if (!pkg_path_exists(out_path)) {
+            if (strcmp(install_name, pkg->name) != 0) {
+                char legacy_path[PKG_INSTALL_PATH_CAP];
+                int legacy_needed = snprintf(legacy_path,
+                                             PKG_INSTALL_PATH_CAP,
+                                             "%s/%s",
+                                             install_dir,
+                                             pkg->name);
+                if (legacy_needed > 0
+                    && legacy_needed < PKG_INSTALL_PATH_CAP
+                    && pkg_path_exists(legacy_path)
+                    && pkg_copy_file_to_path(legacy_path, out_path) == 0) {
+                    (void)unlink(legacy_path);
+                }
+            }
+        }
+
+        if (!pkg_path_exists(out_path)) {
             (void)unlink(archive_path);
             printf("install: no extracted payload found for %s\n", pkg->name);
+            printf("install: package archive did not provide %s/%s\n", install_dir, install_name);
             return -1;
         }
 

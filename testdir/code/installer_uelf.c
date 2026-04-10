@@ -9,6 +9,10 @@
 #include <eynos_cmdmeta.h>
 #include <eynos_syscall.h>
 
+#include "../../install/index.h"
+#include "../../install/package.h"
+#include "../../install/resolve.h"
+
 EYN_CMDMETA_V1("EYN-OS graphical installer.", "installer");
 
 #define MAX_DRIVES 8
@@ -20,15 +24,33 @@ EYN_CMDMETA_V1("EYN-OS graphical installer.", "installer");
  * multi-block reads that are more failure-prone in installer mode.
  */
 #define COPY_BUF_SZ 256
-#define MAX_PATH_LEN 256
 #define MAX_STATUS 128
 
-#define PAYLOAD_MAGIC "EYNPKG1\0"
-#define PAYLOAD_MAGIC_LEGACY "EYNPKG1"
-#define PAYLOAD_TYPE_FILE 1u
-#define PAYLOAD_TYPE_DIR 2u
-#define PAYLOAD_FLAG_RLE 1u
-#define PAYLOAD_DIR_PROGRESS_UNITS 1024u
+#define INSTALL_CACHE_ROOT "/cache"
+#define INSTALL_CACHE_INDEX "/cache/index.json"
+#define INSTALL_CACHE_BASE_ARCHIVE "/cache/base.pkg"
+#define INSTALL_CACHE_MANIFEST "/cache/base.manifest"
+#define INSTALL_CACHE_PACKAGE_DIR "/cache/pkg"
+
+#define INSTALLER_MEDIA_INSTALL "RAM:/binaries/install"
+#define INSTALLER_MEDIA_EXTRACT "RAM:/binaries/extract"
+#define INSTALLER_MEDIA_INSTALLER "RAM:/binaries/installer"
+#define INSTALLER_MEDIA_INDEX "RAM:/installer/index.json"
+#define INSTALLER_MEDIA_BASE_ARCHIVE "RAM:/installer/base.pkg"
+#define INSTALLER_MEDIA_BASE_MANIFEST "RAM:/installer/base.manifest"
+#define INSTALLER_MEDIA_ETC_RESOLV "RAM:/etc/resolv.conf"
+#define INSTALLER_MEDIA_CONFIG_DIR "RAM:/config"
+#define INSTALLER_MEDIA_ICONS_DIR "RAM:/icons"
+#define INSTALLER_MEDIA_ICONS16_DIR "RAM:/icons16"
+#define INSTALLER_MEDIA_VIEW_DIR "RAM:/.view"
+#define INSTALLER_MEDIA_FONTS_DIR "RAM:/fonts"
+#define INSTALLER_MEDIA_CHIBICC "RAM:/programs/chibicc"
+
+#define INSTALLER_MAX_MANIFEST_PACKAGES 256
+#define INSTALLER_MAX_PACKAGE_NAME 64
+#define INSTALLER_MAX_FONT_FILES 64
+#define INSTALLER_MAX_FONT_NAME 64
+#define INSTALLER_OPTION_VISIBLE_ROWS 10
 
 /*
  * ABI-INVARIANT: Raw on-disk LBA used for installer-written kernel payload.
@@ -43,11 +65,12 @@ EYN_CMDMETA_V1("EYN-OS graphical installer.", "installer");
 typedef enum {
     STEP_WELCOME = 0,
     STEP_SELECT_DRIVE = 1,
-    STEP_FORMAT = 2,
-    STEP_COPY = 3,
-    STEP_BOOTLOADER = 4,
-    STEP_DONE = 5,
-    STEP_ERROR = 6,
+    STEP_OPTIONS = 2,
+    STEP_FORMAT = 3,
+    STEP_COPY = 4,
+    STEP_BOOTLOADER = 5,
+    STEP_DONE = 6,
+    STEP_ERROR = 7,
 } installer_step_t;
 
 typedef struct {
@@ -55,6 +78,22 @@ typedef struct {
     int drives[MAX_DRIVES];
     int selected_idx;
     int selected_drive;
+
+    int options_loaded;
+    int option_cursor;
+    int option_scroll;
+
+    int package_count;
+    char packages[INSTALLER_MAX_MANIFEST_PACKAGES][INSTALLER_MAX_PACKAGE_NAME];
+    unsigned char package_selected[INSTALLER_MAX_MANIFEST_PACKAGES];
+
+    int font_count;
+    char fonts[INSTALLER_MAX_FONT_FILES][INSTALLER_MAX_FONT_NAME];
+    unsigned char font_selected[INSTALLER_MAX_FONT_FILES];
+
+    int include_icons;
+    int include_fonts;
+    int include_chibicc;
 
     installer_step_t step;
     int running;
@@ -64,19 +103,18 @@ typedef struct {
     int progress_permille;
     int progress_total;
     int progress_done;
-    int progress_uses_work_units;
-    uint32_t progress_work_total;
-    uint32_t progress_work_done;
     char status[MAX_STATUS];
     char current_item[160];
-    char warning[MAX_STATUS];
     char error[MAX_STATUS];
 } installer_t;
 
 static int g_installer_gui_handle = -1;
 static int g_gui_draw_failures = 0;
 static void draw_ui(int h, installer_t* s);
-static int read_exact_fd(int fd, void* buf, int len);
+static int path_is_directory(const char* path);
+static int read_manifest_packages(const char* manifest_path,
+                                  char out_pkgs[INSTALLER_MAX_MANIFEST_PACKAGES][INSTALLER_MAX_PACKAGE_NAME],
+                                  int* out_count);
 
 static int gui_call_ok(int rc, const char* what, installer_t* s) {
     if (rc >= 0) return 1;
@@ -106,21 +144,6 @@ static void progress_reset(installer_t* s, int total) {
     if (!s) return;
     s->progress_total = (total > 0) ? total : 0;
     s->progress_done = 0;
-    s->progress_uses_work_units = 0;
-    s->progress_work_total = 0;
-    s->progress_work_done = 0;
-    s->progress_permille = 0;
-    s->current_item[0] = '\0';
-    installer_ui_pulse(s);
-}
-
-static void progress_work_reset(installer_t* s, uint32_t total_work) {
-    if (!s) return;
-    s->progress_total = 0;
-    s->progress_done = 0;
-    s->progress_uses_work_units = 1;
-    s->progress_work_total = (total_work > 0u) ? total_work : 1u;
-    s->progress_work_done = 0;
     s->progress_permille = 0;
     s->current_item[0] = '\0';
     installer_ui_pulse(s);
@@ -150,17 +173,6 @@ static void progress_note_item(installer_t* s, const char* item) {
 
 static void progress_set_fraction(installer_t* s, uint32_t entry_done, uint32_t entry_total) {
     if (!s) return;
-    if (s->progress_uses_work_units) {
-        if (s->progress_work_total == 0u || entry_total == 0u) return;
-        if (entry_done > entry_total) entry_done = entry_total;
-
-        uint32_t in_flight = s->progress_work_done + entry_done;
-        if (in_flight > s->progress_work_total) in_flight = s->progress_work_total;
-        s->progress_permille = clamp_permille((int)((in_flight * 1000u) / s->progress_work_total));
-        installer_ui_pulse(s);
-        return;
-    }
-
     if (s->progress_total <= 0) return;
     if (entry_total == 0u) return;
 
@@ -176,16 +188,6 @@ static void progress_set_fraction(installer_t* s, uint32_t entry_done, uint32_t 
     if (combined > s->progress_permille) {
         s->progress_permille = combined;
     }
-    installer_ui_pulse(s);
-}
-
-static void progress_work_advance(installer_t* s, uint32_t work_done) {
-    if (!s || !s->progress_uses_work_units) return;
-    s->progress_work_done += work_done;
-    if (s->progress_work_done > s->progress_work_total) {
-        s->progress_work_done = s->progress_work_total;
-    }
-    s->progress_permille = clamp_permille((int)((s->progress_work_done * 1000u) / s->progress_work_total));
     installer_ui_pulse(s);
 }
 
@@ -227,146 +229,6 @@ static void error_set_path_code(installer_t* s, const char* prefix, const char* 
     printf("[installer] error: %s\n", s->error);
     s->step = STEP_ERROR;
     installer_ui_pulse(s);
-}
-
-static int path_join(const char* base, const char* name, char* out, int out_cap) {
-    if (!base || !name || !out || out_cap <= 0) return -1;
-    if (strcmp(base, "/") == 0) {
-        int n = snprintf(out, (size_t)out_cap, "/%s", name);
-        return (n > 0 && n < out_cap) ? 0 : -1;
-    }
-    int n = snprintf(out, (size_t)out_cap, "%s/%s", base, name);
-    return (n > 0 && n < out_cap) ? 0 : -1;
-}
-
-static int source_join(const char* rel, char* out, int out_cap) {
-    if (!rel || !out || out_cap <= 0) return -1;
-    if (strcmp(rel, "/") == 0) {
-        int n = snprintf(out, (size_t)out_cap, "RAM:/");
-        return (n > 0 && n < out_cap) ? 0 : -1;
-    }
-    int n = snprintf(out, (size_t)out_cap, "RAM:%s", rel);
-    return (n > 0 && n < out_cap) ? 0 : -1;
-}
-
-static int count_tree_from_ram(const char* rel_src, int* out_entries) {
-    if (!rel_src || !out_entries) return -1;
-
-    char src_path[MAX_PATH_LEN];
-    if (source_join(rel_src, src_path, sizeof(src_path)) != 0) return -1;
-
-    int dfd = open(src_path, O_RDONLY, 0);
-    if (dfd < 0) return -1;
-
-    int total = 0;
-    eyn_dirent_t entries[12];
-    for (;;) {
-        int bytes = getdents(dfd, entries, sizeof(entries));
-        if (bytes < 0) {
-            close(dfd);
-            return -1;
-        }
-        if (bytes == 0) break;
-
-        int count = bytes / (int)sizeof(eyn_dirent_t);
-        for (int i = 0; i < count; ++i) {
-            const char* name = entries[i].name;
-            if (!name[0]) continue;
-            if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
-            total++;
-            if (entries[i].is_dir) {
-                char child_rel[MAX_PATH_LEN];
-                if (path_join(rel_src, name, child_rel, sizeof(child_rel)) != 0) {
-                    close(dfd);
-                    return -1;
-                }
-                int sub = 0;
-                if (count_tree_from_ram(child_rel, &sub) != 0) {
-                    close(dfd);
-                    return -1;
-                }
-                total += sub;
-            }
-        }
-    }
-
-    close(dfd);
-    *out_entries = total;
-    return 0;
-}
-
-static int payload_count_entries(const char* payload_path, int* out_entries, uint32_t* out_work_units) {
-    if (!payload_path || !out_entries || !out_work_units) return -1;
-    int fd = open(payload_path, O_RDONLY, 0);
-    if (fd < 0) return -1;
-
-    char first16[16];
-    if (read_exact_fd(fd, first16, (int)sizeof(first16)) != 0) {
-        close(fd);
-        return -1;
-    }
-
-    int pos = -1;
-    if (memcmp(first16, PAYLOAD_MAGIC, 8) == 0) pos = 8;
-    else if (memcmp(first16, PAYLOAD_MAGIC_LEGACY, 7) == 0) pos = 7;
-    else {
-        for (int i = 0; i <= 9; ++i) {
-            if (memcmp(first16 + i, PAYLOAD_MAGIC_LEGACY, 7) == 0) {
-                pos = i + 7;
-                break;
-            }
-        }
-    }
-    if (pos < 0) {
-        close(fd);
-        return -1;
-    }
-
-    uint8_t hdr[12];
-    int count = 0;
-    uint32_t total_work = 0;
-
-    while (1) {
-        int have = (int)sizeof(first16) - pos;
-        if (have < 0) have = 0;
-        if (have > (int)sizeof(hdr)) have = (int)sizeof(hdr);
-        if (have > 0) memcpy(hdr, first16 + pos, (size_t)have);
-        if (have < (int)sizeof(hdr)) {
-            if (read_exact_fd(fd, hdr + have, (int)sizeof(hdr) - have) != 0) {
-                close(fd);
-                return -1;
-            }
-        }
-
-        pos = (int)sizeof(first16);
-
-        uint16_t path_len = (uint16_t)hdr[0] | ((uint16_t)hdr[1] << 8);
-        uint8_t etype = hdr[2];
-        uint32_t orig_size = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) |
-                     ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
-        uint32_t stored_size = (uint32_t)hdr[8] | ((uint32_t)hdr[9] << 8) |
-                               ((uint32_t)hdr[10] << 16) | ((uint32_t)hdr[11] << 24);
-
-        if (path_len == 0 && etype == 0) break;
-        count++;
-
-        if (etype == PAYLOAD_TYPE_FILE) {
-            uint32_t file_work = (stored_size > 0u) ? stored_size : ((orig_size > 0u) ? orig_size : 1u);
-            total_work += file_work;
-        } else if (etype == PAYLOAD_TYPE_DIR) {
-            total_work += PAYLOAD_DIR_PROGRESS_UNITS;
-        }
-
-        if (lseek(fd, (long)path_len + (long)stored_size, SEEK_CUR) < 0) {
-            close(fd);
-            return -1;
-        }
-    }
-
-    close(fd);
-    *out_entries = count;
-    *out_work_units = (total_work > 0u) ? total_work : (uint32_t)count;
-    return 0;
 }
 
 static int copy_file_stream_with_ui(installer_t* s, const char* src_ram_path, const char* dst_abs_path) {
@@ -465,379 +327,664 @@ static int installer_ram_preflight(installer_t* s) {
         return -1;
     }
     close(fd);
+
+    fd = open(INSTALLER_MEDIA_INSTALL, O_RDONLY, 0);
+    if (fd < 0) {
+        error_set(s, "RAM:/binaries/install missing");
+        return -1;
+    }
+    close(fd);
+
+    fd = open(INSTALLER_MEDIA_EXTRACT, O_RDONLY, 0);
+    if (fd < 0) {
+        error_set(s, "RAM:/binaries/extract missing");
+        return -1;
+    }
+    close(fd);
+
+    fd = open(INSTALLER_MEDIA_BASE_MANIFEST, O_RDONLY, 0);
+    if (fd < 0) {
+        error_set(s, "RAM:/installer/base.manifest missing");
+        return -1;
+    }
+    close(fd);
+
+    fd = open(INSTALLER_MEDIA_ETC_RESOLV, O_RDONLY, 0);
+    if (fd < 0) {
+        error_set(s, "RAM:/etc/resolv.conf missing");
+        return -1;
+    }
+    close(fd);
+
+    if (!path_is_directory(INSTALLER_MEDIA_CONFIG_DIR)) {
+        error_set(s, "RAM:/config missing");
+        return -1;
+    }
+
+    if (!path_is_directory(INSTALLER_MEDIA_VIEW_DIR)) {
+        error_set(s, "RAM:/.view missing");
+        return -1;
+    }
+
     return 0;
 }
 
-static int copy_tree_from_ram(installer_t* s, const char* rel_src, const char* dst_abs) {
-    char src_path[MAX_PATH_LEN];
-    if (source_join(rel_src, src_path, sizeof(src_path)) != 0) {
-        error_set_path(s, "Path too long", rel_src);
-        return -1;
+static int path_exists(const char* path) {
+    if (!path || !path[0]) return 0;
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0) return 0;
+    close(fd);
+    return 1;
+}
+
+static int path_is_directory(const char* path) {
+    if (!path || !path[0]) return 0;
+
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0) return 0;
+
+    eyn_dirent_t entries[1];
+    int rc = getdents(fd, entries, sizeof(entries));
+    close(fd);
+    return rc >= 0;
+}
+
+static int ensure_target_directory(const char* path) {
+    if (!path || path[0] != '/') return -1;
+
+    char work[256];
+    int needed = snprintf(work, sizeof(work), "%s", path);
+    if (needed <= 0 || needed >= (int)sizeof(work)) return -1;
+
+    size_t len = strlen(work);
+    while (len > 1 && work[len - 1] == '/') {
+        work[len - 1] = '\0';
+        len--;
     }
 
-    int dfd = open(src_path, O_RDONLY, 0);
-    if (dfd < 0) {
-        error_set_path(s, "Failed opening RAM source", src_path);
-        return -1;
+    for (size_t i = 1; work[i]; i++) {
+        if (work[i] != '/') continue;
+        work[i] = '\0';
+        if (mkdir(work, 0) != 0 && !path_is_directory(work)) {
+            work[i] = '/';
+            return -1;
+        }
+        work[i] = '/';
     }
 
-    eyn_dirent_t entries[12];
+    if (mkdir(work, 0) != 0 && !path_is_directory(work)) return -1;
+    return 0;
+}
+
+static int join_path2(const char* base, const char* leaf, char* out, size_t out_cap) {
+    if (!base || !leaf || !out || out_cap == 0) return -1;
+
+    size_t base_len = strlen(base);
+    int needs_sep = (base_len > 0 && base[base_len - 1] != '/');
+    int needed = snprintf(out,
+                          out_cap,
+                          needs_sep ? "%s/%s" : "%s%s",
+                          base,
+                          leaf);
+    if (needed <= 0 || needed >= (int)out_cap) return -1;
+    return 0;
+}
+
+static int read_directory_file_names(const char* dir_path,
+                                     char out_names[INSTALLER_MAX_FONT_FILES][INSTALLER_MAX_FONT_NAME],
+                                     int max_count,
+                                     int* out_count) {
+    if (!dir_path || !out_names || !out_count || max_count <= 0) return -1;
+
+    int fd = open(dir_path, O_RDONLY, 0);
+    if (fd < 0) {
+        *out_count = 0;
+        return -2;
+    }
+
+    int count = 0;
     for (;;) {
-        int bytes = getdents(dfd, entries, sizeof(entries));
+        eyn_dirent_t entries[16];
+        int bytes = getdents(fd, entries, sizeof(entries));
         if (bytes < 0) {
-            close(dfd);
-            error_set_path(s, "Failed listing directory", src_path);
+            close(fd);
             return -1;
         }
         if (bytes == 0) break;
 
-        int count = bytes / (int)sizeof(eyn_dirent_t);
-        for (int i = 0; i < count; ++i) {
+        int entry_count = bytes / (int)sizeof(eyn_dirent_t);
+        for (int i = 0; i < entry_count; i++) {
             const char* name = entries[i].name;
-            if (!name[0]) continue;
+            if (!name || !name[0]) continue;
             if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+            if (entries[i].is_dir) continue;
 
-            char child_rel[MAX_PATH_LEN];
-            char child_dst[MAX_PATH_LEN];
-            char child_src_ram[MAX_PATH_LEN];
-
-            if (path_join(rel_src, name, child_rel, sizeof(child_rel)) != 0) {
-                close(dfd);
-                error_set_path(s, "Path too long", name);
-                return -1;
-            }
-            if (path_join(dst_abs, name, child_dst, sizeof(child_dst)) != 0) {
-                close(dfd);
-                error_set_path(s, "Target path too long", name);
-                return -1;
-            }
-            if (source_join(child_rel, child_src_ram, sizeof(child_src_ram)) != 0) {
-                close(dfd);
-                error_set_path(s, "Source path too long", child_rel);
+            if (count >= max_count) {
+                close(fd);
                 return -1;
             }
 
-            if (entries[i].is_dir) {
-                (void)mkdir(child_dst, 0);
-                s->copied_dirs++;
-                {
-                    char item[160];
-                    snprintf(item, sizeof(item), "Creating dir: %s", child_dst);
-                    progress_step(s, item);
-                }
-                if (copy_tree_from_ram(s, child_rel, child_dst) != 0) {
-                    close(dfd);
-                    return -1;
-                }
-            } else {
-                {
-                    char item[160];
-                    snprintf(item, sizeof(item), "Copying file: %s", child_dst);
-                    progress_note_item(s, item);
-                }
-                int cfr = copy_file_stream_with_ui(s, child_src_ram, child_dst);
-                if (cfr != 0) {
-                    close(dfd);
-                    if (cfr == -10) error_set_path(s, "Copy source open failed", child_src_ram);
-                    else if (cfr == -30) error_set_path(s, "Copy source read failed", child_src_ram);
-                    else if (cfr == -40) error_set_path(s, "Copy target write failed", child_dst);
-                    else if (cfr == -50) error_set_path(s, "Copy source close failed", child_src_ram);
-                    else if (cfr == -60) error_set_path(s, "Copy finalize failed", child_dst);
-                    else if (cfr < 0) error_set_path_code(s, "Copy target create failed", child_dst, cfr);
-                    else error_set_path(s, "Copy failed", child_src_ram);
-                    return -1;
-                }
-                s->copied_files++;
-                progress_step(s, NULL);
+            size_t name_len = strlen(name);
+            if (name_len == 0 || name_len >= INSTALLER_MAX_FONT_NAME) {
+                close(fd);
+                return -1;
             }
+
+            strncpy(out_names[count], name, INSTALLER_MAX_FONT_NAME - 1);
+            out_names[count][INSTALLER_MAX_FONT_NAME - 1] = '\0';
+            count++;
         }
     }
 
-    close(dfd);
-    return 0;
-}
+    close(fd);
 
-static int read_exact_fd(int fd, void* buf, int len) {
-    uint8_t* p = (uint8_t*)buf;
-    int got = 0;
-    while (got < len) {
-        int n = (int)read(fd, p + got, (size_t)(len - got));
-        if (n <= 0) return -1;
-        got += n;
-    }
-    return 0;
-}
+    for (int i = 1; i < count; i++) {
+        char tmp[INSTALLER_MAX_FONT_NAME];
+        strncpy(tmp, out_names[i], sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
 
-typedef struct {
-    int fd;
-    uint8_t stash[32];
-    int stash_len;
-    int stash_pos;
-} payload_reader_t;
-
-static int payload_read_exact(payload_reader_t* pr, void* buf, int len) {
-    uint8_t* out = (uint8_t*)buf;
-    int got = 0;
-    while (got < len) {
-        if (pr->stash_pos < pr->stash_len) {
-            out[got++] = pr->stash[pr->stash_pos++];
-            continue;
+        int j = i - 1;
+        while (j >= 0 && strcmp(out_names[j], tmp) > 0) {
+            strncpy(out_names[j + 1], out_names[j], INSTALLER_MAX_FONT_NAME - 1);
+            out_names[j + 1][INSTALLER_MAX_FONT_NAME - 1] = '\0';
+            j--;
         }
-        int n = (int)read(pr->fd, out + got, (size_t)(len - got));
-        if (n <= 0) return -1;
-        got += n;
+
+        strncpy(out_names[j + 1], tmp, INSTALLER_MAX_FONT_NAME - 1);
+        out_names[j + 1][INSTALLER_MAX_FONT_NAME - 1] = '\0';
     }
+
+    *out_count = count;
     return 0;
 }
 
-static int payload_find_magic(payload_reader_t* pr, installer_t* s) {
-    if (read_exact_fd(pr->fd, pr->stash, 16) != 0) {
-        error_set(s, "Invalid installer payload archive (short header)");
-        return -1;
-    }
-    pr->stash_len = 16;
-    pr->stash_pos = 0;
+static int option_row_icons(const installer_t* s) {
+    if (!s) return 0;
+    return s->package_count;
+}
 
-    if (memcmp(pr->stash, PAYLOAD_MAGIC, 8) == 0) {
-        pr->stash_pos = 8;
+static int option_row_fonts_toggle(const installer_t* s) {
+    if (!s) return 1;
+    return s->package_count + 1;
+}
+
+static int option_row_fonts_first(const installer_t* s) {
+    if (!s) return 2;
+    return s->package_count + 2;
+}
+
+static int option_row_chibicc(const installer_t* s) {
+    if (!s) return 2;
+    return option_row_fonts_first(s) + (s->include_fonts ? s->font_count : 0);
+}
+
+static int option_row_continue(const installer_t* s) {
+    return option_row_chibicc(s) + 1;
+}
+
+static int options_row_count(const installer_t* s) {
+    return option_row_continue(s) + 1;
+}
+
+static int selected_package_count(const installer_t* s) {
+    if (!s) return 0;
+
+    int selected = 0;
+    for (int i = 0; i < s->package_count; i++) {
+        if (s->package_selected[i]) selected++;
+    }
+    return selected;
+}
+
+static int selected_font_count(const installer_t* s) {
+    if (!s || !s->include_fonts) return 0;
+
+    int selected = 0;
+    for (int i = 0; i < s->font_count; i++) {
+        if (s->font_selected[i]) selected++;
+    }
+    return selected;
+}
+
+static void options_ensure_cursor_visible(installer_t* s) {
+    if (!s) return;
+
+    int rows = options_row_count(s);
+    if (rows <= 0) {
+        s->option_cursor = 0;
+        s->option_scroll = 0;
+        return;
+    }
+
+    if (s->option_cursor < 0) s->option_cursor = 0;
+    if (s->option_cursor >= rows) s->option_cursor = rows - 1;
+
+    if (s->option_scroll < 0) s->option_scroll = 0;
+    if (s->option_scroll > s->option_cursor) s->option_scroll = s->option_cursor;
+
+    if (s->option_cursor >= s->option_scroll + INSTALLER_OPTION_VISIBLE_ROWS) {
+        s->option_scroll = s->option_cursor - INSTALLER_OPTION_VISIBLE_ROWS + 1;
+    }
+
+    int max_scroll = rows - INSTALLER_OPTION_VISIBLE_ROWS;
+    if (max_scroll < 0) max_scroll = 0;
+    if (s->option_scroll > max_scroll) s->option_scroll = max_scroll;
+}
+
+static void toggle_all_packages(installer_t* s) {
+    if (!s || s->package_count <= 0) return;
+
+    int any_unselected = 0;
+    for (int i = 0; i < s->package_count; i++) {
+        if (!s->package_selected[i]) {
+            any_unselected = 1;
+            break;
+        }
+    }
+
+    unsigned char new_value = any_unselected ? 1u : 0u;
+    for (int i = 0; i < s->package_count; i++) {
+        s->package_selected[i] = new_value;
+    }
+}
+
+static int toggle_option_row(installer_t* s, int row) {
+    if (!s || row < 0) return -1;
+
+    if (row < s->package_count) {
+        s->package_selected[row] = s->package_selected[row] ? 0u : 1u;
         return 0;
     }
-    if (memcmp(pr->stash, PAYLOAD_MAGIC_LEGACY, 7) == 0) {
-        pr->stash_pos = 7;
+
+    if (row == option_row_icons(s)) {
+        s->include_icons = s->include_icons ? 0 : 1;
         return 0;
     }
 
-    for (int i = 0; i <= 9; ++i) {
-        if (memcmp(pr->stash + i, PAYLOAD_MAGIC_LEGACY, 7) == 0) {
-            pr->stash_pos = i + 7;
+    if (row == option_row_fonts_toggle(s)) {
+        if (s->font_count <= 0) {
+            s->include_fonts = 0;
+            return 0;
+        }
+        s->include_fonts = s->include_fonts ? 0 : 1;
+        options_ensure_cursor_visible(s);
+        return 0;
+    }
+
+    if (s->include_fonts) {
+        int font_first = option_row_fonts_first(s);
+        int font_last = font_first + s->font_count - 1;
+        if (row >= font_first && row <= font_last) {
+            int font_idx = row - font_first;
+            s->font_selected[font_idx] = s->font_selected[font_idx] ? 0u : 1u;
             return 0;
         }
     }
 
-    char detail[96];
-    snprintf(detail, sizeof(detail),
-             "Invalid installer payload archive (magic %02X %02X %02X %02X %02X %02X %02X %02X)",
-             (unsigned)pr->stash[0], (unsigned)pr->stash[1],
-             (unsigned)pr->stash[2], (unsigned)pr->stash[3],
-             (unsigned)pr->stash[4], (unsigned)pr->stash[5],
-             (unsigned)pr->stash[6], (unsigned)pr->stash[7]);
-    error_set(s, detail);
+    if (row == option_row_chibicc(s)) {
+        s->include_chibicc = s->include_chibicc ? 0 : 1;
+        return 0;
+    }
+
+    if (row == option_row_continue(s)) return 1;
     return -1;
 }
 
-static int stream_write_exact(int sh, const void* buf, int len) {
-    int w = (int)eynfs_stream_write(sh, buf, (size_t)len);
-    return (w == len) ? 0 : -1;
-}
+static int installer_prepare_options(installer_t* s) {
+    if (!s) return -1;
+    if (s->options_loaded) return 0;
 
-static int install_from_payload_archive(installer_t* s, const char* payload_path) {
-    int fd = open(payload_path, O_RDONLY, 0);
-    if (fd < 0) {
-        return 1; /* archive not present -> caller may fallback */
+    if (read_manifest_packages(INSTALLER_MEDIA_BASE_MANIFEST,
+                               s->packages,
+                               &s->package_count) != 0) {
+        return -1;
     }
 
-    payload_reader_t pr;
-    memset(&pr, 0, sizeof(pr));
-    pr.fd = fd;
-    if (payload_find_magic(&pr, s) != 0) {
+    if (s->package_count <= 0) return -1;
+
+    for (int i = 0; i < s->package_count; i++) {
+        s->package_selected[i] = 1u;
+    }
+
+    s->include_icons = 1;
+    s->include_fonts = 0;
+    s->include_chibicc = 0;
+
+    int font_scan_rc = read_directory_file_names(INSTALLER_MEDIA_FONTS_DIR,
+                                                 s->fonts,
+                                                 INSTALLER_MAX_FONT_FILES,
+                                                 &s->font_count);
+    if (font_scan_rc < 0 && font_scan_rc != -2) {
+        return -1;
+    }
+    if (font_scan_rc == -2) {
+        s->font_count = 0;
+    }
+
+    for (int i = 0; i < s->font_count; i++) {
+        s->font_selected[i] = 1u;
+    }
+
+    s->option_cursor = 0;
+    s->option_scroll = 0;
+    s->options_loaded = 1;
+    options_ensure_cursor_visible(s);
+    return 0;
+}
+
+static int copy_media_file_to_target(installer_t* s,
+                                     const char* src_path,
+                                     const char* dst_path,
+                                     const char* item_label) {
+    if (!src_path || !dst_path) return -1;
+
+    if (item_label && item_label[0]) {
+        progress_note_item(s, item_label);
+    }
+
+    int cfr = copy_file_stream_with_ui(s, src_path, dst_path);
+    if (cfr != 0) {
+        if (cfr == -10) error_set_path(s, "Copy source open failed", src_path);
+        else if (cfr == -30) error_set_path(s, "Copy source read failed", src_path);
+        else if (cfr == -40) error_set_path(s, "Copy target write failed", dst_path);
+        else if (cfr == -50) error_set_path(s, "Copy source close failed", src_path);
+        else if (cfr == -60) error_set_path(s, "Copy finalize failed", dst_path);
+        else if (cfr < 0) error_set_path_code(s, "Copy target create failed", dst_path, cfr);
+        else error_set_path(s, "Copy failed", src_path);
+        return -1;
+    }
+
+    if (s) s->copied_files++;
+
+    return 0;
+}
+
+static int copy_media_tree_recursive(installer_t* s,
+                                     const char* src_root,
+                                     const char* dst_root) {
+    if (!src_root || !dst_root) return -1;
+
+    int fd = open(src_root, O_RDONLY, 0);
+    if (fd < 0) return -1;
+
+    if (ensure_target_directory(dst_root) != 0) {
         close(fd);
         return -1;
     }
 
+    if (s) s->copied_dirs++;
+
     for (;;) {
-        uint8_t hdr[12];
-        if (payload_read_exact(&pr, hdr, (int)sizeof(hdr)) != 0) {
+        eyn_dirent_t entries[16];
+        int bytes = getdents(fd, entries, sizeof(entries));
+        if (bytes < 0) {
             close(fd);
-            error_set(s, "Corrupt payload header");
             return -1;
         }
+        if (bytes == 0) break;
 
-        uint16_t path_len = (uint16_t)hdr[0] | ((uint16_t)hdr[1] << 8);
-        uint8_t etype = hdr[2];
-        uint8_t flags = hdr[3];
-        uint32_t orig_size = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
-        uint32_t stored_size = (uint32_t)hdr[8] | ((uint32_t)hdr[9] << 8) | ((uint32_t)hdr[10] << 16) | ((uint32_t)hdr[11] << 24);
+        int entry_count = bytes / (int)sizeof(eyn_dirent_t);
+        for (int i = 0; i < entry_count; i++) {
+            const char* name = entries[i].name;
+            if (!name || !name[0]) continue;
+            if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
 
-        if (path_len == 0 && etype == 0) {
-            close(fd);
-            return 0;
-        }
-        if (path_len == 0 || path_len >= MAX_PATH_LEN) {
-            close(fd);
-            error_set(s, "Payload path too long");
-            return -1;
-        }
-
-        char path[MAX_PATH_LEN];
-        if (payload_read_exact(&pr, path, (int)path_len) != 0) {
-            close(fd);
-            error_set(s, "Corrupt payload path");
-            return -1;
-        }
-        path[path_len] = '\0';
-
-        if (path[0] != '/') {
-            close(fd);
-            error_set(s, "Payload path must be absolute");
-            return -1;
-        }
-
-        if (etype == PAYLOAD_TYPE_DIR) {
-            (void)mkdir(path, 0);
-            s->copied_dirs++;
-            {
-                char item[160];
-                snprintf(item, sizeof(item), "Creating dir: %s", path);
-                progress_step(s, item);
+            char src_child[256];
+            char dst_child[256];
+            if (join_path2(src_root, name, src_child, sizeof(src_child)) != 0
+                || join_path2(dst_root, name, dst_child, sizeof(dst_child)) != 0) {
+                close(fd);
+                return -1;
             }
-            if (s->progress_uses_work_units) {
-                progress_work_advance(s, PAYLOAD_DIR_PROGRESS_UNITS);
-            }
-            continue;
-        }
 
-        if (etype != PAYLOAD_TYPE_FILE) {
-            close(fd);
-            error_set(s, "Unknown payload entry type");
-            return -1;
-        }
-
-        int sh = eynfs_stream_begin(path);
-        if (sh < 0) {
-            close(fd);
-            error_set_path_code(s, "Payload target create failed", path, sh);
-            return -1;
-        }
-
-        {
-            char item[160];
-            snprintf(item, sizeof(item), "Copying file: %s", path);
-            progress_note_item(s, item);
-        }
-
-        uint32_t out_written = 0;
-        uint32_t in_read = 0;
-        int chunks_since_pulse = 0;
-
-        if (flags & PAYLOAD_FLAG_RLE) {
-            while (in_read < stored_size) {
-                uint8_t ctrl;
-                if (payload_read_exact(&pr, &ctrl, 1) != 0) {
-                    (void)eynfs_stream_end(sh);
+            if (entries[i].is_dir) {
+                if (copy_media_tree_recursive(s, src_child, dst_child) != 0) {
                     close(fd);
-                    error_set_path(s, "Corrupt compressed payload", path);
                     return -1;
                 }
-                in_read++;
-
-                if (ctrl < 128u) {
-                    uint32_t lit = (uint32_t)ctrl + 1u;
-                    uint8_t tmp[128];
-                    if (lit > stored_size - in_read) {
-                        (void)eynfs_stream_end(sh);
-                        close(fd);
-                        error_set_path(s, "Payload literal overflow", path);
-                        return -1;
-                    }
-                    if (payload_read_exact(&pr, tmp, (int)lit) != 0) {
-                        (void)eynfs_stream_end(sh);
-                        close(fd);
-                        error_set_path(s, "Corrupt payload literal", path);
-                        return -1;
-                    }
-                    in_read += lit;
-                    if (stream_write_exact(sh, tmp, (int)lit) != 0) {
-                        (void)eynfs_stream_end(sh);
-                        close(fd);
-                        error_set_path(s, "Payload write failed", path);
-                        return -1;
-                    }
-                    out_written += lit;
-                    chunks_since_pulse++;
-                    if (chunks_since_pulse >= 64) {
-                        if (stored_size > 0u) progress_set_fraction(s, in_read, stored_size);
-                        else installer_ui_pulse(s);
-                        chunks_since_pulse = 0;
-                    }
-                } else {
-                    uint32_t run = (uint32_t)ctrl - 127u;
-                    uint8_t val;
-                    if (payload_read_exact(&pr, &val, 1) != 0) {
-                        (void)eynfs_stream_end(sh);
-                        close(fd);
-                        error_set_path(s, "Corrupt payload run", path);
-                        return -1;
-                    }
-                    in_read++;
-                    uint8_t tmp[128];
-                    memset(tmp, val, sizeof(tmp));
-                    if (stream_write_exact(sh, tmp, (int)run) != 0) {
-                        (void)eynfs_stream_end(sh);
-                        close(fd);
-                        error_set_path(s, "Payload write failed", path);
-                        return -1;
-                    }
-                    out_written += run;
-                    chunks_since_pulse++;
-                    if (chunks_since_pulse >= 64) {
-                        if (stored_size > 0u) progress_set_fraction(s, in_read, stored_size);
-                        else installer_ui_pulse(s);
-                        chunks_since_pulse = 0;
-                    }
-                }
+                continue;
             }
-        } else {
-            uint8_t tmp[COPY_BUF_SZ];
-            while (in_read < stored_size) {
-                uint32_t rem = stored_size - in_read;
-                uint32_t take = rem > (uint32_t)sizeof(tmp) ? (uint32_t)sizeof(tmp) : rem;
-                if (payload_read_exact(&pr, tmp, (int)take) != 0) {
-                    (void)eynfs_stream_end(sh);
-                    close(fd);
-                    error_set_path(s, "Corrupt payload data", path);
-                    return -1;
-                }
-                in_read += take;
-                if (stream_write_exact(sh, tmp, (int)take) != 0) {
-                    (void)eynfs_stream_end(sh);
-                    close(fd);
-                    error_set_path(s, "Payload write failed", path);
-                    return -1;
-                }
-                out_written += take;
-                chunks_since_pulse++;
-                if (chunks_since_pulse >= 64) {
-                    if (stored_size > 0u) progress_set_fraction(s, in_read, stored_size);
-                    else installer_ui_pulse(s);
-                    chunks_since_pulse = 0;
-                }
+
+            if (copy_media_file_to_target(s, src_child, dst_child, dst_child) != 0) {
+                close(fd);
+                return -1;
             }
         }
-
-        if (stored_size > 0u) {
-            progress_set_fraction(s, in_read, stored_size);
-        }
-
-        if (out_written != orig_size) {
-            (void)eynfs_stream_end(sh);
-            close(fd);
-            error_set_path(s, "Payload size mismatch", path);
-            return -1;
-        }
-
-        if (eynfs_stream_end(sh) != 0) {
-            close(fd);
-            error_set_path(s, "Payload finalize failed", path);
-            return -1;
-        }
-
-        s->copied_files++;
-        if (s->progress_uses_work_units) {
-            uint32_t file_work = (stored_size > 0u) ? stored_size : ((orig_size > 0u) ? orig_size : 1u);
-            progress_work_advance(s, file_work);
-        }
-        progress_step(s, path);
     }
+
+    close(fd);
+    return 0;
+}
+
+static int copy_media_tree_to_target(installer_t* s,
+                                     const char* src_root,
+                                     const char* dst_root,
+                                     const char* missing_msg) {
+    if (!src_root || !dst_root) return -1;
+
+    if (!path_is_directory(src_root)) {
+        if (missing_msg && missing_msg[0]) {
+            error_set(s, missing_msg);
+        }
+        return -1;
+    }
+
+    if (copy_media_tree_recursive(s, src_root, dst_root) != 0) {
+        error_set_path(s, "Failed to copy media tree", src_root);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int seed_system_content(installer_t* s) {
+    if (!s) return -1;
+
+    if (ensure_target_directory("/etc") != 0) {
+        error_set_path(s, "Failed to create target directory", "/etc");
+        return -1;
+    }
+
+    if (copy_media_file_to_target(s,
+                                  INSTALLER_MEDIA_ETC_RESOLV,
+                                  "/etc/resolv.conf",
+                                  "Seeding /etc/resolv.conf") != 0) {
+        return -1;
+    }
+    progress_step(s, "resolv.conf");
+
+    if (copy_media_tree_to_target(s,
+                                  INSTALLER_MEDIA_CONFIG_DIR,
+                                  "/config",
+                                  "RAM:/config missing") != 0) {
+        return -1;
+    }
+    progress_step(s, "config");
+
+    if (copy_media_tree_to_target(s,
+                                  INSTALLER_MEDIA_VIEW_DIR,
+                                  "/.view",
+                                  "RAM:/.view missing") != 0) {
+        return -1;
+    }
+    progress_step(s, ".view");
+
+    if (s->include_icons) {
+        if (copy_media_tree_to_target(s,
+                                      INSTALLER_MEDIA_ICONS_DIR,
+                                      "/icons",
+                                      "RAM:/icons missing") != 0) {
+            return -1;
+        }
+        progress_step(s, "icons");
+
+        if (copy_media_tree_to_target(s,
+                                      INSTALLER_MEDIA_ICONS16_DIR,
+                                      "/icons16",
+                                      "RAM:/icons16 missing") != 0) {
+            return -1;
+        }
+        progress_step(s, "icons16");
+    }
+
+    if (s->include_fonts) {
+        int fonts_selected = selected_font_count(s);
+        if (fonts_selected <= 0) {
+            error_set(s, "Fonts enabled but no fonts selected");
+            return -1;
+        }
+
+        if (ensure_target_directory("/fonts") != 0) {
+            error_set_path(s, "Failed to create target directory", "/fonts");
+            return -1;
+        }
+
+        for (int i = 0; i < s->font_count; i++) {
+            if (!s->font_selected[i]) continue;
+
+            char src_font[256];
+            char dst_font[256];
+            if (join_path2(INSTALLER_MEDIA_FONTS_DIR, s->fonts[i], src_font, sizeof(src_font)) != 0
+                || join_path2("/fonts", s->fonts[i], dst_font, sizeof(dst_font)) != 0) {
+                error_set(s, "Font path too long");
+                return -1;
+            }
+
+            char item[160];
+            snprintf(item, sizeof(item), "Seeding /fonts/%s", s->fonts[i]);
+            if (copy_media_file_to_target(s, src_font, dst_font, item) != 0) {
+                return -1;
+            }
+            progress_step(s, s->fonts[i]);
+        }
+    }
+
+    if (s->include_chibicc) {
+        if (!path_exists(INSTALLER_MEDIA_CHIBICC)) {
+            error_set(s, "RAM:/programs/chibicc missing");
+            return -1;
+        }
+
+        if (ensure_target_directory("/binaries") != 0) {
+            error_set_path(s, "Failed to create target directory", "/binaries");
+            return -1;
+        }
+
+        if (copy_media_file_to_target(s,
+                                      INSTALLER_MEDIA_CHIBICC,
+                                      "/binaries/chibicc",
+                                      "Seeding /binaries/chibicc") != 0) {
+            return -1;
+        }
+        progress_step(s, "chibicc");
+    }
+
+    return 0;
+}
+
+static int parse_manifest_line(const char* line,
+                               char out_name[INSTALLER_MAX_PACKAGE_NAME]) {
+    if (!line || !out_name) return 1;
+
+    size_t start = 0;
+    size_t len = strlen(line);
+    while (start < len && (line[start] == ' ' || line[start] == '\t')) start++;
+
+    if (start >= len) return 1;
+    if (line[start] == '#') return 1;
+
+    size_t end = len;
+    while (end > start && (line[end - 1] == ' ' || line[end - 1] == '\t')) end--;
+    if (end <= start) return 1;
+
+    size_t token_end = start;
+    while (token_end < end && line[token_end] != ' ' && line[token_end] != '\t') token_end++;
+    size_t token_len = token_end - start;
+
+    if (token_len == 0 || token_len >= INSTALLER_MAX_PACKAGE_NAME) return -1;
+
+    memcpy(out_name, line + start, token_len);
+    out_name[token_len] = '\0';
+    return 0;
+}
+
+static int read_manifest_packages(const char* manifest_path,
+                                  char out_pkgs[INSTALLER_MAX_MANIFEST_PACKAGES][INSTALLER_MAX_PACKAGE_NAME],
+                                  int* out_count) {
+    if (!manifest_path || !out_pkgs || !out_count) return -1;
+
+    int fd = open(manifest_path, O_RDONLY, 0);
+    if (fd < 0) return -1;
+
+    char line[160];
+    int line_len = 0;
+    int count = 0;
+
+    char chunk[128];
+    for (;;) {
+        int n = (int)read(fd, chunk, sizeof(chunk));
+        if (n < 0) {
+            close(fd);
+            return -1;
+        }
+        if (n == 0) break;
+
+        for (int i = 0; i < n; i++) {
+            char c = chunk[i];
+            if (c == '\r') continue;
+
+            if (c == '\n') {
+                line[line_len] = '\0';
+                char parsed[INSTALLER_MAX_PACKAGE_NAME];
+                int pr = parse_manifest_line(line, parsed);
+                if (pr < 0) {
+                    close(fd);
+                    return -1;
+                }
+                if (pr == 0) {
+                    if (count >= INSTALLER_MAX_MANIFEST_PACKAGES) {
+                        close(fd);
+                        return -1;
+                    }
+                    strncpy(out_pkgs[count], parsed, INSTALLER_MAX_PACKAGE_NAME - 1);
+                    out_pkgs[count][INSTALLER_MAX_PACKAGE_NAME - 1] = '\0';
+                    count++;
+                }
+                line_len = 0;
+                continue;
+            }
+
+            if (line_len + 1 < (int)sizeof(line)) {
+                line[line_len++] = c;
+            } else {
+                close(fd);
+                return -1;
+            }
+        }
+    }
+
+    if (line_len > 0) {
+        line[line_len] = '\0';
+        char parsed[INSTALLER_MAX_PACKAGE_NAME];
+        int pr = parse_manifest_line(line, parsed);
+        if (pr < 0) {
+            close(fd);
+            return -1;
+        }
+        if (pr == 0) {
+            if (count >= INSTALLER_MAX_MANIFEST_PACKAGES) {
+                close(fd);
+                return -1;
+            }
+            strncpy(out_pkgs[count], parsed, INSTALLER_MAX_PACKAGE_NAME - 1);
+            out_pkgs[count][INSTALLER_MAX_PACKAGE_NAME - 1] = '\0';
+            count++;
+        }
+    }
+
+    close(fd);
+    *out_count = count;
+    return 0;
 }
 
 static int install_mbr_boot_code(int logical_drive) {
@@ -1035,6 +1182,177 @@ static int write_grub_cfg(void) {
     return 0;
 }
 
+static int run_install_for_package(installer_t* s,
+                                   const PackageIndex* package_index,
+                                   const char* pkg_name,
+                                   int index,
+                                   int total) {
+    if (!s || !package_index || !pkg_name || !pkg_name[0]) return -1;
+
+    char status[96];
+    snprintf(status, sizeof(status), "Installing package %d/%d", index + 1, total);
+    status_set(s, status);
+
+    ResolvePlan plan;
+    if (resolve_install_plan(package_index, pkg_name, &plan) != 0) {
+        error_set_path(s, "Failed to resolve install plan", pkg_name);
+        return -1;
+    }
+
+    if (plan.count <= 0) {
+        error_set_path(s, "Empty install plan", pkg_name);
+        return -1;
+    }
+
+    for (int plan_idx = 0; plan_idx < plan.count; plan_idx++) {
+        const Package* pkg = plan.ordered[plan_idx];
+        if (!pkg || !pkg->name[0]) {
+            error_set_path(s, "Invalid package in install plan", pkg_name);
+            return -1;
+        }
+
+        char item[160];
+        snprintf(item, sizeof(item), "install %s", pkg->name);
+        progress_note_item(s, item);
+
+        if (install_package(package_index, pkg) != 0) {
+            error_set_path(s, "Package install failed", pkg->name);
+            return -1;
+        }
+    }
+
+    progress_step(s, pkg_name);
+    return 0;
+}
+
+static int install_from_package_manifest(installer_t* s) {
+    if (!s) return -1;
+
+    if (installer_prepare_options(s) != 0) {
+        error_set(s, "Failed to load installer options");
+        return -1;
+    }
+
+    int packages_selected = selected_package_count(s);
+    if (packages_selected <= 0) {
+        error_set(s, "Select at least one package before install");
+        return -1;
+    }
+
+    int system_seed_steps = 3;
+    if (s->include_icons) system_seed_steps += 2;
+    if (s->include_fonts) system_seed_steps += selected_font_count(s);
+    if (s->include_chibicc) system_seed_steps += 1;
+
+    (void)mkdir("/binaries", 0);
+    (void)mkdir("/boot", 0);
+    (void)mkdir(INSTALL_CACHE_ROOT, 0);
+    (void)mkdir(INSTALL_CACHE_PACKAGE_DIR, 0);
+
+    status_set(s, "Seeding installer tools and cache ...");
+    progress_reset(s, 7 + system_seed_steps);
+
+    if (copy_media_file_to_target(s,
+                                  INSTALLER_MEDIA_INSTALL,
+                                  "/binaries/install",
+                                  "Seeding /binaries/install") != 0) {
+        return -1;
+    }
+    progress_step(s, "install");
+
+    if (copy_media_file_to_target(s,
+                                  INSTALLER_MEDIA_EXTRACT,
+                                  "/binaries/extract",
+                                  "Seeding /binaries/extract") != 0) {
+        return -1;
+    }
+    progress_step(s, "extract");
+
+    if (copy_media_file_to_target(s,
+                                  INSTALLER_MEDIA_INSTALLER,
+                                  "/binaries/installer",
+                                  "Seeding /binaries/installer") != 0) {
+        return -1;
+    }
+    progress_step(s, "installer");
+
+    if (copy_media_file_to_target(s,
+                                  "RAM:/boot/kernel.bin",
+                                  "/boot/kernel.bin",
+                                  "Copying /boot/kernel.bin") != 0) {
+        return -1;
+    }
+    progress_step(s, "kernel");
+
+    if (path_exists(INSTALLER_MEDIA_INDEX)) {
+        if (copy_media_file_to_target(s,
+                                      INSTALLER_MEDIA_INDEX,
+                                      INSTALL_CACHE_INDEX,
+                                      "Copying local index.json") != 0) {
+            return -1;
+        }
+    }
+    progress_step(s, "index");
+
+    if (path_exists(INSTALLER_MEDIA_BASE_ARCHIVE)) {
+        if (copy_media_file_to_target(s,
+                                      INSTALLER_MEDIA_BASE_ARCHIVE,
+                                      INSTALL_CACHE_BASE_ARCHIVE,
+                                      "Copying base.pkg") != 0) {
+            return -1;
+        }
+    }
+    progress_step(s, "base.pkg");
+
+    if (!path_exists(INSTALLER_MEDIA_BASE_MANIFEST)) {
+        error_set(s, "RAM:/installer/base.manifest missing");
+        return -1;
+    }
+    if (copy_media_file_to_target(s,
+                                  INSTALLER_MEDIA_BASE_MANIFEST,
+                                  INSTALL_CACHE_MANIFEST,
+                                  "Copying base.manifest") != 0) {
+        return -1;
+    }
+    progress_step(s, "manifest");
+
+    if (seed_system_content(s) != 0) {
+        return -1;
+    }
+
+    PackageIndex package_index;
+    if (index_fetch_and_parse(&package_index) != 0) {
+        error_set(s, "Failed to load package index");
+        return -1;
+    }
+
+    s->step = STEP_COPY;
+    status_set(s, "Installing base packages ...");
+    progress_reset(s, packages_selected);
+
+    int previous_confirm_mode = package_set_confirm_mode(PACKAGE_CONFIRM_AUTO_ACCEPT);
+
+    int install_index = 0;
+    for (int i = 0; i < s->package_count; i++) {
+        if (!s->package_selected[i]) continue;
+
+        if (run_install_for_package(s,
+                                    &package_index,
+                                    s->packages[i],
+                                    install_index,
+                                    packages_selected) != 0) {
+            (void)package_set_confirm_mode(previous_confirm_mode);
+            return -1;
+        }
+
+        install_index++;
+    }
+
+    (void)package_set_confirm_mode(previous_confirm_mode);
+
+    return 0;
+}
+
 static int run_install(installer_t* s) {
     if (!s) return -1;
 
@@ -1062,43 +1380,11 @@ static int run_install(installer_t* s) {
     installer_ui_pulse(s);
 
     s->step = STEP_COPY;
-    status_set(s, "Applying payload archive ...");
-    {
-        int total_entries = 0;
-        uint32_t total_work = 0;
-        if (payload_count_entries("RAM:/installer/payload.eynpkg", &total_entries, &total_work) == 0 && total_entries > 0) {
-            if (total_work > 0u) progress_work_reset(s, total_work);
-            else progress_reset(s, total_entries);
-        } else {
-            progress_reset(s, 0);
-            s->progress_permille = 150;
-        }
-        installer_ui_pulse(s);
-    }
-    int payload_rc = install_from_payload_archive(s, "RAM:/installer/payload.eynpkg");
-    if (payload_rc == 1) {
-        status_set(s, "Payload archive missing; copying files from RAM:/ ...");
-        {
-            int total_entries = 0;
-            if (count_tree_from_ram("/", &total_entries) == 0 && total_entries > 0) {
-                progress_reset(s, total_entries);
-            } else {
-                progress_reset(s, 0);
-                s->progress_permille = 200;
-                installer_ui_pulse(s);
-            }
-        }
-        if (copy_tree_from_ram(s, "/", "/") != 0) {
-            if (s->error[0] == '\0') {
-                error_set(s, "Copy from RAM:/ failed");
-            }
-            return -105;
-        }
-    } else if (payload_rc != 0) {
+    if (install_from_package_manifest(s) != 0) {
         if (s->error[0] == '\0') {
-            error_set(s, "Payload install failed");
+            error_set(s, "Package-manifest install failed");
         }
-        return -108;
+        return -109;
     }
 
     status_set(s, "Writing GRUB config ...");
@@ -1188,6 +1474,89 @@ static void draw_ui(int h, installer_t* s) {
         if (s->drive_count == 0) {
             draw_center_text(h, 72, "No drives detected", 255, 140, 140);
         }
+    } else if (s->step == STEP_OPTIONS) {
+        int selected_pkgs = selected_package_count(s);
+        int selected_fonts = selected_font_count(s);
+
+        char summary_pkgs[96];
+        char summary_assets[128];
+        snprintf(summary_pkgs,
+                 sizeof(summary_pkgs),
+                 "Packages selected: %d / %d",
+                 selected_pkgs,
+                 s->package_count);
+        snprintf(summary_assets,
+                 sizeof(summary_assets),
+                 "Icons: %s   Fonts: %s (%d)   Chibicc: %s",
+                 s->include_icons ? "on" : "off",
+                 s->include_fonts ? "on" : "off",
+                 selected_fonts,
+                 s->include_chibicc ? "on" : "off");
+
+        draw_center_text(h, 42, "Configure install options (menuconfig-style)", 220, 220, 220);
+        draw_center_text(h, 62, summary_pkgs, 180, 200, 220);
+        draw_center_text(h, 80, summary_assets, 170, 190, 210);
+
+        int rows = options_row_count(s);
+        int first = s->option_scroll;
+        int last = first + INSTALLER_OPTION_VISIBLE_ROWS;
+        if (last > rows) last = rows;
+
+        int y = 106;
+        for (int row = first; row < last; row++) {
+            int is_cursor = (row == s->option_cursor);
+            if (is_cursor) {
+                gui_rect_t sel = {8, y - 2, sz.w - 16, 16, GUI_PAL_SEL_R, GUI_PAL_SEL_G, GUI_PAL_SEL_B, 0};
+                if (!gui_call_ok(gui_fill_rect(h, &sel), "gui_fill_rect(options)", s)) return;
+            }
+
+            char line[176];
+            if (row < s->package_count) {
+                snprintf(line,
+                         sizeof(line),
+                         "[%c] package: %s",
+                         s->package_selected[row] ? 'x' : ' ',
+                         s->packages[row]);
+            } else if (row == option_row_icons(s)) {
+                snprintf(line,
+                         sizeof(line),
+                         "[%c] seed /icons and /icons16",
+                         s->include_icons ? 'x' : ' ');
+            } else if (row == option_row_fonts_toggle(s)) {
+                if (s->font_count > 0) {
+                    snprintf(line,
+                             sizeof(line),
+                             "[%c] seed fonts",
+                             s->include_fonts ? 'x' : ' ');
+                } else {
+                    snprintf(line, sizeof(line), "[ ] seed fonts (none available on media)");
+                }
+            } else if (s->include_fonts
+                       && row >= option_row_fonts_first(s)
+                       && row < option_row_fonts_first(s) + s->font_count) {
+                int font_idx = row - option_row_fonts_first(s);
+                snprintf(line,
+                         sizeof(line),
+                         "    [%c] font: %s",
+                         s->font_selected[font_idx] ? 'x' : ' ',
+                         s->fonts[font_idx]);
+            } else if (row == option_row_chibicc(s)) {
+                snprintf(line,
+                         sizeof(line),
+                         "[%c] seed /binaries/chibicc",
+                         s->include_chibicc ? 'x' : ' ');
+            } else if (row == option_row_continue(s)) {
+                snprintf(line, sizeof(line), "[>] continue to disk format");
+            } else {
+                snprintf(line, sizeof(line), "");
+            }
+
+            draw_center_text(h, y, line, 230, 230, 230);
+            y += 18;
+        }
+
+        draw_center_text(h, 306, "Up/Down: move   Enter/Space: toggle", 170, 170, 170);
+        draw_center_text(h, 324, "A: toggle all packages   B: back   I: continue", 170, 170, 170);
     } else if (s->step == STEP_FORMAT) {
         char line[96];
         snprintf(line, sizeof(line), "Target drive: %d", s->selected_drive);
@@ -1226,14 +1595,8 @@ static void draw_ui(int h, installer_t* s) {
         snprintf(c1, sizeof(c1), "Copied files: %d   directories: %d", s->copied_files, s->copied_dirs);
         draw_center_text(h, 56, "Install finished successfully.", 140, 255, 160);
         draw_center_text(h, 78, c1, 220, 220, 220);
-        if (s->warning[0]) {
-            draw_center_text(h, 102, s->warning, 255, 200, 120);
-            draw_center_text(h, 126, "Payload installed; bootloader integration is pending.", 190, 190, 190);
-            draw_center_text(h, 150, "Press Q to close installer.", 170, 170, 170);
-        } else {
-            draw_center_text(h, 102, "Reboot and boot from installed disk.", 190, 190, 190);
-            draw_center_text(h, 126, "Press Q to close installer.", 170, 170, 170);
-        }
+        draw_center_text(h, 102, "Reboot and boot from installed disk.", 190, 190, 190);
+        draw_center_text(h, 126, "Press Q to close installer.", 170, 170, 170);
     } else if (s->step == STEP_ERROR) {
         draw_center_text(h, 56, "Install failed", 255, 120, 120);
         draw_center_text(h, 78, s->error, 230, 190, 190);
@@ -1307,8 +1670,43 @@ int main(void) {
                 if (ev.a == GUI_KEY_DOWN && st.selected_idx + 1 < st.drive_count) st.selected_idx++;
                 if ((ch == '\r' || ch == '\n') && st.drive_count > 0) {
                     st.selected_drive = st.drives[st.selected_idx];
-                    st.step = STEP_FORMAT;
+                    if (installer_prepare_options(&st) != 0) {
+                        error_set(&st, "Failed to load installer options");
+                        st.step = STEP_ERROR;
+                    } else {
+                        st.step = STEP_OPTIONS;
+                    }
                 }
+            } else if (st.step == STEP_OPTIONS) {
+                if (ev.a == GUI_KEY_UP && st.option_cursor > 0) {
+                    st.option_cursor--;
+                }
+                if (ev.a == GUI_KEY_DOWN && st.option_cursor + 1 < options_row_count(&st)) {
+                    st.option_cursor++;
+                }
+
+                if (ch == 'a' || ch == 'A') {
+                    toggle_all_packages(&st);
+                } else if (ch == 'b' || ch == 'B') {
+                    st.step = STEP_SELECT_DRIVE;
+                } else if (ch == 'i' || ch == 'I') {
+                    if (selected_package_count(&st) <= 0) {
+                        status_set(&st, "Select at least one package");
+                    } else {
+                        st.step = STEP_FORMAT;
+                    }
+                } else if (ch == '\r' || ch == '\n' || ch == ' ') {
+                    int row_action = toggle_option_row(&st, st.option_cursor);
+                    if (row_action == 1) {
+                        if (selected_package_count(&st) <= 0) {
+                            status_set(&st, "Select at least one package");
+                        } else {
+                            st.step = STEP_FORMAT;
+                        }
+                    }
+                }
+
+                options_ensure_cursor_visible(&st);
             } else if (st.step == STEP_FORMAT) {
                 if (ch == '\r' || ch == '\n') {
                     st.step = STEP_COPY;
@@ -1333,3 +1731,20 @@ int main(void) {
     g_installer_gui_handle = -1;
     return 0;
 }
+
+/*
+ * build_user_c.sh compiles one translation unit per command source.
+ * Include install module implementations directly to preserve modular files
+ * under /install without changing the userland build pipeline.
+ */
+#define PKG_EXTRACT_EMBEDDED_ONLY 1
+#include "../../install/package.c"
+#include "../../install/index.c"
+#include "../../install/resolve.c"
+#undef PKG_EXTRACT_EMBEDDED_ONLY
+
+#define EXTRACT_EMBEDDED_MODE 1
+#define main install_embedded_extract_main
+#include "extract_uelf.c"
+#undef main
+#undef EXTRACT_EMBEDDED_MODE

@@ -232,6 +232,8 @@ static struct {
     tcp_conn tcp;
     net_tcp_stats tcp_stats;
     tcp_rx_slot tcp_rxq[8];
+    uint32 tcp_rxq_head;
+    uint32 tcp_rxq_tail;
 
     udp_socket sockets[MAX_SOCKETS];
 
@@ -951,26 +953,27 @@ static int tcp_rxq_enqueue(const uint8 src_ip[4], uint16 src_port,
         return -1;
     }
 
-    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
-        if (!g_net.tcp_rxq[i].valid) {
-            tcp_rx_slot* s = &g_net.tcp_rxq[i];
-            s->valid = 1;
-            for (int j = 0; j < 4; j++) s->pkt.src_ip[j] = src_ip[j];
-            for (int j = 0; j < 4; j++) s->pkt.dst_ip[j] = dst_ip[j];
-            s->pkt.src_port = src_port;
-            s->pkt.dst_port = dst_port;
-
-            s->pkt.payload_len = payload_len;
-            if (payload_len != 0u) {
-                memcpy(s->pkt.payload, payload, payload_len);
-            }
-            g_net.tcp_stats.tcp_rx_enqueued++;
-            return 0;
-        }
+    uint32 cap = (uint32)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0]));
+    tcp_rx_slot* s = &g_net.tcp_rxq[g_net.tcp_rxq_tail];
+    if (s->valid) {
+        g_net.tcp_stats.tcp_rx_dropped++;
+        return -1;
     }
 
-    g_net.tcp_stats.tcp_rx_dropped++;
-    return -1;
+    s->valid = 1;
+    for (int j = 0; j < 4; j++) s->pkt.src_ip[j] = src_ip[j];
+    for (int j = 0; j < 4; j++) s->pkt.dst_ip[j] = dst_ip[j];
+    s->pkt.src_port = src_port;
+    s->pkt.dst_port = dst_port;
+
+    s->pkt.payload_len = payload_len;
+    if (payload_len != 0u) {
+        memcpy(s->pkt.payload, payload, payload_len);
+    }
+
+    g_net.tcp_rxq_tail = (g_net.tcp_rxq_tail + 1u) % cap;
+    g_net.tcp_stats.tcp_rx_enqueued++;
+    return 0;
 }
 
 static void icmp_rxq_clear(void)
@@ -992,6 +995,8 @@ static void tcp_rxq_clear(void)
     for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
         g_net.tcp_rxq[i].valid = 0;
     }
+    g_net.tcp_rxq_head = 0u;
+    g_net.tcp_rxq_tail = 0u;
     g_net.tcp_stats.tcp_rx_enqueued = 0;
     g_net.tcp_stats.tcp_rx_dropped = 0;
 }
@@ -1202,10 +1207,13 @@ int net_tcp_recv(net_tcp_rx_packet* out)
         (void)net_poll(local_ip, 8);
     }
 
-    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
-        if (g_net.tcp_rxq[i].valid) {
-            *out = g_net.tcp_rxq[i].pkt;
-            g_net.tcp_rxq[i].valid = 0;
+    uint32 cap = (uint32)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0]));
+    for (uint32 n = 0; n < cap; n++) {
+        uint32 idx = (g_net.tcp_rxq_head + n) % cap;
+        if (g_net.tcp_rxq[idx].valid) {
+            *out = g_net.tcp_rxq[idx].pkt;
+            g_net.tcp_rxq[idx].valid = 0;
+            g_net.tcp_rxq_head = (idx + 1u) % cap;
             return 1;
         }
     }

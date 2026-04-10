@@ -10,12 +10,6 @@ ARCH ?= i386
 SUPPORTED_ARCHES := i386 amd64
 OBJDIR := obj/$(ARCH)
 
-CONFIG_INSTALLER_RAMDISK_PRUNE ?= 1
-CONFIG_INSTALLER_RAMDISK_FULL ?= 0
-CONFIG_INSTALLER_RAMDISK_INCLUDE_FONTS ?= 0
-CONFIG_INSTALLER_RAMDISK_INCLUDE_HEADERS ?= 0
-CONFIG_INSTALLER_APPS ?=
-
 ifeq ($(filter $(ARCH),$(SUPPORTED_ARCHES)),)
 $(error Unsupported ARCH '$(ARCH)'. Supported values: $(SUPPORTED_ARCHES))
 endif
@@ -366,14 +360,11 @@ menuconfig:
 .PHONY: installer_userland installer_ramdisk menuconfig
 installer_userland:
 	bash devtools/build_user_c.sh testdir/code/installer_uelf.c testdir/binaries/installer
+	bash devtools/build_user_c.sh testdir/code/install_uelf.c testdir/binaries/install
+	bash devtools/build_user_c.sh testdir/code/extract_uelf.c testdir/binaries/extract
 
 installer_ramdisk: installer_userland
 	mkdir -p tmp_user/boot
-	EYN_INSTALLER_RAMDISK_PRUNE=$(CONFIG_INSTALLER_RAMDISK_PRUNE) \
-	EYN_INSTALLER_RAMDISK_FULL=$(CONFIG_INSTALLER_RAMDISK_FULL) \
-	EYN_INSTALLER_RAMDISK_INCLUDE_FONTS=$(CONFIG_INSTALLER_RAMDISK_INCLUDE_FONTS) \
-	EYN_INSTALLER_RAMDISK_INCLUDE_HEADERS=$(CONFIG_INSTALLER_RAMDISK_INCLUDE_HEADERS) \
-	EYN_INSTALLER_APPS="$(CONFIG_INSTALLER_APPS)" \
 	python3 devtools/build_installer_ramdisk.py tmp_user/boot/installer_ramdisk.img
 
 clean:
@@ -419,7 +410,7 @@ eynfsimg-legacy:
 # Create blank drive for testing
 testimg: eynfs_format
 	rm -f testimg.img
-	dd if=/dev/zero of=testimg.img bs=1M count=10
+	dd if=/dev/zero of=testimg.img bs=1M count=30
 	$(COMPILER) $(HOST_CFLAGS) -o eynfs_format eynfs_format.c $(HOST_LDFLAGS)
 	./eynfs_format testimg.img 20480
 
@@ -451,6 +442,37 @@ qemu-debug: build
 	-serial stdio \
 	-d int,cpu_reset -D tmp/qemu-debug.log \
 	-no-reboot -no-shutdown \
+	-m 64M
+
+.PHONY: installer-debug
+installer-debug: build
+	@mkdir -p tmp
+	$(QEMU_ENV) $(EMULATOR) -cdrom EYNOS.iso \
+	-drive file=testimg.img,format=raw,if=ide,index=0,media=disk \
+	-boot d \
+	-display $(QEMU_DISPLAY) \
+	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
+	-device e1000,netdev=net0 \
+	-audiodev pipewire,id=audio0 \
+	-device ac97,audiodev=audio0 \
+	-serial stdio \
+	-d int,cpu_reset -D tmp/qemu-debug.log \
+	-no-reboot -no-shutdown \
+	-m 64M
+
+.PHONY: installer-debug
+installer-nobuild:
+	@mkdir -p tmp
+	$(QEMU_ENV) $(EMULATOR) -cdrom EYNOS.iso \
+	-drive file=testimg.img,format=raw,if=ide,index=0,media=disk \
+	-boot c \
+	-display $(QEMU_DISPLAY) \
+	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
+	-device e1000,netdev=net0 \
+	-audiodev pipewire,id=audio0 \
+	-device ac97,audiodev=audio0 \
+	-serial stdio \
+	-d int,cpu_reset -D tmp/qemu-debug.log \
 	-m 64M
 
 # Halt at start for GDB attach on tcp:1234 (target remote :1234)
