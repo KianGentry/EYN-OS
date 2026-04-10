@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-10 11:54:14
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-10 14:24:24
 
-**Total Commands:** 89
+**Total Commands:** 90
 
 ## Table of Contents
 
@@ -1052,6 +1052,22 @@ edit [/path/to/file]
 
 ---
 
+### extract
+
+**Binary:** `testdir/binaries/extract`
+
+**Metadata Source:** `testdir/code/extract_uelf.c`
+
+**Description:**
+Extract a TAR or TAR.GZ archive into a directory.
+
+**Example:**
+```bash
+extract /archive.tar.gz /out
+```
+
+---
+
 ### fdisk
 
 **Binary:** `testdir/binaries/fdisk`
@@ -1132,22 +1148,6 @@ gui_demo
 
 ---
 
-### hello
-
-**Binary:** `testdir/binaries/hello`
-
-**Metadata Source:** `testdir/code/(metadata not found)`
-
-**Description:**
-Run the hello command.
-
-**Example:**
-```bash
-hello
-```
-
----
-
 ### history
 
 **Binary:** `testdir/binaries/history`
@@ -1160,6 +1160,22 @@ Show or clear command history.
 **Example:**
 ```bash
 history
+```
+
+---
+
+### install
+
+**Binary:** `testdir/binaries/install`
+
+**Metadata Source:** `testdir/code/install_uelf.c`
+
+**Description:**
+Install packages from the EYN-OS package index.
+
+**Example:**
+```bash
+install hello
 ```
 
 ---
@@ -1192,6 +1208,22 @@ List background jobs.
 **Example:**
 ```bash
 jobs
+```
+
+---
+
+### jsonparse
+
+**Binary:** `testdir/binaries/jsonparse`
+
+**Metadata Source:** `testdir/code/jsonparse_uelf.c`
+
+**Description:**
+Parse and normalize JSON files.
+
+**Example:**
+```bash
+jsonparse --pretty /config/settings.json
 ```
 
 ---
@@ -1292,6 +1324,22 @@ settings
 
 ---
 
+### sha256
+
+**Binary:** `testdir/binaries/sha256`
+
+**Metadata Source:** `testdir/code/sha256_uelf.c`
+
+**Description:**
+Compute SHA-256 digests for files or strings.
+
+**Example:**
+```bash
+sha256 /test.txt
+```
+
+---
+
 ### sort
 
 **Binary:** `testdir/binaries/sort`
@@ -1340,22 +1388,6 @@ tiling
 
 ---
 
-### view_backend_audio
-
-**Binary:** `testdir/binaries/view_backend_audio`
-
-**Metadata Source:** `testdir/code/(metadata not found)`
-
-**Description:**
-Run the view_backend_audio command.
-
-**Example:**
-```bash
-view_backend_audio
-```
-
----
-
 ### view_backend_bmp
 
 **Binary:** `testdir/binaries/view_backend_bmp`
@@ -1368,22 +1400,6 @@ Run the view_backend_bmp command.
 **Example:**
 ```bash
 view_backend_bmp
-```
-
----
-
-### view_backend_html
-
-**Binary:** `testdir/binaries/view_backend_html`
-
-**Metadata Source:** `testdir/code/(metadata not found)`
-
-**Description:**
-Run the view_backend_html command.
-
-**Example:**
-```bash
-view_backend_html
 ```
 
 ---
@@ -1462,5 +1478,5 @@ xeyes
 | Memory Commands | 7 |
 | GUI/Window Commands | 10 |
 | Development Commands | 10 |
-| Utility Commands | 31 |
+| Utility Commands | 32 |
 
