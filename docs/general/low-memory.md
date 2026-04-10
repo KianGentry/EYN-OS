@@ -4,7 +4,7 @@ EYN-OS is intentionally usable in extremely low RAM configurations (the default 
 
 ## Boot-time: kernel footprint matters (especially `.bss`)
 
-When booting via GRUB/Multiboot, the kernel’s *in-memory* footprint (not just the ISO size) must fit.
+When booting via GRUB/Multiboot, the kernel's *in-memory* footprint (not just the ISO size) must fit.
 
 Key point: **Large zero-initialized globals live in `.bss` and still consume RAM at boot**, because the loader must reserve and zero that space.
 
@@ -24,7 +24,7 @@ i686-elf-size -A tmp_user/boot/kernel.bin || size -A tmp_user/boot/kernel.bin
 i686-elf-nm -S --size-sort tmp_user/boot/kernel.bin | tail -n 50
 ```
 
-## Runtime: “page faults” can be normal under demand paging
+## Runtime: "page faults" can be normal under demand paging
 
 EYN-OS uses demand paging and swap. That means a #PF (INT 14) is not automatically a crash:
 
@@ -37,7 +37,7 @@ Recent improvement:
 
 ## User programs: large `.bss` is now low-RAM-friendly
 
-The user program loader sets up the program’s full `PT_LOAD` mapping range as **demand-zero** first, then only allocates/maps the pages that actually contain file-backed bytes.
+The user program loader sets up the program's full `PT_LOAD` mapping range as **demand-zero** first, then only allocates/maps the pages that actually contain file-backed bytes.
 
 Result:
 - Large user `.bss` regions (and similar zero-fill spans) do **not** immediately allocate physical frames.

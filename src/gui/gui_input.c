@@ -320,7 +320,7 @@ void tile_render_once(void) {
 
     tui_refresh();
     // Force an immediate present. Prefer a direct backbuffer->fb blit so we
-    // don’t depend on dirty-rect bookkeeping in this one-shot path.
+    // don't depend on dirty-rect bookkeeping in this one-shot path.
     if (vga_get_vsync_enabled()) vga_wait_vblank();
     vga_blit_backbuffer_region_to_fb(0, 0, screen_w, screen_h);
 

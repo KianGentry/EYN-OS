@@ -15,6 +15,6 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    puts("EYN-OS (userland command)");
+    puts("EYN-OS Release 16");
     return 0;
 }

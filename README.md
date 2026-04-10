@@ -24,14 +24,14 @@ Rather than relying on external libraries, EYN-OS includes minimal, well‑docum
 
 ## Architecture and philosophy
 
-EYN-OS follows a “learnable core” approach:
+EYN-OS follows a "learnable core" approach:
 - From‑scratch components with small, readable implementations (no libc)
 - Clear layering: CPU/interrupts → drivers → kernel utilities → UI/tools
 - Conservative memory footprint suitable for very low‑RAM targets
 - Deterministic behavior prioritized over feature breadth
 
 ### What makes it different
-- Education first: code explains the “why,” not just the “what”
+- Education first: code explains the "why," not just the "what"
 - Minimal dependencies: predictable builds and easy portability
 - Tight scope: only the primitives needed to understand an OS stack
 - Practical docs: APIs and internals documented alongside the code
@@ -115,7 +115,7 @@ Start here: **[docs/README.md](docs/README.md)**
 Contributions are welcome. This project values clarity and simplicity:
 
 - Keep implementations small and readable
-- Prefer clear comments that explain the “why”
+- Prefer clear comments that explain the "why"
 - Favor portable approaches and conservative memory use
 - Update docs alongside code changes
 

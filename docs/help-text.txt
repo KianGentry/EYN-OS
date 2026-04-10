@@ -103,7 +103,9 @@ Utility Commands:
   sort            - Sort strings alphabetically.
   spam            - Spam 'EYN-OS' to stdout 100 times.
   tiling          - Launch the tiling manager.
+  view_backend_audio - Run the view_backend_audio command.
   view_backend_bmp - Run the view_backend_bmp command.
+  view_backend_html - Run the view_backend_html command.
   view_backend_rei - Run the view_backend_rei command.
   view_backend_reis - Play a REIS audio file in a dedicated backend.
   view_backend_reiv - Play a REIV video file in a dedicated backend.

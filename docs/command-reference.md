@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-06 08:25:42
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-10 11:54:14
 
-**Total Commands:** 87
+**Total Commands:** 89
 
 ## Table of Contents
 
@@ -1340,6 +1340,22 @@ tiling
 
 ---
 
+### view_backend_audio
+
+**Binary:** `testdir/binaries/view_backend_audio`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the view_backend_audio command.
+
+**Example:**
+```bash
+view_backend_audio
+```
+
+---
+
 ### view_backend_bmp
 
 **Binary:** `testdir/binaries/view_backend_bmp`
@@ -1352,6 +1368,22 @@ Run the view_backend_bmp command.
 **Example:**
 ```bash
 view_backend_bmp
+```
+
+---
+
+### view_backend_html
+
+**Binary:** `testdir/binaries/view_backend_html`
+
+**Metadata Source:** `testdir/code/(metadata not found)`
+
+**Description:**
+Run the view_backend_html command.
+
+**Example:**
+```bash
+view_backend_html
 ```
 
 ---
@@ -1430,5 +1462,5 @@ xeyes
 | Memory Commands | 7 |
 | GUI/Window Commands | 10 |
 | Development Commands | 10 |
-| Utility Commands | 29 |
+| Utility Commands | 31 |
 

@@ -874,10 +874,22 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     if (!slot) return -1;
 
     while (slot->state != USER_TASK_STATE_ZOMBIE) {
+        // If any runnable user task exists, execute it now. This allows
+        // parent tasks blocked in waitpid() to make progress on spawned
+        // children even though only one ring3 task runs at a time.
+        if (user_task_continue_or_schedule()) {
+            slot = user_task_find_slot_by_pid(pid);
+            if (!slot) return -1;
+            continue;
+        }
+
         if (flags & USER_TASK_WAIT_NOHANG) return 0;
         watchdog_kick("waitpid");
         __asm__ __volatile__("sti");
         __asm__ __volatile__("hlt");
+
+        slot = user_task_find_slot_by_pid(pid);
+        if (!slot) return -1;
     }
 
     if (out_status) *out_status = slot->status;
