@@ -29,6 +29,12 @@ int user_task_poll_scheduler(void);
 void user_task_capture_syscall_frame(const regs_t* regs);
 int user_task_try_resume_from_syscall(regs_t* regs);
 
+/* Scheduler integration helpers used by timer and blocking subsystems. */
+void user_task_on_timeslice_end(void);
+int user_task_get_running_pid(void);
+int user_task_donate_running_to_pid(int target_pid, uint16 tickets);
+void user_task_clear_running_donation(void);
+
 // Mapping ownership accessors used by abort/cleanup logic.
 void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* stack_page);
 void user_task_set_current_mapping_state(uint32 base, uint32 pages, uint32 stack_page);

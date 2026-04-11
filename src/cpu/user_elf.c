@@ -611,6 +611,8 @@ typedef struct {
     uint16 effective_tickets;
     int wait_target_pid;
     int donation_target_pid;
+    uint16 donation_tickets_out;
+    uint16 _sched_pad1;
     user_task_runtime_t runtime;
     user_task_image_t* image;
     int has_syscall_frame;
@@ -654,10 +656,26 @@ typedef struct {
 #define USER_TASK_TICKETS_DEFAULT  32u
 #define USER_TASK_TICKETS_MAX      1024u
 
+/*
+ * ABI-INVARIANT: Cross-class service floors for stratified lottery.
+ *
+ * Why: Prevents strict-class starvation while preserving strong preference for
+ * higher classes.
+ * Invariant: If lower classes are runnable continuously, class 0 yields at
+ * least one slot every (USER_TASK_CLASS0_BURST_MAX + 1) selections, and class 1
+ * yields to class 2 at least one slot every (USER_TASK_CLASS1_BURST_MAX + 1)
+ * selections.
+ * ABI-sensitive: Yes (user-visible latency bounds by class).
+ */
+#define USER_TASK_CLASS0_BURST_MAX 8u
+#define USER_TASK_CLASS1_BURST_MAX 4u
+
 static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static int g_user_task_next_pid = 1;
 static user_task_slot_t* g_user_task_active_slot = NULL;
 static volatile int g_user_task_schedule_request = 0;
+static uint16 g_user_task_class0_burst_remaining = USER_TASK_CLASS0_BURST_MAX;
+static uint16 g_user_task_class1_burst_remaining = USER_TASK_CLASS1_BURST_MAX;
 
 static user_task_image_t* user_task_image_build(uint8 drive,
                                                 const char* abspath,
@@ -734,6 +752,16 @@ void user_task_request_schedule(void) {
     g_user_task_schedule_request = 1;
 }
 
+void user_task_on_timeslice_end(void) {
+    if (!g_user_task_active) return;
+    if ((int)g_user_task_running_pid <= 0) return;
+    user_task_request_schedule();
+}
+
+int user_task_get_running_pid(void) {
+    return (int)g_user_task_running_pid;
+}
+
 void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* stack_page) {
     if (g_user_task_active_slot) {
         if (base) *base = g_user_task_active_slot->runtime.code_base;
@@ -806,6 +834,82 @@ static uint32 user_task_effective_tickets(user_task_slot_t* slot) {
     return clamped;
 }
 
+static void user_task_clear_donation(user_task_slot_t* donor) {
+    if (!donor) return;
+
+    int target_pid = donor->donation_target_pid;
+    uint32 donated_out = (uint32)donor->donation_tickets_out;
+    if (target_pid > 0 && donated_out > 0) {
+        user_task_slot_t* target = user_task_find_slot_by_pid(target_pid);
+        if (target && target->used) {
+            uint32 current = (uint32)target->donated_tickets;
+            target->donated_tickets = (uint16)((current > donated_out) ? (current - donated_out) : 0u);
+            (void)user_task_effective_tickets(target);
+        }
+    }
+
+    donor->donation_target_pid = 0;
+    donor->donation_tickets_out = 0;
+    (void)user_task_effective_tickets(donor);
+}
+
+static void user_task_clear_donations_target_pid(int target_pid) {
+    if (target_pid <= 0) return;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* donor = &g_user_tasks[i];
+        if (!donor->used) continue;
+        if (donor->donation_target_pid != target_pid) continue;
+        user_task_clear_donation(donor);
+    }
+}
+
+static void user_task_donate_tickets(user_task_slot_t* donor,
+                                     user_task_slot_t* target,
+                                     uint32 tickets) {
+    if (!donor) return;
+
+    user_task_clear_donation(donor);
+
+    if (!target || !target->used) return;
+    if (target->state == USER_TASK_STATE_UNUSED) return;
+    if (target->pid <= 0 || donor->pid <= 0) return;
+    if (target->pid == donor->pid) return;
+    if (tickets == 0) return;
+
+    uint32 grant = user_task_clamp_tickets(tickets);
+    uint32 room = USER_TASK_TICKETS_MAX - (uint32)target->donated_tickets;
+    if (room == 0) return;
+    if (grant > room) grant = room;
+
+    target->donated_tickets = (uint16)((uint32)target->donated_tickets + grant);
+    donor->donation_target_pid = target->pid;
+    donor->donation_tickets_out = (uint16)grant;
+
+    (void)user_task_effective_tickets(target);
+    (void)user_task_effective_tickets(donor);
+}
+
+int user_task_donate_running_to_pid(int target_pid, uint16 tickets) {
+    int running_pid = (int)g_user_task_running_pid;
+    if (running_pid <= 0 || target_pid <= 0) return -1;
+
+    user_task_slot_t* donor = user_task_find_slot_by_pid(running_pid);
+    user_task_slot_t* target = user_task_find_slot_by_pid(target_pid);
+    if (!donor || !target) return -1;
+    if (donor == target) return -1;
+
+    user_task_donate_tickets(donor, target, (uint32)tickets);
+    return 0;
+}
+
+void user_task_clear_running_donation(void) {
+    int running_pid = (int)g_user_task_running_pid;
+    if (running_pid <= 0) return;
+    user_task_slot_t* donor = user_task_find_slot_by_pid(running_pid);
+    if (!donor) return;
+    user_task_clear_donation(donor);
+}
+
 static int user_task_slot_eligible(user_task_slot_t* slot,
                                    int exclude_pid,
                                    int require_syscall_frame) {
@@ -821,32 +925,101 @@ static int user_task_slot_eligible(user_task_slot_t* slot,
     return 1;
 }
 
-static user_task_slot_t* user_task_pick_runnable_slot(int exclude_pid,
-                                                       int require_syscall_frame) {
-    for (uint32 cls = 0; cls < USER_TASK_SCHED_CLASS_COUNT; ++cls) {
-        uint32 total_tickets = 0;
+static int user_task_class_has_runnable(uint32 sched_class,
+                                        int exclude_pid,
+                                        int require_syscall_frame) {
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!user_task_slot_eligible(slot, exclude_pid, require_syscall_frame)) continue;
+        if (user_task_sched_class_index(slot) != sched_class) continue;
+        return 1;
+    }
+    return 0;
+}
 
-        for (int i = 0; i < USER_TASK_MAX; ++i) {
-            user_task_slot_t* slot = &g_user_tasks[i];
-            if (!user_task_slot_eligible(slot, exclude_pid, require_syscall_frame)) continue;
-            if (user_task_sched_class_index(slot) != cls) continue;
-            total_tickets += user_task_effective_tickets(slot);
+static int user_task_select_sched_class_with_floor(int exclude_pid,
+                                                    int require_syscall_frame,
+                                                    uint32* out_class) {
+    int has0 = user_task_class_has_runnable(USER_TASK_SCHED_CLASS_INTERACTIVE,
+                                            exclude_pid,
+                                            require_syscall_frame);
+    int has1 = user_task_class_has_runnable(USER_TASK_SCHED_CLASS_NORMAL,
+                                            exclude_pid,
+                                            require_syscall_frame);
+    int has2 = user_task_class_has_runnable(USER_TASK_SCHED_CLASS_BACKGROUND,
+                                            exclude_pid,
+                                            require_syscall_frame);
+
+    if (!has0) g_user_task_class0_burst_remaining = USER_TASK_CLASS0_BURST_MAX;
+    if (!has1) g_user_task_class1_burst_remaining = USER_TASK_CLASS1_BURST_MAX;
+
+    if (has0) {
+        if (has1 || has2) {
+            if (g_user_task_class0_burst_remaining == 0) {
+                g_user_task_class0_burst_remaining = USER_TASK_CLASS0_BURST_MAX;
+                if (has1) {
+                    *out_class = USER_TASK_SCHED_CLASS_NORMAL;
+                    return 1;
+                }
+                *out_class = USER_TASK_SCHED_CLASS_BACKGROUND;
+                return 1;
+            }
+            g_user_task_class0_burst_remaining--;
         }
 
-        if (total_tickets == 0) continue;
+        *out_class = USER_TASK_SCHED_CLASS_INTERACTIVE;
+        return 1;
+    }
 
-        uint32 draw = sched_rng_bounded(total_tickets);
-        uint32 acc = 0;
-
-        for (int i = 0; i < USER_TASK_MAX; ++i) {
-            user_task_slot_t* slot = &g_user_tasks[i];
-            if (!user_task_slot_eligible(slot, exclude_pid, require_syscall_frame)) continue;
-            if (user_task_sched_class_index(slot) != cls) continue;
-
-            acc += user_task_effective_tickets(slot);
-            if (draw < acc) {
-                return slot;
+    if (has1) {
+        if (has2) {
+            if (g_user_task_class1_burst_remaining == 0) {
+                g_user_task_class1_burst_remaining = USER_TASK_CLASS1_BURST_MAX;
+                *out_class = USER_TASK_SCHED_CLASS_BACKGROUND;
+                return 1;
             }
+            g_user_task_class1_burst_remaining--;
+        }
+
+        *out_class = USER_TASK_SCHED_CLASS_NORMAL;
+        return 1;
+    }
+
+    if (has2) {
+        *out_class = USER_TASK_SCHED_CLASS_BACKGROUND;
+        return 1;
+    }
+
+    return 0;
+}
+
+static user_task_slot_t* user_task_pick_runnable_slot(int exclude_pid,
+                                                       int require_syscall_frame) {
+    uint32 cls = USER_TASK_SCHED_CLASS_NORMAL;
+    if (!user_task_select_sched_class_with_floor(exclude_pid, require_syscall_frame, &cls)) {
+        return NULL;
+    }
+
+    uint32 total_tickets = 0;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!user_task_slot_eligible(slot, exclude_pid, require_syscall_frame)) continue;
+        if (user_task_sched_class_index(slot) != cls) continue;
+        total_tickets += user_task_effective_tickets(slot);
+    }
+
+    if (total_tickets == 0) return NULL;
+
+    uint32 draw = sched_rng_bounded(total_tickets);
+    uint32 acc = 0;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!user_task_slot_eligible(slot, exclude_pid, require_syscall_frame)) continue;
+        if (user_task_sched_class_index(slot) != cls) continue;
+
+        acc += user_task_effective_tickets(slot);
+        if (draw < acc) {
+            return slot;
         }
     }
 
@@ -896,6 +1069,7 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     slot->effective_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;
     slot->wait_target_pid = 0;
     slot->donation_target_pid = 0;
+    slot->donation_tickets_out = 0;
     if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
 
     /*
@@ -951,6 +1125,8 @@ void user_task_notify_exit(int status) {
     if (pid > 0) {
         user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
         if (slot) {
+            user_task_clear_donation(slot);
+            user_task_clear_donations_target_pid(pid);
             slot->state = USER_TASK_STATE_ZOMBIE;
             slot->status = status;
         }
@@ -965,26 +1141,46 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
     if (!slot) return -1;
 
+    int waiter_pid = (int)g_user_task_running_pid;
+    user_task_slot_t* waiter = user_task_find_slot_by_pid(waiter_pid);
+    if (waiter && waiter != slot) {
+        uint32 donation = waiter->base_tickets ? (uint32)waiter->base_tickets : USER_TASK_TICKETS_DEFAULT;
+        user_task_donate_tickets(waiter, slot, donation);
+    }
+
     while (slot->state != USER_TASK_STATE_ZOMBIE) {
         // If any runnable user task exists, execute it now. This allows
         // parent tasks blocked in waitpid() to make progress on spawned
         // children even though only one ring3 task runs at a time.
         if (user_task_continue_or_schedule()) {
             slot = user_task_find_slot_by_pid(pid);
-            if (!slot) return -1;
+            if (!slot) {
+                if (waiter) user_task_clear_donation(waiter);
+                return -1;
+            }
             continue;
         }
 
-        if (flags & USER_TASK_WAIT_NOHANG) return 0;
+        if (flags & USER_TASK_WAIT_NOHANG) {
+            if (waiter) user_task_clear_donation(waiter);
+            return 0;
+        }
         watchdog_kick("waitpid");
         __asm__ __volatile__("sti");
         __asm__ __volatile__("hlt");
 
         slot = user_task_find_slot_by_pid(pid);
-        if (!slot) return -1;
+        if (!slot) {
+            if (waiter) user_task_clear_donation(waiter);
+            return -1;
+        }
     }
 
+    if (waiter) user_task_clear_donation(waiter);
+
     if (out_status) *out_status = slot->status;
+    user_task_clear_donation(slot);
+    user_task_clear_donations_target_pid(slot->pid);
     user_task_image_free(slot->image);
     slot->image = NULL;
     slot->used = 0;
@@ -997,6 +1193,7 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->effective_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;
     slot->wait_target_pid = 0;
     slot->donation_target_pid = 0;
+    slot->donation_tickets_out = 0;
     slot->has_syscall_frame = 0;
     user_task_request_schedule();
     return pid;

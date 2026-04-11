@@ -1,4 +1,4 @@
-; amd64 IRQ stubs 0..15 route to C dispatcher irq_dispatch_c(irq)
+; amd64 IRQ stubs 0..15 route to C dispatcher irq_dispatch_c(irq, frame_ptr)
 
 bits 64
 
@@ -52,6 +52,7 @@ global irq%1
 irq%1:
     PUSH_GPRS
     mov edi, %1
+    mov rsi, rsp
     call irq_dispatch_c
     cmp dword [rel g_abort_to_shell], 0
     je .no_abort_%1

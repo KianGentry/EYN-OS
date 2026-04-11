@@ -862,6 +862,16 @@ typedef enum {
  */
 #define USER_PIPE_BUFFER_BYTES 4096
 
+/*
+ * ABI-INVARIANT: Ticket donation amount for blocked pipe endpoints.
+ *
+ * Why: Improves pipeline responsiveness by temporarily boosting the likely
+ * unblocking peer when read/write must wait.
+ * Invariant: Donation is transient and cleared when wait condition resolves.
+ * ABI-sensitive: Behavioral (scheduler latency), not numeric syscall ABI.
+ */
+#define USER_TASK_PIPE_DONATION_TICKETS 24u
+
 typedef struct {
     int used;
     int persistent_fifo;
@@ -876,6 +886,8 @@ typedef struct {
     uint32 spool_read_pos;
     uint32 spool_write_pos;
     uint32 spool_bytes;
+    int last_reader_pid;
+    int last_writer_pid;
     char fifo_path[128];
     uint8 buffer[USER_PIPE_BUFFER_BYTES];
 } user_pipe_t;
@@ -992,6 +1004,8 @@ static void user_pipe_maybe_destroy(int pipe_id) {
             p->spool_read_pos = 0;
             p->spool_write_pos = 0;
             p->spool_bytes = 0;
+            p->last_reader_pid = 0;
+            p->last_writer_pid = 0;
         }
         return;
     }
@@ -1064,19 +1078,37 @@ static int user_pipe_read(int pipe_id, void* user_dst, int maxlen, int nonblock)
     if (!p->used) return -1;
     if (maxlen == 0) return 0;
 
+    int donated = 0;
+    int running_pid = user_task_get_running_pid();
+    if (running_pid > 0) {
+        p->last_reader_pid = running_pid;
+    }
+
     while (p->bytes_used == 0 && p->spool_bytes == 0) {
         if (p->writer_refs == 0) {
+            if (donated) user_task_clear_running_donation();
             // POSIX-style EOF: no writers and no buffered bytes.
             return 0;
         }
         if (nonblock) {
+            if (donated) user_task_clear_running_donation();
             return -1;
         }
-        if (g_user_interrupt) return -1;
+        if (g_user_interrupt) {
+            if (donated) user_task_clear_running_donation();
+            return -1;
+        }
+        if (running_pid > 0 && !donated && p->last_writer_pid > 0 && p->last_writer_pid != running_pid) {
+            if (user_task_donate_running_to_pid(p->last_writer_pid, (uint16)USER_TASK_PIPE_DONATION_TICKETS) == 0) {
+                donated = 1;
+            }
+        }
         watchdog_kick("pipe-read");
         __asm__ __volatile__("sti");
         __asm__ __volatile__("hlt");
     }
+
+    if (donated) user_task_clear_running_donation();
 
     int n = 0;
     while (n < maxlen && p->bytes_used > 0) {
@@ -1103,7 +1135,14 @@ static int user_pipe_write(int pipe_id, const void* user_src, int len, int nonbl
     if (!p->used) return -1;
     if (len == 0) return 0;
 
+    int donated = 0;
+    int running_pid = user_task_get_running_pid();
+    if (running_pid > 0) {
+        p->last_writer_pid = running_pid;
+    }
+
     if (p->reader_refs == 0) {
+        if (donated) user_task_clear_running_donation();
         // POSIX-like broken pipe behavior: no readers present.
         return -1;
     }
@@ -1112,17 +1151,30 @@ static int user_pipe_write(int pipe_id, const void* user_src, int len, int nonbl
     while (n < len) {
         while (p->bytes_used >= USER_PIPE_BUFFER_BYTES && (!p->spool_enabled || p->spool_bytes >= p->spool_cap)) {
             if (p->reader_refs == 0) {
+                if (donated) user_task_clear_running_donation();
                 return (n > 0) ? n : -1;
             }
             if (nonblock) {
+                if (donated) user_task_clear_running_donation();
                 return (n > 0) ? n : -1;
             }
             if (g_user_interrupt) {
+                if (donated) user_task_clear_running_donation();
                 return (n > 0) ? n : -1;
+            }
+            if (running_pid > 0 && !donated && p->last_reader_pid > 0 && p->last_reader_pid != running_pid) {
+                if (user_task_donate_running_to_pid(p->last_reader_pid, (uint16)USER_TASK_PIPE_DONATION_TICKETS) == 0) {
+                    donated = 1;
+                }
             }
             watchdog_kick("pipe-write");
             __asm__ __volatile__("sti");
             __asm__ __volatile__("hlt");
+        }
+
+        if (donated) {
+            user_task_clear_running_donation();
+            donated = 0;
         }
 
         uint8 b = 0;
@@ -1141,6 +1193,8 @@ static int user_pipe_write(int pipe_id, const void* user_src, int len, int nonbl
         }
         n++;
     }
+
+    if (donated) user_task_clear_running_donation();
     return n;
 }
 

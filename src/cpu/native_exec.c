@@ -9,6 +9,7 @@
 #include <drivers/flat_exe_format.h>
 #include <misc/sched.h>
 #include <context.h>
+#include <cpu/user_elf.h>
 
 // Minimal ELF32 structures for parsing 32-bit little-endian ELF files
 typedef struct {
@@ -1295,6 +1296,7 @@ void native_exit(int code) {
 
 // scheduler hook called on timeslice end
 void sched_on_timeslice_end(void) {
+    user_task_on_timeslice_end();
     if (sched_work_on_timeslice_end()) {
         return;
     }
