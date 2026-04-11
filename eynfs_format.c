@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include "include/drivers/eynfs.h"
 
-#define DEFAULT_SIZE_SECTORS 1024000 // 500MB
+#define DEFAULT_SIZE_SECTORS 1024000
 #define RESERVED_BLOCKS 4
 #define ZERO_BLOCKS 2048
 
