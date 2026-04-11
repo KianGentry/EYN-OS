@@ -86,7 +86,12 @@ Auto-start policy:
 ## Installer Program
 
 Source:
-- `testdir/code/installer_uelf.c`
+- `EYN-packages/packages/installer/installer_uelf.c`
+
+Build workflow note:
+- Installer app development now lives under `EYN-packages/packages/*`.
+- `make installer_userland` builds `installer`, `install`, and `extract` from
+  those package sources via `EYN-packages/devtools/build_user_c.sh`.
 
 Current flow:
 1. GUI drive selection

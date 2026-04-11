@@ -359,9 +359,9 @@ menuconfig:
 
 .PHONY: installer_userland installer_ramdisk menuconfig
 installer_userland:
-	bash devtools/build_user_c.sh testdir/code/installer_uelf.c testdir/binaries/installer
-	bash devtools/build_user_c.sh testdir/code/install_uelf.c testdir/binaries/install
-	bash devtools/build_user_c.sh testdir/code/extract_uelf.c testdir/binaries/extract
+	bash EYN-packages/devtools/build_user_c.sh packages/installer/installer_uelf.c ../testdir/binaries/installer
+	bash EYN-packages/devtools/build_user_c.sh packages/install/install_uelf.c ../testdir/binaries/install
+	bash EYN-packages/devtools/build_user_c.sh packages/extract/extract_uelf.c ../testdir/binaries/extract
 
 installer_ramdisk: installer_userland
 	mkdir -p tmp_user/boot
@@ -393,8 +393,14 @@ userland:
 	@for src in testdir/code/*_uelf.c; do \
 		name=$$(basename "$$src" _uelf.c); \
 		out="testdir/binaries/$$name"; \
+		build_script="devtools/build_user_c.sh"; \
+		if [ "$$name" = "installer" ] || [ "$$name" = "install" ] || [ "$$name" = "extract" ]; then \
+			src="packages/$$name/$${name}_uelf.c"; \
+			out="../testdir/binaries/$$name"; \
+			build_script="EYN-packages/devtools/build_user_c.sh"; \
+		fi; \
 		echo "Building $$name ..."; \
-		bash devtools/build_user_c.sh "$$src" "$$out" || true; \
+		bash "$$build_script" "$$src" "$$out" || true; \
 	done
 
 # Legacy non-partitioned disk image (for testing/compatibility)
