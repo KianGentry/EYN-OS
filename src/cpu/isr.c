@@ -5678,10 +5678,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             user_task_notify_exit((int)arg1);
             // Clean up any GUI resources created by this user task.
             syscall_reset_user_guis();
-            g_user_task_active = 0;
-            g_user_task_term = -1;
             g_user_interrupt = 0;
-            g_abort_to_shell = 1;
             if (!g_user_fd_inherit_mode) {
                 syscall_reset_user_fds();
             }

@@ -608,25 +608,6 @@ void vterm_handle_key(int idx, int key) {
         // append newline visually
         vterm_write_char(idx, '\n');
 
-        /*
-         * SECURITY-INVARIANT: Shell command execution must not start a new
-         * user image while another ring3 task is active.
-         *
-         * The ELF launcher rebuilds the singleton live user mapping. Running
-         * it re-entrantly from a second terminal can invalidate the active
-         * task's mapping and stall subsequent scheduling.
-         */
-        if (g_user_task_active) {
-            const char* busy_msg = "[busy] ring3 task active; stop it before launching another program.";
-            for (int bi = 0; busy_msg[bi]; ++bi) vterm_write_char(idx, busy_msg[bi]);
-            vterm_write_char(idx, '\n');
-            t->history_idx = -1;
-            t->sel_active = 0;
-            vterm_print_prompt(idx);
-            t->version++;
-            return;
-        }
-
         // handle command: use existing handle_shell_command, but capture output via shell redirect
         if (strlen(t->input_buf) > 0) {
             while (pipeline_resume_pending()) {

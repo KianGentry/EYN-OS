@@ -48,14 +48,15 @@ void user_task_cleanup_mappings(void) {
     uint32 base = 0;
     uint32 pages = 0;
     uint32 stack_page = 0;
+    address_space_t* as = vmm_current_as ? vmm_current_as : &vmm_kernel_as;
     user_task_get_current_mapping_state(&base, &pages, &stack_page);
-    uint32 stack_bottom = vmm_kernel_as.stack_bottom;
+    uint32 stack_bottom = as->stack_bottom;
 
     vm_tlb_defer_begin();
 
     if (base && pages) {
         for (uint32 i = 0; i < pages; ++i) {
-            (void)vmm_unmap_page(&vmm_kernel_as, base + i * PAGE_SIZE);
+            (void)vmm_unmap_page(as, base + i * PAGE_SIZE);
         }
     }
 
@@ -63,11 +64,11 @@ void user_task_cleanup_mappings(void) {
     // the current stack_bottom as the lower bound when it looks valid.
     if (stack_bottom >= USER_STACK_BASE && stack_bottom < USER_STACK_TOP) {
         for (uint32 va = stack_bottom; va < USER_STACK_TOP; va += PAGE_SIZE) {
-            (void)vmm_unmap_page(&vmm_kernel_as, va);
+            (void)vmm_unmap_page(as, va);
         }
     } else if (stack_page) {
         // Back-compat: older callers only tracked a single stack page.
-        (void)vmm_unmap_page(&vmm_kernel_as, stack_page);
+        (void)vmm_unmap_page(as, stack_page);
     }
 
     user_task_clear_current_mapping_state();
@@ -80,9 +81,14 @@ void user_task_cleanup_mappings(void) {
     g_user_segdom_ds = GDT_USER_DS;
 
     // Reset stack metadata for the kernel address space.
-    vmm_kernel_as.stack_bottom = USER_STACK_TOP - PAGE_SIZE;
+    as->stack_bottom = USER_STACK_TOP - PAGE_SIZE;
 
     vm_tlb_defer_end();
+
+    if (as != &vmm_kernel_as) {
+        switch_address_space(&vmm_kernel_as);
+        destroy_address_space(as);
+    }
 
     // Keep inherited user FDs alive while a multi-stage shell pipeline is
     // active; the pipeline runtime will close and reset them when it finishes.
