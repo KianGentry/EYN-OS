@@ -1098,27 +1098,19 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
         return 1;
     }
 
-    user_task_slot_t* target = user_task_pick_runnable_slot(current_pid, 0);
-    if (!target) return 0;
-
-    current->last_syscall_frame = *regs;
-    current->has_syscall_frame = 1;
-    current->state = USER_TASK_STATE_RUNNABLE;
-
-    g_user_task_schedule_request = 0;
-    if (target->term_idx >= 0) {
-        g_user_task_term = target->term_idx;
-    }
-
-    if (user_task_launch_slot(target) != 0) {
-        current->state = USER_TASK_STATE_RUNNING;
-        g_user_task_active_slot = current;
-        g_user_task_running_pid = current->pid;
-        *regs = current->last_syscall_frame;
-        return 0;
-    }
-
-    return 1;
+    /*
+     * SECURITY-INVARIANT: Do not launch a fresh ring3 image from an active
+     * task's syscall return path.
+     *
+     * Why: user_elf_run_argv() tears down and rebuilds the singleton live
+     * user mapping. Doing that while another task is still active corrupts the
+     * current task's execution context and can deadlock scheduling.
+     *
+     * Consequence: syscall-path reschedule is frame-switch-only. Tasks without
+     * a captured syscall frame remain queued and are launched when no ring3
+     * task is active (abort/poll scheduler path).
+     */
+    return 0;
 }
 
 int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
