@@ -603,6 +603,7 @@ typedef struct {
     int used;
     int pid;
     int status;
+    int term_idx;
     user_task_state_t state;
     uint8 sched_class;
     uint8 _sched_pad0;
@@ -674,6 +675,7 @@ static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static int g_user_task_next_pid = 1;
 static user_task_slot_t* g_user_task_active_slot = NULL;
 static volatile int g_user_task_schedule_request = 0;
+static int g_user_task_focus_term = -1;
 static uint16 g_user_task_class0_burst_remaining = USER_TASK_CLASS0_BURST_MAX;
 static uint16 g_user_task_class1_burst_remaining = USER_TASK_CLASS1_BURST_MAX;
 
@@ -731,6 +733,9 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
 
     slot->state = USER_TASK_STATE_RUNNING;
     slot->wait_target_pid = 0;
+    if (slot->term_idx >= 0) {
+        g_user_task_term = slot->term_idx;
+    }
     g_user_task_active_slot = slot;
     g_user_task_pending_pid = slot->pid;
 
@@ -750,6 +755,25 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
 
 void user_task_request_schedule(void) {
     g_user_task_schedule_request = 1;
+}
+
+void user_task_note_focus_term(int term_idx) {
+    if (term_idx < 0) {
+        g_user_task_focus_term = -1;
+    } else {
+        g_user_task_focus_term = term_idx;
+    }
+
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used) continue;
+        if (slot->state == USER_TASK_STATE_UNUSED || slot->state == USER_TASK_STATE_ZOMBIE) continue;
+        if (g_user_task_focus_term >= 0 && slot->term_idx == g_user_task_focus_term) {
+            slot->sched_class = (uint8)USER_TASK_SCHED_CLASS_INTERACTIVE;
+        } else {
+            slot->sched_class = (uint8)USER_TASK_SCHED_CLASS_NORMAL;
+        }
+    }
 }
 
 void user_task_on_timeslice_end(void) {
@@ -1026,17 +1050,12 @@ static user_task_slot_t* user_task_pick_runnable_slot(int exclude_pid,
     return NULL;
 }
 
-int user_task_try_resume_from_syscall(regs_t* regs) {
-    if (!regs) return 0;
-    if (!g_user_task_schedule_request) return 0;
-    if (!g_user_task_active) return 0;
-
-    int current_pid = (int)g_user_task_running_pid;
-    user_task_slot_t* current = user_task_find_slot_by_pid(current_pid);
-    if (!current) return 0;
+static int user_task_try_switch_to_saved_frame(regs_t* regs,
+                                               user_task_slot_t* current,
+                                               int current_pid) {
+    if (!regs || !current) return 0;
 
     user_task_slot_t* target = user_task_pick_runnable_slot(current_pid, 1);
-
     if (!target) return 0;
 
     current->last_syscall_frame = *regs;
@@ -1047,7 +1066,58 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
     target->state = USER_TASK_STATE_RUNNING;
     g_user_task_active_slot = target;
     g_user_task_running_pid = target->pid;
+    if (target->term_idx >= 0) {
+        g_user_task_term = target->term_idx;
+    }
     g_user_task_schedule_request = 0;
+    return 1;
+}
+
+int user_task_try_preempt_from_irq(regs_t* regs) {
+    if (!regs) return 0;
+    if (!g_user_task_schedule_request) return 0;
+    if (!g_user_task_active) return 0;
+
+    int current_pid = (int)g_user_task_running_pid;
+    user_task_slot_t* current = user_task_find_slot_by_pid(current_pid);
+    if (!current) return 0;
+
+    return user_task_try_switch_to_saved_frame(regs, current, current_pid);
+}
+
+int user_task_try_resume_from_syscall(regs_t* regs) {
+    if (!regs) return 0;
+    if (!g_user_task_schedule_request) return 0;
+    if (!g_user_task_active) return 0;
+
+    int current_pid = (int)g_user_task_running_pid;
+    user_task_slot_t* current = user_task_find_slot_by_pid(current_pid);
+    if (!current) return 0;
+
+    if (user_task_try_switch_to_saved_frame(regs, current, current_pid)) {
+        return 1;
+    }
+
+    user_task_slot_t* target = user_task_pick_runnable_slot(current_pid, 0);
+    if (!target) return 0;
+
+    current->last_syscall_frame = *regs;
+    current->has_syscall_frame = 1;
+    current->state = USER_TASK_STATE_RUNNABLE;
+
+    g_user_task_schedule_request = 0;
+    if (target->term_idx >= 0) {
+        g_user_task_term = target->term_idx;
+    }
+
+    if (user_task_launch_slot(target) != 0) {
+        current->state = USER_TASK_STATE_RUNNING;
+        g_user_task_active_slot = current;
+        g_user_task_running_pid = current->pid;
+        *regs = current->last_syscall_frame;
+        return 0;
+    }
+
     return 1;
 }
 
@@ -1063,6 +1133,7 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     slot->pid = g_user_task_next_pid++;
     slot->image = image;
     slot->state = USER_TASK_STATE_RUNNABLE;
+    slot->term_idx = -1;
     slot->sched_class = (uint8)USER_TASK_SCHED_CLASS_NORMAL;
     slot->base_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;
     slot->donated_tickets = 0;
@@ -1070,6 +1141,11 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     slot->wait_target_pid = 0;
     slot->donation_target_pid = 0;
     slot->donation_tickets_out = 0;
+    if (g_user_task_term >= 0) {
+        slot->term_idx = g_user_task_term;
+    } else if (tile_is_tiling_active()) {
+        slot->term_idx = tile_get_focused_term();
+    }
     if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
 
     /*
@@ -1118,6 +1194,9 @@ void user_task_capture_syscall_frame(const regs_t* regs) {
 
     slot->last_syscall_frame = *regs;
     slot->has_syscall_frame = 1;
+    if (g_user_task_term >= 0) {
+        slot->term_idx = g_user_task_term;
+    }
 }
 
 void user_task_notify_exit(int status) {
@@ -1186,6 +1265,7 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->used = 0;
     slot->pid = 0;
     slot->state = USER_TASK_STATE_UNUSED;
+    slot->term_idx = -1;
     slot->status = 0;
     slot->sched_class = (uint8)USER_TASK_SCHED_CLASS_NORMAL;
     slot->base_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;

@@ -97,6 +97,11 @@ void tile_close(int tile_idx) {
 
 int tile_get_focused() { return focused; }
 
+int tile_get_focused_term() {
+    if (focused < 0 || focused >= tile_count) return -1;
+    return tiles[focused].term_idx;
+}
+
 int tile_find_by_term(int term_idx) {
     if (term_idx < 0 || term_idx >= MAX_TILES) return -1;
     for (int i = 0; i < tile_count; ++i) {
@@ -341,6 +346,14 @@ void tile_render_once(void) {
 int tile_pump_input_once(void) {
     if (!g_tm_initialized) return 0;
     if (tile_count <= 0) return 0;
+
+    if (g_user_task_active) {
+        int focus_term = -1;
+        if (g_win_focused < 0 && focused >= 0 && focused < tile_count) {
+            focus_term = tiles[focused].term_idx;
+        }
+        user_task_note_focus_term(focus_term);
+    }
 
     // Also poll + route mouse while a ring3 task is running (the main tiler loop is paused).
     // This enables GUI user programs to receive GUI_EVENT_MOUSE events.
@@ -837,6 +850,8 @@ int tile_pump_input_once(void) {
                 {
                     int t_hit_p = tile_index_at(me.x, me.y);
                     if (t_hit_p >= 0 && t_hit_p < tile_count && !tiles[t_hit_p].maximized) {
+                        focused = t_hit_p;
+                        g_win_focused = -1;
                         int te = tile_border_resize_hit_test(&tiles[t_hit_p], me.x, me.y);
                         if (te) {
                             tile_border_resize_active = 1;
@@ -932,7 +947,7 @@ int tile_pump_input_once(void) {
      */
     if (key < 0) {
         int target_tile = focused;
-        if (g_user_task_active && g_user_task_term >= 0) {
+        if ((target_tile < 0 || target_tile >= tile_count) && g_user_task_active && g_user_task_term >= 0) {
             int tt = tile_find_by_term(g_user_task_term);
             if (tt >= 0 && tt < tile_count) target_tile = tt;
         }
@@ -978,9 +993,13 @@ int tile_pump_input_once(void) {
     // instead of the normal vterm command handling.
     if (g_user_task_active && g_user_task_term >= 0) {
         int term = g_user_task_term;
+        int active_tile = tile_find_by_term(term);
+        int allow_active_input = (g_win_focused < 0 && active_tile >= 0 && active_tile == focused);
         // If this ring3 task has attached a GUI key handler, prefer routing keys
         // to the GUI event queue instead of hijacking them into stdin.
-        if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
+        if (!allow_active_input) {
+            // Focus is elsewhere; do not hijack keys into the active task stdin.
+        } else if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
             // fall through to normal routing
         } else {
         // Skip Super-modified keys (they go to tiler hotkeys below)
@@ -1252,10 +1271,9 @@ int tile_pump_input_once(void) {
     }
 
     // While a ring3 task is active, route normal keys to the task's tile.
-    // Mouse-based focus switching is not pumped in the PIT path, so relying on
-    // 'focused' can starve the user task of input.
+    // Normal routing prefers the currently focused tile/window.
     int target_tile = focused;
-    if (g_user_task_active && g_user_task_term >= 0) {
+    if ((target_tile < 0 || target_tile >= tile_count) && g_user_task_active && g_user_task_term >= 0) {
         int tt = tile_find_by_term(g_user_task_term);
         if (tt >= 0 && tt < tile_count) target_tile = tt;
     }

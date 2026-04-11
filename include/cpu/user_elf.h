@@ -28,6 +28,8 @@ void user_task_request_schedule(void);
 int user_task_poll_scheduler(void);
 void user_task_capture_syscall_frame(const regs_t* regs);
 int user_task_try_resume_from_syscall(regs_t* regs);
+int user_task_try_preempt_from_irq(regs_t* regs);
+void user_task_note_focus_term(int term_idx);
 
 /* Scheduler integration helpers used by timer and blocking subsystems. */
 void user_task_on_timeslice_end(void);

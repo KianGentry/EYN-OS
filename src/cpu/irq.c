@@ -142,7 +142,7 @@ static void irq_maybe_preempt_user_task_on_timer(int irq_number, uintptr frame_p
     if ((regs.cs & 3u) != 3u) return;
 
     user_task_capture_syscall_frame(&regs);
-    if (user_task_try_resume_from_syscall(&regs)) {
+    if (user_task_try_preempt_from_irq(&regs)) {
         (void)irq_regs_to_frame(frame_ptr, &regs);
     }
 }
