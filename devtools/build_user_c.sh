@@ -4,8 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-src="${1:-testdir/hello_c_uelf.c}"
-out="${2:-testdir/hello_c_uelf.uelf}"
+src="${1:-EYN-packages/packages/hello_c/hello_c_uelf.c}"
+out="${2:-testdir/binaries/hello_c}"
 
 tmp_root="tmp_user"
 mkdir -p "$tmp_root"

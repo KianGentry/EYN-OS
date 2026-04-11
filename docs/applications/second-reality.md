@@ -17,7 +17,7 @@ Features implemented:
 From the repository root:
 
 ```bash
-./devtools/build_user_c.sh testdir/demo.c testdir/demo.uelf
+./EYN-packages/devtools/build_user_c.sh packages/second_reality/second_reality_uelf.c ../testdir/binaries/second_reality
 ```
 
 ### Run
@@ -25,7 +25,7 @@ From the repository root:
 From the EYN-OS shell:
 
 ```bash
-run /testdir/demo.uelf
+second_reality
 ```
 
 ### Notes
