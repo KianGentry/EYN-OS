@@ -44,7 +44,7 @@ make qemu-debug
 make qemu-gdb
 ```
 
-- Rebuild userland binaries from `testdir/code/*_uelf.c`:
+- Rebuild userland binaries from `EYN-packages/packages/*/*_uelf.c`:
 
 ```bash
 make userland
@@ -67,7 +67,7 @@ make analyze
 User-facing shell commands are now primarily userland binaries loaded from `/binaries`.
 
 ### Add a New User Command
-1. Create source at `testdir/code/<name>_uelf.c`.
+1. Create source at `EYN-packages/packages/<name>/<name>_uelf.c`.
 2. Add command metadata near the top:
 
 ```c
@@ -78,7 +78,7 @@ EYN_CMDMETA_V1("Describe what this command does.", "<name> --example");
 3. Build it to `testdir/binaries/<name>` using one of:
 
 ```bash
-bash devtools/build_user_c.sh testdir/code/<name>_uelf.c testdir/binaries/<name>
+bash EYN-packages/devtools/build_user_c.sh packages/<name>/<name>_uelf.c ../testdir/binaries/<name>
 ```
 
 4. Repack and run:

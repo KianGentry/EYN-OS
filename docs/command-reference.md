@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-10 23:57:25
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-11 12:59:08
 
-**Total Commands:** 90
+**Total Commands:** 91
 
 ## Table of Contents
 
@@ -20,7 +20,7 @@ This document is auto-generated from userland command metadata and binaries. Las
 
 **Binary:** `testdir/binaries/cd`
 
-**Metadata Source:** `testdir/code/cd_uelf.c`
+**Metadata Source:** `EYN-packages/packages/cd/cd_uelf.c`
 
 **Description:**
 Change the current directory.
@@ -36,7 +36,7 @@ cd <directory>
 
 **Binary:** `testdir/binaries/copy`
 
-**Metadata Source:** `testdir/code/copy_uelf.c`
+**Metadata Source:** `EYN-packages/packages/copy/copy_uelf.c`
 
 **Description:**
 Copy a file from source to destination.
@@ -52,7 +52,7 @@ copy file1.txt file2.txt
 
 **Binary:** `testdir/binaries/create`
 
-**Metadata Source:** `testdir/code/create_uelf.c`
+**Metadata Source:** `EYN-packages/packages/create/create_uelf.c`
 
 **Description:**
 Create a file or directory.
@@ -68,7 +68,7 @@ create test/
 
 **Binary:** `testdir/binaries/del`
 
-**Metadata Source:** `testdir/code/del_uelf.c`
+**Metadata Source:** `EYN-packages/packages/del/del_uelf.c`
 
 **Description:**
 Delete a file from the filesystem.
@@ -84,7 +84,7 @@ del myfile.txt
 
 **Binary:** `testdir/binaries/deldir`
 
-**Metadata Source:** `testdir/code/deldir_uelf.c`
+**Metadata Source:** `EYN-packages/packages/deldir/deldir_uelf.c`
 
 **Description:**
 Delete an empty directory.
@@ -100,7 +100,7 @@ deldir myfolder
 
 **Binary:** `testdir/binaries/delete`
 
-**Metadata Source:** `testdir/code/delete_uelf.c`
+**Metadata Source:** `EYN-packages/packages/delete/delete_uelf.c`
 
 **Description:**
 Delete a file or directory.
@@ -116,7 +116,7 @@ delete test.txt
 
 **Binary:** `testdir/binaries/fatfix`
 
-**Metadata Source:** `testdir/code/fatfix_uelf.c`
+**Metadata Source:** `EYN-packages/packages/fatfix/fatfix_uelf.c`
 
 **Description:**
 Repair FAT32 directory entry flags.
@@ -132,7 +132,7 @@ fatfix /
 
 **Binary:** `testdir/binaries/fscheck`
 
-**Metadata Source:** `testdir/code/fscheck_uelf.c`
+**Metadata Source:** `EYN-packages/packages/fscheck/fscheck_uelf.c`
 
 **Description:**
 Check filesystem integrity.
@@ -148,7 +148,7 @@ fscheck
 
 **Binary:** `testdir/binaries/head`
 
-**Metadata Source:** `testdir/code/head_uelf.c`
+**Metadata Source:** `EYN-packages/packages/head/head_uelf.c`
 
 **Description:**
 Print the first lines of a file.
@@ -164,7 +164,7 @@ head -n 10 /test.txt
 
 **Binary:** `testdir/binaries/ls`
 
-**Metadata Source:** `testdir/code/(metadata not found)`
+**Metadata Source:** `(metadata not found)`
 
 **Description:**
 Run the ls command.
@@ -180,7 +180,7 @@ ls
 
 **Binary:** `testdir/binaries/makedir`
 
-**Metadata Source:** `testdir/code/makedir_uelf.c`
+**Metadata Source:** `EYN-packages/packages/makedir/makedir_uelf.c`
 
 **Description:**
 Create a new directory.
@@ -196,7 +196,7 @@ makedir myfolder
 
 **Binary:** `testdir/binaries/move`
 
-**Metadata Source:** `testdir/code/move_uelf.c`
+**Metadata Source:** `EYN-packages/packages/move/move_uelf.c`
 
 **Description:**
 Move a file from source to destination.
@@ -212,7 +212,7 @@ move file1.txt /backup/file1.txt
 
 **Binary:** `testdir/binaries/pwd`
 
-**Metadata Source:** `testdir/code/pwd_uelf.c`
+**Metadata Source:** `EYN-packages/packages/pwd/pwd_uelf.c`
 
 **Description:**
 Print the current working directory.
@@ -228,7 +228,7 @@ pwd
 
 **Binary:** `testdir/binaries/read`
 
-**Metadata Source:** `testdir/code/(metadata not found)`
+**Metadata Source:** `(metadata not found)`
 
 **Description:**
 Run the read command.
@@ -244,7 +244,7 @@ read
 
 **Binary:** `testdir/binaries/size`
 
-**Metadata Source:** `testdir/code/size_uelf.c`
+**Metadata Source:** `EYN-packages/packages/size/size_uelf.c`
 
 **Description:**
 Show the size of a file in bytes.
@@ -260,7 +260,7 @@ size myfile.txt
 
 **Binary:** `testdir/binaries/tail`
 
-**Metadata Source:** `testdir/code/tail_uelf.c`
+**Metadata Source:** `EYN-packages/packages/tail/tail_uelf.c`
 
 **Description:**
 Print the last lines of a file.
@@ -278,7 +278,7 @@ tail -n 10 /test.txt
 
 **Binary:** `testdir/binaries/clear`
 
-**Metadata Source:** `testdir/code/clear_uelf.c`
+**Metadata Source:** `EYN-packages/packages/clear/clear_uelf.c`
 
 **Description:**
 Clear terminal output.
@@ -294,7 +294,7 @@ clear
 
 **Binary:** `testdir/binaries/drive`
 
-**Metadata Source:** `testdir/code/drive_uelf.c`
+**Metadata Source:** `EYN-packages/packages/drive/drive_uelf.c`
 
 **Description:**
 Drive selection helper.
@@ -310,7 +310,7 @@ drive 0
 
 **Binary:** `testdir/binaries/exit`
 
-**Metadata Source:** `testdir/code/exit_uelf.c`
+**Metadata Source:** `EYN-packages/packages/exit/exit_uelf.c`
 
 **Description:**
 Exits the kernel and shuts down the system.
@@ -326,7 +326,7 @@ exit
 
 **Binary:** `testdir/binaries/help`
 
-**Metadata Source:** `testdir/code/help_uelf.c`
+**Metadata Source:** `EYN-packages/packages/help/help_uelf.c`
 
 **Description:**
 Display command help.
@@ -342,7 +342,7 @@ help
 
 **Binary:** `testdir/binaries/init`
 
-**Metadata Source:** `testdir/code/init_uelf.c`
+**Metadata Source:** `EYN-packages/packages/init/init_uelf.c`
 
 **Description:**
 Initialize core services.
@@ -358,7 +358,7 @@ init
 
 **Binary:** `testdir/binaries/lsata`
 
-**Metadata Source:** `testdir/code/lsata_uelf.c`
+**Metadata Source:** `EYN-packages/packages/lsata/lsata_uelf.c`
 
 **Description:**
 List detected logical drives.
@@ -374,7 +374,7 @@ lsata
 
 **Binary:** `testdir/binaries/portable`
 
-**Metadata Source:** `testdir/code/portable_uelf.c`
+**Metadata Source:** `EYN-packages/packages/portable/portable_uelf.c`
 
 **Description:**
 Show portability optimization status.
@@ -390,7 +390,7 @@ portable stats
 
 **Binary:** `testdir/binaries/serialtest`
 
-**Metadata Source:** `testdir/code/serialtest_uelf.c`
+**Metadata Source:** `EYN-packages/packages/serialtest/serialtest_uelf.c`
 
 **Description:**
 Serial output test (userland).
@@ -406,7 +406,7 @@ serialtest
 
 **Binary:** `testdir/binaries/ver`
 
-**Metadata Source:** `testdir/code/ver_uelf.c`
+**Metadata Source:** `EYN-packages/packages/ver/ver_uelf.c`
 
 **Description:**
 Show system version information.
@@ -424,7 +424,7 @@ ver
 
 **Binary:** `testdir/binaries/e1000`
 
-**Metadata Source:** `testdir/code/e1000_uelf.c`
+**Metadata Source:** `EYN-packages/packages/e1000/e1000_uelf.c`
 
 **Description:**
 Intel e1000 utilities.
@@ -440,7 +440,7 @@ e1000 init
 
 **Binary:** `testdir/binaries/e1000probe`
 
-**Metadata Source:** `testdir/code/e1000probe_uelf.c`
+**Metadata Source:** `EYN-packages/packages/e1000probe/e1000probe_uelf.c`
 
 **Description:**
 Probe Intel e1000 NIC.
@@ -456,7 +456,7 @@ e1000probe
 
 **Binary:** `testdir/binaries/netcfg`
 
-**Metadata Source:** `testdir/code/netcfg_uelf.c`
+**Metadata Source:** `EYN-packages/packages/netcfg/netcfg_uelf.c`
 
 **Description:**
 Network configuration command.
@@ -472,7 +472,7 @@ netcfg show
 
 **Binary:** `testdir/binaries/netstat`
 
-**Metadata Source:** `testdir/code/netstat_uelf.c`
+**Metadata Source:** `EYN-packages/packages/netstat/netstat_uelf.c`
 
 **Description:**
 Show network status.
@@ -488,7 +488,7 @@ netstat
 
 **Binary:** `testdir/binaries/pciscan`
 
-**Metadata Source:** `testdir/code/pciscan_uelf.c`
+**Metadata Source:** `EYN-packages/packages/pciscan/pciscan_uelf.c`
 
 **Description:**
 Scan PCI devices.
@@ -504,7 +504,7 @@ pciscan net
 
 **Binary:** `testdir/binaries/ping`
 
-**Metadata Source:** `testdir/code/ping_uelf.c`
+**Metadata Source:** `EYN-packages/packages/ping/ping_uelf.c`
 
 **Description:**
 Send ICMP echo requests.
@@ -522,7 +522,7 @@ ping 10.0.2.2
 
 **Binary:** `testdir/binaries/memory`
 
-**Metadata Source:** `testdir/code/memory_uelf.c`
+**Metadata Source:** `EYN-packages/packages/memory/memory_uelf.c`
 
 **Description:**
 Memory management and testing.
@@ -538,7 +538,7 @@ memory stats
 
 **Binary:** `testdir/binaries/memory_stats`
 
-**Metadata Source:** `testdir/code/memory_stats_uelf.c`
+**Metadata Source:** `EYN-packages/packages/memory_stats/memory_stats_uelf.c`
 
 **Description:**
 Show predictive memory statistics
@@ -554,7 +554,7 @@ memory_stats
 
 **Binary:** `testdir/binaries/mmap`
 
-**Metadata Source:** `testdir/code/mmap_uelf.c`
+**Metadata Source:** `EYN-packages/packages/mmap/mmap_uelf.c`
 
 **Description:**
 Memory map a file for zero-copy access.
@@ -570,7 +570,7 @@ mmap <filename> [readonly]
 
 **Binary:** `testdir/binaries/msync`
 
-**Metadata Source:** `testdir/code/msync_uelf.c`
+**Metadata Source:** `EYN-packages/packages/msync/msync_uelf.c`
 
 **Description:**
 Synchronize memory-mapped file to disk.
@@ -586,7 +586,7 @@ msync <address>
 
 **Binary:** `testdir/binaries/munmap`
 
-**Metadata Source:** `testdir/code/munmap_uelf.c`
+**Metadata Source:** `EYN-packages/packages/munmap/munmap_uelf.c`
 
 **Description:**
 Unmap a memory-mapped file.
@@ -602,7 +602,7 @@ munmap <address>
 
 **Binary:** `testdir/binaries/pagingguards`
 
-**Metadata Source:** `testdir/code/pagingguards_uelf.c`
+**Metadata Source:** `EYN-packages/packages/pagingguards/pagingguards_uelf.c`
 
 **Description:**
 Install optional paging guards.
@@ -618,7 +618,7 @@ pagingguards
 
 **Binary:** `testdir/binaries/predict`
 
-**Metadata Source:** `testdir/code/predict_uelf.c`
+**Metadata Source:** `EYN-packages/packages/predict/predict_uelf.c`
 
 **Description:**
 Predictive memory management
@@ -636,7 +636,7 @@ predict [stats|reset|optimize]
 
 **Binary:** `testdir/binaries/clearbg`
 
-**Metadata Source:** `testdir/code/clearbg_uelf.c`
+**Metadata Source:** `EYN-packages/packages/clearbg/clearbg_uelf.c`
 
 **Description:**
 Clear background image for focused tile.
@@ -652,7 +652,7 @@ clearbg
 
 **Binary:** `testdir/binaries/draw`
 
-**Metadata Source:** `testdir/code/draw_uelf.c`
+**Metadata Source:** `EYN-packages/packages/draw/draw_uelf.c`
 
 **Description:**
 Open the draw canvas editor.
@@ -668,7 +668,7 @@ draw /images/sketch.rei
 
 **Binary:** `testdir/binaries/kstats`
 
-**Metadata Source:** `testdir/code/kstats_uelf.c`
+**Metadata Source:** `EYN-packages/packages/kstats/kstats_uelf.c`
 
 **Description:**
 Legacy kernel stats GUI (migrated default is userland 'stats').
@@ -684,7 +684,7 @@ kstats
 
 **Binary:** `testdir/binaries/kwin_test`
 
-**Metadata Source:** `testdir/code/kwin_test_uelf.c`
+**Metadata Source:** `EYN-packages/packages/kwin_test/kwin_test_uelf.c`
 
 **Description:**
 Legacy kernel window-test command (migrated default is userland 'win_test').
@@ -700,7 +700,7 @@ kwin_test
 
 **Binary:** `testdir/binaries/rect`
 
-**Metadata Source:** `testdir/code/rect_uelf.c`
+**Metadata Source:** `EYN-packages/packages/rect/rect_uelf.c`
 
 **Description:**
 Draw a rectangle.
@@ -716,7 +716,7 @@ rect 10 20 100 50 255 0 0
 
 **Binary:** `testdir/binaries/setbg`
 
-**Metadata Source:** `testdir/code/setbg_uelf.c`
+**Metadata Source:** `EYN-packages/packages/setbg/setbg_uelf.c`
 
 **Description:**
 Set background image for focused tile.
@@ -732,7 +732,7 @@ setbg /images/eynos.rei
 
 **Binary:** `testdir/binaries/setfont`
 
-**Metadata Source:** `testdir/code/setfont_uelf.c`
+**Metadata Source:** `EYN-packages/packages/setfont/setfont_uelf.c`
 
 **Description:**
 Set runtime system font (.hex/.otf/.ttf).
@@ -748,7 +748,7 @@ setfont /fonts/unscii-16.otf
 
 **Binary:** `testdir/binaries/stats`
 
-**Metadata Source:** `testdir/code/stats_uelf.c`
+**Metadata Source:** `EYN-packages/packages/stats/stats_uelf.c`
 
 **Description:**
 Open the stats GUI.
@@ -764,7 +764,7 @@ stats
 
 **Binary:** `testdir/binaries/theme`
 
-**Metadata Source:** `testdir/code/theme_uelf.c`
+**Metadata Source:** `EYN-packages/packages/theme/theme_uelf.c`
 
 **Description:**
 Open the theme editor.
@@ -780,7 +780,7 @@ theme /fonts/unscii-16.hex
 
 **Binary:** `testdir/binaries/view`
 
-**Metadata Source:** `testdir/code/view_uelf.c`
+**Metadata Source:** `EYN-packages/packages/view/view_uelf.c`
 
 **Description:**
 Dispatch a file to a view backend from /.view.
@@ -798,7 +798,7 @@ view /images/picture.rei
 
 **Binary:** `testdir/binaries/assertfail`
 
-**Metadata Source:** `testdir/code/assertfail_uelf.c`
+**Metadata Source:** `EYN-packages/packages/assertfail/assertfail_uelf.c`
 
 **Description:**
 Trigger an assertion failure (ASSERT).
@@ -814,7 +814,7 @@ assertfail yes
 
 **Binary:** `testdir/binaries/crashlog`
 
-**Metadata Source:** `testdir/code/crashlog_uelf.c`
+**Metadata Source:** `EYN-packages/packages/crashlog/crashlog_uelf.c`
 
 **Description:**
 Inspect and clear crashlog records.
@@ -830,7 +830,7 @@ crashlog dump
 
 **Binary:** `testdir/binaries/error`
 
-**Metadata Source:** `testdir/code/error_uelf.c`
+**Metadata Source:** `EYN-packages/packages/error/error_uelf.c`
 
 **Description:**
 Display command error status.
@@ -846,7 +846,7 @@ error details
 
 **Binary:** `testdir/binaries/hexdump`
 
-**Metadata Source:** `testdir/code/hexdump_uelf.c`
+**Metadata Source:** `EYN-packages/packages/hexdump/hexdump_uelf.c`
 
 **Description:**
 Hex dump file bytes.
@@ -862,7 +862,7 @@ hexdump /test.txt 256
 
 **Binary:** `testdir/binaries/log`
 
-**Metadata Source:** `testdir/code/log_uelf.c`
+**Metadata Source:** `EYN-packages/packages/log/log_uelf.c`
 
 **Description:**
 Enable or disable shell logging.
@@ -878,7 +878,7 @@ log on
 
 **Binary:** `testdir/binaries/panic`
 
-**Metadata Source:** `testdir/code/panic_uelf.c`
+**Metadata Source:** `EYN-packages/packages/panic/panic_uelf.c`
 
 **Description:**
 Trigger a kernel panic for diagnostics.
@@ -894,7 +894,7 @@ panic yes
 
 **Binary:** `testdir/binaries/pf`
 
-**Metadata Source:** `testdir/code/pf_uelf.c`
+**Metadata Source:** `EYN-packages/packages/pf/pf_uelf.c`
 
 **Description:**
 Intentionally trigger a page fault.
@@ -910,7 +910,7 @@ pf yes [addr] [r|w|x]
 
 **Binary:** `testdir/binaries/ring3`
 
-**Metadata Source:** `testdir/code/ring3_uelf.c`
+**Metadata Source:** `EYN-packages/packages/ring3/ring3_uelf.c`
 
 **Description:**
 Switch to ring 3 and run a tiny user-mode stub.
@@ -926,7 +926,7 @@ ring3 yes
 
 **Binary:** `testdir/binaries/run`
 
-**Metadata Source:** `testdir/code/run_uelf.c`
+**Metadata Source:** `EYN-packages/packages/run/run_uelf.c`
 
 **Description:**
 Run a native program, .uelf, or script.
@@ -942,7 +942,7 @@ run <program> [args...]
 
 **Binary:** `testdir/binaries/validate`
 
-**Metadata Source:** `testdir/code/validate_uelf.c`
+**Metadata Source:** `EYN-packages/packages/validate/validate_uelf.c`
 
 **Description:**
 Show input validation status and tests.
@@ -960,7 +960,7 @@ validate test
 
 **Binary:** `testdir/binaries/alias`
 
-**Metadata Source:** `testdir/code/alias_uelf.c`
+**Metadata Source:** `EYN-packages/packages/alias/alias_uelf.c`
 
 **Description:**
 Create or remove command aliases.
@@ -976,7 +976,7 @@ alias ll ls -l
 
 **Binary:** `testdir/binaries/calc`
 
-**Metadata Source:** `testdir/code/calc_uelf.c`
+**Metadata Source:** `EYN-packages/packages/calc/calc_uelf.c`
 
 **Description:**
 Integer calculator supporting + - * /.
@@ -992,7 +992,7 @@ calc 2+3*4
 
 **Binary:** `testdir/binaries/diskmgr`
 
-**Metadata Source:** `testdir/code/diskmgr_uelf.c`
+**Metadata Source:** `EYN-packages/packages/diskmgr/diskmgr_uelf.c`
 
 **Description:**
 Manage logical drives from userland.
@@ -1008,7 +1008,7 @@ diskmgr status
 
 **Binary:** `testdir/binaries/download`
 
-**Metadata Source:** `testdir/code/download_uelf.c`
+**Metadata Source:** `EYN-packages/packages/download/download_uelf.c`
 
 **Description:**
 Download a file over HTTP/1.1 (GET only) with DNS support.
@@ -1024,7 +1024,7 @@ download http://example.com/index.html
 
 **Binary:** `testdir/binaries/echo`
 
-**Metadata Source:** `testdir/code/echo_uelf.c`
+**Metadata Source:** `EYN-packages/packages/echo/echo_uelf.c`
 
 **Description:**
 Print arguments to stdout.
@@ -1040,7 +1040,7 @@ echo hello world
 
 **Binary:** `testdir/binaries/edit`
 
-**Metadata Source:** `testdir/code/edit_uelf.c`
+**Metadata Source:** `EYN-packages/packages/edit/edit_uelf.c`
 
 **Description:**
 Graphical text editor.
@@ -1056,7 +1056,7 @@ edit [/path/to/file]
 
 **Binary:** `testdir/binaries/extract`
 
-**Metadata Source:** `testdir/code/extract_uelf.c`
+**Metadata Source:** `EYN-packages/packages/extract/extract_uelf.c`
 
 **Description:**
 Extract a TAR or TAR.GZ archive into a directory.
@@ -1072,7 +1072,7 @@ extract /archive.tar.gz /out
 
 **Binary:** `testdir/binaries/fdisk`
 
-**Metadata Source:** `testdir/code/(metadata not found)`
+**Metadata Source:** `(metadata not found)`
 
 **Description:**
 Run the fdisk command.
@@ -1088,7 +1088,7 @@ fdisk
 
 **Binary:** `testdir/binaries/files`
 
-**Metadata Source:** `testdir/code/files_uelf.c`
+**Metadata Source:** `EYN-packages/packages/files/files_uelf.c`
 
 **Description:**
 Graphical file explorer.
@@ -1104,7 +1104,7 @@ files [/path]
 
 **Binary:** `testdir/binaries/fontpreview`
 
-**Metadata Source:** `testdir/code/fontpreview_uelf.c`
+**Metadata Source:** `EYN-packages/packages/fontpreview/fontpreview_uelf.c`
 
 **Description:**
 Preview an OTF/TTF font in multiple sizes.
@@ -1120,7 +1120,7 @@ fontpreview /fonts/unscii-16.otf
 
 **Binary:** `testdir/binaries/format`
 
-**Metadata Source:** `testdir/code/(metadata not found)`
+**Metadata Source:** `(metadata not found)`
 
 **Description:**
 Run the format command.
@@ -1136,7 +1136,7 @@ format
 
 **Binary:** `testdir/binaries/gui_demo`
 
-**Metadata Source:** `testdir/code/(metadata not found)`
+**Metadata Source:** `(metadata not found)`
 
 **Description:**
 Run the gui_demo command.
@@ -1148,11 +1148,27 @@ gui_demo
 
 ---
 
+### hello
+
+**Binary:** `testdir/binaries/hello`
+
+**Metadata Source:** `(metadata not found)`
+
+**Description:**
+Run the hello command.
+
+**Example:**
+```bash
+hello
+```
+
+---
+
 ### history
 
 **Binary:** `testdir/binaries/history`
 
-**Metadata Source:** `testdir/code/history_uelf.c`
+**Metadata Source:** `EYN-packages/packages/history/history_uelf.c`
 
 **Description:**
 Show or clear command history.
@@ -1168,7 +1184,7 @@ history
 
 **Binary:** `testdir/binaries/install`
 
-**Metadata Source:** `testdir/code/install_uelf.c`
+**Metadata Source:** `EYN-packages/packages/install/install_uelf.c`
 
 **Description:**
 Install packages from the EYN-OS package index.
@@ -1184,7 +1200,7 @@ install hello
 
 **Binary:** `testdir/binaries/installer`
 
-**Metadata Source:** `testdir/code/installer_uelf.c`
+**Metadata Source:** `EYN-packages/packages/installer/installer_uelf.c`
 
 **Description:**
 EYN-OS graphical installer.
@@ -1200,7 +1216,7 @@ installer
 
 **Binary:** `testdir/binaries/jobs`
 
-**Metadata Source:** `testdir/code/jobs_uelf.c`
+**Metadata Source:** `EYN-packages/packages/jobs/jobs_uelf.c`
 
 **Description:**
 List background jobs.
@@ -1216,7 +1232,7 @@ jobs
 
 **Binary:** `testdir/binaries/jsonparse`
 
-**Metadata Source:** `testdir/code/jsonparse_uelf.c`
+**Metadata Source:** `EYN-packages/packages/jsonparse/jsonparse_uelf.c`
 
 **Description:**
 Parse and normalize JSON files.
@@ -1232,7 +1248,7 @@ jsonparse --pretty /config/settings.json
 
 **Binary:** `testdir/binaries/list`
 
-**Metadata Source:** `testdir/code/list_uelf.c`
+**Metadata Source:** `EYN-packages/packages/list/list_uelf.c`
 
 **Description:**
 List directory entries with terminal icons.
@@ -1248,7 +1264,7 @@ list [path]
 
 **Binary:** `testdir/binaries/metadata`
 
-**Metadata Source:** `testdir/code/metadata_uelf.c`
+**Metadata Source:** `EYN-packages/packages/metadata/metadata_uelf.c`
 
 **Description:**
 Show metadata for a file or directory.
@@ -1264,7 +1280,7 @@ metadata /binaries/ping
 
 **Binary:** `testdir/binaries/pipe`
 
-**Metadata Source:** `testdir/code/pipe_uelf.c`
+**Metadata Source:** `EYN-packages/packages/pipe/pipe_uelf.c`
 
 **Description:**
 Run a command pipeline from userspace command launcher.
@@ -1280,7 +1296,7 @@ pipe files 'search test -a'
 
 **Binary:** `testdir/binaries/random`
 
-**Metadata Source:** `testdir/code/random_uelf.c`
+**Metadata Source:** `EYN-packages/packages/random/random_uelf.c`
 
 **Description:**
 Generate random numbers.
@@ -1296,7 +1312,7 @@ random 5
 
 **Binary:** `testdir/binaries/search`
 
-**Metadata Source:** `testdir/code/search_uelf.c`
+**Metadata Source:** `EYN-packages/packages/search/search_uelf.c`
 
 **Description:**
 Search for text in filenames and file contents.
@@ -1312,7 +1328,7 @@ search hello -a
 
 **Binary:** `testdir/binaries/settings`
 
-**Metadata Source:** `testdir/code/settings_uelf.c`
+**Metadata Source:** `EYN-packages/packages/settings/settings_uelf.c`
 
 **Description:**
 Open system settings (video + customization).
@@ -1328,7 +1344,7 @@ settings
 
 **Binary:** `testdir/binaries/sha256`
 
-**Metadata Source:** `testdir/code/sha256_uelf.c`
+**Metadata Source:** `EYN-packages/packages/sha256/sha256_uelf.c`
 
 **Description:**
 Compute SHA-256 digests for files or strings.
@@ -1344,7 +1360,7 @@ sha256 /test.txt
 
 **Binary:** `testdir/binaries/sort`
 
-**Metadata Source:** `testdir/code/sort_uelf.c`
+**Metadata Source:** `EYN-packages/packages/sort/sort_uelf.c`
 
 **Description:**
 Sort strings alphabetically.
@@ -1360,7 +1376,7 @@ sort zebra apple banana
 
 **Binary:** `testdir/binaries/spam`
 
-**Metadata Source:** `testdir/code/spam_uelf.c`
+**Metadata Source:** `EYN-packages/packages/spam/spam_uelf.c`
 
 **Description:**
 Spam 'EYN-OS' to stdout 100 times.
@@ -1376,7 +1392,7 @@ spam
 
 **Binary:** `testdir/binaries/tiling`
 
-**Metadata Source:** `testdir/code/tiling_uelf.c`
+**Metadata Source:** `EYN-packages/packages/tiling/tiling_uelf.c`
 
 **Description:**
 Launch the tiling manager.
@@ -1392,7 +1408,7 @@ tiling
 
 **Binary:** `testdir/binaries/view_backend_bmp`
 
-**Metadata Source:** `testdir/code/(metadata not found)`
+**Metadata Source:** `(metadata not found)`
 
 **Description:**
 Run the view_backend_bmp command.
@@ -1408,7 +1424,7 @@ view_backend_bmp
 
 **Binary:** `testdir/binaries/view_backend_rei`
 
-**Metadata Source:** `testdir/code/(metadata not found)`
+**Metadata Source:** `(metadata not found)`
 
 **Description:**
 Run the view_backend_rei command.
@@ -1424,7 +1440,7 @@ view_backend_rei
 
 **Binary:** `testdir/binaries/view_backend_reis`
 
-**Metadata Source:** `testdir/code/view_backend_reis_uelf.c`
+**Metadata Source:** `EYN-packages/packages/view_backend_reis/view_backend_reis_uelf.c`
 
 **Description:**
 Play a REIS audio file in a dedicated backend.
@@ -1440,7 +1456,7 @@ view_backend_reis /audio/track.reis
 
 **Binary:** `testdir/binaries/view_backend_reiv`
 
-**Metadata Source:** `testdir/code/view_backend_reiv_uelf.c`
+**Metadata Source:** `EYN-packages/packages/view_backend_reiv/view_backend_reiv_uelf.c`
 
 **Description:**
 Play a REIV video file in a dedicated backend.
@@ -1456,7 +1472,7 @@ view_backend_reiv /videos/demo.reiv
 
 **Binary:** `testdir/binaries/xeyes`
 
-**Metadata Source:** `testdir/code/xeyes_uelf.c`
+**Metadata Source:** `EYN-packages/packages/xeyes/xeyes_uelf.c`
 
 **Description:**
 X11 xeyes - eyes that follow the mouse pointer
@@ -1478,5 +1494,5 @@ xeyes
 | Memory Commands | 7 |
 | GUI/Window Commands | 10 |
 | Development Commands | 10 |
-| Utility Commands | 32 |
+| Utility Commands | 33 |
 

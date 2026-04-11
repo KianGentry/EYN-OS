@@ -385,23 +385,12 @@ eynfsimg:
 	python3 devtools/create_partitioned_disk.py eynfs.img
 	python3 devtools/copy_testdir_to_eynfs.py testdir/
 
-# Rebuild all userland C programs from source in testdir/code/.
-# Run this after editing any *_uelf.c file, then run 'make build'.
+# Rebuild all userland C programs from EYN-packages package sources.
+# Run this after editing package *_uelf.c files, then run 'make build'.
 # Usage: make userland
 .PHONY: userland
 userland:
-	@for src in testdir/code/*_uelf.c; do \
-		name=$$(basename "$$src" _uelf.c); \
-		out="testdir/binaries/$$name"; \
-		build_script="devtools/build_user_c.sh"; \
-		if [ "$$name" = "installer" ] || [ "$$name" = "install" ] || [ "$$name" = "extract" ]; then \
-			src="packages/$$name/$${name}_uelf.c"; \
-			out="../testdir/binaries/$$name"; \
-			build_script="EYN-packages/devtools/build_user_c.sh"; \
-		fi; \
-		echo "Building $$name ..."; \
-		bash "$$build_script" "$$src" "$$out" || true; \
-	done
+	$(MAKE) -C EYN-packages userland OUT_DIR=../testdir/binaries
 
 # Legacy non-partitioned disk image (for testing/compatibility)
 eynfsimg-legacy:

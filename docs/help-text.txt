@@ -91,6 +91,7 @@ Utility Commands:
   fontpreview     - Preview an OTF/TTF font in multiple sizes.
   format          - Run the format command.
   gui_demo        - Run the gui_demo command.
+  hello           - Run the hello command.
   history         - Show or clear command history.
   install         - Install packages from the EYN-OS package index.
   installer       - EYN-OS graphical installer.

@@ -139,10 +139,10 @@ into `libeync.a` automatically:
 
 ```bash
 # GCC build
-bash devtools/build_user_c.sh testdir/code/myapp_uelf.c testdir/binaries/myapp
+bash EYN-packages/devtools/build_user_c.sh packages/myapp/myapp_uelf.c ../testdir/binaries/myapp
 
 # chibicc build
-bash devtools/build_user_c_chibicc.sh testdir/code/myapp_uelf.c testdir/binaries/myapp.uelf
+bash devtools/build_user_c_chibicc.sh EYN-packages/packages/myapp/myapp_uelf.c testdir/binaries/myapp.uelf
 ```
 
 The program source should `#include <X11/Xlib.h>` (and any other X11 headers
@@ -152,7 +152,7 @@ it needs) -- the build system's `-I userland/include` flag resolves them.
 
 A pure-Xlib `xeyes` clone is included as a reference program:
 
-- Source: `testdir/code/xeyes_uelf.c`
+- Source: `EYN-packages/packages/xeyes/xeyes_uelf.c`
 - Binary: `testdir/binaries/xeyes`
 
 Build and run:
