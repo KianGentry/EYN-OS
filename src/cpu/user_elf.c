@@ -604,7 +604,13 @@ typedef struct {
     int pid;
     int status;
     user_task_state_t state;
+    uint8 sched_class;
+    uint8 _sched_pad0;
+    uint16 base_tickets;
+    uint16 donated_tickets;
+    uint16 effective_tickets;
     int wait_target_pid;
+    int donation_target_pid;
     user_task_runtime_t runtime;
     user_task_image_t* image;
     int has_syscall_frame;
@@ -623,6 +629,30 @@ typedef struct {
  * Security-critical: Yes (resource exhaustion boundary).
  */
 #define USER_TASK_MAX 16
+
+/*
+ * ABI-INVARIANT: Stratified lottery scheduling classes for ring3 tasks.
+ *
+ * Why: Keeps scheduling policy simple while preserving broad urgency tiers.
+ * Invariant: Class IDs are stable and must remain in [0, USER_TASK_SCHED_CLASS_COUNT).
+ * ABI-sensitive: Yes (user-visible run-order behavior under contention).
+ */
+#define USER_TASK_SCHED_CLASS_INTERACTIVE 0u
+#define USER_TASK_SCHED_CLASS_NORMAL      1u
+#define USER_TASK_SCHED_CLASS_BACKGROUND  2u
+#define USER_TASK_SCHED_CLASS_COUNT       3u
+
+/*
+ * SECURITY-INVARIANT: Per-task ticket bounds for lottery selection.
+ *
+ * Why: Prevents runaway ticket inflation from dominating selection and keeps
+ * integer accounting bounded on low-RAM builds.
+ * Invariant: Effective tickets are clamped to [USER_TASK_TICKETS_MIN, USER_TASK_TICKETS_MAX].
+ * ABI-sensitive: Yes (priority behavior is ticket-proportional).
+ */
+#define USER_TASK_TICKETS_MIN      1u
+#define USER_TASK_TICKETS_DEFAULT  32u
+#define USER_TASK_TICKETS_MAX      1024u
 
 static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static int g_user_task_next_pid = 1;
@@ -753,6 +783,76 @@ static int user_task_runtime_matches_live(const user_task_runtime_t* rt) {
             rt->stack_page == g_user_stack_page) ? 1 : 0;
 }
 
+static uint32 user_task_sched_class_index(const user_task_slot_t* slot) {
+    if (!slot) return USER_TASK_SCHED_CLASS_NORMAL;
+    uint32 cls = (uint32)slot->sched_class;
+    if (cls >= USER_TASK_SCHED_CLASS_COUNT) return USER_TASK_SCHED_CLASS_NORMAL;
+    return cls;
+}
+
+static uint32 user_task_clamp_tickets(uint32 tickets) {
+    if (tickets < USER_TASK_TICKETS_MIN) return USER_TASK_TICKETS_MIN;
+    if (tickets > USER_TASK_TICKETS_MAX) return USER_TASK_TICKETS_MAX;
+    return tickets;
+}
+
+static uint32 user_task_effective_tickets(user_task_slot_t* slot) {
+    if (!slot) return USER_TASK_TICKETS_MIN;
+    uint32 base = slot->base_tickets ? (uint32)slot->base_tickets : USER_TASK_TICKETS_DEFAULT;
+    uint32 donated = (uint32)slot->donated_tickets;
+    uint32 total = base + donated;
+    uint32 clamped = user_task_clamp_tickets(total);
+    slot->effective_tickets = (uint16)clamped;
+    return clamped;
+}
+
+static int user_task_slot_eligible(user_task_slot_t* slot,
+                                   int exclude_pid,
+                                   int require_syscall_frame) {
+    if (!slot || !slot->used) return 0;
+    if (slot->state != USER_TASK_STATE_RUNNABLE) return 0;
+    if (exclude_pid > 0 && slot->pid == exclude_pid) return 0;
+
+    if (require_syscall_frame) {
+        if (!slot->has_syscall_frame) return 0;
+        if (!user_task_runtime_matches_live(&slot->runtime)) return 0;
+    }
+
+    return 1;
+}
+
+static user_task_slot_t* user_task_pick_runnable_slot(int exclude_pid,
+                                                       int require_syscall_frame) {
+    for (uint32 cls = 0; cls < USER_TASK_SCHED_CLASS_COUNT; ++cls) {
+        uint32 total_tickets = 0;
+
+        for (int i = 0; i < USER_TASK_MAX; ++i) {
+            user_task_slot_t* slot = &g_user_tasks[i];
+            if (!user_task_slot_eligible(slot, exclude_pid, require_syscall_frame)) continue;
+            if (user_task_sched_class_index(slot) != cls) continue;
+            total_tickets += user_task_effective_tickets(slot);
+        }
+
+        if (total_tickets == 0) continue;
+
+        uint32 draw = sched_rng_bounded(total_tickets);
+        uint32 acc = 0;
+
+        for (int i = 0; i < USER_TASK_MAX; ++i) {
+            user_task_slot_t* slot = &g_user_tasks[i];
+            if (!user_task_slot_eligible(slot, exclude_pid, require_syscall_frame)) continue;
+            if (user_task_sched_class_index(slot) != cls) continue;
+
+            acc += user_task_effective_tickets(slot);
+            if (draw < acc) {
+                return slot;
+            }
+        }
+    }
+
+    return NULL;
+}
+
 int user_task_try_resume_from_syscall(regs_t* regs) {
     if (!regs) return 0;
     if (!g_user_task_schedule_request) return 0;
@@ -762,17 +862,7 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
     user_task_slot_t* current = user_task_find_slot_by_pid(current_pid);
     if (!current) return 0;
 
-    user_task_slot_t* target = NULL;
-    for (int i = 0; i < USER_TASK_MAX; ++i) {
-        user_task_slot_t* slot = &g_user_tasks[i];
-        if (!slot->used) continue;
-        if (slot->pid == current_pid) continue;
-        if (slot->state != USER_TASK_STATE_RUNNABLE) continue;
-        if (!slot->has_syscall_frame) continue;
-        if (!user_task_runtime_matches_live(&slot->runtime)) continue;
-        target = slot;
-        break;
-    }
+    user_task_slot_t* target = user_task_pick_runnable_slot(current_pid, 1);
 
     if (!target) return 0;
 
@@ -800,7 +890,12 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     slot->pid = g_user_task_next_pid++;
     slot->image = image;
     slot->state = USER_TASK_STATE_RUNNABLE;
+    slot->sched_class = (uint8)USER_TASK_SCHED_CLASS_NORMAL;
+    slot->base_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;
+    slot->donated_tickets = 0;
+    slot->effective_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;
     slot->wait_target_pid = 0;
+    slot->donation_target_pid = 0;
     if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
 
     /*
@@ -822,13 +917,10 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
 
 int user_task_continue_or_schedule(void) {
     // Prefer runnable queued tasks over UI fallback.
-    for (int i = 0; i < USER_TASK_MAX; ++i) {
-        user_task_slot_t* slot = &g_user_tasks[i];
-        if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) continue;
-        (void)user_task_launch_slot(slot);
-        return 1;
-    }
-    return 0;
+    user_task_slot_t* slot = user_task_pick_runnable_slot(0, 0);
+    if (!slot) return 0;
+    (void)user_task_launch_slot(slot);
+    return 1;
 }
 
 int user_task_poll_scheduler(void) {
@@ -899,7 +991,12 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->pid = 0;
     slot->state = USER_TASK_STATE_UNUSED;
     slot->status = 0;
+    slot->sched_class = (uint8)USER_TASK_SCHED_CLASS_NORMAL;
+    slot->base_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;
+    slot->donated_tickets = 0;
+    slot->effective_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;
     slot->wait_target_pid = 0;
+    slot->donation_target_pid = 0;
     slot->has_syscall_frame = 0;
     user_task_request_schedule();
     return pid;
