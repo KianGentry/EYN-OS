@@ -30,6 +30,9 @@ syscall_entry:
     push dword 0            ; err_code
     push dword 0x80         ; int_no
     pusha
+    ; Preserve the exact pusha-frame base in memory rather than a GPR.
+    ; Some mixed C/asm call paths may not preserve callee-saved registers.
+    mov [syscall_saved_frame_esp], esp
 
     ; Stack overflow tripwire: if the kernel C call stack underflowed (ESP below
     ; stack_bottom), bail out to a known-good stack.
@@ -68,6 +71,9 @@ syscall_entry:
     jmp .halt
 .no_abort:
 
+    ; Ensure popa reads from the original pusha frame base.
+    mov esp, [syscall_saved_frame_esp]
+
     ; Stash return value into saved EAX within the pusha frame.
     mov [esp + 28], eax
 
@@ -103,4 +109,8 @@ syscall_entry:
 .seg_done:
     pop eax
     iretd
+
+section .bss
+align 4
+syscall_saved_frame_esp: resd 1
 

@@ -34,6 +34,9 @@ void user_task_note_focus_term(int term_idx);
 /* Scheduler integration helpers used by timer and blocking subsystems. */
 void user_task_on_timeslice_end(void);
 int user_task_get_running_pid(void);
+int user_task_get_running_term(void);
+int user_task_has_live_tasks(void);
+int user_task_term_has_live_task(int term_idx);
 int user_task_donate_running_to_pid(int target_pid, uint16 tickets);
 void user_task_clear_running_donation(void);
 

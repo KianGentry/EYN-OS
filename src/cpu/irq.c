@@ -275,6 +275,10 @@ static void irq_dispatch_core(int irq_number, int send_eoi, uintptr frame_ptr) {
 
         if (g_user_interrupt) {
             g_user_interrupt = 0;
+            int exiting_pid = user_task_get_running_pid();
+            if (exiting_pid > 0) {
+                syscall_cleanup_user_resources_for_pid(exiting_pid);
+            }
             user_task_notify_exit(-130);
             g_user_task_active = 0;
             g_user_task_term = -1;

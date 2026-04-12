@@ -93,6 +93,10 @@ void syscall_reset_user_streams(void);
 // Reset/cleanup user-task GUI resources (created tiles + title strings).
 void syscall_reset_user_guis(void);
 
+// Cleanup resources owned by a specific ring3 pid during task exit.
+// This is applied on all exit paths (syscall exit, faults, Ctrl+C abort).
+void syscall_cleanup_user_resources_for_pid(int pid);
+
 // CPU exception C dispatcher (called from src/cpu/isr.asm)
 void isr_dispatch(regs_t* regs);
 

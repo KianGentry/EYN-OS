@@ -10,6 +10,7 @@
 #include <misc/sched.h>
 #include <utilities/shell/pipeline.h>
 #include <fs/vfs.h>
+#include <cpu/user_elf.h>
 
 // shell_current_path is maintained by the main shell code
 extern char shell_current_path[128];
@@ -605,6 +606,7 @@ void vterm_handle_key(int idx, int key) {
     }
     // Enter - execute command in this vterm
     if (key == '\n' || key == 10) {
+        int defer_prompt = 0;
         // append newline visually
         vterm_write_char(idx, '\n');
 
@@ -760,11 +762,19 @@ void vterm_handle_key(int idx, int key) {
                 }
             // reset this vterm's browsing state so next Up starts from the most-recent entry
             t->history_idx = -1;
+
+            // If the command spawned/queued a task in this terminal, the prompt
+            // is printed on task exit to avoid overlapping asynchronous output.
+            defer_prompt = user_task_term_has_live_task(idx);
         }
         // reset input buffer via new prompt
+        t->input_buf[0] = '\0';
+        t->input_pos = 0;
         t->sel_active = 0;
         // After executing, print a fresh prompt line (this will also reset input anchors)
-        vterm_print_prompt(idx);
+        if (!defer_prompt) {
+            vterm_print_prompt(idx);
+        }
         t->version++;
         return;
     }

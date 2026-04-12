@@ -30,6 +30,8 @@ isr%1:
 
 isr_common_stub:
     pusha
+    ; Preserve the pushad frame base in memory rather than a GPR.
+    mov [isr_saved_frame_esp], esp
 
     ; pass &regs_t (starts at saved EDI)
     mov eax, esp
@@ -55,6 +57,9 @@ isr_common_stub:
     hlt
     jmp .halt
 .no_abort:
+
+    ; Re-anchor to the original pushad frame base in case C paths moved ESP.
+    mov esp, [isr_saved_frame_esp]
 
     popa
 
@@ -100,3 +105,7 @@ ISR_NOERR 28
 ISR_NOERR 29
 ISR_ERR 30
 ISR_NOERR 31
+
+section .bss
+align 4
+isr_saved_frame_esp: resd 1

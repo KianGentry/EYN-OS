@@ -707,6 +707,36 @@ static int g_user_task_focus_term = -1;
 static uint16 g_user_task_class0_burst_remaining = USER_TASK_CLASS0_BURST_MAX;
 static uint16 g_user_task_class1_burst_remaining = USER_TASK_CLASS1_BURST_MAX;
 
+static int user_task_state_is_live(user_task_state_t state) {
+    return (state == USER_TASK_STATE_RUNNABLE ||
+            state == USER_TASK_STATE_RUNNING ||
+            state == USER_TASK_STATE_BLOCKED);
+}
+
+static int user_task_term_has_live_task_except(int term_idx, int exclude_pid) {
+    if (term_idx < 0) return 0;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used) continue;
+        if (exclude_pid > 0 && slot->pid == exclude_pid) continue;
+        if (slot->term_idx != term_idx) continue;
+        if (!user_task_state_is_live(slot->state)) continue;
+        return 1;
+    }
+    return 0;
+}
+
+static int user_task_has_live_task_except_pid(int exclude_pid) {
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used) continue;
+        if (exclude_pid > 0 && slot->pid == exclude_pid) continue;
+        if (!user_task_state_is_live(slot->state)) continue;
+        return 1;
+    }
+    return 0;
+}
+
 static user_task_image_t* user_task_image_build(uint8 drive,
                                                 const char* abspath,
                                                 int argc,
@@ -864,6 +894,8 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
                                         slot->runtime.code_pages,
                                         slot->runtime.stack_page);
 
+    int has_other_live_tasks = user_task_has_live_task_except_pid(slot->pid);
+
     if (!slot->has_syscall_frame) {
         // Default user program output colour to white (programs can change it).
         g_user_task_colour_r = 255;
@@ -876,12 +908,18 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
             vterm_stdin_clear(g_user_task_term);
         }
 
-        if (!syscall_get_user_fd_inherit_mode()) {
-            syscall_reset_user_fds();
-            syscall_reset_user_stdio_fds();
+        /*
+         * SECURITY-INVARIANT: Shared syscall state must not be globally reset
+         * while other tasks are still alive.
+         */
+        if (!has_other_live_tasks) {
+            if (!syscall_get_user_fd_inherit_mode()) {
+                syscall_reset_user_fds();
+                syscall_reset_user_stdio_fds();
+            }
+            syscall_reset_user_streams();
+            syscall_reset_user_guis();
         }
-        syscall_reset_user_streams();
-        syscall_reset_user_guis();
     }
 
     user_task_apply_user_segments();
@@ -986,6 +1024,29 @@ static user_task_slot_t* user_task_find_slot_by_pid(int pid) {
         if (g_user_tasks[i].used && g_user_tasks[i].pid == pid) return &g_user_tasks[i];
     }
     return NULL;
+}
+
+int user_task_get_running_term(void) {
+    int pid = (int)g_user_task_running_pid;
+    if (pid > 0) {
+        user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
+        if (slot && slot->used && slot->term_idx >= 0) {
+            return slot->term_idx;
+        }
+    }
+    if (g_user_task_active_slot && g_user_task_active_slot->used && g_user_task_active_slot->term_idx >= 0) {
+        return g_user_task_active_slot->term_idx;
+    }
+    if (g_user_task_term >= 0) return g_user_task_term;
+    return -1;
+}
+
+int user_task_term_has_live_task(int term_idx) {
+    return user_task_term_has_live_task_except(term_idx, 0);
+}
+
+int user_task_has_live_tasks(void) {
+    return user_task_has_live_task_except_pid(0);
 }
 
 static user_task_slot_t* user_task_alloc_slot(void) {
@@ -1331,10 +1392,21 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     slot->initial_entry = 0;
     slot->initial_user_esp = 0;
     slot->has_syscall_frame = 0;
-    if (g_user_task_term >= 0) {
+    /*
+     * ABI-INVARIANT: Task terminal affinity is captured at launch source.
+     *
+     * Why: Multiple queued tasks may be launched while another task is
+     * currently running. New tasks must write to the terminal where the
+     * command was entered (focused tile), not to the running task terminal.
+     */
+    if (tile_is_tiling_active()) {
+        int focused_term = tile_get_focused_term();
+        if (focused_term >= 0) {
+            slot->term_idx = focused_term;
+        }
+    }
+    if (slot->term_idx < 0 && g_user_task_term >= 0) {
         slot->term_idx = g_user_task_term;
-    } else if (tile_is_tiling_active()) {
-        slot->term_idx = tile_get_focused_term();
     }
     if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
 
@@ -1383,16 +1455,15 @@ void user_task_capture_syscall_frame(const regs_t* regs) {
 
     slot->last_syscall_frame = *regs;
     slot->has_syscall_frame = 1;
-    if (g_user_task_term >= 0) {
-        slot->term_idx = g_user_task_term;
-    }
 }
 
 void user_task_notify_exit(int status) {
     int pid = (int)g_user_task_running_pid;
+    int exited_term = -1;
     if (pid > 0) {
         user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
         if (slot) {
+            exited_term = slot->term_idx;
             user_task_clear_donation(slot);
             user_task_clear_donations_target_pid(pid);
             slot->state = USER_TASK_STATE_ZOMBIE;
@@ -1409,9 +1480,25 @@ void user_task_notify_exit(int status) {
             slot->has_syscall_frame = 0;
         }
     }
+
+    /*
+     * SECURITY-INVARIANT: Exit path must clear live mapping metadata before
+     * abort-to-shell cleanup runs.
+     *
+     * Why: If stale user VA ranges survive after we switched back to the
+     * kernel address space, user_task_cleanup_mappings() may attempt to unmap
+     * those VAs from the kernel AS, corrupting low identity mappings.
+     */
     g_user_task_active_slot = NULL;
+    user_task_clear_current_mapping_state();
     g_user_task_running_pid = 0;
     g_user_task_pending_pid = 0;
+
+    if (exited_term >= 0 && !user_task_term_has_live_task_except(exited_term, pid)) {
+        vterm_print_prompt(exited_term);
+        g_user_task_ui_dirty = 1;
+    }
+
     user_task_request_schedule();
 }
 

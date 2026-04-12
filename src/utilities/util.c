@@ -49,6 +49,23 @@ void user_task_cleanup_mappings(void) {
     uint32 pages = 0;
     uint32 stack_page = 0;
     address_space_t* as = vmm_current_as ? vmm_current_as : &vmm_kernel_as;
+
+    /*
+     * SECURITY-INVARIANT: Never unmap user ranges from kernel address space
+     * when no user task is active.
+     *
+     * Why: abort/exit paths can run after we've already switched back to
+     * kernel AS. If stale user mapping metadata remains, blindly unmapping in
+     * kernel AS can tear down low identity mappings and crash/reboot.
+     */
+    if (as == &vmm_kernel_as && !g_user_task_active) {
+        user_task_clear_current_mapping_state();
+        g_user_code_base = 0;
+        g_user_code_pages = 0;
+        g_user_stack_page = 0;
+        return;
+    }
+
     user_task_get_current_mapping_state(&base, &pages, &stack_page);
     uint32 stack_bottom = as->stack_bottom;
 

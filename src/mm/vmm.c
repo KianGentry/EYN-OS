@@ -710,7 +710,20 @@ address_space_t* create_address_space(void) {
     as->pd_phys = pd_phys;
     memset(as->pd, 0, sizeof(page_directory_t));
     
-    /* Copy kernel mappings (entries 768-1023 for addresses >= 0xC0000000) */
+    /*
+     * ABI-INVARIANT: Kernel execution mappings shared into every task AS.
+     *
+     * Why: The current kernel executes from low identity-mapped linear
+     * addresses (e.g. 0x0010xxxx) while also using high-half aliases.
+     * After CR3 switches, both regions must remain executable/accessible.
+     *
+     * Invariant: PDE 0 (low identity kernel text/stack) and PDEs 768-1023
+     * (high-half kernel aliases) are shared from vmm_kernel_as and must be
+     * treated as kernel-owned, not user-owned page tables.
+     */
+    as->pd->entries[0] = vmm_kernel_as.pd->entries[0];
+
+    /* Copy high-half kernel mappings (entries 768-1023 for >= 0xC0000000). */
     for (int i = 768; i < 1024; i++) {
         as->pd->entries[i] = vmm_kernel_as.pd->entries[i];
     }
@@ -740,6 +753,11 @@ void destroy_address_space(address_space_t* as) {
     for (int pdi = 0; pdi < 768; pdi++) {  /* User space = entries 0-767 */
         pde_t pde = as->pd->entries[pdi];
         if (!(pde & PTE_PRESENT)) {
+            continue;
+        }
+
+        /* Shared low kernel identity mapping is not user-owned. */
+        if (pdi == 0 && pde == vmm_kernel_as.pd->entries[0]) {
             continue;
         }
         
@@ -788,7 +806,7 @@ address_space_t* clone_address_space(address_space_t* src) {
     
     /* Mark all user pages as COW in both source and destination */
     int need_src_tlb_flush = 0;
-    for (int pdi = 0; pdi < 768; pdi++) {
+    for (int pdi = 1; pdi < 768; pdi++) {
         pde_t src_pde = src->pd->entries[pdi];
         if (!(src_pde & PTE_PRESENT)) {
             continue;
@@ -1762,6 +1780,16 @@ void vmm_enable_paging(void) {
     write_cr0(cr0);
     
     paging_enabled = 1;
+
+    /*
+     * ABI-INVARIANT: vmm_kernel_as.pd must be a kernel-linear alias once
+     * paging is active.
+     *
+     * Why: create/switch/destroy paths may run under non-kernel CR3 values.
+     * A low physical-linear pointer (e.g. 0x007B8000) is not guaranteed to be
+     * mapped in those address spaces, while KERNEL_BASE + pd_phys is.
+     */
+    vmm_kernel_as.pd = (page_directory_t*)vmm_kphys_to_ptr(vmm_kernel_as.pd_phys);
     
     /* Now executing with paging enabled!
      * Thanks to identity mapping, current EIP is still valid. */
@@ -1771,4 +1799,5 @@ void vmm_enable_paging(void) {
 
 void vmm_mark_paging_enabled(void) {
     paging_enabled = 1;
+    vmm_kernel_as.pd = (page_directory_t*)vmm_kphys_to_ptr(vmm_kernel_as.pd_phys);
 }

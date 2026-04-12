@@ -361,6 +361,7 @@ int tile_pump_input_once(void) {
         mouse_poll();
         // mouse_read_event() always succeeds and clears deltas, so only read/dispatch
         // when something actually changed.
+        int mouse_event_seen = 0;
         int have_mouse = 0;
         if (g_mouse_state.delta_x || g_mouse_state.delta_y || g_mouse_state.wheel_delta) {
             have_mouse = 1;
@@ -371,6 +372,7 @@ int tile_pump_input_once(void) {
 
         mouse_event_t me;
         if (have_mouse && mouse_read_event(&me) == 0) {
+            mouse_event_seen = 1;
             uint8 changes = me.button_changes;
             int left_press = (changes & MOUSE_BUTTON_LEFT) && (me.buttons & MOUSE_BUTTON_LEFT);
             int right_press = (changes & MOUSE_BUTTON_RIGHT) && (me.buttons & MOUSE_BUTTON_RIGHT);
@@ -904,6 +906,10 @@ int tile_pump_input_once(void) {
                 gui_needs_redraw[term] = 1;
                 return 1;
             }
+        }
+
+        if (mouse_event_seen) {
+            return 1;
         }
     }
 
