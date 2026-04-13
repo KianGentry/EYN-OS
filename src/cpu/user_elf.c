@@ -17,11 +17,6 @@
 
 // Defined in src/boot/kernel.asm; this is the top of the kernel stack.
 extern uint32 stack_space;
-extern volatile int g_user_task_colour_r;
-extern volatile int g_user_task_colour_g;
-extern volatile int g_user_task_colour_b;
-extern volatile uint8 g_user_task_colour_state;
-extern volatile uint8 g_user_task_icon_state;
 
 volatile uint16 g_user_segdom_cs = GDT_USER_CS;
 volatile uint16 g_user_segdom_ds = GDT_USER_DS;
@@ -221,16 +216,8 @@ static uint32 user_stack_build_argv(uint32 user_stack_top,
     return sp;
 }
 
-static int user_elf_run_argv_internal(uint8 drive,
-                                      const char* abspath,
-                                      int argc,
-                                      const char* const* argv,
-                                      int enter_user,
-                                      uint32* out_entry,
-                                      uint32* out_user_esp) {
+int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
     if (!abspath || !abspath[0]) return -1;
-
-    address_space_t* active_as = vmm_current_as ? vmm_current_as : &vmm_kernel_as;
 
     if (!user_elf_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
 
@@ -360,38 +347,41 @@ static int user_elf_run_argv_internal(uint8 drive,
         return -1;
     }
 
-    if (enter_user) {
-        // Clean up any previous user-task mappings first.
-        user_task_cleanup_mappings();
+    // Clean up any previous user-task mappings first.
+    user_task_cleanup_mappings();
 
-        // Reset per-task syscall state.
-        if (!syscall_get_user_fd_inherit_mode()) {
-            syscall_reset_user_fds();
-            syscall_reset_user_stdio_fds();
-        }
-        syscall_reset_user_streams();
-        syscall_reset_user_guis();
-
-        g_user_interrupt = 0;
-        g_user_task_active = 1;
-        g_user_task_term = tile_is_tiling_active() ? tile_get_focused() : -1;
-        if (g_user_task_term < 0) g_user_task_term = 0;
-        g_user_task_ui_dirty = 1;
-
-        // Default user program output colour to white (programs can change it).
-        g_user_task_colour_r = 255;
-        g_user_task_colour_g = 255;
-        g_user_task_colour_b = 255;
-        g_user_task_colour_state = 0;
-        g_user_task_icon_state = 0;
-
-        // Clear the stdin buffer for this terminal so the user task starts fresh
-        vterm_stdin_clear(g_user_task_term);
+    // Reset per-task syscall state.
+    if (!syscall_get_user_fd_inherit_mode()) {
+        syscall_reset_user_fds();
+        syscall_reset_user_stdio_fds();
     }
+    syscall_reset_user_streams();
+    syscall_reset_user_guis();
+
+    g_user_interrupt = 0;
+    g_user_task_active = 1;
+    g_user_task_term = tile_is_tiling_active() ? tile_get_focused() : -1;
+    if (g_user_task_term < 0) g_user_task_term = 0;
+    g_user_task_ui_dirty = 1;
+
+    // Default user program output colour to white (programs can change it).
+    extern volatile int g_user_task_colour_r;
+    extern volatile int g_user_task_colour_g;
+    extern volatile int g_user_task_colour_b;
+    extern volatile uint8 g_user_task_colour_state;
+    extern volatile uint8 g_user_task_icon_state;
+    g_user_task_colour_r = 255;
+    g_user_task_colour_g = 255;
+    g_user_task_colour_b = 255;
+    g_user_task_colour_state = 0;
+    g_user_task_icon_state = 0;
+    
+    // Clear the stdin buffer for this terminal so the user task starts fresh
+    vterm_stdin_clear(g_user_task_term);
 
     // Record mappings incrementally so any mid-loop OOM can be cleaned up.
     user_task_set_current_mapping_state(map_start, 0, 0);
-    active_as->stack_bottom = USER_STACK_TOP - PAGE_SIZE;
+    vmm_kernel_as.stack_bottom = USER_STACK_TOP - PAGE_SIZE;
 
     /* Low-RAM-friendly program image mapping:
      * - Pre-create PTEs for the full PT_LOAD range as demand-zero (not present).
@@ -401,15 +391,15 @@ static int user_elf_run_argv_internal(uint8 drive,
      */
     for (uint32 pi = 0; pi < pages; ++pi) {
         uint32 va = map_start + pi * PAGE_SIZE;
-        pte_t* pte = vmm_walk_page_tables(active_as, va, 1);
+        pte_t* pte = vmm_walk_page_tables(&vmm_kernel_as, va, 1);
         if (!pte) {
             printf("%cError: failed to create PTEs for user image.\n", 255, 0, 0);
-            if (enter_user) user_task_cleanup_mappings();
+            user_task_cleanup_mappings();
             free(file);
             return -1;
         }
         /* Ensure PDE is user-accessible when we eventually fault/map. */
-        pde_t* pde = &active_as->pd->entries[PDE_INDEX(va)];
+        pde_t* pde = &vmm_kernel_as.pd->entries[PDE_INDEX(va)];
         *pde |= PTE_USER;
         *pte = PTE_DEMAND | PTE_USER | PTE_RW;
     }
@@ -426,7 +416,7 @@ static int user_elf_run_argv_internal(uint8 drive,
     const uint32 user_stack_top = user_stack_limit - 0x10;
 
     // Enable VMM stack growth for the current address space.
-    active_as->stack_bottom = user_stack_page;
+    vmm_kernel_as.stack_bottom = user_stack_page;
     user_task_set_current_mapping_state(map_start, pages, user_stack_page);
 
     for (uint32 spi = 0; spi < user_stack_pages; ++spi) {
@@ -435,17 +425,17 @@ static int user_elf_run_argv_internal(uint8 drive,
         if (frame == 0) {
             printf("%cError: out of physical frames (free=%u/%u).\n",
                    255, 0, 0, (unsigned)vmm_get_free_frames(), (unsigned)vmm_get_total_frames());
-            if (enter_user) user_task_cleanup_mappings();
+            user_task_cleanup_mappings();
             free(file);
             return -1;
         }
 
         memset(user_elf_kphys_alias_ptr(frame), 0, PAGE_SIZE);
 
-        if (vmm_map_page(active_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
+        if (vmm_map_page(&vmm_kernel_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
             printf("%cError: failed to map user stack.\n", 255, 0, 0);
             frame_free(frame);
-            if (enter_user) user_task_cleanup_mappings();
+            user_task_cleanup_mappings();
             free(file);
             return -1;
         }
@@ -461,13 +451,13 @@ static int user_elf_run_argv_internal(uint8 drive,
         if (ph->p_memsz == 0) continue;
         if (ph->p_filesz > ph->p_memsz) {
             printf("%cError: ELF segment filesz > memsz.\n", 255, 0, 0);
-            if (enter_user) user_task_cleanup_mappings();
+            user_task_cleanup_mappings();
             free(file);
             return -1;
         }
         if (ph->p_offset + ph->p_filesz > (uint32)n) {
             printf("%cError: ELF segment out of range.\n", 255, 0, 0);
-            if (enter_user) user_task_cleanup_mappings();
+            user_task_cleanup_mappings();
             free(file);
             return -1;
         }
@@ -482,7 +472,7 @@ static int user_elf_run_argv_internal(uint8 drive,
             if (frame == 0) {
                 printf("%cError: out of physical frames (free=%u/%u).\n",
                        255, 0, 0, (unsigned)vmm_get_free_frames(), (unsigned)vmm_get_total_frames());
-                if (enter_user) user_task_cleanup_mappings();
+                user_task_cleanup_mappings();
                 free(file);
                 return -1;
             }
@@ -490,10 +480,10 @@ static int user_elf_run_argv_internal(uint8 drive,
             /* Zero via kernel mapping so we don't touch user VAs unnecessarily. */
             memset(user_elf_kphys_alias_ptr(frame), 0, PAGE_SIZE);
 
-            if (vmm_map_page(active_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
+            if (vmm_map_page(&vmm_kernel_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
                 printf("%cError: failed to map ELF segment page.\n", 255, 0, 0);
                 frame_free(frame);
-                if (enter_user) user_task_cleanup_mappings();
+                user_task_cleanup_mappings();
                 free(file);
                 return -1;
             }
@@ -514,7 +504,7 @@ static int user_elf_run_argv_internal(uint8 drive,
     uint32 entry = eh->e_entry;
     if (entry == 0 || entry < map_start || entry >= map_end) {
         printf("%cError: invalid ELF entrypoint: 0x%X\n", 255, 0, 0, (unsigned)entry);
-        if (enter_user) user_task_cleanup_mappings();
+        user_task_cleanup_mappings();
         free(file);
         return -1;
     }
@@ -524,7 +514,7 @@ static int user_elf_run_argv_internal(uint8 drive,
     uint32 user_esp = user_stack_build_argv(user_stack_top, user_stack_page, abspath, argc, argv);
     if (user_esp == 0) {
         printf("%cError: argv too large.\n", 255, 0, 0);
-        if (enter_user) user_task_cleanup_mappings();
+        user_task_cleanup_mappings();
         return -1;
     }
 
@@ -533,23 +523,17 @@ static int user_elf_run_argv_internal(uint8 drive,
      */
     for (uint32 pi = 0; pi < pages; ++pi) {
         uint32 va = map_start + pi * PAGE_SIZE;
-        pte_t* pte = vmm_walk_page_tables(active_as, va, 0);
+        pte_t* pte = vmm_walk_page_tables(&vmm_kernel_as, va, 0);
         if (pte && (*pte & PTE_PRESENT)) {
-            clock_add_page(*pte & PTE_FRAME_MASK, pte, va, active_as);
+            clock_add_page(*pte & PTE_FRAME_MASK, pte, va, &vmm_kernel_as);
         }
     }
     for (uint32 spi = 0; spi < user_stack_pages; ++spi) {
         uint32 va = user_stack_page + spi * PAGE_SIZE;
-        pte_t* pte = vmm_walk_page_tables(active_as, va, 0);
+        pte_t* pte = vmm_walk_page_tables(&vmm_kernel_as, va, 0);
         if (pte && (*pte & PTE_PRESENT)) {
-            clock_add_page(*pte & PTE_FRAME_MASK, pte, va, active_as);
+            clock_add_page(*pte & PTE_FRAME_MASK, pte, va, &vmm_kernel_as);
         }
-    }
-
-    if (!enter_user) {
-        if (out_entry) *out_entry = entry;
-        if (out_user_esp) *out_user_esp = user_esp;
-        return 0;
     }
 
 #if defined(EYNOS_ARCH_AMD64)
@@ -574,7 +558,7 @@ static int user_elf_run_argv_internal(uint8 drive,
     uint32 kernel_stack_u32 = user_elf_ptr_to_u32(&stack_space);
     if (kernel_stack_u32 == 0) {
         printf("%cError: kernel stack pointer exceeds 32-bit TSS ABI.\n", 255, 0, 0);
-        if (enter_user) user_task_cleanup_mappings();
+        user_task_cleanup_mappings();
         return -1;
     }
     tss_set_kernel_stack(kernel_stack_u32);
@@ -584,15 +568,6 @@ static int user_elf_run_argv_internal(uint8 drive,
     enter_user_mode_segdom(entry, user_esp, g_user_segdom_cs, g_user_segdom_ds);
 #endif
 
-    return 0;
-}
-
-int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
-    int pid = user_task_spawn_argv(drive, abspath, argc, argv);
-    if (pid < 0) {
-        printf("%cError: failed to spawn user task.\n", 255, 0, 0);
-        return -1;
-    }
     return 0;
 }
 
@@ -628,21 +603,9 @@ typedef struct {
     int used;
     int pid;
     int status;
-    int term_idx;
     user_task_state_t state;
-    uint8 sched_class;
-    uint8 _sched_pad0;
-    uint16 base_tickets;
-    uint16 donated_tickets;
-    uint16 effective_tickets;
     int wait_target_pid;
-    int donation_target_pid;
-    uint16 donation_tickets_out;
-    uint16 _sched_pad1;
     user_task_runtime_t runtime;
-    address_space_t* as;
-    uint32 initial_entry;
-    uint32 initial_user_esp;
     user_task_image_t* image;
     int has_syscall_frame;
     regs_t last_syscall_frame;
@@ -661,81 +624,10 @@ typedef struct {
  */
 #define USER_TASK_MAX 16
 
-/*
- * ABI-INVARIANT: Stratified lottery scheduling classes for ring3 tasks.
- *
- * Why: Keeps scheduling policy simple while preserving broad urgency tiers.
- * Invariant: Class IDs are stable and must remain in [0, USER_TASK_SCHED_CLASS_COUNT).
- * ABI-sensitive: Yes (user-visible run-order behavior under contention).
- */
-#define USER_TASK_SCHED_CLASS_INTERACTIVE 0u
-#define USER_TASK_SCHED_CLASS_NORMAL      1u
-#define USER_TASK_SCHED_CLASS_BACKGROUND  2u
-#define USER_TASK_SCHED_CLASS_COUNT       3u
-
-/*
- * SECURITY-INVARIANT: Per-task ticket bounds for lottery selection.
- *
- * Why: Prevents runaway ticket inflation from dominating selection and keeps
- * integer accounting bounded on low-RAM builds.
- * Invariant: Effective tickets are clamped to [USER_TASK_TICKETS_MIN, USER_TASK_TICKETS_MAX].
- * ABI-sensitive: Yes (priority behavior is ticket-proportional).
- */
-#define USER_TASK_TICKETS_MIN      1u
-#define USER_TASK_TICKETS_DEFAULT  32u
-#define USER_TASK_TICKETS_MAX      1024u
-
-/*
- * ABI-INVARIANT: Cross-class service floors for stratified lottery.
- *
- * Why: Prevents strict-class starvation while preserving strong preference for
- * higher classes.
- * Invariant: If lower classes are runnable continuously, class 0 yields at
- * least one slot every (USER_TASK_CLASS0_BURST_MAX + 1) selections, and class 1
- * yields to class 2 at least one slot every (USER_TASK_CLASS1_BURST_MAX + 1)
- * selections.
- * ABI-sensitive: Yes (user-visible latency bounds by class).
- */
-#define USER_TASK_CLASS0_BURST_MAX 8u
-#define USER_TASK_CLASS1_BURST_MAX 4u
-
 static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static int g_user_task_next_pid = 1;
 static user_task_slot_t* g_user_task_active_slot = NULL;
 static volatile int g_user_task_schedule_request = 0;
-static int g_user_task_focus_term = -1;
-static uint16 g_user_task_class0_burst_remaining = USER_TASK_CLASS0_BURST_MAX;
-static uint16 g_user_task_class1_burst_remaining = USER_TASK_CLASS1_BURST_MAX;
-
-static int user_task_state_is_live(user_task_state_t state) {
-    return (state == USER_TASK_STATE_RUNNABLE ||
-            state == USER_TASK_STATE_RUNNING ||
-            state == USER_TASK_STATE_BLOCKED);
-}
-
-static int user_task_term_has_live_task_except(int term_idx, int exclude_pid) {
-    if (term_idx < 0) return 0;
-    for (int i = 0; i < USER_TASK_MAX; ++i) {
-        user_task_slot_t* slot = &g_user_tasks[i];
-        if (!slot->used) continue;
-        if (exclude_pid > 0 && slot->pid == exclude_pid) continue;
-        if (slot->term_idx != term_idx) continue;
-        if (!user_task_state_is_live(slot->state)) continue;
-        return 1;
-    }
-    return 0;
-}
-
-static int user_task_has_live_task_except_pid(int exclude_pid) {
-    for (int i = 0; i < USER_TASK_MAX; ++i) {
-        user_task_slot_t* slot = &g_user_tasks[i];
-        if (!slot->used) continue;
-        if (exclude_pid > 0 && slot->pid == exclude_pid) continue;
-        if (!user_task_state_is_live(slot->state)) continue;
-        return 1;
-    }
-    return 0;
-}
 
 static user_task_image_t* user_task_image_build(uint8 drive,
                                                 const char* abspath,
@@ -786,209 +678,30 @@ static void user_task_image_free(user_task_image_t* image) {
     free(image);
 }
 
-static void user_task_apply_user_segments(void) {
-#if defined(EYNOS_ARCH_AMD64)
-    g_user_segdom_cs = GDT_USER_CS;
-    g_user_segdom_ds = GDT_USER_DS;
-#else
-    uint32 seg_base = 0;
-    uint32 seg_limit = USER_STACK_TOP;
-    segdom_init(&g_user_segdom, seg_base, seg_limit);
-    g_user_segdom_cs = g_user_segdom.user_cs;
-    g_user_segdom_ds = g_user_segdom.user_ds;
-    segdom_load(&g_user_segdom);
-#endif
-}
-
-static void user_task_build_initial_frame(const user_task_slot_t* slot, regs_t* regs) {
-    if (!slot || !regs) return;
-    memset(regs, 0, sizeof(*regs));
-    regs->eip = slot->initial_entry;
-    regs->cs = g_user_segdom_cs ? (uint32)g_user_segdom_cs : (uint32)GDT_USER_CS;
-    regs->eflags = 0x202u;
-    regs->useresp = slot->initial_user_esp;
-    regs->ss = g_user_segdom_ds ? (uint32)g_user_segdom_ds : (uint32)GDT_USER_DS;
-}
-
-static int user_task_prepare_slot_image(user_task_slot_t* slot) {
-    if (!slot || !slot->image) return -1;
-    if (slot->as && slot->initial_entry != 0 && slot->initial_user_esp != 0) return 0;
-
-    address_space_t* as = create_address_space();
-    if (!as) {
-        printf("%cError: out of memory creating task address space.\n", 255, 0, 0);
-        return -1;
-    }
-
-    address_space_t* previous_as = vmm_current_as ? vmm_current_as : &vmm_kernel_as;
-    user_task_slot_t* previous_active_slot = g_user_task_active_slot;
-
-    uint32 saved_base = g_user_code_base;
-    uint32 saved_pages = g_user_code_pages;
-    uint32 saved_stack = g_user_stack_page;
-
-    g_user_task_active_slot = NULL;
-
-    switch_address_space(as);
-
-    uint32 entry = 0;
-    uint32 user_esp = 0;
-    int rc = user_elf_run_argv_internal(slot->image->drive,
-                                        slot->image->path,
-                                        slot->image->argc,
-                                        slot->image->argv,
-                                        0,
-                                        &entry,
-                                        &user_esp);
-
-    uint32 loaded_base = g_user_code_base;
-    uint32 loaded_pages = g_user_code_pages;
-    uint32 loaded_stack = g_user_stack_page;
-
-    switch_address_space(previous_as);
-
-    g_user_task_active_slot = previous_active_slot;
-    g_user_code_base = saved_base;
-    g_user_code_pages = saved_pages;
-    g_user_stack_page = saved_stack;
-
-    if (rc != 0 || entry == 0 || user_esp == 0) {
-        destroy_address_space(as);
-        return -1;
-    }
-
-    slot->as = as;
-    slot->initial_entry = entry;
-    slot->initial_user_esp = user_esp;
-    slot->runtime.code_base = loaded_base;
-    slot->runtime.code_pages = loaded_pages;
-    slot->runtime.stack_page = loaded_stack;
-    return 0;
-}
-
 static int user_task_launch_slot(user_task_slot_t* slot) {
     if (!slot || !slot->image) return -1;
 
-    if (user_task_prepare_slot_image(slot) != 0) {
-        slot->state = USER_TASK_STATE_ZOMBIE;
-        slot->status = -1;
-        return -1;
-    }
-
     slot->state = USER_TASK_STATE_RUNNING;
     slot->wait_target_pid = 0;
-    if (slot->term_idx >= 0) {
-        g_user_task_term = slot->term_idx;
-    }
-
-    g_user_interrupt = 0;
-    g_user_task_active = 1;
-    g_user_task_ui_dirty = 1;
-
     g_user_task_active_slot = slot;
-    g_user_task_running_pid = slot->pid;
-    g_user_task_pending_pid = 0;
+    g_user_task_pending_pid = slot->pid;
 
-    switch_address_space(slot->as);
-    user_task_set_current_mapping_state(slot->runtime.code_base,
-                                        slot->runtime.code_pages,
-                                        slot->runtime.stack_page);
+    int rc = user_elf_run_argv(slot->image->drive,
+                               slot->image->path,
+                               slot->image->argc,
+                               slot->image->argv);
 
-    int has_other_live_tasks = user_task_has_live_task_except_pid(slot->pid);
-
-    if (!slot->has_syscall_frame) {
-        // Default user program output colour to white (programs can change it).
-        g_user_task_colour_r = 255;
-        g_user_task_colour_g = 255;
-        g_user_task_colour_b = 255;
-        g_user_task_colour_state = 0;
-        g_user_task_icon_state = 0;
-
-        if (g_user_task_term >= 0) {
-            vterm_stdin_clear(g_user_task_term);
-        }
-
-        /*
-         * SECURITY-INVARIANT: Shared syscall state must not be globally reset
-         * while other tasks are still alive.
-         */
-        if (!has_other_live_tasks) {
-            if (!syscall_get_user_fd_inherit_mode()) {
-                syscall_reset_user_fds();
-                syscall_reset_user_stdio_fds();
-            }
-            syscall_reset_user_streams();
-            syscall_reset_user_guis();
-        }
-    }
-
-    user_task_apply_user_segments();
-
-    uint32 kernel_stack_u32 = user_elf_ptr_to_u32(&stack_space);
-    if (kernel_stack_u32 == 0) {
-        printf("%cError: kernel stack pointer exceeds 32-bit TSS ABI.\n", 255, 0, 0);
-        switch_address_space(&vmm_kernel_as);
-        g_user_task_active_slot = NULL;
-        g_user_task_running_pid = 0;
-        g_user_task_active = 0;
-        g_user_task_term = -1;
-        if (slot->as) {
-            destroy_address_space(slot->as);
-            slot->as = NULL;
-        }
-        slot->state = USER_TASK_STATE_ZOMBIE;
-        slot->status = -1;
-        return -1;
-    }
-    tss_set_kernel_stack(kernel_stack_u32);
-
-    uint32 entry = slot->initial_entry;
-    uint32 user_esp = slot->initial_user_esp;
-    if (slot->has_syscall_frame) {
-        entry = slot->last_syscall_frame.eip;
-        user_esp = slot->last_syscall_frame.useresp;
-    }
-
-#if defined(EYNOS_ARCH_AMD64)
-    enter_user_mode(entry, user_esp);
-#else
-    enter_user_mode_segdom(entry, user_esp, g_user_segdom_cs, g_user_segdom_ds);
-#endif
-
-    return 0;
+    // Returning here means load failed before entering ring3.
+    g_user_task_active_slot = NULL;
+    if (g_user_task_pending_pid == slot->pid) g_user_task_pending_pid = 0;
+    if (g_user_task_running_pid == slot->pid) g_user_task_running_pid = 0;
+    slot->state = USER_TASK_STATE_ZOMBIE;
+    slot->status = (rc == 0) ? 0 : -1;
+    return rc;
 }
 
 void user_task_request_schedule(void) {
     g_user_task_schedule_request = 1;
-}
-
-void user_task_note_focus_term(int term_idx) {
-    if (term_idx < 0) {
-        g_user_task_focus_term = -1;
-    } else {
-        g_user_task_focus_term = term_idx;
-    }
-
-    for (int i = 0; i < USER_TASK_MAX; ++i) {
-        user_task_slot_t* slot = &g_user_tasks[i];
-        if (!slot->used) continue;
-        if (slot->state == USER_TASK_STATE_UNUSED || slot->state == USER_TASK_STATE_ZOMBIE) continue;
-        if (g_user_task_focus_term >= 0 && slot->term_idx == g_user_task_focus_term) {
-            slot->sched_class = (uint8)USER_TASK_SCHED_CLASS_INTERACTIVE;
-        } else {
-            slot->sched_class = (uint8)USER_TASK_SCHED_CLASS_NORMAL;
-        }
-    }
-}
-
-void user_task_on_timeslice_end(void) {
-    if (!g_user_task_active) return;
-    if ((int)g_user_task_running_pid <= 0) return;
-    user_task_request_schedule();
-}
-
-int user_task_get_running_pid(void) {
-    return (int)g_user_task_running_pid;
 }
 
 void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* stack_page) {
@@ -1026,29 +739,6 @@ static user_task_slot_t* user_task_find_slot_by_pid(int pid) {
     return NULL;
 }
 
-int user_task_get_running_term(void) {
-    int pid = (int)g_user_task_running_pid;
-    if (pid > 0) {
-        user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
-        if (slot && slot->used && slot->term_idx >= 0) {
-            return slot->term_idx;
-        }
-    }
-    if (g_user_task_active_slot && g_user_task_active_slot->used && g_user_task_active_slot->term_idx >= 0) {
-        return g_user_task_active_slot->term_idx;
-    }
-    if (g_user_task_term >= 0) return g_user_task_term;
-    return -1;
-}
-
-int user_task_term_has_live_task(int term_idx) {
-    return user_task_term_has_live_task_except(term_idx, 0);
-}
-
-int user_task_has_live_tasks(void) {
-    return user_task_has_live_task_except_pid(0);
-}
-
 static user_task_slot_t* user_task_alloc_slot(void) {
     for (int i = 0; i < USER_TASK_MAX; ++i) {
         if (!g_user_tasks[i].used) return &g_user_tasks[i];
@@ -1056,288 +746,11 @@ static user_task_slot_t* user_task_alloc_slot(void) {
     return NULL;
 }
 
-static uint32 user_task_sched_class_index(const user_task_slot_t* slot) {
-    if (!slot) return USER_TASK_SCHED_CLASS_NORMAL;
-    uint32 cls = (uint32)slot->sched_class;
-    if (cls >= USER_TASK_SCHED_CLASS_COUNT) return USER_TASK_SCHED_CLASS_NORMAL;
-    return cls;
-}
-
-static uint32 user_task_clamp_tickets(uint32 tickets) {
-    if (tickets < USER_TASK_TICKETS_MIN) return USER_TASK_TICKETS_MIN;
-    if (tickets > USER_TASK_TICKETS_MAX) return USER_TASK_TICKETS_MAX;
-    return tickets;
-}
-
-static uint32 user_task_effective_tickets(user_task_slot_t* slot) {
-    if (!slot) return USER_TASK_TICKETS_MIN;
-    uint32 base = slot->base_tickets ? (uint32)slot->base_tickets : USER_TASK_TICKETS_DEFAULT;
-    uint32 donated = (uint32)slot->donated_tickets;
-    uint32 total = base + donated;
-    uint32 clamped = user_task_clamp_tickets(total);
-    slot->effective_tickets = (uint16)clamped;
-    return clamped;
-}
-
-static void user_task_clear_donation(user_task_slot_t* donor) {
-    if (!donor) return;
-
-    int target_pid = donor->donation_target_pid;
-    uint32 donated_out = (uint32)donor->donation_tickets_out;
-    if (target_pid > 0 && donated_out > 0) {
-        user_task_slot_t* target = user_task_find_slot_by_pid(target_pid);
-        if (target && target->used) {
-            uint32 current = (uint32)target->donated_tickets;
-            target->donated_tickets = (uint16)((current > donated_out) ? (current - donated_out) : 0u);
-            (void)user_task_effective_tickets(target);
-        }
-    }
-
-    donor->donation_target_pid = 0;
-    donor->donation_tickets_out = 0;
-    (void)user_task_effective_tickets(donor);
-}
-
-static void user_task_clear_donations_target_pid(int target_pid) {
-    if (target_pid <= 0) return;
-    for (int i = 0; i < USER_TASK_MAX; ++i) {
-        user_task_slot_t* donor = &g_user_tasks[i];
-        if (!donor->used) continue;
-        if (donor->donation_target_pid != target_pid) continue;
-        user_task_clear_donation(donor);
-    }
-}
-
-static void user_task_donate_tickets(user_task_slot_t* donor,
-                                     user_task_slot_t* target,
-                                     uint32 tickets) {
-    if (!donor) return;
-
-    user_task_clear_donation(donor);
-
-    if (!target || !target->used) return;
-    if (target->state == USER_TASK_STATE_UNUSED) return;
-    if (target->pid <= 0 || donor->pid <= 0) return;
-    if (target->pid == donor->pid) return;
-    if (tickets == 0) return;
-
-    uint32 grant = user_task_clamp_tickets(tickets);
-    uint32 room = USER_TASK_TICKETS_MAX - (uint32)target->donated_tickets;
-    if (room == 0) return;
-    if (grant > room) grant = room;
-
-    target->donated_tickets = (uint16)((uint32)target->donated_tickets + grant);
-    donor->donation_target_pid = target->pid;
-    donor->donation_tickets_out = (uint16)grant;
-
-    (void)user_task_effective_tickets(target);
-    (void)user_task_effective_tickets(donor);
-}
-
-int user_task_donate_running_to_pid(int target_pid, uint16 tickets) {
-    int running_pid = (int)g_user_task_running_pid;
-    if (running_pid <= 0 || target_pid <= 0) return -1;
-
-    user_task_slot_t* donor = user_task_find_slot_by_pid(running_pid);
-    user_task_slot_t* target = user_task_find_slot_by_pid(target_pid);
-    if (!donor || !target) return -1;
-    if (donor == target) return -1;
-
-    user_task_donate_tickets(donor, target, (uint32)tickets);
-    return 0;
-}
-
-void user_task_clear_running_donation(void) {
-    int running_pid = (int)g_user_task_running_pid;
-    if (running_pid <= 0) return;
-    user_task_slot_t* donor = user_task_find_slot_by_pid(running_pid);
-    if (!donor) return;
-    user_task_clear_donation(donor);
-}
-
-static int user_task_slot_eligible(user_task_slot_t* slot,
-                                   int exclude_pid,
-                                   int require_syscall_frame) {
-    if (!slot || !slot->used) return 0;
-    if (slot->state != USER_TASK_STATE_RUNNABLE) return 0;
-    if (exclude_pid > 0 && slot->pid == exclude_pid) return 0;
-
-    if (require_syscall_frame) {
-        if (!slot->has_syscall_frame) return 0;
-        if (!slot->as) return 0;
-    }
-
-    return 1;
-}
-
-static int user_task_class_has_runnable(uint32 sched_class,
-                                        int exclude_pid,
-                                        int require_syscall_frame) {
-    for (int i = 0; i < USER_TASK_MAX; ++i) {
-        user_task_slot_t* slot = &g_user_tasks[i];
-        if (!user_task_slot_eligible(slot, exclude_pid, require_syscall_frame)) continue;
-        if (user_task_sched_class_index(slot) != sched_class) continue;
-        return 1;
-    }
-    return 0;
-}
-
-static int user_task_select_sched_class_with_floor(int exclude_pid,
-                                                    int require_syscall_frame,
-                                                    uint32* out_class) {
-    int has0 = user_task_class_has_runnable(USER_TASK_SCHED_CLASS_INTERACTIVE,
-                                            exclude_pid,
-                                            require_syscall_frame);
-    int has1 = user_task_class_has_runnable(USER_TASK_SCHED_CLASS_NORMAL,
-                                            exclude_pid,
-                                            require_syscall_frame);
-    int has2 = user_task_class_has_runnable(USER_TASK_SCHED_CLASS_BACKGROUND,
-                                            exclude_pid,
-                                            require_syscall_frame);
-
-    if (!has0) g_user_task_class0_burst_remaining = USER_TASK_CLASS0_BURST_MAX;
-    if (!has1) g_user_task_class1_burst_remaining = USER_TASK_CLASS1_BURST_MAX;
-
-    if (has0) {
-        if (has1 || has2) {
-            if (g_user_task_class0_burst_remaining == 0) {
-                g_user_task_class0_burst_remaining = USER_TASK_CLASS0_BURST_MAX;
-                if (has1) {
-                    *out_class = USER_TASK_SCHED_CLASS_NORMAL;
-                    return 1;
-                }
-                *out_class = USER_TASK_SCHED_CLASS_BACKGROUND;
-                return 1;
-            }
-            g_user_task_class0_burst_remaining--;
-        }
-
-        *out_class = USER_TASK_SCHED_CLASS_INTERACTIVE;
-        return 1;
-    }
-
-    if (has1) {
-        if (has2) {
-            if (g_user_task_class1_burst_remaining == 0) {
-                g_user_task_class1_burst_remaining = USER_TASK_CLASS1_BURST_MAX;
-                *out_class = USER_TASK_SCHED_CLASS_BACKGROUND;
-                return 1;
-            }
-            g_user_task_class1_burst_remaining--;
-        }
-
-        *out_class = USER_TASK_SCHED_CLASS_NORMAL;
-        return 1;
-    }
-
-    if (has2) {
-        *out_class = USER_TASK_SCHED_CLASS_BACKGROUND;
-        return 1;
-    }
-
-    return 0;
-}
-
-static user_task_slot_t* user_task_pick_runnable_slot(int exclude_pid,
-                                                       int require_syscall_frame) {
-    uint32 cls = USER_TASK_SCHED_CLASS_NORMAL;
-    if (!user_task_select_sched_class_with_floor(exclude_pid, require_syscall_frame, &cls)) {
-        return NULL;
-    }
-
-    uint32 total_tickets = 0;
-    for (int i = 0; i < USER_TASK_MAX; ++i) {
-        user_task_slot_t* slot = &g_user_tasks[i];
-        if (!user_task_slot_eligible(slot, exclude_pid, require_syscall_frame)) continue;
-        if (user_task_sched_class_index(slot) != cls) continue;
-        total_tickets += user_task_effective_tickets(slot);
-    }
-
-    if (total_tickets == 0) return NULL;
-
-    uint32 draw = sched_rng_bounded(total_tickets);
-    uint32 acc = 0;
-    for (int i = 0; i < USER_TASK_MAX; ++i) {
-        user_task_slot_t* slot = &g_user_tasks[i];
-        if (!user_task_slot_eligible(slot, exclude_pid, require_syscall_frame)) continue;
-        if (user_task_sched_class_index(slot) != cls) continue;
-
-        acc += user_task_effective_tickets(slot);
-        if (draw < acc) {
-            return slot;
-        }
-    }
-
-    return NULL;
-}
-
-static int user_task_switch_to_slot(regs_t* regs,
-                                    user_task_slot_t* current,
-                                    user_task_slot_t* target,
-                                    int allow_prepare,
-                                    int save_current_frame) {
-    if (!regs || !target || !target->used) return 0;
-
-    if (!target->as && allow_prepare) {
-        if (user_task_prepare_slot_image(target) != 0) {
-            target->state = USER_TASK_STATE_ZOMBIE;
-            target->status = -1;
-            return 0;
-        }
-    }
-    if (!target->as) return 0;
-
-    if (save_current_frame && current) {
-        current->last_syscall_frame = *regs;
-        current->has_syscall_frame = 1;
-        current->state = USER_TASK_STATE_RUNNABLE;
-    }
-
-    switch_address_space(target->as);
-    user_task_set_current_mapping_state(target->runtime.code_base,
-                                        target->runtime.code_pages,
-                                        target->runtime.stack_page);
-
-    if (target->has_syscall_frame) {
-        *regs = target->last_syscall_frame;
-    } else {
-        user_task_apply_user_segments();
-        user_task_build_initial_frame(target, regs);
-    }
-
-    target->state = USER_TASK_STATE_RUNNING;
-    g_user_task_active = 1;
-    g_user_task_active_slot = target;
-    g_user_task_running_pid = target->pid;
-    if (target->term_idx >= 0) {
-        g_user_task_term = target->term_idx;
-    }
-    g_user_task_ui_dirty = 1;
-    g_user_task_schedule_request = 0;
-    return 1;
-}
-
-static int user_task_try_switch_to_saved_frame(regs_t* regs,
-                                               user_task_slot_t* current,
-                                               int current_pid) {
-    if (!regs || !current) return 0;
-
-    user_task_slot_t* target = user_task_pick_runnable_slot(current_pid, 1);
-    if (!target) return 0;
-
-    return user_task_switch_to_slot(regs, current, target, 0, 1);
-}
-
-int user_task_try_preempt_from_irq(regs_t* regs) {
-    if (!regs) return 0;
-    if (!g_user_task_schedule_request) return 0;
-    if (!g_user_task_active) return 0;
-
-    int current_pid = (int)g_user_task_running_pid;
-    user_task_slot_t* current = user_task_find_slot_by_pid(current_pid);
-    if (!current) return 0;
-
-    return user_task_try_switch_to_saved_frame(regs, current, current_pid);
+static int user_task_runtime_matches_live(const user_task_runtime_t* rt) {
+    if (!rt) return 0;
+    return (rt->code_base == g_user_code_base &&
+            rt->code_pages == g_user_code_pages &&
+            rt->stack_page == g_user_stack_page) ? 1 : 0;
 }
 
 int user_task_try_resume_from_syscall(regs_t* regs) {
@@ -1347,25 +760,32 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
 
     int current_pid = (int)g_user_task_running_pid;
     user_task_slot_t* current = user_task_find_slot_by_pid(current_pid);
-    if (current) {
-        if (user_task_try_switch_to_saved_frame(regs, current, current_pid)) {
-            return 1;
-        }
+    if (!current) return 0;
+
+    user_task_slot_t* target = NULL;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used) continue;
+        if (slot->pid == current_pid) continue;
+        if (slot->state != USER_TASK_STATE_RUNNABLE) continue;
+        if (!slot->has_syscall_frame) continue;
+        if (!user_task_runtime_matches_live(&slot->runtime)) continue;
+        target = slot;
+        break;
     }
 
-    user_task_slot_t* target = user_task_pick_runnable_slot(current_pid > 0 ? current_pid : 0, 0);
-    if (!target) {
-        if (!current) {
-            g_user_task_active = 0;
-            g_user_task_term = -1;
-            g_user_task_ui_dirty = 0;
-            g_abort_to_shell = 1;
-        }
-        g_user_task_schedule_request = 0;
-        return 0;
-    }
+    if (!target) return 0;
 
-    return user_task_switch_to_slot(regs, current, target, 1, current != NULL);
+    current->last_syscall_frame = *regs;
+    current->has_syscall_frame = 1;
+    current->state = USER_TASK_STATE_RUNNABLE;
+
+    *regs = target->last_syscall_frame;
+    target->state = USER_TASK_STATE_RUNNING;
+    g_user_task_active_slot = target;
+    g_user_task_running_pid = target->pid;
+    g_user_task_schedule_request = 0;
+    return 1;
 }
 
 int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
@@ -1380,34 +800,7 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     slot->pid = g_user_task_next_pid++;
     slot->image = image;
     slot->state = USER_TASK_STATE_RUNNABLE;
-    slot->term_idx = -1;
-    slot->sched_class = (uint8)USER_TASK_SCHED_CLASS_NORMAL;
-    slot->base_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;
-    slot->donated_tickets = 0;
-    slot->effective_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;
     slot->wait_target_pid = 0;
-    slot->donation_target_pid = 0;
-    slot->donation_tickets_out = 0;
-    slot->as = NULL;
-    slot->initial_entry = 0;
-    slot->initial_user_esp = 0;
-    slot->has_syscall_frame = 0;
-    /*
-     * ABI-INVARIANT: Task terminal affinity is captured at launch source.
-     *
-     * Why: Multiple queued tasks may be launched while another task is
-     * currently running. New tasks must write to the terminal where the
-     * command was entered (focused tile), not to the running task terminal.
-     */
-    if (tile_is_tiling_active()) {
-        int focused_term = tile_get_focused_term();
-        if (focused_term >= 0) {
-            slot->term_idx = focused_term;
-        }
-    }
-    if (slot->term_idx < 0 && g_user_task_term >= 0) {
-        slot->term_idx = g_user_task_term;
-    }
     if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
 
     /*
@@ -1418,7 +811,7 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
      */
     if (!g_user_task_active) {
         if (user_task_launch_slot(slot) != 0) {
-            return -1;
+            return slot->pid;
         }
     } else {
         user_task_request_schedule();
@@ -1429,9 +822,13 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
 
 int user_task_continue_or_schedule(void) {
     // Prefer runnable queued tasks over UI fallback.
-    user_task_slot_t* slot = user_task_pick_runnable_slot(0, 0);
-    if (!slot) return 0;
-    return (user_task_launch_slot(slot) == 0) ? 1 : 0;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) continue;
+        (void)user_task_launch_slot(slot);
+        return 1;
+    }
+    return 0;
 }
 
 int user_task_poll_scheduler(void) {
@@ -1459,46 +856,16 @@ void user_task_capture_syscall_frame(const regs_t* regs) {
 
 void user_task_notify_exit(int status) {
     int pid = (int)g_user_task_running_pid;
-    int exited_term = -1;
     if (pid > 0) {
         user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
         if (slot) {
-            exited_term = slot->term_idx;
-            user_task_clear_donation(slot);
-            user_task_clear_donations_target_pid(pid);
             slot->state = USER_TASK_STATE_ZOMBIE;
             slot->status = status;
-            if (slot->as) {
-                if (vmm_current_as == slot->as) {
-                    switch_address_space(&vmm_kernel_as);
-                }
-                destroy_address_space(slot->as);
-                slot->as = NULL;
-            }
-            slot->initial_entry = 0;
-            slot->initial_user_esp = 0;
-            slot->has_syscall_frame = 0;
         }
     }
-
-    /*
-     * SECURITY-INVARIANT: Exit path must clear live mapping metadata before
-     * abort-to-shell cleanup runs.
-     *
-     * Why: If stale user VA ranges survive after we switched back to the
-     * kernel address space, user_task_cleanup_mappings() may attempt to unmap
-     * those VAs from the kernel AS, corrupting low identity mappings.
-     */
     g_user_task_active_slot = NULL;
-    user_task_clear_current_mapping_state();
     g_user_task_running_pid = 0;
     g_user_task_pending_pid = 0;
-
-    if (exited_term >= 0 && !user_task_term_has_live_task_except(exited_term, pid)) {
-        vterm_print_prompt(exited_term);
-        g_user_task_ui_dirty = 1;
-    }
-
     user_task_request_schedule();
 }
 
@@ -1506,66 +873,33 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
     if (!slot) return -1;
 
-    int waiter_pid = (int)g_user_task_running_pid;
-    user_task_slot_t* waiter = user_task_find_slot_by_pid(waiter_pid);
-    if (waiter && waiter != slot) {
-        uint32 donation = waiter->base_tickets ? (uint32)waiter->base_tickets : USER_TASK_TICKETS_DEFAULT;
-        user_task_donate_tickets(waiter, slot, donation);
-    }
-
     while (slot->state != USER_TASK_STATE_ZOMBIE) {
         // If any runnable user task exists, execute it now. This allows
         // parent tasks blocked in waitpid() to make progress on spawned
         // children even though only one ring3 task runs at a time.
         if (user_task_continue_or_schedule()) {
             slot = user_task_find_slot_by_pid(pid);
-            if (!slot) {
-                if (waiter) user_task_clear_donation(waiter);
-                return -1;
-            }
+            if (!slot) return -1;
             continue;
         }
 
-        if (flags & USER_TASK_WAIT_NOHANG) {
-            if (waiter) user_task_clear_donation(waiter);
-            return 0;
-        }
+        if (flags & USER_TASK_WAIT_NOHANG) return 0;
         watchdog_kick("waitpid");
         __asm__ __volatile__("sti");
         __asm__ __volatile__("hlt");
 
         slot = user_task_find_slot_by_pid(pid);
-        if (!slot) {
-            if (waiter) user_task_clear_donation(waiter);
-            return -1;
-        }
+        if (!slot) return -1;
     }
-
-    if (waiter) user_task_clear_donation(waiter);
 
     if (out_status) *out_status = slot->status;
-    user_task_clear_donation(slot);
-    user_task_clear_donations_target_pid(slot->pid);
-    if (slot->as) {
-        destroy_address_space(slot->as);
-        slot->as = NULL;
-    }
     user_task_image_free(slot->image);
     slot->image = NULL;
     slot->used = 0;
     slot->pid = 0;
     slot->state = USER_TASK_STATE_UNUSED;
-    slot->term_idx = -1;
     slot->status = 0;
-    slot->sched_class = (uint8)USER_TASK_SCHED_CLASS_NORMAL;
-    slot->base_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;
-    slot->donated_tickets = 0;
-    slot->effective_tickets = (uint16)USER_TASK_TICKETS_DEFAULT;
-    slot->initial_entry = 0;
-    slot->initial_user_esp = 0;
     slot->wait_target_pid = 0;
-    slot->donation_target_pid = 0;
-    slot->donation_tickets_out = 0;
     slot->has_syscall_frame = 0;
     user_task_request_schedule();
     return pid;

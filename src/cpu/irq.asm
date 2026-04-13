@@ -1,4 +1,4 @@
-; IRQ stubs 0..15 route to C dispatcher irq_dispatch_c(irq, frame_ptr)
+; IRQ stubs 0..15 route to C dispatcher irq_dispatch_c(irq)
 
 BITS 32
 
@@ -27,11 +27,9 @@ irq%1:
     jmp .do_abort_%1
 .stack_ok_%1:
 
-    mov eax, esp
-    push eax
     push dword %1
     call irq_dispatch_c
-    add esp, 8
+    add esp, 4
 
     ; If requested, abandon return-to-user and jump back into the shell.
     cmp dword [g_abort_to_shell], 0

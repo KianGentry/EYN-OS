@@ -371,6 +371,7 @@ clean:
 	rm -rf obj tmp/boot/kernel.bin *.img eynfs_format EYNOS.iso
 	@rm -rf tmp/grub_minimal tmp/grub_ultra_minimal tmp/grub_ultra_minimal.* tmp/grub.* tmp/iso_edit.* tmp/iso_clean.* 2>/dev/null || true
 	rm -f userland/*.o userland/*.bin
+	rm -rf tmp tmp_user
 
 clear: clean
 

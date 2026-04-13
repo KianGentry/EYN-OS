@@ -28,7 +28,6 @@ static uint32 g_ready_bitmap = 0;
 
 static volatile uint32 g_ticks = 0;
 static uint32 g_tick_hz = 100;
-static uint32 g_sched_rng_state = 0x53A9D37Du;
 /*
  * ABI-INVARIANT: Scheduler timeslice length in ticks.
  *
@@ -64,15 +63,6 @@ static volatile uint16 g_det_tail = 0;
 static volatile int g_det_enabled = 0;
 static volatile int g_det_processing = 0;
 
-/*
- * ABI-INVARIANT: Default scheduler PRNG seed.
- *
- * Why: Provides a deterministic baseline sequence across boots and test runs.
- * Invariant: The scheduler-owned PRNG stream is independent from userland RNG.
- * ABI-sensitive: Yes when deterministic mode is enabled.
- */
-#define SCHED_RNG_DEFAULT_SEED 0x53A9D37Du
-
 static void sched_irq0_handler(void) {
     sched_tick();
 }
@@ -87,7 +77,6 @@ static inline void sched_sti(void) {
 
 void sched_init(void) {
     g_ticks = 0;
-    sched_rng_seed(SCHED_RNG_DEFAULT_SEED);
     // register tick handler on IRQ0
     register_interrupt_handler(0, sched_irq0_handler);
     sched_work_init();
@@ -333,27 +322,6 @@ int sched_work_on_timeslice_end(void) {
     return ran;
 }
 
-void sched_rng_seed(uint32 seed) {
-    if (seed == 0) seed = SCHED_RNG_DEFAULT_SEED;
-    g_sched_rng_state = seed;
-}
-
-uint32 sched_rng_next_u32(void) {
-    /* Numerical Recipes LCG constants: fast and adequate for scheduling draws. */
-    g_sched_rng_state = g_sched_rng_state * 1664525u + 1013904223u;
-    return g_sched_rng_state;
-}
-
-uint32 sched_rng_bounded(uint32 upper_exclusive) {
-    if (upper_exclusive <= 1u) return 0;
-
-    /*
-     * Map uniformly with multiply-high to avoid modulo bias for non-powers of two.
-     */
-    uint64 product = (uint64)sched_rng_next_u32() * (uint64)upper_exclusive;
-    return (uint32)(product >> 32);
-}
-
 void sched_det_enable(int enabled) {
     g_det_enabled = enabled ? 1 : 0;
     if (g_det_enabled) {
@@ -361,7 +329,6 @@ void sched_det_enable(int enabled) {
         g_det_head = 0;
         g_det_tail = 0;
         sched_sti();
-        sched_rng_seed(SCHED_RNG_DEFAULT_SEED);
     }
 }
 

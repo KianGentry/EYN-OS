@@ -14,8 +14,7 @@ void register_interrupt_handler(int irq, irq_handler_t handler);
 void pic_send_eoi(int irq);
 
 // C-level IRQ dispatcher used by assembly stubs.
-// frame_ptr points at the saved GPR block produced by the IRQ entry stub.
-void irq_dispatch_c(int irq_number, uintptr frame_ptr);
+void irq_dispatch_c(int irq_number);
 
 // Deferred IRQ dispatch for deterministic mode (no PIC EOI).
 void irq_dispatch_deferred(int irq_number);

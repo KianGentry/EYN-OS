@@ -7,7 +7,6 @@
 #include <watchdog.h>
 #include <misc/sched.h>
 #include <cpu/user_elf.h>
-#include <isr.h>
 
 extern void poll_keyboard_for_ctrl_c();
 
@@ -27,125 +26,6 @@ extern void poll_keyboard_for_ctrl_c();
 
 // store handlers
 static irq_handler_t g_irq_handlers[16];
-
-static int irq_frame_to_regs(uintptr frame_ptr, int irq_number, regs_t* out) {
-    if (!frame_ptr || !out) return -1;
-    if (irq_number < 0 || irq_number >= 16) return -1;
-
-#if defined(EYNOS_ARCH_AMD64)
-    uint64* q = (uint64*)frame_ptr;
-    uint64 cs = q[16];
-
-    out->edi = (uint32)q[8];
-    out->esi = (uint32)q[9];
-    out->ebp = (uint32)q[10];
-    out->esp = 0;
-    out->ebx = (uint32)q[11];
-    out->edx = (uint32)q[12];
-    out->ecx = (uint32)q[13];
-    out->eax = (uint32)q[14];
-    out->int_no = (uint32)(32 + irq_number);
-    out->err_code = 0;
-    out->eip = (uint32)q[15];
-    out->cs = (uint32)cs;
-    out->eflags = (uint32)q[17];
-
-    if ((cs & 3u) == 3u) {
-        out->useresp = (uint32)q[18];
-        out->ss = (uint32)q[19];
-    } else {
-        out->useresp = 0;
-        out->ss = 0;
-    }
-#else
-    uint32* w = (uint32*)frame_ptr;
-    uint32 cs = w[9];
-
-    out->edi = w[0];
-    out->esi = w[1];
-    out->ebp = w[2];
-    out->esp = w[3];
-    out->ebx = w[4];
-    out->edx = w[5];
-    out->ecx = w[6];
-    out->eax = w[7];
-    out->int_no = (uint32)(32 + irq_number);
-    out->err_code = 0;
-    out->eip = w[8];
-    out->cs = cs;
-    out->eflags = w[10];
-
-    if ((cs & 3u) == 3u) {
-        out->useresp = w[11];
-        out->ss = w[12];
-    } else {
-        out->useresp = 0;
-        out->ss = 0;
-    }
-#endif
-
-    return 0;
-}
-
-static int irq_regs_to_frame(uintptr frame_ptr, const regs_t* in) {
-    if (!frame_ptr || !in) return -1;
-
-#if defined(EYNOS_ARCH_AMD64)
-    uint64* q = (uint64*)frame_ptr;
-
-    q[8] = (uint64)in->edi;
-    q[9] = (uint64)in->esi;
-    q[10] = (uint64)in->ebp;
-    q[11] = (uint64)in->ebx;
-    q[12] = (uint64)in->edx;
-    q[13] = (uint64)in->ecx;
-    q[14] = (uint64)in->eax;
-    q[15] = (uint64)in->eip;
-    q[16] = (uint64)in->cs;
-    q[17] = (uint64)in->eflags;
-
-    if ((in->cs & 3u) == 3u) {
-        q[18] = (uint64)in->useresp;
-        q[19] = (uint64)in->ss;
-    }
-#else
-    uint32* w = (uint32*)frame_ptr;
-
-    w[0] = in->edi;
-    w[1] = in->esi;
-    w[2] = in->ebp;
-    w[3] = in->esp;
-    w[4] = in->ebx;
-    w[5] = in->edx;
-    w[6] = in->ecx;
-    w[7] = in->eax;
-    w[8] = in->eip;
-    w[9] = in->cs;
-    w[10] = in->eflags;
-
-    if ((in->cs & 3u) == 3u) {
-        w[11] = in->useresp;
-        w[12] = in->ss;
-    }
-#endif
-
-    return 0;
-}
-
-static void irq_maybe_preempt_user_task_on_timer(int irq_number, uintptr frame_ptr) {
-    if (irq_number != 0) return;
-    if (!g_user_task_active) return;
-    if (frame_ptr == 0) return;
-
-    regs_t regs;
-    if (irq_frame_to_regs(frame_ptr, irq_number, &regs) != 0) return;
-    if ((regs.cs & 3u) != 3u) return;
-
-    user_task_capture_syscall_frame(&regs);
-    if (user_task_try_preempt_from_irq(&regs)) {
-        (void)irq_regs_to_frame(frame_ptr, &regs);
-    }
-}
 
 // assembly stubs to route to C handlers
 extern void irq0();
@@ -248,7 +128,7 @@ void pic_send_eoi(int irq) {
     outportb(PIC1_COMMAND, PIC_EOI);
 }
 
-static void irq_dispatch_core(int irq_number, int send_eoi, uintptr frame_ptr) {
+static void irq_dispatch_core(int irq_number, int send_eoi) {
     if (irq_number < 0 || irq_number >= 16) {
         return;
     }
@@ -275,10 +155,6 @@ static void irq_dispatch_core(int irq_number, int send_eoi, uintptr frame_ptr) {
 
         if (g_user_interrupt) {
             g_user_interrupt = 0;
-            int exiting_pid = user_task_get_running_pid();
-            if (exiting_pid > 0) {
-                syscall_cleanup_user_resources_for_pid(exiting_pid);
-            }
             user_task_notify_exit(-130);
             g_user_task_active = 0;
             g_user_task_term = -1;
@@ -308,25 +184,24 @@ static void irq_dispatch_core(int irq_number, int send_eoi, uintptr frame_ptr) {
     if (h) {
         h();
     }
-    irq_maybe_preempt_user_task_on_timer(irq_number, frame_ptr);
     if (send_eoi) {
         pic_send_eoi(irq_number);
     }
 }
 
 // common C-level IRQ dispatcher called from assembly stubs
-void irq_dispatch_c(int irq_number, uintptr frame_ptr) {
+void irq_dispatch_c(int irq_number) {
     if (sched_det_is_enabled()) {
         if (sched_det_queue_irq(irq_number) == 0) {
             pic_send_eoi(irq_number);
             return;
         }
     }
-    irq_dispatch_core(irq_number, 1, frame_ptr);
+    irq_dispatch_core(irq_number, 1);
 }
 
 void irq_dispatch_deferred(int irq_number) {
-    irq_dispatch_core(irq_number, 0, (uintptr)0);
+    irq_dispatch_core(irq_number, 0);
 }
 
 

@@ -59,20 +59,6 @@ int sched_det_is_enabled(void);
 int sched_det_queue_irq(int irq);
 int sched_det_step(uint32 max_events);
 
-/*
- * ABI-INVARIANT: Scheduler PRNG interface.
- *
- * Why: Scheduling policies that use randomness (e.g. lottery selection)
- * require a kernel-owned PRNG stream that can be made reproducible in
- * deterministic mode.
- * Invariant: Calls to sched_rng_next_u32()/sched_rng_bounded() advance a
- * scheduler-local sequence only; they do not depend on userland RNG state.
- * ABI-sensitive: Yes (DET mode userspace tests rely on repeatable ordering).
- */
-void sched_rng_seed(uint32 seed);
-uint32 sched_rng_next_u32(void);
-uint32 sched_rng_bounded(uint32 upper_exclusive);
-
 // Lightweight timing/usage getters ---
 // Monotonic scheduler tick counter (increments in IRQ0 handler)
 uint32 sched_get_tick_count(void);
