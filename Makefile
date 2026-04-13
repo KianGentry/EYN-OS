@@ -21,6 +21,12 @@ GRUB_MKRESCUE := $(shell command -v grub2-mkrescue 2>/dev/null || command -v gru
 # Kernel (freestanding) compiler flags
 # Note: keep frame pointers for stack traces; avoid stack protector & fortify in freestanding kernel
 CPU_HAS_INVLPG ?= 0
+CONFIG_SCHED_MLFQ ?= 1
+CONFIG_SCHED_MLFQ_IRQ_PREEMPT ?= 0
+CONFIG_SCHED_MLFQ_Q0_MS ?= 10
+CONFIG_SCHED_MLFQ_Q1_MS ?= 25
+CONFIG_SCHED_MLFQ_Q2_MS ?= 50
+CONFIG_SCHED_MLFQ_BOOST_MS ?= 1000
 
 ARCH_KERNEL_CFLAGS_i386 = -m32 -march=i386 -mtune=i386 -DEYNOS_ARCH_I386=1
 ARCH_KERNEL_CFLAGS_amd64 = -m64 -march=x86-64 -mtune=generic -mno-red-zone -DEYNOS_ARCH_AMD64=1
@@ -28,6 +34,12 @@ ARCH_KERNEL_CFLAGS_amd64 = -m64 -march=x86-64 -mtune=generic -mno-red-zone -DEYN
 KERNEL_CFLAGS = $(ARCH_KERNEL_CFLAGS_$(ARCH)) -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-common -MMD -MP \
 		 -Os -fno-strict-overflow -fwrapv \
 		 -DCONFIG_CPU_HAS_INVLPG=$(CPU_HAS_INVLPG) \
+		 -DCONFIG_SCHED_MLFQ=$(CONFIG_SCHED_MLFQ) \
+		 -DCONFIG_SCHED_MLFQ_IRQ_PREEMPT=$(CONFIG_SCHED_MLFQ_IRQ_PREEMPT) \
+		 -DCONFIG_SCHED_MLFQ_Q0_MS=$(CONFIG_SCHED_MLFQ_Q0_MS) \
+		 -DCONFIG_SCHED_MLFQ_Q1_MS=$(CONFIG_SCHED_MLFQ_Q1_MS) \
+		 -DCONFIG_SCHED_MLFQ_Q2_MS=$(CONFIG_SCHED_MLFQ_Q2_MS) \
+		 -DCONFIG_SCHED_MLFQ_BOOST_MS=$(CONFIG_SCHED_MLFQ_BOOST_MS) \
 		 -fdata-sections -ffunction-sections \
 		 -I include/ -I include/cpu -I include/drivers -I include/misc -I include/graphics -I include/network -I include/utilities -I include/utilities/shell \
 		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \

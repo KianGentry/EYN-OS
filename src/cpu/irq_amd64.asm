@@ -55,6 +55,9 @@ irq%1:
     call irq_dispatch_c
     cmp dword [rel g_abort_to_shell], 0
     je .no_abort_%1
+    mov ax, [rsp + 128]
+    test ax, 3
+    jz .clear_abort_%1
     mov dword [rel g_abort_to_shell], 0
     mov ax, 0x10
     mov ds, ax
@@ -68,6 +71,8 @@ irq%1:
 .halt_%1:
     hlt
     jmp .halt_%1
+.clear_abort_%1:
+    mov dword [rel g_abort_to_shell], 0
 .no_abort_%1:
     POP_GPRS
     iretq

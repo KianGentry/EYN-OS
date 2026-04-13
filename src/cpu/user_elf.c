@@ -605,6 +605,11 @@ typedef struct {
     int status;
     user_task_state_t state;
     int wait_target_pid;
+    uint8 mlfq_level;
+    uint8 in_runq;
+    uint16 _pad0;
+    int runq_next;
+    uint32 mlfq_slice_left;
     user_task_runtime_t runtime;
     user_task_image_t* image;
     int has_syscall_frame;
@@ -628,6 +633,179 @@ static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static int g_user_task_next_pid = 1;
 static user_task_slot_t* g_user_task_active_slot = NULL;
 static volatile int g_user_task_schedule_request = 0;
+
+typedef struct {
+    int head;
+    int tail;
+} user_task_runq_t;
+
+static user_task_runq_t g_user_task_runq[SCHED_MLFQ_LEVELS];
+static int g_user_task_runq_initialized = 0;
+static uint32 g_user_task_last_boost_tick = 0;
+
+static inline uint32 user_task_level_quantum_ticks(uint32 level) {
+    uint32 q = sched_mlfq_level_quantum_ticks(level);
+    if (q == 0) q = 1;
+    return q;
+}
+
+static void user_task_runq_bootstrap(void) {
+    if (!sched_mlfq_is_enabled()) return;
+    if (g_user_task_runq_initialized) return;
+
+    for (uint32 i = 0; i < SCHED_MLFQ_LEVELS; ++i) {
+        g_user_task_runq[i].head = -1;
+        g_user_task_runq[i].tail = -1;
+    }
+
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        g_user_tasks[i].runq_next = -1;
+        g_user_tasks[i].in_runq = 0;
+        if (g_user_tasks[i].used && g_user_tasks[i].state == USER_TASK_STATE_RUNNABLE) {
+            g_user_tasks[i].mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
+            g_user_tasks[i].mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
+        }
+    }
+
+    g_user_task_last_boost_tick = sched_get_tick_count();
+    g_user_task_runq_initialized = 1;
+}
+
+static void user_task_runq_enqueue(user_task_slot_t* slot) {
+    if (!slot || !sched_mlfq_is_enabled()) return;
+    if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) return;
+    user_task_runq_bootstrap();
+    if (slot->in_runq) return;
+
+    uint32 level = slot->mlfq_level;
+    if (level >= SCHED_MLFQ_LEVELS) level = SCHED_MLFQ_LEVEL_HIGH;
+
+    int idx = (int)(slot - g_user_tasks);
+    if (idx < 0 || idx >= USER_TASK_MAX) return;
+
+    user_task_runq_t* q = &g_user_task_runq[level];
+    slot->runq_next = -1;
+    if (q->tail >= 0) {
+        g_user_tasks[q->tail].runq_next = idx;
+        q->tail = idx;
+    } else {
+        q->head = idx;
+        q->tail = idx;
+    }
+    slot->in_runq = 1;
+}
+
+static void user_task_runq_remove(user_task_slot_t* slot) {
+    if (!slot || !sched_mlfq_is_enabled()) return;
+    if (!slot->in_runq) return;
+    user_task_runq_bootstrap();
+
+    int idx = (int)(slot - g_user_tasks);
+    if (idx < 0 || idx >= USER_TASK_MAX) return;
+
+    for (uint32 level = 0; level < SCHED_MLFQ_LEVELS; ++level) {
+        user_task_runq_t* q = &g_user_task_runq[level];
+        int prev = -1;
+        int cur = q->head;
+        while (cur >= 0) {
+            int next = g_user_tasks[cur].runq_next;
+            if (cur == idx) {
+                if (prev >= 0) {
+                    g_user_tasks[prev].runq_next = next;
+                } else {
+                    q->head = next;
+                }
+                if (q->tail == cur) {
+                    q->tail = prev;
+                }
+                slot->in_runq = 0;
+                slot->runq_next = -1;
+                return;
+            }
+            prev = cur;
+            cur = next;
+        }
+    }
+
+    slot->in_runq = 0;
+    slot->runq_next = -1;
+}
+
+static user_task_slot_t* user_task_runq_pop_highest(void) {
+    if (!sched_mlfq_is_enabled()) return NULL;
+    user_task_runq_bootstrap();
+
+    for (int level = (int)SCHED_MLFQ_LEVELS - 1; level >= 0; --level) {
+        user_task_runq_t* q = &g_user_task_runq[(uint32)level];
+        int idx = q->head;
+        if (idx < 0) continue;
+
+        user_task_slot_t* slot = &g_user_tasks[idx];
+        q->head = slot->runq_next;
+        if (q->head < 0) q->tail = -1;
+
+        slot->runq_next = -1;
+        slot->in_runq = 0;
+        return slot;
+    }
+    return NULL;
+}
+
+static void user_task_runq_rebuild(void) {
+    if (!sched_mlfq_is_enabled()) return;
+    user_task_runq_bootstrap();
+
+    for (uint32 i = 0; i < SCHED_MLFQ_LEVELS; ++i) {
+        g_user_task_runq[i].head = -1;
+        g_user_task_runq[i].tail = -1;
+    }
+
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        g_user_tasks[i].runq_next = -1;
+        g_user_tasks[i].in_runq = 0;
+    }
+
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) continue;
+        user_task_runq_enqueue(slot);
+    }
+}
+
+static void user_task_mlfq_boost_if_due(void) {
+    if (!sched_mlfq_is_enabled()) return;
+    user_task_runq_bootstrap();
+
+    uint32 interval = sched_mlfq_boost_interval_ticks();
+    if (interval == 0) return;
+
+    uint32 now = sched_get_tick_count();
+    if ((uint32)(now - g_user_task_last_boost_tick) < interval) return;
+
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used) continue;
+        if (slot->state != USER_TASK_STATE_RUNNABLE && slot->state != USER_TASK_STATE_RUNNING) continue;
+        slot->mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
+        slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
+    }
+
+    user_task_runq_rebuild();
+    g_user_task_last_boost_tick = now;
+}
+
+static void user_task_mlfq_account_preempt(user_task_slot_t* slot) {
+    if (!slot || !sched_mlfq_is_enabled()) return;
+    if (slot->mlfq_slice_left > 0) {
+        slot->mlfq_slice_left--;
+    }
+    if (slot->mlfq_slice_left == 0) {
+        if (slot->mlfq_level > SCHED_MLFQ_LEVEL_LOW) {
+            slot->mlfq_level--;
+        }
+        slot->mlfq_slice_left = user_task_level_quantum_ticks(slot->mlfq_level);
+    }
+}
 
 static user_task_image_t* user_task_image_build(uint8 drive,
                                                 const char* abspath,
@@ -680,6 +858,13 @@ static void user_task_image_free(user_task_image_t* image) {
 
 static int user_task_launch_slot(user_task_slot_t* slot) {
     if (!slot || !slot->image) return -1;
+
+    if (sched_mlfq_is_enabled()) {
+        user_task_runq_remove(slot);
+        if (slot->mlfq_slice_left == 0) {
+            slot->mlfq_slice_left = user_task_level_quantum_ticks(slot->mlfq_level);
+        }
+    }
 
     slot->state = USER_TASK_STATE_RUNNING;
     slot->wait_target_pid = 0;
@@ -758,6 +943,11 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
     if (!g_user_task_schedule_request) return 0;
     if (!g_user_task_active) return 0;
 
+    if (sched_mlfq_is_enabled()) {
+        user_task_runq_bootstrap();
+        user_task_mlfq_boost_if_due();
+    }
+
     int current_pid = (int)g_user_task_running_pid;
     user_task_slot_t* current = user_task_find_slot_by_pid(current_pid);
     if (!current) return 0;
@@ -770,15 +960,30 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
         if (slot->state != USER_TASK_STATE_RUNNABLE) continue;
         if (!slot->has_syscall_frame) continue;
         if (!user_task_runtime_matches_live(&slot->runtime)) continue;
-        target = slot;
-        break;
+        if (!target) {
+            target = slot;
+            continue;
+        }
+        if (sched_mlfq_is_enabled() && slot->mlfq_level > target->mlfq_level) {
+            target = slot;
+        }
     }
 
     if (!target) return 0;
 
     current->last_syscall_frame = *regs;
     current->has_syscall_frame = 1;
-    current->state = USER_TASK_STATE_RUNNABLE;
+    if (sched_mlfq_is_enabled()) {
+        user_task_mlfq_account_preempt(current);
+        current->state = USER_TASK_STATE_RUNNABLE;
+        user_task_runq_enqueue(current);
+        user_task_runq_remove(target);
+        if (target->mlfq_slice_left == 0) {
+            target->mlfq_slice_left = user_task_level_quantum_ticks(target->mlfq_level);
+        }
+    } else {
+        current->state = USER_TASK_STATE_RUNNABLE;
+    }
 
     *regs = target->last_syscall_frame;
     target->state = USER_TASK_STATE_RUNNING;
@@ -801,7 +1006,16 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     slot->image = image;
     slot->state = USER_TASK_STATE_RUNNABLE;
     slot->wait_target_pid = 0;
+    slot->mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
+    slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
+    slot->in_runq = 0;
+    slot->runq_next = -1;
     if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
+
+    if (sched_mlfq_is_enabled()) {
+        user_task_runq_bootstrap();
+        user_task_runq_enqueue(slot);
+    }
 
     /*
      * Scheduler handoff model:
@@ -810,8 +1024,12 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
      *   launch it when the current task exits.
      */
     if (!g_user_task_active) {
-        if (user_task_launch_slot(slot) != 0) {
-            return slot->pid;
+        if (sched_mlfq_is_enabled()) {
+            (void)user_task_continue_or_schedule();
+        } else {
+            if (user_task_launch_slot(slot) != 0) {
+                return slot->pid;
+            }
         }
     } else {
         user_task_request_schedule();
@@ -821,6 +1039,23 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
 }
 
 int user_task_continue_or_schedule(void) {
+    if (sched_mlfq_is_enabled()) {
+        user_task_runq_bootstrap();
+        user_task_mlfq_boost_if_due();
+
+        for (;;) {
+            user_task_slot_t* slot = user_task_runq_pop_highest();
+            if (!slot) break;
+            if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) continue;
+            if (slot->mlfq_slice_left == 0) {
+                slot->mlfq_slice_left = user_task_level_quantum_ticks(slot->mlfq_level);
+            }
+            (void)user_task_launch_slot(slot);
+            return 1;
+        }
+        return 0;
+    }
+
     // Prefer runnable queued tasks over UI fallback.
     for (int i = 0; i < USER_TASK_MAX; ++i) {
         user_task_slot_t* slot = &g_user_tasks[i];
@@ -859,6 +1094,7 @@ void user_task_notify_exit(int status) {
     if (pid > 0) {
         user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
         if (slot) {
+            user_task_runq_remove(slot);
             slot->state = USER_TASK_STATE_ZOMBIE;
             slot->status = status;
         }
@@ -893,6 +1129,7 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     }
 
     if (out_status) *out_status = slot->status;
+    user_task_runq_remove(slot);
     user_task_image_free(slot->image);
     slot->image = NULL;
     slot->used = 0;
@@ -900,6 +1137,10 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->state = USER_TASK_STATE_UNUSED;
     slot->status = 0;
     slot->wait_target_pid = 0;
+    slot->mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
+    slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
+    slot->in_runq = 0;
+    slot->runq_next = -1;
     slot->has_syscall_frame = 0;
     user_task_request_schedule();
     return pid;
