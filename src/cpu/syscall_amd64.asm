@@ -34,7 +34,7 @@ syscall_entry:
     push r15
 
     mov rbp, rsp
-    sub rsp, 72
+    sub rsp, 88
 
     ; Legacy int 0x80 convention: eax=sysno, ebx/ecx/edx=args1..3.
     ; We also pass saved RSI/RDI and return frame metadata.
@@ -56,6 +56,10 @@ syscall_entry:
     mov [rsp + 56], rax
     mov rax, [rbp + 136]
     mov [rsp + 64], rax
+    mov rax, [rbp + 144]
+    mov [rsp + 72], rax
+    mov rax, [rbp + 152]
+    mov [rsp + 80], rax
 
     mov rdi, rsp
     call syscall_dispatch_amd64_frame
@@ -79,7 +83,7 @@ syscall_entry:
     jmp .halt
 
 .no_abort:
-    add rsp, 72
+    add rsp, 88
 
     ; Place syscall return value into saved RAX slot.
     mov [rsp + 112], rax

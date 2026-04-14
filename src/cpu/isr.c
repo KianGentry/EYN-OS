@@ -367,11 +367,15 @@ uint64 syscall_dispatch_amd64_frame(const amd64_syscall_frame_t* frame) {
     uint32 arg2_32 = 0;
     uint32 arg3_32 = 0;
     uint32 rip32 = 0;
+    uint32 useresp32 = 0;
+    uint32 ss32 = 0;
     if (isr_amd64_u32_from_uintptr((uintptr)frame->syscall_no, &syscall_no32) != 0 ||
         isr_amd64_u32_from_uintptr((uintptr)frame->arg1, &arg1_32) != 0 ||
         isr_amd64_u32_from_uintptr((uintptr)frame->arg2, &arg2_32) != 0 ||
         isr_amd64_u32_from_uintptr((uintptr)frame->arg3, &arg3_32) != 0 ||
-        isr_amd64_u32_from_uintptr((uintptr)frame->rip, &rip32) != 0) {
+        isr_amd64_u32_from_uintptr((uintptr)frame->rip, &rip32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->user_rsp, &useresp32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->user_ss, &ss32) != 0) {
         return (uint64)-1;
     }
 
@@ -382,6 +386,8 @@ uint64 syscall_dispatch_amd64_frame(const amd64_syscall_frame_t* frame) {
     synthetic_regs.eip = rip32;
     synthetic_regs.cs = (uint32)frame->cs;
     synthetic_regs.eflags = (uint32)frame->rflags;
+    synthetic_regs.useresp = useresp32;
+    synthetic_regs.ss = ss32;
 
     return (uint64)syscall_dispatch_core(&synthetic_regs,
                                          syscall_no32,

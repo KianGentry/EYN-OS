@@ -116,6 +116,8 @@ typedef struct amd64_syscall_frame_t {
     uint64 rip;
     uint64 cs;
     uint64 rflags;
+    uint64 user_rsp;
+    uint64 user_ss;
 } amd64_syscall_frame_t;
 
 void isr_amd64_dispatch_frame(const amd64_interrupt_frame_t* frame);

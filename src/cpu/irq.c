@@ -27,6 +27,54 @@ extern void poll_keyboard_for_ctrl_c();
 // store handlers
 static irq_handler_t g_irq_handlers[16];
 
+#if defined(EYNOS_ARCH_AMD64)
+typedef struct irq_saved_frame_amd64_t {
+    uint64 rax;
+    uint64 rcx;
+    uint64 rdx;
+    uint64 rbx;
+    uint64 rbp;
+    uint64 rsi;
+    uint64 rdi;
+    uint64 r8;
+    uint64 r9;
+    uint64 r10;
+    uint64 r11;
+    uint64 r12;
+    uint64 r13;
+    uint64 r14;
+    uint64 r15;
+    uint64 rip;
+    uint64 cs;
+    uint64 rflags;
+} irq_saved_frame_amd64_t;
+#else
+typedef struct irq_saved_frame_i386_t {
+    uint32 edi;
+    uint32 esi;
+    uint32 ebp;
+    uint32 esp;
+    uint32 ebx;
+    uint32 edx;
+    uint32 ecx;
+    uint32 eax;
+    uint32 eip;
+    uint32 cs;
+    uint32 eflags;
+} irq_saved_frame_i386_t;
+#endif
+
+static int irq_frame_from_user_mode(void* frame_ptr) {
+    if (!frame_ptr) return 0;
+#if defined(EYNOS_ARCH_AMD64)
+    const irq_saved_frame_amd64_t* frame = (const irq_saved_frame_amd64_t*)frame_ptr;
+    return ((uint16)frame->cs & 3u) == 3u;
+#else
+    const irq_saved_frame_i386_t* frame = (const irq_saved_frame_i386_t*)frame_ptr;
+    return ((uint16)frame->cs & 3u) == 3u;
+#endif
+}
+
 // assembly stubs to route to C handlers
 extern void irq0();
 extern void irq1();
@@ -132,6 +180,8 @@ static void irq_dispatch_core(int irq_number, int send_eoi, void* frame_ptr) {
         return;
     }
 
+    int interrupted_user_mode = irq_frame_from_user_mode(frame_ptr);
+
     if (irq_number == 0 && g_user_task_active) {
         // Ring3 tasks can run for long periods without calling into the kernel.
         // While they run, IRQ0 still pumps input/render; count that as forward
@@ -153,17 +203,19 @@ static void irq_dispatch_core(int irq_number, int send_eoi, void* frame_ptr) {
         }
 
         if (g_user_interrupt) {
-            g_user_interrupt = 0;
-            user_task_notify_exit(-130);
-            g_user_task_active = 0;
-            g_user_task_term = -1;
-            g_user_task_ui_dirty = 0;
-            g_abort_to_shell = 1;
-            printf("^C\n");
-            if (send_eoi) {
-                pic_send_eoi(irq_number);
+            if (interrupted_user_mode) {
+                g_user_interrupt = 0;
+                user_task_notify_exit(-130);
+                g_user_task_active = 0;
+                g_user_task_term = -1;
+                g_user_task_ui_dirty = 0;
+                g_abort_to_shell = 1;
+                printf("^C\n");
+                if (send_eoi) {
+                    pic_send_eoi(irq_number);
+                }
+                return;
             }
-            return;
         }
 
         // Throttle renders (PIT is 50Hz). Only render when something changed.
@@ -185,7 +237,7 @@ static void irq_dispatch_core(int irq_number, int send_eoi, void* frame_ptr) {
         h();
     }
 
-    if (irq_number == 0 && g_user_task_active && sched_mlfq_irq_preempt_enabled()) {
+    if (irq_number == 0 && g_user_task_active && interrupted_user_mode && sched_mlfq_irq_preempt_enabled()) {
         (void)user_task_try_preempt_from_irq(frame_ptr);
     }
 

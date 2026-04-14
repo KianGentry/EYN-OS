@@ -1072,7 +1072,64 @@ void user_task_wake_gui_waiters(int gui_handle) {
 
 static int user_task_runtime_matches_live(const user_task_runtime_t* rt);
 
-#if !defined(EYNOS_ARCH_AMD64)
+#if defined(EYNOS_ARCH_AMD64)
+typedef struct user_task_irq_frame64_t {
+    uint64 rax;
+    uint64 rcx;
+    uint64 rdx;
+    uint64 rbx;
+    uint64 rbp;
+    uint64 rsi;
+    uint64 rdi;
+    uint64 r8;
+    uint64 r9;
+    uint64 r10;
+    uint64 r11;
+    uint64 r12;
+    uint64 r13;
+    uint64 r14;
+    uint64 r15;
+    uint64 rip;
+    uint64 cs;
+    uint64 rflags;
+    uint64 user_rsp;
+    uint64 user_ss;
+} user_task_irq_frame64_t;
+
+static void user_task_regs_from_irq_frame(const user_task_irq_frame64_t* irqf, regs_t* out) {
+    if (!irqf || !out) return;
+    memset(out, 0, sizeof(*out));
+    out->edi = (uint32)irqf->rdi;
+    out->esi = (uint32)irqf->rsi;
+    out->ebp = (uint32)irqf->rbp;
+    out->esp = (uint32)irqf->user_rsp;
+    out->ebx = (uint32)irqf->rbx;
+    out->edx = (uint32)irqf->rdx;
+    out->ecx = (uint32)irqf->rcx;
+    out->eax = (uint32)irqf->rax;
+    out->eip = (uint32)irqf->rip;
+    out->cs = (uint32)irqf->cs;
+    out->eflags = (uint32)irqf->rflags;
+    out->useresp = (uint32)irqf->user_rsp;
+    out->ss = (uint32)irqf->user_ss;
+}
+
+static void user_task_regs_to_irq_frame(user_task_irq_frame64_t* irqf, const regs_t* regs) {
+    if (!irqf || !regs) return;
+    irqf->rdi = (uint64)(uint32)regs->edi;
+    irqf->rsi = (uint64)(uint32)regs->esi;
+    irqf->rbp = (uint64)(uint32)regs->ebp;
+    irqf->rbx = (uint64)(uint32)regs->ebx;
+    irqf->rdx = (uint64)(uint32)regs->edx;
+    irqf->rcx = (uint64)(uint32)regs->ecx;
+    irqf->rax = (uint64)(uint32)regs->eax;
+    irqf->rip = (uint64)(uint32)regs->eip;
+    irqf->cs = (uint64)(uint32)regs->cs;
+    irqf->rflags = (uint64)(uint32)regs->eflags;
+    irqf->user_rsp = (uint64)(uint32)regs->useresp;
+    irqf->user_ss = (uint64)(uint32)regs->ss;
+}
+#else
 typedef struct user_task_irq_frame32_t {
     uint32 edi;
     uint32 esi;
@@ -1149,10 +1206,53 @@ int user_task_try_preempt_from_irq(void* frame) {
     if (!g_user_task_schedule_request) return 0;
 
 #if defined(EYNOS_ARCH_AMD64)
-    (void)frame;
-    return 0;
+    if (!frame) return 0;
+    if ((((const user_task_irq_frame64_t*)frame)->cs & 3u) != 3u) return 0;
+
+    user_task_slot_t* target = NULL;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used) continue;
+        if (slot->pid == current_pid) continue;
+        if (slot->state != USER_TASK_STATE_RUNNABLE) continue;
+        if (!slot->has_syscall_frame) continue;
+        if (!user_task_runtime_matches_live(&slot->runtime)) continue;
+        if (!target) {
+            target = slot;
+            continue;
+        }
+        if (sched_mlfq_is_enabled() && slot->mlfq_level > target->mlfq_level) {
+            target = slot;
+        }
+    }
+
+    if (!target) return 0;
+
+    regs_t live_regs;
+    user_task_regs_from_irq_frame((const user_task_irq_frame64_t*)frame, &live_regs);
+    current->last_syscall_frame = live_regs;
+    current->has_syscall_frame = 1;
+
+    if (sched_mlfq_is_enabled()) {
+        current->state = USER_TASK_STATE_RUNNABLE;
+        user_task_runq_enqueue(current);
+        user_task_runq_remove(target);
+        if (target->mlfq_slice_left == 0) {
+            target->mlfq_slice_left = user_task_level_quantum_ticks(target->mlfq_level);
+        }
+    } else {
+        current->state = USER_TASK_STATE_RUNNABLE;
+    }
+
+    user_task_regs_to_irq_frame((user_task_irq_frame64_t*)frame, &target->last_syscall_frame);
+    target->state = USER_TASK_STATE_RUNNING;
+    g_user_task_active_slot = target;
+    g_user_task_running_pid = target->pid;
+    g_user_task_schedule_request = 0;
+    return 1;
 #else
     if (!frame) return 0;
+    if ((((const user_task_irq_frame32_t*)frame)->cs & 3u) != 3u) return 0;
 
     user_task_slot_t* target = NULL;
     for (int i = 0; i < USER_TASK_MAX; ++i) {
