@@ -48,6 +48,10 @@ syscall_entry:
     call syscall_dispatch
     add esp, 4
 
+    ; SYSCALL_EXIT (eax=2) must never return to user mode.
+    cmp dword [esp + 28], 2
+    je .do_abort
+
     ; If requested, abandon return-to-user and jump back into the shell.
     cmp dword [g_abort_to_shell], 0
     je .no_abort

@@ -36,8 +36,14 @@ syscall_entry:
     mov rbp, rsp
     sub rsp, 88
 
+    ; SYSCALL_EXIT (eax=2) must never return to user mode.
+    cmp qword [rbp + 112], 2
+    je .do_abort
+
     ; Legacy int 0x80 convention: eax=sysno, ebx/ecx/edx=args1..3.
     ; We also pass saved RSI/RDI and return frame metadata.
+
+.do_abort:
     mov rax, [rbp + 112]
     mov [rsp + 0], rax
     mov rax, [rbp + 88]

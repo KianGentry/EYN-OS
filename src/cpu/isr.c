@@ -248,6 +248,20 @@ void isr_dispatch(regs_t* regs) {
         return;
     }
 
+    if (regs->int_no == 13 && (regs->cs & 3u) == 3u) {
+        printf("\n%c*** General Protection Fault (user) ***\n", 255, 0, 0);
+        printf("EIP: 0x%08X  ERR: 0x%08X\n",
+               (unsigned)regs->eip,
+               (unsigned)regs->err_code);
+        printf("Terminating user process\n");
+        user_task_notify_exit(-13);
+        g_user_task_active = 0;
+        g_user_task_term = -1;
+        g_user_interrupt = 0;
+        g_abort_to_shell = 1;
+        return;
+    }
+
     // ISR 7: #NM (Device Not Available). Used for lazy x87 enabling (CR0.TS).
     // Even if we don't use lazy switching yet, handling this avoids spurious
     // fatal errors if firmware/boot code left TS set.

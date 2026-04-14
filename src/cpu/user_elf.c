@@ -27,6 +27,7 @@ static segdom_t g_user_segdom;
 // PID bookkeeping for spawned tasks crossing non-local abort-to-kernel flow.
 static volatile int g_user_task_pending_pid = 0;
 static volatile int g_user_task_running_pid = 0;
+static uint32 g_user_task_runtime_generation;
 
 static int user_elf_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -552,6 +553,8 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     // completion to waitpid slot tracking.
     g_user_task_running_pid = g_user_task_pending_pid;
     g_user_task_pending_pid = 0;
+    g_user_task_runtime_generation++;
+    if (g_user_task_runtime_generation == 0) g_user_task_runtime_generation = 1;
 
     // Enter ring3 at ELF entry.
     // printf("%c[elfrun] entering user mode: %s (entry=0x%X)\n", 0, 255, 0, abspath, (unsigned)entry);
@@ -623,6 +626,7 @@ typedef struct {
     user_task_runtime_t runtime;
     user_task_image_t* image;
     int has_syscall_frame;
+    uint32 syscall_frame_generation;
     regs_t last_syscall_frame;
 } user_task_slot_t;
 
@@ -643,6 +647,7 @@ static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static int g_user_task_next_pid = 1;
 static user_task_slot_t* g_user_task_active_slot = NULL;
 static volatile int g_user_task_schedule_request = 0;
+static uint32 g_user_task_runtime_generation = 1;
 
 typedef struct {
     int head;
@@ -881,6 +886,8 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
     slot->wait_gui_handle = -1;
     slot->wake_tick = 0;
     slot->block_reason = USER_TASK_BLOCK_NONE;
+    slot->has_syscall_frame = 0;
+    slot->syscall_frame_generation = 0;
     g_user_task_active_slot = slot;
     g_user_task_pending_pid = slot->pid;
 
@@ -1216,6 +1223,7 @@ int user_task_try_preempt_from_irq(void* frame) {
         if (slot->pid == current_pid) continue;
         if (slot->state != USER_TASK_STATE_RUNNABLE) continue;
         if (!slot->has_syscall_frame) continue;
+        if (slot->syscall_frame_generation != g_user_task_runtime_generation) continue;
         if (!user_task_runtime_matches_live(&slot->runtime)) continue;
         if (!target) {
             target = slot;
@@ -1232,6 +1240,7 @@ int user_task_try_preempt_from_irq(void* frame) {
     user_task_regs_from_irq_frame((const user_task_irq_frame64_t*)frame, &live_regs);
     current->last_syscall_frame = live_regs;
     current->has_syscall_frame = 1;
+    current->syscall_frame_generation = g_user_task_runtime_generation;
 
     if (sched_mlfq_is_enabled()) {
         current->state = USER_TASK_STATE_RUNNABLE;
@@ -1261,6 +1270,7 @@ int user_task_try_preempt_from_irq(void* frame) {
         if (slot->pid == current_pid) continue;
         if (slot->state != USER_TASK_STATE_RUNNABLE) continue;
         if (!slot->has_syscall_frame) continue;
+        if (slot->syscall_frame_generation != g_user_task_runtime_generation) continue;
         if (!user_task_runtime_matches_live(&slot->runtime)) continue;
         if (!target) {
             target = slot;
@@ -1277,6 +1287,7 @@ int user_task_try_preempt_from_irq(void* frame) {
     user_task_regs_from_irq_frame((const user_task_irq_frame32_t*)frame, &live_regs);
     current->last_syscall_frame = live_regs;
     current->has_syscall_frame = 1;
+    current->syscall_frame_generation = g_user_task_runtime_generation;
 
     if (sched_mlfq_is_enabled()) {
         current->state = USER_TASK_STATE_RUNNABLE;
@@ -1326,6 +1337,7 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
         if (slot->pid == current_pid) continue;
         if (slot->state != USER_TASK_STATE_RUNNABLE) continue;
         if (!slot->has_syscall_frame) continue;
+        if (slot->syscall_frame_generation != g_user_task_runtime_generation) continue;
         if (!user_task_runtime_matches_live(&slot->runtime)) continue;
         if (!target) {
             target = slot;
@@ -1340,6 +1352,7 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
 
     current->last_syscall_frame = *regs;
     current->has_syscall_frame = 1;
+    current->syscall_frame_generation = g_user_task_runtime_generation;
     if (sched_mlfq_is_enabled()) {
         user_task_mlfq_account_preempt(current);
         current->state = USER_TASK_STATE_RUNNABLE;
@@ -1457,6 +1470,7 @@ void user_task_capture_syscall_frame(const regs_t* regs) {
 
     slot->last_syscall_frame = *regs;
     slot->has_syscall_frame = 1;
+    slot->syscall_frame_generation = g_user_task_runtime_generation;
 }
 
 void user_task_notify_exit(int status) {
@@ -1525,6 +1539,7 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->in_runq = 0;
     slot->runq_next = -1;
     slot->has_syscall_frame = 0;
+    slot->syscall_frame_generation = 0;
     user_task_request_schedule();
     return pid;
 }
