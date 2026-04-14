@@ -82,7 +82,7 @@ Utility Commands:
   alias           - Create or remove command aliases.
   calc            - Integer calculator supporting + - * /.
   diskmgr         - Manage logical drives from userland.
-  download        - Download a file over HTTP/1.1 (GET only) with DNS support.
+  download        - Download a file over HTTP/1.1 or HTTPS/TLS (GET only) with DNS support.
   echo            - Print arguments to stdout.
   edit            - Graphical text editor.
   extract         - Extract a TAR or TAR.GZ archive into a directory.

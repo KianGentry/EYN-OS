@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-14 17:04:39
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-14 21:25:05
 
 **Total Commands:** 91
 
@@ -1011,11 +1011,11 @@ diskmgr status
 **Metadata Source:** `EYN-packages/packages/download/download_uelf.c`
 
 **Description:**
-Download a file over HTTP/1.1 (GET only) with DNS support.
+Download a file over HTTP/1.1 or HTTPS/TLS (GET only) with DNS support.
 
 **Example:**
 ```bash
-download http://example.com/index.html
+download https://example.com/index.html
 ```
 
 ---
