@@ -41,15 +41,19 @@ syscall_entry:
     mov dword [g_abort_to_shell], 1
     jmp .do_abort
 .stack_ok:
+    ; Preserve original syscall number (saved EAX in pusha frame) across C call.
+    mov edx, [esp + 28]
+    push edx
 
     ; pass &regs_t (starts at saved EDI)
-    mov eax, esp
+    lea eax, [esp + 4]
     push eax
     call syscall_dispatch
     add esp, 4
+    pop edx
 
     ; SYSCALL_EXIT (eax=2) must never return to user mode.
-    cmp dword [esp + 28], 2
+    cmp edx, 2
     je .do_abort
 
     ; If requested, abandon return-to-user and jump back into the shell.
