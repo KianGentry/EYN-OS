@@ -1525,6 +1525,17 @@ static void user_gui_push_event(user_gui_t* e, const user_gui_event_t* ev) {
     e->ev[head] = *ev;
     e->ev_head = next;
     __asm__ __volatile__("sti");
+
+    int handle = -1;
+    for (int i = 0; i < USER_GUI_MAX; ++i) {
+        if (&g_user_guis[i] == e) {
+            handle = i;
+            break;
+        }
+    }
+    if (handle >= 0) {
+        user_task_wake_gui_waiters(handle);
+    }
 }
 
 static int user_gui_pop_event(user_gui_t* e, user_gui_event_t* out) {
@@ -4398,9 +4409,28 @@ static uint32 syscall_dispatch_core(regs_t* regs,
         }
         case SYSCALL_SLEEP_US: {
             uint32 usec = (uint32)arg1;
-            // Cooperative sleep to allow other tasks (UI/tiler) to run.
-            // Uses a busy-wait fallback if no timer is configured.
-            sched_sleep_us(usec);
+            if (!g_user_task_active) {
+                sched_sleep_us(usec);
+                regs->eax = 0;
+                break;
+            }
+
+            uint32 hz = sched_get_tick_hz();
+            if (hz == 0) hz = 100;
+            uint32 tick_us = 1000000u / hz;
+            if (tick_us == 0) tick_us = 1;
+            uint32 needed_ticks = (usec + tick_us - 1u) / tick_us;
+            uint32 wake_tick = sched_get_tick_count() + needed_ticks;
+
+            user_task_block_current_sleep_until(wake_tick);
+            while (user_task_current_is_blocked()) {
+                watchdog_kick("sleep");
+                __asm__ __volatile__("sti");
+                __asm__ __volatile__("hlt");
+                __asm__ __volatile__("cli");
+                user_task_scheduler_tick();
+            }
+            user_task_unblock_current();
             regs->eax = 0;
             break;
         }
@@ -5265,12 +5295,19 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             int have = 0;
             if (syscall_num == SYSCALL_GUI_WAIT_EVENT) {
                 // Block until an event arrives.
+                user_task_block_current_gui_wait(handle);
                 while (!(have = user_gui_pop_event(e, &ev))) {
-                    if (g_user_interrupt) { regs->eax = (uint32)-1; goto gui_event_done; }
+                    if (g_user_interrupt) {
+                        user_task_unblock_current();
+                        regs->eax = (uint32)-1;
+                        goto gui_event_done;
+                    }
+                    watchdog_kick("gui-wait");
                     __asm__ __volatile__("sti");
                     __asm__ __volatile__("hlt");
                     __asm__ __volatile__("cli");
                 }
+                user_task_unblock_current();
             } else {
                 have = user_gui_pop_event(e, &ev);
             }
@@ -5585,18 +5622,27 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_READ, NULL);
             if (!e) { regs->eax = (uint32)-1; break; }
+            int gui_handle = user_gui_index_from_ptr(e);
+            if (gui_handle < 0) { regs->eax = (uint32)-1; break; }
 
             user_gui_flush_pending_frame(e);
 
             user_gui_event_t ev;
             int have = 0;
             if (syscall_num == SYSCALL_CAP_GUI_WAIT_EVENT) {
+                user_task_block_current_gui_wait(gui_handle);
                 while (!(have = user_gui_pop_event(e, &ev))) {
-                    if (g_user_interrupt) { regs->eax = (uint32)-1; goto cap_gui_event_done; }
+                    if (g_user_interrupt) {
+                        user_task_unblock_current();
+                        regs->eax = (uint32)-1;
+                        goto cap_gui_event_done;
+                    }
+                    watchdog_kick("gui-wait-cap");
                     __asm__ __volatile__("sti");
                     __asm__ __volatile__("hlt");
                     __asm__ __volatile__("cli");
                 }
+                user_task_unblock_current();
             } else {
                 have = user_gui_pop_event(e, &ev);
             }

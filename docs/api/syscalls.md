@@ -175,6 +175,7 @@ Spawn a user program with argv.
 Notes:
 - The spawn/wait ABI is stable and intended for concurrent task scheduling.
 - Current implementation executes spawned tasks through the existing single-user-task runtime; API compatibility is provided now so userland and shell pipeline code do not need to change when full concurrency lands.
+- Scheduler policy uses a 3-level MLFQ queue model internally; new tasks start at the highest queue and can be demoted by CPU-heavy behavior.
 
 #### Wait for spawned PID (syscall 132)
 Wait for a previously spawned PID.
@@ -186,6 +187,9 @@ Wait for a previously spawned PID.
 
 **Returns:**
 - EAX: `pid` when reaped, `0` for `WNOHANG` with no completion, or `-1` on error
+
+Notes:
+- Blocking waitpid calls now mark the calling task blocked until the target PID exits, instead of polling in a tight userspace-visible loop.
 
 #### Get directory entries (syscall 7)
 Read directory entries from an open directory fd.
@@ -259,6 +263,10 @@ Cooperatively yields and sleeps for at least the specified duration.
 
 **Arguments:**
 - EBX: Microseconds to sleep
+
+Notes:
+- Sleep now transitions the current task into a blocked sleep state and wakes it from scheduler tick deadlines.
+- Wake timing is tick-granular and follows the active PIT frequency (`sched_get_tick_hz`).
 
 #### GUI continuous redraw (syscall 23)
 Enables or disables continuous redraw for a GUI tile.

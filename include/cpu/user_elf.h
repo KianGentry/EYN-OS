@@ -28,6 +28,16 @@ void user_task_request_schedule(void);
 int user_task_poll_scheduler(void);
 void user_task_capture_syscall_frame(const regs_t* regs);
 int user_task_try_resume_from_syscall(regs_t* regs);
+int user_task_try_preempt_from_irq(void* frame);
+
+void user_task_scheduler_tick(void);
+void user_task_block_current_sleep_until(uint32 wake_tick);
+void user_task_block_current_waitpid(int target_pid);
+void user_task_block_current_gui_wait(int gui_handle);
+void user_task_unblock_current(void);
+int user_task_current_is_blocked(void);
+void user_task_wake_waiters_for_pid(int pid);
+void user_task_wake_gui_waiters(int gui_handle);
 
 // Mapping ownership accessors used by abort/cleanup logic.
 void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* stack_page);

@@ -51,6 +51,7 @@ section .text
 global irq%1
 irq%1:
     PUSH_GPRS
+    mov rsi, rsp
     mov edi, %1
     call irq_dispatch_c
     cmp dword [rel g_abort_to_shell], 0

@@ -599,12 +599,22 @@ typedef enum {
     USER_TASK_STATE_ZOMBIE = 4,
 } user_task_state_t;
 
+typedef enum {
+    USER_TASK_BLOCK_NONE = 0,
+    USER_TASK_BLOCK_SLEEP = 1,
+    USER_TASK_BLOCK_WAITPID = 2,
+    USER_TASK_BLOCK_GUI_EVENT = 3,
+} user_task_block_reason_t;
+
 typedef struct {
     int used;
     int pid;
     int status;
     user_task_state_t state;
     int wait_target_pid;
+    int wait_gui_handle;
+    uint32 wake_tick;
+    uint8 block_reason;
     uint8 mlfq_level;
     uint8 in_runq;
     uint16 _pad0;
@@ -868,6 +878,9 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
 
     slot->state = USER_TASK_STATE_RUNNING;
     slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->wake_tick = 0;
+    slot->block_reason = USER_TASK_BLOCK_NONE;
     g_user_task_active_slot = slot;
     g_user_task_pending_pid = slot->pid;
 
@@ -929,6 +942,140 @@ static user_task_slot_t* user_task_alloc_slot(void) {
         if (!g_user_tasks[i].used) return &g_user_tasks[i];
     }
     return NULL;
+}
+
+static user_task_slot_t* user_task_current_slot(void) {
+    int pid = (int)g_user_task_running_pid;
+    if (pid <= 0) return NULL;
+    return user_task_find_slot_by_pid(pid);
+}
+
+void user_task_scheduler_tick(void) {
+    uint32 now = sched_get_tick_count();
+    int current_pid = (int)g_user_task_running_pid;
+
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used || slot->state != USER_TASK_STATE_BLOCKED) continue;
+        if (slot->block_reason != USER_TASK_BLOCK_SLEEP) continue;
+        if ((int32)(now - slot->wake_tick) < 0) continue;
+
+        slot->wake_tick = 0;
+        slot->block_reason = USER_TASK_BLOCK_NONE;
+        if (slot->pid == current_pid) {
+            slot->state = USER_TASK_STATE_RUNNING;
+        } else {
+            slot->state = USER_TASK_STATE_RUNNABLE;
+            user_task_runq_enqueue(slot);
+            user_task_request_schedule();
+        }
+    }
+}
+
+void user_task_block_current_sleep_until(uint32 wake_tick) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (!slot) return;
+    slot->state = USER_TASK_STATE_BLOCKED;
+    slot->wake_tick = wake_tick;
+    slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->block_reason = USER_TASK_BLOCK_SLEEP;
+    user_task_runq_remove(slot);
+    user_task_request_schedule();
+}
+
+void user_task_block_current_waitpid(int target_pid) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (!slot) return;
+    slot->state = USER_TASK_STATE_BLOCKED;
+    slot->wake_tick = 0;
+    slot->wait_target_pid = target_pid;
+    slot->wait_gui_handle = -1;
+    slot->block_reason = USER_TASK_BLOCK_WAITPID;
+    user_task_runq_remove(slot);
+    user_task_request_schedule();
+}
+
+void user_task_block_current_gui_wait(int gui_handle) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (!slot) return;
+    slot->state = USER_TASK_STATE_BLOCKED;
+    slot->wake_tick = 0;
+    slot->wait_target_pid = 0;
+    slot->wait_gui_handle = gui_handle;
+    slot->block_reason = USER_TASK_BLOCK_GUI_EVENT;
+    user_task_runq_remove(slot);
+    user_task_request_schedule();
+}
+
+void user_task_unblock_current(void) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (!slot) return;
+    if (slot->state == USER_TASK_STATE_BLOCKED) {
+        slot->state = USER_TASK_STATE_RUNNING;
+    }
+    slot->wake_tick = 0;
+    slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->block_reason = USER_TASK_BLOCK_NONE;
+}
+
+int user_task_current_is_blocked(void) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (!slot) return 0;
+    return slot->state == USER_TASK_STATE_BLOCKED ? 1 : 0;
+}
+
+void user_task_wake_waiters_for_pid(int pid) {
+    int current_pid = (int)g_user_task_running_pid;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used || slot->state != USER_TASK_STATE_BLOCKED) continue;
+        if (slot->block_reason != USER_TASK_BLOCK_WAITPID) continue;
+        if (slot->wait_target_pid != pid) continue;
+
+        slot->wait_target_pid = 0;
+        slot->wait_gui_handle = -1;
+        slot->wake_tick = 0;
+        slot->block_reason = USER_TASK_BLOCK_NONE;
+        if (slot->pid == current_pid) {
+            slot->state = USER_TASK_STATE_RUNNING;
+        } else {
+            slot->state = USER_TASK_STATE_RUNNABLE;
+            user_task_runq_enqueue(slot);
+        }
+        user_task_request_schedule();
+    }
+}
+
+void user_task_wake_gui_waiters(int gui_handle) {
+    int current_pid = (int)g_user_task_running_pid;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used || slot->state != USER_TASK_STATE_BLOCKED) continue;
+        if (slot->block_reason != USER_TASK_BLOCK_GUI_EVENT) continue;
+        if (slot->wait_gui_handle != gui_handle) continue;
+
+        slot->wait_target_pid = 0;
+        slot->wait_gui_handle = -1;
+        slot->wake_tick = 0;
+        slot->block_reason = USER_TASK_BLOCK_NONE;
+        if (slot->pid == current_pid) {
+            slot->state = USER_TASK_STATE_RUNNING;
+        } else {
+            slot->state = USER_TASK_STATE_RUNNABLE;
+            user_task_runq_enqueue(slot);
+        }
+        user_task_request_schedule();
+    }
+}
+
+int user_task_try_preempt_from_irq(void* frame) {
+    (void)frame;
+    if (!sched_mlfq_irq_preempt_enabled()) return 0;
+    if (!g_user_task_active) return 0;
+    user_task_request_schedule();
+    return 0;
 }
 
 static int user_task_runtime_matches_live(const user_task_runtime_t* rt) {
@@ -1006,6 +1153,9 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     slot->image = image;
     slot->state = USER_TASK_STATE_RUNNABLE;
     slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->wake_tick = 0;
+    slot->block_reason = USER_TASK_BLOCK_NONE;
     slot->mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
     slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
     slot->in_runq = 0;
@@ -1098,6 +1248,7 @@ void user_task_notify_exit(int status) {
             slot->state = USER_TASK_STATE_ZOMBIE;
             slot->status = status;
         }
+        user_task_wake_waiters_for_pid(pid);
     }
     g_user_task_active_slot = NULL;
     g_user_task_running_pid = 0;
@@ -1109,6 +1260,10 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
     if (!slot) return -1;
 
+    if (slot->state != USER_TASK_STATE_ZOMBIE && !(flags & USER_TASK_WAIT_NOHANG)) {
+        user_task_block_current_waitpid(pid);
+    }
+
     while (slot->state != USER_TASK_STATE_ZOMBIE) {
         // If any runnable user task exists, execute it now. This allows
         // parent tasks blocked in waitpid() to make progress on spawned
@@ -1119,7 +1274,10 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
             continue;
         }
 
-        if (flags & USER_TASK_WAIT_NOHANG) return 0;
+        if (flags & USER_TASK_WAIT_NOHANG) {
+            user_task_unblock_current();
+            return 0;
+        }
         watchdog_kick("waitpid");
         __asm__ __volatile__("sti");
         __asm__ __volatile__("hlt");
@@ -1127,6 +1285,8 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
         slot = user_task_find_slot_by_pid(pid);
         if (!slot) return -1;
     }
+
+    user_task_unblock_current();
 
     if (out_status) *out_status = slot->status;
     user_task_runq_remove(slot);
@@ -1137,6 +1297,9 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->state = USER_TASK_STATE_UNUSED;
     slot->status = 0;
     slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->wake_tick = 0;
+    slot->block_reason = USER_TASK_BLOCK_NONE;
     slot->mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
     slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
     slot->in_runq = 0;

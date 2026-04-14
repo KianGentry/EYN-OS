@@ -67,6 +67,24 @@ int sched_mlfq_irq_preempt_enabled(void);
 uint32 sched_mlfq_level_quantum_ticks(uint32 level);
 uint32 sched_mlfq_boost_interval_ticks(void);
 
+typedef struct sched_debug_snapshot {
+	uint32 ticks;
+	uint32 tick_hz;
+	uint32 timeslice_ticks;
+	uint32 current_slice;
+	uint32 mlfq_enabled;
+	uint32 mlfq_irq_preempt_enabled;
+	uint32 mlfq_boost_interval_ticks;
+	uint32 mlfq_quantum_ticks[SCHED_MLFQ_LEVELS];
+	uint32 runq_depth[SCHED_MLFQ_LEVELS];
+	uint32 work_runs;
+	uint32 work_demotions;
+	uint32 work_boosts;
+} sched_debug_snapshot_t;
+
+void sched_debug_get_snapshot(sched_debug_snapshot_t* out);
+void sched_debug_print(void);
+
 // Deterministic execution mode
 void sched_det_enable(int enabled);
 int sched_det_is_enabled(void);

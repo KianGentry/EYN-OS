@@ -128,7 +128,7 @@ void pic_send_eoi(int irq) {
     outportb(PIC1_COMMAND, PIC_EOI);
 }
 
-static void irq_dispatch_core(int irq_number, int send_eoi) {
+static void irq_dispatch_core(int irq_number, int send_eoi, void* frame_ptr) {
     if (irq_number < 0 || irq_number >= 16) {
         return;
     }
@@ -178,6 +178,10 @@ static void irq_dispatch_core(int irq_number, int send_eoi) {
                 }
             }
         }
+
+        if (sched_mlfq_irq_preempt_enabled()) {
+            (void)user_task_try_preempt_from_irq(frame_ptr);
+        }
     }
 
     irq_handler_t h = g_irq_handlers[irq_number];
@@ -190,18 +194,18 @@ static void irq_dispatch_core(int irq_number, int send_eoi) {
 }
 
 // common C-level IRQ dispatcher called from assembly stubs
-void irq_dispatch_c(int irq_number) {
+void irq_dispatch_c(int irq_number, void* frame_ptr) {
     if (sched_det_is_enabled()) {
         if (sched_det_queue_irq(irq_number) == 0) {
             pic_send_eoi(irq_number);
             return;
         }
     }
-    irq_dispatch_core(irq_number, 1);
+    irq_dispatch_core(irq_number, 1, frame_ptr);
 }
 
-void irq_dispatch_deferred(int irq_number) {
-    irq_dispatch_core(irq_number, 0);
+void irq_dispatch_deferred(int irq_number, void* frame_ptr) {
+    irq_dispatch_core(irq_number, 0, frame_ptr);
 }
 
 

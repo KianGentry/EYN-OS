@@ -322,6 +322,15 @@ void handle_shell_command(string input) {
         goto cleanup;
     }
 
+    shell_args_t diag_args;
+    if (shell_args_parse(&diag_args, current) == 0 &&
+        diag_args.argc > 0 &&
+        diag_args.argv[0] &&
+        strcmp(diag_args.argv[0], "schedstat") == 0) {
+        sched_debug_print();
+        goto cleanup;
+    }
+
     // Resolve and execute userland binaries only.
     shell_args_t unknown_args;
     if (shell_args_parse(&unknown_args, current) == 0 && try_run_unknown_as_uelf(&unknown_args))
