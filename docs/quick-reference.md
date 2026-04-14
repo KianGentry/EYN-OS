@@ -72,6 +72,7 @@ status          # Check which commands are loaded
 | `help` | Show help | `help` |
 | `history` | Show command history | `history` |
 | `alias` | Create command alias | `alias ll ls -la` |
+| `schedstat` | Show scheduler MLFQ runtime snapshot | `schedstat` |
 | `exit` | Exit EYN-OS | `exit` |
 
 ## Development Tools

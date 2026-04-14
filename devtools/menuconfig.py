@@ -26,6 +26,12 @@ class ConfigState:
     ramdisk_full: bool = False
     ramdisk_include_fonts: bool = False
     ramdisk_include_headers: bool = False
+    sched_mlfq: bool = True
+    sched_mlfq_irq_preempt: bool = False
+    sched_mlfq_q0_ms: int = 10
+    sched_mlfq_q1_ms: int = 25
+    sched_mlfq_q2_ms: int = 50
+    sched_mlfq_boost_ms: int = 1000
     selected_apps: Set[str] = None  # type: ignore[assignment]
 
 
@@ -39,6 +45,18 @@ def str_to_bool(value: str, default: bool) -> bool:
     if value in {"0", "n", "N", "no", "false", "off"}:
         return False
     return default
+
+
+def str_to_int(value: str, default: int, min_value: int, max_value: int) -> int:
+    try:
+        parsed = int(value.strip(), 10)
+    except (AttributeError, ValueError):
+        return default
+    if parsed < min_value:
+        return min_value
+    if parsed > max_value:
+        return max_value
+    return parsed
 
 
 def discover_apps(repo_root: Path) -> List[str]:
@@ -93,6 +111,21 @@ def load_state(config_path: Path, apps: List[str]) -> ConfigState:
     state.ramdisk_include_headers = str_to_bool(
         values.get("CONFIG_INSTALLER_RAMDISK_INCLUDE_HEADERS", "0"), False
     )
+    state.sched_mlfq = str_to_bool(values.get("CONFIG_SCHED_MLFQ", "1"), True)
+    state.sched_mlfq_irq_preempt = str_to_bool(
+        values.get("CONFIG_SCHED_MLFQ_IRQ_PREEMPT", "0"), False
+    )
+    state.sched_mlfq_q0_ms = str_to_int(values.get("CONFIG_SCHED_MLFQ_Q0_MS", "10"), 10, 1, 1000)
+    state.sched_mlfq_q1_ms = str_to_int(values.get("CONFIG_SCHED_MLFQ_Q1_MS", "25"), 25, 1, 2000)
+    state.sched_mlfq_q2_ms = str_to_int(values.get("CONFIG_SCHED_MLFQ_Q2_MS", "50"), 50, 1, 4000)
+    state.sched_mlfq_boost_ms = str_to_int(
+        values.get("CONFIG_SCHED_MLFQ_BOOST_MS", "1000"), 1000, 10, 120000
+    )
+
+    if state.sched_mlfq_q1_ms < state.sched_mlfq_q0_ms:
+        state.sched_mlfq_q1_ms = state.sched_mlfq_q0_ms
+    if state.sched_mlfq_q2_ms < state.sched_mlfq_q1_ms:
+        state.sched_mlfq_q2_ms = state.sched_mlfq_q1_ms
 
     selected = values.get("CONFIG_INSTALLER_APPS", "")
     if selected and selected.lower() != "all":
@@ -120,6 +153,12 @@ def save_state(config_path: Path, state: ConfigState, apps: List[str]) -> None:
         f"CONFIG_INSTALLER_RAMDISK_FULL={bool_to_str(state.ramdisk_full)}",
         f"CONFIG_INSTALLER_RAMDISK_INCLUDE_FONTS={bool_to_str(state.ramdisk_include_fonts)}",
         f"CONFIG_INSTALLER_RAMDISK_INCLUDE_HEADERS={bool_to_str(state.ramdisk_include_headers)}",
+        f"CONFIG_SCHED_MLFQ={bool_to_str(state.sched_mlfq)}",
+        f"CONFIG_SCHED_MLFQ_IRQ_PREEMPT={bool_to_str(state.sched_mlfq_irq_preempt)}",
+        f"CONFIG_SCHED_MLFQ_Q0_MS={state.sched_mlfq_q0_ms}",
+        f"CONFIG_SCHED_MLFQ_Q1_MS={state.sched_mlfq_q1_ms}",
+        f"CONFIG_SCHED_MLFQ_Q2_MS={state.sched_mlfq_q2_ms}",
+        f"CONFIG_SCHED_MLFQ_BOOST_MS={state.sched_mlfq_boost_ms}",
         f"CONFIG_INSTALLER_APPS={app_list}",
         "",
     ]
@@ -390,6 +429,112 @@ def run_apps_menu(stdscr: curses.window, state: ConfigState, apps: List[str]) ->
                 state.selected_apps.add(app)
 
 
+def clamp_int(value: int, min_value: int, max_value: int) -> int:
+    if value < min_value:
+        return min_value
+    if value > max_value:
+        return max_value
+    return value
+
+
+def run_scheduler_menu(stdscr: curses.window, state: ConfigState) -> None:
+    index = 0
+    items = [
+        "Enable 3-level MLFQ scheduler",
+        "Enable IRQ-time preemption hook",
+        "Q0 quantum (ms)",
+        "Q1 quantum (ms)",
+        "Q2 quantum (ms)",
+        "Boost interval (ms)",
+        "< Back >",
+    ]
+
+    while True:
+        if not ensure_min_size(stdscr):
+            continue
+
+        stdscr.clear()
+        stdscr.attrset(ATTR_NORMAL)
+        draw_header(stdscr, "Scheduler (MLFQ)")
+
+        values = [
+            "*" if state.sched_mlfq else " ",
+            "*" if state.sched_mlfq_irq_preempt else " ",
+            str(state.sched_mlfq_q0_ms),
+            str(state.sched_mlfq_q1_ms),
+            str(state.sched_mlfq_q2_ms),
+            str(state.sched_mlfq_boost_ms),
+            "",
+        ]
+
+        for row, item in enumerate(items):
+            y = 4 + row
+            marker = ">" if row == index else " "
+            if row <= 1:
+                line = f" {marker} [{values[row]}] {item}"
+            elif row <= 5:
+                line = f" {marker} {item:<36} [{values[row]}]"
+            else:
+                line = f" {marker} {item}"
+            stdscr.attrset(ATTR_SELECTED if row == index else ATTR_NORMAL)
+            safe_addnstr(stdscr, y, 2, line, max(1, stdscr.getmaxyx()[1] - 4))
+            stdscr.attrset(ATTR_NORMAL)
+
+        draw_footer(stdscr, "Left/Right adjust values. Enter/Space toggles or increments.")
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key in (ord("q"), ord("Q")):
+            return
+        if key in (curses.KEY_UP, ord("k")):
+            index = (index - 1) % len(items)
+            continue
+        if key in (curses.KEY_DOWN, ord("j")):
+            index = (index + 1) % len(items)
+            continue
+
+        if index == 6 and key in (ord("\n"), ord(" ")):
+            return
+
+        if index == 0 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("\n"), ord(" ")):
+            state.sched_mlfq = not state.sched_mlfq
+            continue
+
+        if index == 1 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("\n"), ord(" ")):
+            state.sched_mlfq_irq_preempt = not state.sched_mlfq_irq_preempt
+            continue
+
+        if index == 2 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("\n"), ord(" ")):
+            delta = -1 if key == curses.KEY_LEFT else 1
+            state.sched_mlfq_q0_ms = clamp_int(state.sched_mlfq_q0_ms + delta, 1, 1000)
+            if state.sched_mlfq_q1_ms < state.sched_mlfq_q0_ms:
+                state.sched_mlfq_q1_ms = state.sched_mlfq_q0_ms
+            if state.sched_mlfq_q2_ms < state.sched_mlfq_q1_ms:
+                state.sched_mlfq_q2_ms = state.sched_mlfq_q1_ms
+            continue
+
+        if index == 3 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("\n"), ord(" ")):
+            delta = -5 if key == curses.KEY_LEFT else 5
+            state.sched_mlfq_q1_ms = clamp_int(state.sched_mlfq_q1_ms + delta, 1, 2000)
+            if state.sched_mlfq_q1_ms < state.sched_mlfq_q0_ms:
+                state.sched_mlfq_q1_ms = state.sched_mlfq_q0_ms
+            if state.sched_mlfq_q2_ms < state.sched_mlfq_q1_ms:
+                state.sched_mlfq_q2_ms = state.sched_mlfq_q1_ms
+            continue
+
+        if index == 4 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("\n"), ord(" ")):
+            delta = -5 if key == curses.KEY_LEFT else 5
+            state.sched_mlfq_q2_ms = clamp_int(state.sched_mlfq_q2_ms + delta, 1, 4000)
+            if state.sched_mlfq_q2_ms < state.sched_mlfq_q1_ms:
+                state.sched_mlfq_q2_ms = state.sched_mlfq_q1_ms
+            continue
+
+        if index == 5 and key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord("\n"), ord(" ")):
+            delta = -100 if key == curses.KEY_LEFT else 100
+            state.sched_mlfq_boost_ms = clamp_int(state.sched_mlfq_boost_ms + delta, 10, 120000)
+            continue
+
+
 def run_main_menu(stdscr: curses.window, config_path: Path, state: ConfigState, apps: List[str]) -> int:
     curses.curs_set(0)
     stdscr.keypad(True)
@@ -397,6 +542,7 @@ def run_main_menu(stdscr: curses.window, config_path: Path, state: ConfigState, 
 
     items = [
         "General setup --->",
+        "Scheduler (MLFQ) --->",
         "Preinstalled applications --->",
         "Save configuration",
         "Exit",
@@ -422,7 +568,9 @@ def run_main_menu(stdscr: curses.window, config_path: Path, state: ConfigState, 
 
         summary = (
             f"ARCH={state.arch}  prune={bool_to_str(state.ramdisk_prune)}  "
-            f"full={bool_to_str(state.ramdisk_full)}  apps={len(state.selected_apps)}/{len(apps)}"
+            f"full={bool_to_str(state.ramdisk_full)}  mlfq={bool_to_str(state.sched_mlfq)} "
+            f"irqpreempt={bool_to_str(state.sched_mlfq_irq_preempt)} "
+            f"apps={len(state.selected_apps)}/{len(apps)}"
         )
         draw_footer(stdscr, summary)
         safe_addnstr(stdscr, stdscr.getmaxyx()[0] - 1, 0, message.ljust(stdscr.getmaxyx()[1]), stdscr.getmaxyx()[1])
@@ -442,11 +590,13 @@ def run_main_menu(stdscr: curses.window, config_path: Path, state: ConfigState, 
             if index == 0:
                 run_general_menu(stdscr, state)
             elif index == 1:
-                run_apps_menu(stdscr, state, apps)
+                run_scheduler_menu(stdscr, state)
             elif index == 2:
+                run_apps_menu(stdscr, state, apps)
+            elif index == 3:
                 save_state(config_path, state, apps)
                 message = f"Saved configuration to {config_path}"
-            elif index == 3:
+            elif index == 4:
                 return 0
 
 

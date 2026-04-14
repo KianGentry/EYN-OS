@@ -112,7 +112,6 @@ void irq_init(void) {
      * Overhead: ~1 µs ISR × 1000/s = 1 ms/s CPU cost -- negligible.
      */
     pit_init(1000);
-    extern void sched_set_tick_hz(uint32);
     sched_set_tick_hz(1000);
 }
 
@@ -179,15 +178,17 @@ static void irq_dispatch_core(int irq_number, int send_eoi, void* frame_ptr) {
             }
         }
 
-        if (sched_mlfq_irq_preempt_enabled()) {
-            (void)user_task_try_preempt_from_irq(frame_ptr);
-        }
     }
 
     irq_handler_t h = g_irq_handlers[irq_number];
     if (h) {
         h();
     }
+
+    if (irq_number == 0 && g_user_task_active && sched_mlfq_irq_preempt_enabled()) {
+        (void)user_task_try_preempt_from_irq(frame_ptr);
+    }
+
     if (send_eoi) {
         pic_send_eoi(irq_number);
     }
