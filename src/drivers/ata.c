@@ -63,6 +63,8 @@
 #define ATA_PIO_POST_WRITE_BSY_TIMEOUT 1000000
 #define ATA_PIO_POST_WRITE_DRDY_TIMEOUT 1000000
 #define ATA_PIO_MAX_ATTEMPTS 3
+#define ATA_RESET_BACKOFF_MAX_SHIFT 6
+#define ATA_RESET_BACKOFF_MIN_WINDOW 1u
 
 #ifndef CONFIG_ATA_LBA48_SMOKE
 #define CONFIG_ATA_LBA48_SMOKE 0
@@ -103,6 +105,9 @@ static uint16 detected_drive_cylinders[8];
 static uint16 detected_drive_heads[8];
 static uint16 detected_drive_spt[8];
 static uint64 detected_drive_lba48_sectors[8];
+static uint32 g_ata_recovery_epoch = 0;
+static uint32 g_ata_reset_cooldown_until[2];
+static uint8 g_ata_reset_backoff_shift[2];
 
 /*
  * ABI-INVARIANT: ATA re-entrancy guard.
@@ -191,6 +196,61 @@ static uint32 ata_u64_to_u32_sat(uint64 value) {
     return (uint32)value;
 }
 
+static uint8 ata_drive_channel_index(uint8 drive) {
+    return (drive & 2u) ? 1u : 0u;
+}
+
+static void ata_note_io_success(uint8 drive) {
+    uint8 ch = ata_drive_channel_index(drive);
+    if (g_ata_reset_backoff_shift[ch] > 0) {
+        g_ata_reset_backoff_shift[ch]--;
+    }
+    if (g_ata_reset_backoff_shift[ch] == 0) {
+        g_ata_reset_cooldown_until[ch] = 0;
+    }
+}
+
+static int ata_compute_drive_max_lba(uint8 drive, uint32* out_max_lba) {
+    if (!out_max_lba) return -1;
+    if (drive >= 8) return -1;
+
+    if (detected_drive_lba[drive]) {
+        if (detected_drive_lba48[drive] && detected_drive_lba48_sectors[drive] != 0) {
+            uint64 max64 = detected_drive_lba48_sectors[drive] - 1u;
+            if (max64 > (uint64)0xFFFFFFFFu) max64 = (uint64)0xFFFFFFFFu;
+            *out_max_lba = (uint32)max64;
+            return 0;
+        }
+
+        if (detected_drives[drive].sectors == 0) {
+            return -1;
+        }
+
+        uint32 max_lba = detected_drives[drive].sectors - 1u;
+        if (max_lba > ATA_LBA28_MAX_SECTOR) {
+            max_lba = ATA_LBA28_MAX_SECTOR;
+        }
+        *out_max_lba = max_lba;
+        return 0;
+    }
+
+    uint16 cyl = 0;
+    uint16 heads = 0;
+    uint16 spt = 0;
+    if (ata_get_chs_geometry(drive, &cyl, &heads, &spt) != 0) {
+        return -1;
+    }
+
+    uint32 sectors_per_cyl = (uint32)heads * (uint32)spt;
+    uint32 total = (uint32)cyl * sectors_per_cyl;
+    if (total == 0) {
+        return -1;
+    }
+
+    *out_max_lba = total - 1u;
+    return 0;
+}
+
 static int ata_try_recover_after_failure(uint8 drive,
                                          uint16 io_base,
                                          const char* op,
@@ -200,8 +260,25 @@ static int ata_try_recover_after_failure(uint8 drive,
                                          const char* reason,
                                          uint8 status,
                                          int error_code) {
+    uint8 channel = ata_drive_channel_index(drive);
+
+    g_ata_recovery_epoch++;
+
     if (attempt >= max_attempts) {
         return -1;
+    }
+
+    if (g_ata_recovery_epoch < g_ata_reset_cooldown_until[channel]) {
+        printf("[ata] %s recover: drive=%u lba=%u attempt=%d/%d reason=%s status=0x%X reset=deferred cooldown=%u\n",
+               op,
+               (unsigned)drive,
+               (unsigned)lba,
+               attempt,
+               max_attempts,
+               reason,
+               (unsigned)status,
+               (unsigned)(g_ata_reset_cooldown_until[channel] - g_ata_recovery_epoch));
+        return 0;
     }
 
     if (error_code >= 0) {
@@ -228,6 +305,15 @@ static int ata_try_recover_after_failure(uint8 drive,
     ata_soft_reset(io_base);
     outportb(io_base + ATA_REG_HDDEVSEL, (drive & 1u) ? 0xB0 : 0xA0);
     ata_io_wait(io_base);
+
+    uint8 shift = g_ata_reset_backoff_shift[channel];
+    if (shift > ATA_RESET_BACKOFF_MAX_SHIFT) shift = ATA_RESET_BACKOFF_MAX_SHIFT;
+    uint32 window = (uint32)ATA_RESET_BACKOFF_MIN_WINDOW << shift;
+    g_ata_reset_cooldown_until[channel] = g_ata_recovery_epoch + window;
+    if (g_ata_reset_backoff_shift[channel] < ATA_RESET_BACKOFF_MAX_SHIFT) {
+        g_ata_reset_backoff_shift[channel]++;
+    }
+
     if (ata_poll(io_base) != 0) {
         printf("[ata] %s recover warning: drive=%u not ready after soft reset\n",
                op,
@@ -279,6 +365,23 @@ static void ata_run_lba48_smoke(void) {
 
 static int ata_program_sector_address(uint8 drive, uint16 io_base, uint32 lba, uint8* out_cmd, int is_write) {
     if (!out_cmd) return -1;
+
+    uint32 max_lba = 0;
+    if (ata_compute_drive_max_lba(drive, &max_lba) != 0) {
+        printf("ATA %s error: Drive %d capacity unknown (cannot validate LBA %u)\n",
+               is_write ? "write" : "read",
+               (int)drive,
+               (unsigned)lba);
+        return -1;
+    }
+    if (lba > max_lba) {
+        printf("ATA %s error: Drive %d LBA %u out of range (max=%u)\n",
+               is_write ? "write" : "read",
+               (int)drive,
+               (unsigned)lba,
+               (unsigned)max_lba);
+        return -1;
+    }
 
     uint8 is_slave = (drive & 1u) ? 1u : 0u;
 
@@ -466,6 +569,12 @@ int ata_detect_drive(uint8 drive) {
 // Initialize all drives during system startup
 void ata_init_drives() {
     printf("[ata] transfer path: pio-only (bus-master DMA not enabled)\n");
+
+    g_ata_recovery_epoch = 0;
+    g_ata_reset_cooldown_until[0] = 0;
+    g_ata_reset_cooldown_until[1] = 0;
+    g_ata_reset_backoff_shift[0] = 0;
+    g_ata_reset_backoff_shift[1] = 0;
 
     // Clear drive info
     for (int i = 0; i < 8; i++) {
@@ -709,6 +818,7 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
 
         ata_io_wait(io_base);
         arch_irq_restore(irq_state);
+        ata_note_io_success(drive);
         g_ata_busy = 0;
         return 0;
     }
@@ -896,6 +1006,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
         }
 
         arch_irq_restore(irq_state);
+        ata_note_io_success(drive);
         g_ata_busy = 0;
         return 0;
     }
