@@ -20,6 +20,7 @@ extern multiboot_info_t *g_mbi;
 
 #if defined(EYNOS_ARCH_I386)
 extern uint32 vbe_bios_int10_set_mode_i386(uint16 mode);
+extern uint32 vbe_bios_int10_get_mode_info_i386(uint16 mode, void* out_block);
 #endif
 
 int width, height;
@@ -71,6 +72,44 @@ typedef struct {
 	uint16 height;
 	uint8 bpp;
 } vbe_mode_map_t;
+
+typedef struct __attribute__((packed)) {
+	uint16 mode_attributes;
+	uint8 win_a_attributes;
+	uint8 win_b_attributes;
+	uint16 win_granularity;
+	uint16 win_size;
+	uint16 win_a_segment;
+	uint16 win_b_segment;
+	uint32 win_func_ptr;
+	uint16 bytes_per_scan_line;
+	uint16 x_resolution;
+	uint16 y_resolution;
+	uint8 x_char_size;
+	uint8 y_char_size;
+	uint8 number_of_planes;
+	uint8 bits_per_pixel;
+	uint8 number_of_banks;
+	uint8 memory_model;
+	uint8 bank_size;
+	uint8 number_of_image_pages;
+	uint8 reserved0;
+	uint8 red_mask_size;
+	uint8 red_field_position;
+	uint8 green_mask_size;
+	uint8 green_field_position;
+	uint8 blue_mask_size;
+	uint8 blue_field_position;
+	uint8 reserved_mask_size;
+	uint8 reserved_field_position;
+	uint8 direct_color_mode_info;
+	uint32 phys_base_ptr;
+	uint32 off_screen_mem_offset;
+	uint16 off_screen_mem_size;
+	uint8 reserved1[206];
+} vbe_mode_info_block_t;
+
+static vbe_mode_info_block_t g_vbe_runtime_mode_info;
 
 /*
  * Common VBE mode IDs used by many 1990s BIOS implementations.
@@ -161,23 +200,85 @@ static int vga_try_bios_vbe_set_mode_i386(int mode_w, int mode_h, int bpp, const
 		return -1;
 	}
 
+	vbe_mode_info_block_t mode_info;
+	memset(&mode_info, 0, sizeof(mode_info));
+	uint32 mode_info_status = vbe_bios_int10_get_mode_info_i386(candidate, &mode_info);
+
+	int resolved_w = mode_w;
+	int resolved_h = mode_h;
+	int resolved_bpp = bpp;
+	int bytes = vga_bpp_to_bytes((uint8)bpp);
+	if (bytes <= 0) {
+		bytes = 4;
+	}
+	uint32 resolved_pitch = (uint32)mode_w * (uint32)bytes;
+	uint32 resolved_fb_addr = (uint32)g_mbi->framebuffer_addr;
+	int mode_info_usable = 0;
+
+	if ((mode_info_status & 0xFFFFu) == 0x004Fu) {
+		int info_w = (int)mode_info.x_resolution;
+		int info_h = (int)mode_info.y_resolution;
+		int info_bpp = (int)mode_info.bits_per_pixel;
+		int info_bytes = vga_bpp_to_bytes(mode_info.bits_per_pixel);
+		uint32 info_pitch = (uint32)mode_info.bytes_per_scan_line;
+		uint32 min_pitch = 0;
+
+		if (info_w > 0 && info_bytes > 0) {
+			min_pitch = (uint32)info_w * (uint32)info_bytes;
+		}
+
+		if ((mode_info.mode_attributes & 0x0001u) &&
+		    info_w > 0 &&
+		    info_h > 0 &&
+		    info_bytes > 0 &&
+		    info_pitch >= min_pitch) {
+			resolved_w = info_w;
+			resolved_h = info_h;
+			resolved_bpp = info_bpp;
+			resolved_pitch = info_pitch;
+			if (mode_info.phys_base_ptr) {
+				resolved_fb_addr = mode_info.phys_base_ptr;
+			}
+			g_vbe_runtime_mode_info = mode_info;
+			mode_info_usable = 1;
+		} else {
+			printf("[gfx] bios mode info warning: unusable block mode=0x%X attr=0x%X %dx%dx%d pitch=%u lfb=0x%X\n",
+			       (unsigned)candidate,
+			       (unsigned)mode_info.mode_attributes,
+			       info_w,
+			       info_h,
+			       info_bpp,
+			       (unsigned)info_pitch,
+			       (unsigned)mode_info.phys_base_ptr);
+		}
+	} else {
+		printf("[gfx] bios mode info warning: int10 status=0x%X mode=0x%X\n",
+		       (unsigned)(mode_info_status & 0xFFFFu),
+		       (unsigned)candidate);
+	}
+
 	g_mbi->flags |= MULTIBOOT_INFO_FRAMEBUFFER_INFO;
 	g_mbi->flags |= MULTIBOOT_INFO_VBE_INFO;
 	g_mbi->vbe_mode = candidate;
-	g_mbi->framebuffer_width = (uint32)mode_w;
-	g_mbi->framebuffer_height = (uint32)mode_h;
-	g_mbi->framebuffer_bpp = (uint8)bpp;
+	if (mode_info_usable) {
+		g_mbi->vbe_mode_info = (uint32)(uintptr_t)&g_vbe_runtime_mode_info;
+	}
+	g_mbi->framebuffer_addr = (uint64)resolved_fb_addr;
+	g_mbi->framebuffer_width = (uint32)resolved_w;
+	g_mbi->framebuffer_height = (uint32)resolved_h;
+	g_mbi->framebuffer_bpp = (uint8)resolved_bpp;
+	g_mbi->framebuffer_pitch = resolved_pitch;
 
-	int bytes = vga_bpp_to_bytes((uint8)bpp);
-	if (bytes <= 0) bytes = 4;
-	g_mbi->framebuffer_pitch = (uint32)mode_w * (uint32)bytes;
-
-	printf("[gfx] bios mode switch: mode=0x%X status=0x%X %dx%dx%d\n",
+	printf("[gfx] bios mode switch: mode=0x%X set=0x%X info=0x%X %dx%dx%d pitch=%u lfb=0x%X source=%s\n",
 	       (unsigned)candidate,
 	       (unsigned)(bios_status & 0xFFFFu),
-	       mode_w,
-	       mode_h,
-	       bpp);
+	       (unsigned)(mode_info_status & 0xFFFFu),
+	       resolved_w,
+	       resolved_h,
+	       resolved_bpp,
+	       (unsigned)resolved_pitch,
+	       (unsigned)resolved_fb_addr,
+	       mode_info_usable ? "bios-mode-info" : "fallback-requested");
 
 	return 0;
 #else
