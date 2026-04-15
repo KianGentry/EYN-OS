@@ -59,50 +59,126 @@ static uint16 vbe_dispi_read(uint16 index) {
 	return inw(VBE_DISPI_IOPORT_DATA);
 }
 
+static vga_capabilities_t g_vga_caps;
+
+static int vga_bpp_to_bytes(uint8 bpp) {
+	if (bpp == 16) return 2;
+	if (bpp == 24) return 3;
+	if (bpp == 32) return 4;
+	return 0;
+}
+
+static int vga_boot_framebuffer_valid(const multiboot_info_t* mbi) {
+	if (!mbi) return 0;
+	if (!mbi->framebuffer_addr) return 0;
+	if (!mbi->framebuffer_width || !mbi->framebuffer_height || !mbi->framebuffer_pitch) return 0;
+
+	int bytes = vga_bpp_to_bytes(mbi->framebuffer_bpp);
+	if (bytes <= 0) return 0;
+
+	uint32 min_pitch = mbi->framebuffer_width * (uint32)bytes;
+	if (mbi->framebuffer_pitch < min_pitch) return 0;
+
+	return 1;
+}
+
+static void vga_refresh_capabilities_internal(int probe_dispi) {
+	uint16 dispi_id = g_vga_caps.bochs_dispi_id;
+
+	memset(&g_vga_caps, 0, sizeof(g_vga_caps));
+	g_vga_caps.initialized = 1;
+	g_vga_caps.fallback_text_eligible = 1;
+
+	if (g_mbi) {
+		g_vga_caps.has_multiboot_state = 1;
+		g_vga_caps.has_multiboot_fb_info = (g_mbi->flags & MULTIBOOT_INFO_FRAMEBUFFER_INFO) ? 1 : 0;
+		g_vga_caps.has_multiboot_vbe_info = (g_mbi->flags & MULTIBOOT_INFO_VBE_INFO) ? 1 : 0;
+		g_vga_caps.has_framebuffer_addr = g_mbi->framebuffer_addr ? 1 : 0;
+		g_vga_caps.has_framebuffer_geometry =
+			(g_mbi->framebuffer_width && g_mbi->framebuffer_height && g_mbi->framebuffer_pitch) ? 1 : 0;
+		g_vga_caps.valid_boot_framebuffer = vga_boot_framebuffer_valid(g_mbi) ? 1 : 0;
+
+		g_vga_caps.boot_fb_addr = (uint32)g_mbi->framebuffer_addr;
+		g_vga_caps.boot_fb_pitch = g_mbi->framebuffer_pitch;
+		g_vga_caps.boot_fb_width = g_mbi->framebuffer_width;
+		g_vga_caps.boot_fb_height = g_mbi->framebuffer_height;
+		g_vga_caps.boot_fb_bpp = g_mbi->framebuffer_bpp;
+		g_vga_caps.boot_vbe_mode = g_mbi->vbe_mode;
+		g_vga_caps.boot_vbe_control_info = g_mbi->vbe_control_info;
+		g_vga_caps.boot_vbe_mode_info = g_mbi->vbe_mode_info;
+	}
+
+	if (probe_dispi || dispi_id == 0) {
+		dispi_id = vbe_dispi_read(VBE_DISPI_INDEX_ID);
+	}
+
+	g_vga_caps.bochs_dispi_id = dispi_id;
+	g_vga_caps.bochs_dispi_available = (dispi_id >= VBE_DISPI_ID0 && dispi_id <= VBE_DISPI_ID5) ? 1 : 0;
+	g_vga_caps.runtime_mode_switch_available = g_vga_caps.bochs_dispi_available;
+	g_vga_caps.fallback_grub_fb_eligible = g_vga_caps.valid_boot_framebuffer ? 1 : 0;
+}
+
+void vga_get_capabilities(vga_capabilities_t* out) {
+	vga_refresh_capabilities_internal(1);
+	if (out) {
+		*out = g_vga_caps;
+	}
+}
+
 int vga_can_set_mode(void) {
-	uint16 id = vbe_dispi_read(VBE_DISPI_INDEX_ID);
-	return (id >= VBE_DISPI_ID0 && id <= VBE_DISPI_ID5) ? 1 : 0;
+	vga_refresh_capabilities_internal(1);
+	return g_vga_caps.runtime_mode_switch_available ? 1 : 0;
 }
 
 void vga_log_boot_capabilities(void) {
-	if (!g_mbi) {
+	vga_capabilities_t caps;
+	vga_get_capabilities(&caps);
+
+	if (!caps.has_multiboot_state) {
 		printf("[gfx] boot: multiboot info missing\n");
 		return;
 	}
 
-	int has_fb = (g_mbi->flags & MULTIBOOT_INFO_FRAMEBUFFER_INFO) != 0;
-	int has_vbe = (g_mbi->flags & MULTIBOOT_INFO_VBE_INFO) != 0;
-	uint32 fb_addr = (uint32)g_mbi->framebuffer_addr;
-
 	printf("[gfx] boot: flags=0x%X fb_flag=%d vbe_flag=%d\n",
 	       (unsigned)g_mbi->flags,
-	       has_fb,
-	       has_vbe);
+	       (int)caps.has_multiboot_fb_info,
+	       (int)caps.has_multiboot_vbe_info);
 
-	if (fb_addr && g_mbi->framebuffer_width && g_mbi->framebuffer_height) {
+	if (caps.has_framebuffer_addr && caps.has_framebuffer_geometry) {
 		printf("[gfx] boot fb: addr=0x%X %ux%ux%u pitch=%u\n",
-		       (unsigned)fb_addr,
-		       (unsigned)g_mbi->framebuffer_width,
-		       (unsigned)g_mbi->framebuffer_height,
-		       (unsigned)g_mbi->framebuffer_bpp,
-		       (unsigned)g_mbi->framebuffer_pitch);
-	} else if (fb_addr) {
-		printf("[gfx] boot fb: addr=0x%X (geometry unavailable)\n", (unsigned)fb_addr);
+		       (unsigned)caps.boot_fb_addr,
+		       (unsigned)caps.boot_fb_width,
+		       (unsigned)caps.boot_fb_height,
+		       (unsigned)caps.boot_fb_bpp,
+		       (unsigned)caps.boot_fb_pitch);
+	} else if (caps.has_framebuffer_addr) {
+		printf("[gfx] boot fb: addr=0x%X (geometry unavailable)\n", (unsigned)caps.boot_fb_addr);
 	} else {
 		printf("[gfx] boot fb: not provided\n");
 	}
 
+	printf("[gfx] boot fb validity: %s\n", caps.valid_boot_framebuffer ? "valid" : "invalid");
+
 	printf("[gfx] multiboot vbe: mode=0x%X ctrl=0x%X mode_info=0x%X\n",
-	       (unsigned)g_mbi->vbe_mode,
-	       (unsigned)g_mbi->vbe_control_info,
-	       (unsigned)g_mbi->vbe_mode_info);
+	       (unsigned)caps.boot_vbe_mode,
+	       (unsigned)caps.boot_vbe_control_info,
+	       (unsigned)caps.boot_vbe_mode_info);
+
+	printf("[gfx] capabilities: dispi_id=0x%X runtime_switch=%d grub_fb_fallback=%d text_fallback=%d\n",
+	       (unsigned)caps.bochs_dispi_id,
+	       (int)caps.runtime_mode_switch_available,
+	       (int)caps.fallback_grub_fb_eligible,
+	       (int)caps.fallback_text_eligible);
 
 	printf("[gfx] runtime mode path: %s\n",
-	       vga_can_set_mode() ? "bochs/qemu-dispi" : "unavailable");
+	       caps.runtime_mode_switch_available ? "bochs/qemu-dispi" : "unavailable");
 }
 
 int vga_set_mode(int mode_w, int mode_h, int bpp) {
-	if (!g_mbi) {
+    vga_capabilities_t caps;
+    vga_get_capabilities(&caps);
+
+	if (!caps.has_multiboot_state) {
 		printf("[gfx] mode switch fail: no multiboot state\n");
 		return -1;
 	}
@@ -114,8 +190,10 @@ int vga_set_mode(int mode_w, int mode_h, int bpp) {
 		printf("[gfx] mode switch fail: unsupported bpp=%d\n", bpp);
 		return -1;
 	}
-	if (!vga_can_set_mode()) {
-		printf("[gfx] mode switch fail: bochs/qemu-dispi unavailable\n");
+	if (!caps.runtime_mode_switch_available) {
+		printf("[gfx] mode switch fail: runtime switch unavailable (grub_fb_fallback=%d text_fallback=%d)\n",
+		       (int)caps.fallback_grub_fb_eligible,
+		       (int)caps.fallback_text_eligible);
 		return -1;
 	}
 
@@ -144,6 +222,7 @@ int vga_set_mode(int mode_w, int mode_h, int bpp) {
 	g_mbi->framebuffer_height = (uint32)actual_h;
 	g_mbi->framebuffer_bpp = (uint8)actual_bpp;
 	g_mbi->framebuffer_pitch = (uint32)(actual_w * (actual_bpp / 8));
+	vga_refresh_capabilities_internal(1);
 
 	vga_init_double_buffer();
 	clearScreen();

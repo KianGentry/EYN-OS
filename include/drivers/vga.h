@@ -138,12 +138,37 @@ extern int shell_log_line_starts[1001];
 extern int shell_log_current_line_start;
 #define LOG_BUF_SIZE 65536
 
+typedef struct {
+	uint8 initialized;
+	uint8 has_multiboot_state;
+	uint8 has_multiboot_fb_info;
+	uint8 has_multiboot_vbe_info;
+	uint8 has_framebuffer_addr;
+	uint8 has_framebuffer_geometry;
+	uint8 valid_boot_framebuffer;
+	uint8 bochs_dispi_available;
+	uint8 runtime_mode_switch_available;
+	uint8 fallback_grub_fb_eligible;
+	uint8 fallback_text_eligible;
+	uint8 boot_fb_bpp;
+	uint16 bochs_dispi_id;
+	uint16 boot_vbe_mode;
+	uint32 boot_fb_addr;
+	uint32 boot_fb_pitch;
+	uint32 boot_fb_width;
+	uint32 boot_fb_height;
+	uint32 boot_vbe_control_info;
+	uint32 boot_vbe_mode_info;
+} vga_capabilities_t;
+
 // Double buffer integration
 void vga_swap_buffers(void);
 // Initialize the software backbuffer (safe no-op if allocation fails)
 void vga_init_double_buffer(void);
 // Log boot-time graphics capability/handoff details from multiboot.
 void vga_log_boot_capabilities(void);
+// Snapshot current graphics capability state used for mode selection/fallbacks.
+void vga_get_capabilities(vga_capabilities_t* out);
 // Returns 1 when Bochs/QEMU VBE runtime mode switching is available.
 int vga_can_set_mode(void);
 // Attempt runtime hardware mode switch (e.g. 1024x768x32).
