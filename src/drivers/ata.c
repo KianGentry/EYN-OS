@@ -120,6 +120,21 @@ static uint16 g_ata_channel_ctrl_base[2] = { ATA_PRIMARY_CTRL, ATA_SECONDARY_CTR
 static uint8 g_ata_channel_native_mode[2];
 static uint8 g_ata_channel_configured_by_pci[2];
 
+typedef struct {
+    uint8 found;
+    uint8 bus;
+    uint8 device;
+    uint8 function;
+    uint8 prog_if;
+    uint16 vendor_id;
+    uint16 device_id;
+    uint32 bar0;
+    uint32 bar1;
+    uint32 bar2;
+    uint32 bar3;
+    int score;
+} ata_ide_pci_info_t;
+
 /*
  * ABI-INVARIANT: ATA re-entrancy guard.
  *
@@ -151,20 +166,9 @@ static uint8 num_logical_drives = 0;
 
 // function declarations
 static void init_logical_drive_mapping(void);
-
-typedef struct {
-    uint8 found;
-    uint8 bus;
-    uint8 device;
-    uint8 function;
-    uint8 prog_if;
-    uint16 vendor_id;
-    uint16 device_id;
-    uint32 bar0;
-    uint32 bar1;
-    uint32 bar2;
-    uint32 bar3;
-} ata_ide_pci_info_t;
+static void ata_set_legacy_channels(void);
+static void ata_log_channel_config(void);
+static uint8 ata_count_detected_physical_drives(void);
 
 static int ata_decode_ide_io_bar(uint32 bar, uint16* out_base) {
     if (!out_base) return -1;
@@ -186,25 +190,7 @@ static int ata_decode_ide_ctrl_bar(uint32 bar, uint16* out_ctrl_port) {
     return 0;
 }
 
-static void ata_ide_pci_enum_cb(const pci_device_info* info, void* user) {
-    ata_ide_pci_info_t* out = (ata_ide_pci_info_t*)user;
-    if (!info || !out || out->found) return;
-    if (info->class_code != PCI_CLASS_MASS_STORAGE || info->subclass != PCI_SUBCLASS_IDE) return;
-
-    out->found = 1;
-    out->bus = info->bus;
-    out->device = info->device;
-    out->function = info->function;
-    out->prog_if = info->prog_if;
-    out->vendor_id = info->vendor_id;
-    out->device_id = info->device_id;
-    out->bar0 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR0);
-    out->bar1 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR1);
-    out->bar2 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR2);
-    out->bar3 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR3);
-}
-
-static void ata_configure_channels_from_pci(void) {
+static void ata_set_legacy_channels(void) {
     g_ata_channel_io_base[0] = ATA_PRIMARY_IO;
     g_ata_channel_io_base[1] = ATA_SECONDARY_IO;
     g_ata_channel_ctrl_base[0] = ATA_PRIMARY_CTRL;
@@ -213,6 +199,101 @@ static void ata_configure_channels_from_pci(void) {
     g_ata_channel_native_mode[1] = 0;
     g_ata_channel_configured_by_pci[0] = 0;
     g_ata_channel_configured_by_pci[1] = 0;
+}
+
+static void ata_log_channel_config(void) {
+    printf("[ata] channel0: mode=%s io=0x%X ctrl=0x%X source=%s\n",
+           g_ata_channel_native_mode[0] ? "native" : "compat",
+           (unsigned)g_ata_channel_io_base[0],
+           (unsigned)g_ata_channel_ctrl_base[0],
+           g_ata_channel_configured_by_pci[0] ? "pci" : "legacy");
+    printf("[ata] channel1: mode=%s io=0x%X ctrl=0x%X source=%s\n",
+           g_ata_channel_native_mode[1] ? "native" : "compat",
+           (unsigned)g_ata_channel_io_base[1],
+           (unsigned)g_ata_channel_ctrl_base[1],
+           g_ata_channel_configured_by_pci[1] ? "pci" : "legacy");
+}
+
+static uint8 ata_count_detected_physical_drives(void) {
+    uint8 physical_count = 0;
+    for (int i = 0; i < 8; i++) {
+        if (detected_drives[i].present) physical_count++;
+    }
+    return physical_count;
+}
+
+static int ata_score_ide_candidate(const pci_device_info* info,
+                                   uint32 bar0,
+                                   uint32 bar1,
+                                   uint32 bar2,
+                                   uint32 bar3) {
+    int score = 0;
+    int primary_native = (info->prog_if & ATA_PCI_PROGIF_PRIMARY_NATIVE) ? 1 : 0;
+    int secondary_native = (info->prog_if & ATA_PCI_PROGIF_SECONDARY_NATIVE) ? 1 : 0;
+
+    if (primary_native) {
+        uint16 io = 0;
+        uint16 ctrl = 0;
+        if (ata_decode_ide_io_bar(bar0, &io) == 0 && ata_decode_ide_ctrl_bar(bar1, &ctrl) == 0) {
+            score += 16;
+        } else {
+            score -= 8;
+        }
+    } else {
+        score += 2;
+    }
+
+    if (secondary_native) {
+        uint16 io = 0;
+        uint16 ctrl = 0;
+        if (ata_decode_ide_io_bar(bar2, &io) == 0 && ata_decode_ide_ctrl_bar(bar3, &ctrl) == 0) {
+            score += 16;
+        } else {
+            score -= 8;
+        }
+    } else {
+        score += 2;
+    }
+
+    if (primary_native && secondary_native) {
+        score += 1;
+    }
+
+    return score;
+}
+
+static void ata_ide_pci_enum_cb(const pci_device_info* info, void* user) {
+    ata_ide_pci_info_t* out = (ata_ide_pci_info_t*)user;
+    if (!info || !out) return;
+    if (info->class_code != PCI_CLASS_MASS_STORAGE || info->subclass != PCI_SUBCLASS_IDE) return;
+
+    uint32 bar0 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR0);
+    uint32 bar1 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR1);
+    uint32 bar2 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR2);
+    uint32 bar3 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR3);
+
+    int score = ata_score_ide_candidate(info, bar0, bar1, bar2, bar3);
+
+    if (out->found && score <= out->score) {
+        return;
+    }
+
+    out->found = 1;
+    out->bus = info->bus;
+    out->device = info->device;
+    out->function = info->function;
+    out->prog_if = info->prog_if;
+    out->vendor_id = info->vendor_id;
+    out->device_id = info->device_id;
+    out->bar0 = bar0;
+    out->bar1 = bar1;
+    out->bar2 = bar2;
+    out->bar3 = bar3;
+    out->score = score;
+}
+
+static void ata_configure_channels_from_pci(void) {
+    ata_set_legacy_channels();
 
     ata_ide_pci_info_t ide;
     memset(&ide, 0, sizeof(ide));
@@ -220,16 +301,18 @@ static void ata_configure_channels_from_pci(void) {
 
     if (!ide.found) {
         printf("[ata] pci ide: no controller found, using legacy channels\n");
+        ata_log_channel_config();
         return;
     }
 
-    printf("[ata] pci ide: bdf=%u:%u.%u ven=0x%X dev=0x%X prog_if=0x%X\n",
+    printf("[ata] pci ide: selected bdf=%u:%u.%u ven=0x%X dev=0x%X prog_if=0x%X score=%d\n",
            (unsigned)ide.bus,
            (unsigned)ide.device,
            (unsigned)ide.function,
            (unsigned)ide.vendor_id,
            (unsigned)ide.device_id,
-           (unsigned)ide.prog_if);
+           (unsigned)ide.prog_if,
+           ide.score);
 
     if (ide.prog_if & ATA_PCI_PROGIF_PRIMARY_NATIVE) {
         uint16 io = 0;
@@ -257,16 +340,7 @@ static void ata_configure_channels_from_pci(void) {
         }
     }
 
-    printf("[ata] channel0: mode=%s io=0x%X ctrl=0x%X source=%s\n",
-           g_ata_channel_native_mode[0] ? "native" : "compat",
-           (unsigned)g_ata_channel_io_base[0],
-           (unsigned)g_ata_channel_ctrl_base[0],
-           g_ata_channel_configured_by_pci[0] ? "pci" : "legacy");
-    printf("[ata] channel1: mode=%s io=0x%X ctrl=0x%X source=%s\n",
-           g_ata_channel_native_mode[1] ? "native" : "compat",
-           (unsigned)g_ata_channel_io_base[1],
-           (unsigned)g_ata_channel_ctrl_base[1],
-           g_ata_channel_configured_by_pci[1] ? "pci" : "legacy");
+        ata_log_channel_config();
 }
 
 static uint16 ata_drive_io_base(uint8 drive) {
@@ -741,16 +815,28 @@ void ata_init_drives() {
         ata_detect_drive(drive);
     }
 
+    {
+        uint8 physical_count = ata_count_detected_physical_drives();
+        int any_native = (g_ata_channel_native_mode[0] || g_ata_channel_native_mode[1]) ? 1 : 0;
+
+        if (any_native && physical_count == 0) {
+            printf("[ata] pci ide: native probe found no drives, retrying legacy compatibility channels\n");
+            ata_set_legacy_channels();
+            ata_log_channel_config();
+
+            for (int drive = 0; drive < 4; drive++) {
+                ata_detect_drive(drive);
+            }
+        }
+    }
+
     ata_run_lba48_smoke();
     
     // initialize logical drive mapping after detection
     init_logical_drive_mapping();
 
     {
-        uint8 physical_count = 0;
-        for (int i = 0; i < 8; i++) {
-            if (detected_drives[i].present) physical_count++;
-        }
+        uint8 physical_count = ata_count_detected_physical_drives();
         printf("[ata] probe complete: physical=%u logical=%u\n",
                (unsigned)physical_count,
                (unsigned)num_logical_drives);
