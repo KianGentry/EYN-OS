@@ -106,6 +106,8 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
         printf("[boot] multiboot modules: none (flags=0x%X)\n", (unsigned)mbi->flags);
     }
 
+    vga_log_boot_capabilities();
+
 #if defined(EYNOS_ARCH_AMD64)
     amd64_patch_bootstrap_framebuffer_mapping(mbi);
 #endif

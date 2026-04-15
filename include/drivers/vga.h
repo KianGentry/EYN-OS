@@ -142,6 +142,8 @@ extern int shell_log_current_line_start;
 void vga_swap_buffers(void);
 // Initialize the software backbuffer (safe no-op if allocation fails)
 void vga_init_double_buffer(void);
+// Log boot-time graphics capability/handoff details from multiboot.
+void vga_log_boot_capabilities(void);
 // Returns 1 when Bochs/QEMU VBE runtime mode switching is available.
 int vga_can_set_mode(void);
 // Attempt runtime hardware mode switch (e.g. 1024x768x32).

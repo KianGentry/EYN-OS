@@ -64,11 +64,60 @@ int vga_can_set_mode(void) {
 	return (id >= VBE_DISPI_ID0 && id <= VBE_DISPI_ID5) ? 1 : 0;
 }
 
+void vga_log_boot_capabilities(void) {
+	if (!g_mbi) {
+		printf("[gfx] boot: multiboot info missing\n");
+		return;
+	}
+
+	int has_fb = (g_mbi->flags & MULTIBOOT_INFO_FRAMEBUFFER_INFO) != 0;
+	int has_vbe = (g_mbi->flags & MULTIBOOT_INFO_VBE_INFO) != 0;
+	uint32 fb_addr = (uint32)g_mbi->framebuffer_addr;
+
+	printf("[gfx] boot: flags=0x%X fb_flag=%d vbe_flag=%d\n",
+	       (unsigned)g_mbi->flags,
+	       has_fb,
+	       has_vbe);
+
+	if (fb_addr && g_mbi->framebuffer_width && g_mbi->framebuffer_height) {
+		printf("[gfx] boot fb: addr=0x%X %ux%ux%u pitch=%u\n",
+		       (unsigned)fb_addr,
+		       (unsigned)g_mbi->framebuffer_width,
+		       (unsigned)g_mbi->framebuffer_height,
+		       (unsigned)g_mbi->framebuffer_bpp,
+		       (unsigned)g_mbi->framebuffer_pitch);
+	} else if (fb_addr) {
+		printf("[gfx] boot fb: addr=0x%X (geometry unavailable)\n", (unsigned)fb_addr);
+	} else {
+		printf("[gfx] boot fb: not provided\n");
+	}
+
+	printf("[gfx] multiboot vbe: mode=0x%X ctrl=0x%X mode_info=0x%X\n",
+	       (unsigned)g_mbi->vbe_mode,
+	       (unsigned)g_mbi->vbe_control_info,
+	       (unsigned)g_mbi->vbe_mode_info);
+
+	printf("[gfx] runtime mode path: %s\n",
+	       vga_can_set_mode() ? "bochs/qemu-dispi" : "unavailable");
+}
+
 int vga_set_mode(int mode_w, int mode_h, int bpp) {
-	if (!g_mbi) return -1;
-	if (mode_w < 320 || mode_h < 200) return -1;
-	if (bpp != 16 && bpp != 24 && bpp != 32) return -1;
-	if (!vga_can_set_mode()) return -1;
+	if (!g_mbi) {
+		printf("[gfx] mode switch fail: no multiboot state\n");
+		return -1;
+	}
+	if (mode_w < 320 || mode_h < 200) {
+		printf("[gfx] mode switch fail: invalid geometry %dx%d\n", mode_w, mode_h);
+		return -1;
+	}
+	if (bpp != 16 && bpp != 24 && bpp != 32) {
+		printf("[gfx] mode switch fail: unsupported bpp=%d\n", bpp);
+		return -1;
+	}
+	if (!vga_can_set_mode()) {
+		printf("[gfx] mode switch fail: bochs/qemu-dispi unavailable\n");
+		return -1;
+	}
 
 	vbe_dispi_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
 	vbe_dispi_write(VBE_DISPI_INDEX_XRES, (uint16)mode_w);
@@ -81,8 +130,14 @@ int vga_set_mode(int mode_w, int mode_h, int bpp) {
 	int actual_w = (int)vbe_dispi_read(VBE_DISPI_INDEX_XRES);
 	int actual_h = (int)vbe_dispi_read(VBE_DISPI_INDEX_YRES);
 	int actual_bpp = (int)vbe_dispi_read(VBE_DISPI_INDEX_BPP);
-	if (actual_w <= 0 || actual_h <= 0) return -1;
-	if (actual_bpp != 16 && actual_bpp != 24 && actual_bpp != 32) return -1;
+	if (actual_w <= 0 || actual_h <= 0) {
+		printf("[gfx] mode switch fail: invalid actual geometry %dx%d\n", actual_w, actual_h);
+		return -1;
+	}
+	if (actual_bpp != 16 && actual_bpp != 24 && actual_bpp != 32) {
+		printf("[gfx] mode switch fail: invalid actual bpp=%d\n", actual_bpp);
+		return -1;
+	}
 
 	g_mbi->flags |= MULTIBOOT_INFO_FRAMEBUFFER_INFO;
 	g_mbi->framebuffer_width = (uint32)actual_w;
@@ -95,6 +150,14 @@ int vga_set_mode(int mode_w, int mode_h, int bpp) {
 	vga_begin_frame();
 	vga_mark_dirty_rect(0, 0, actual_w, actual_h);
 	vga_swap_buffers();
+
+	printf("[gfx] mode switch: requested=%dx%dx%d actual=%dx%dx%d\n",
+	       mode_w,
+	       mode_h,
+	       bpp,
+	       actual_w,
+	       actual_h,
+	       actual_bpp);
 
 	return 0;
 }

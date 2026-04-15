@@ -78,6 +78,10 @@ static void ata_ctx_account(uint32 cost) {
 }
 
 static drive_info_t detected_drives[8];
+static uint8 detected_drive_atapi[8];
+static uint8 detected_drive_dma[8];
+static uint8 detected_drive_lba[8];
+static uint8 detected_drive_lba48[8];
 
 /*
  * ABI-INVARIANT: ATA re-entrancy guard.
@@ -132,6 +136,16 @@ static int ata_poll(uint16 io_base) {
     return -1;
 }
 
+static const char* ata_drive_slot_name(uint8 drive) {
+    switch (drive) {
+        case 0: return "primary-master";
+        case 1: return "primary-slave";
+        case 2: return "secondary-master";
+        case 3: return "secondary-slave";
+        default: return "aux";
+    }
+}
+
 // Enhanced drive detection for SATA compatibility
 int ata_detect_drive(uint8 drive) {
     if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
@@ -171,6 +185,25 @@ int ata_detect_drive(uint8 drive) {
         // Keep legacy semantics: default to "IDE".
         // Note: IDENTIFY does not reliably indicate SATA vs PATA transport.
         detected_drives[drive].type = 0;
+
+        {
+            uint16 caps49 = identify_data[49];
+            uint16 caps83 = identify_data[83];
+            detected_drive_atapi[drive] = (identify_data[0] & 0x8000u) ? 1u : 0u;
+            detected_drive_dma[drive] = (caps49 & (1u << 8)) ? 1u : 0u;
+            detected_drive_lba[drive] = (caps49 & (1u << 9)) ? 1u : 0u;
+            detected_drive_lba48[drive] = (caps83 & (1u << 10)) ? 1u : 0u;
+        }
+
+        printf("[ata] detect %u (%s): model='%s' sectors=%u lba=%u lba48=%u dma=%u atapi=%u\n",
+               (unsigned)drive,
+               ata_drive_slot_name(drive),
+               detected_drives[drive].model,
+               (unsigned)detected_drives[drive].sectors,
+               (unsigned)detected_drive_lba[drive],
+               (unsigned)detected_drive_lba48[drive],
+               (unsigned)detected_drive_dma[drive],
+               (unsigned)detected_drive_atapi[drive]);
         
         return 0;
     }
@@ -180,6 +213,8 @@ int ata_detect_drive(uint8 drive) {
 
 // Initialize all drives during system startup
 void ata_init_drives() {
+    printf("[ata] transfer path: pio-only (bus-master DMA not enabled)\n");
+
     // Clear drive info
     for (int i = 0; i < 8; i++) {
         detected_drives[i].present = 0;
@@ -187,6 +222,10 @@ void ata_init_drives() {
         detected_drives[i].sectors = 0;
         detected_drives[i].size_mb = 0;
         detected_drives[i].model[0] = '\0';
+        detected_drive_atapi[i] = 0;
+        detected_drive_dma[i] = 0;
+        detected_drive_lba[i] = 0;
+        detected_drive_lba48[i] = 0;
     }
     
     // Probe classic primary/secondary master/slave.
@@ -196,6 +235,16 @@ void ata_init_drives() {
     
     // initialize logical drive mapping after detection
     init_logical_drive_mapping();
+
+    {
+        uint8 physical_count = 0;
+        for (int i = 0; i < 8; i++) {
+            if (detected_drives[i].present) physical_count++;
+        }
+        printf("[ata] probe complete: physical=%u logical=%u\n",
+               (unsigned)physical_count,
+               (unsigned)num_logical_drives);
+    }
 }
 
 int ata_identify(uint8 drive, uint16* identify_data) {
