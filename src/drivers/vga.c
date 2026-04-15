@@ -18,6 +18,10 @@
 
 extern multiboot_info_t *g_mbi;
 
+#if defined(EYNOS_ARCH_I386)
+extern uint32 vbe_bios_int10_set_mode_i386(uint16 mode);
+#endif
+
 int width, height;
 int vga_default_r = 255, vga_default_g = 255, vga_default_b = 255; // Default to white
 // When non-zero, drawText operates in a minimal glyph-draw mode used by drawCharAt.
@@ -144,13 +148,38 @@ static int vga_try_bios_vbe_set_mode_i386(int mode_w, int mode_h, int bpp, const
 		return 0;
 	}
 
-	/*
-	 * Phase C note: this path now resolves/validates BIOS mode IDs and is wired
-	 * into backend selection. The protected->real mode thunk is added next.
-	 */
-	printf("[gfx] bios mode switch fail: mode 0x%X selected but thunk is not wired yet\n",
-	       (unsigned)candidate);
-	return -1;
+	if (!g_mbi || !g_mbi->framebuffer_addr) {
+		printf("[gfx] bios mode switch fail: framebuffer address unavailable\n");
+		return -1;
+	}
+
+	uint32 bios_status = vbe_bios_int10_set_mode_i386(candidate);
+	if ((bios_status & 0xFFFFu) != 0x004Fu) {
+		printf("[gfx] bios mode switch fail: int10 status=0x%X mode=0x%X\n",
+		       (unsigned)(bios_status & 0xFFFFu),
+		       (unsigned)candidate);
+		return -1;
+	}
+
+	g_mbi->flags |= MULTIBOOT_INFO_FRAMEBUFFER_INFO;
+	g_mbi->flags |= MULTIBOOT_INFO_VBE_INFO;
+	g_mbi->vbe_mode = candidate;
+	g_mbi->framebuffer_width = (uint32)mode_w;
+	g_mbi->framebuffer_height = (uint32)mode_h;
+	g_mbi->framebuffer_bpp = (uint8)bpp;
+
+	int bytes = vga_bpp_to_bytes((uint8)bpp);
+	if (bytes <= 0) bytes = 4;
+	g_mbi->framebuffer_pitch = (uint32)mode_w * (uint32)bytes;
+
+	printf("[gfx] bios mode switch: mode=0x%X status=0x%X %dx%dx%d\n",
+	       (unsigned)candidate,
+	       (unsigned)(bios_status & 0xFFFFu),
+	       mode_w,
+	       mode_h,
+	       bpp);
+
+	return 0;
 #else
 	(void)mode_w;
 	(void)mode_h;

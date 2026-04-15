@@ -123,6 +123,10 @@ OBJS += $(OBJDIR)/shell_script.o
 OBJS += $(OBJDIR)/ac97.o
 OBJS += $(OBJDIR)/reis.o
 OBJS += $(OBJDIR)/otf_font.o
+
+ifeq ($(ARCH),i386)
+OBJS += $(OBJDIR)/vbe_bios.o
+endif
 OUTPUT = $(BOOTDIR)/kernel.bin
 
 # Source files to object files
@@ -176,6 +180,12 @@ $(OBJDIR)/irq_stubs.o:$(ARCH_IRQ_STUB_SRC_$(ARCH))
 $(OBJDIR)/mem386.o:$(ARCH_MEM_ASM_SRC_$(ARCH))
 	mkdir $(OBJDIR)/ -p
 	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/mem386.o $(ARCH_MEM_ASM_SRC_$(ARCH))
+
+ifeq ($(ARCH),i386)
+$(OBJDIR)/vbe_bios.o:src/drivers/vbe_bios_i386.asm
+	mkdir $(OBJDIR)/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/vbe_bios.o src/drivers/vbe_bios_i386.asm
+endif
 	
 $(OBJDIR)/kc.o:src/entry/kernel.c
 	$(COMPILER) $(CFLAGS) src/entry/kernel.c -o $(OBJDIR)/kc.o 
