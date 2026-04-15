@@ -6,6 +6,7 @@
 #include <context.h>
 #include <misc/sched.h>
 #include <cpu/arch.h>
+#include <drivers/pci.h>
 
 // Define NULL if not available
 #ifndef NULL
@@ -16,12 +17,6 @@
 #define ATA_SECONDARY_IO 0x170
 #define ATA_PRIMARY_CTRL 0x3F6
 #define ATA_SECONDARY_CTRL 0x376
-
-// SATA ports (common on Dell Optiplex 755)
-#define SATA_PRIMARY_IO 0x1F0
-#define SATA_SECONDARY_IO 0x170
-#define SATA_PRIMARY_CTRL 0x3F6
-#define SATA_SECONDARY_CTRL 0x376
 
 #define ATA_REG_DATA       0x00
 #define ATA_REG_ERROR      0x01
@@ -73,6 +68,17 @@
 #define ATA_LBA28_MAX_SECTOR 0x0FFFFFFFu
 #define ATA_LBA48_SMOKE_TARGET_LBA 0x10000000u
 
+#define PCI_CLASS_MASS_STORAGE 0x01
+#define PCI_SUBCLASS_IDE 0x01
+
+#define ATA_PCI_PROGIF_PRIMARY_NATIVE 0x01
+#define ATA_PCI_PROGIF_SECONDARY_NATIVE 0x04
+
+#define ATA_PCI_BAR0 0x10
+#define ATA_PCI_BAR1 0x14
+#define ATA_PCI_BAR2 0x18
+#define ATA_PCI_BAR3 0x1C
+
 // SATA specific features
 #define ATA_FEATURE_SATA_ENABLE 0x10
 #define ATA_FEATURE_SATA_DISABLE 0x90
@@ -109,6 +115,11 @@ static uint32 g_ata_recovery_epoch = 0;
 static uint32 g_ata_reset_cooldown_until[2];
 static uint8 g_ata_reset_backoff_shift[2];
 
+static uint16 g_ata_channel_io_base[2] = { ATA_PRIMARY_IO, ATA_SECONDARY_IO };
+static uint16 g_ata_channel_ctrl_base[2] = { ATA_PRIMARY_CTRL, ATA_SECONDARY_CTRL };
+static uint8 g_ata_channel_native_mode[2];
+static uint8 g_ata_channel_configured_by_pci[2];
+
 /*
  * ABI-INVARIANT: ATA re-entrancy guard.
  *
@@ -141,17 +152,140 @@ static uint8 num_logical_drives = 0;
 // function declarations
 static void init_logical_drive_mapping(void);
 
-static void ata_io_wait(uint16 io_base) {
-    for (int i = 0; i < 4; i++) inportb(io_base + ATA_REG_ALTSTATUS);
+typedef struct {
+    uint8 found;
+    uint8 bus;
+    uint8 device;
+    uint8 function;
+    uint8 prog_if;
+    uint16 vendor_id;
+    uint16 device_id;
+    uint32 bar0;
+    uint32 bar1;
+    uint32 bar2;
+    uint32 bar3;
+} ata_ide_pci_info_t;
+
+static int ata_decode_ide_io_bar(uint32 bar, uint16* out_base) {
+    if (!out_base) return -1;
+    if (bar == 0 || bar == 0xFFFFFFFFu) return -1;
+    if ((bar & 0x1u) == 0) return -1;
+
+    uint16 base = (uint16)(bar & 0xFFFCu);
+    if (base == 0) return -1;
+
+    *out_base = base;
+    return 0;
 }
 
-static void ata_soft_reset(uint16 io_base) {
-    /* Legacy control port is io_base + 0x206 (0x3F6/0x376). */
-    uint16 ctrl = io_base + ATA_REG_ALTSTATUS;
-    outportb(ctrl, 0x04); /* SRST */
-    ata_io_wait(io_base);
-    outportb(ctrl, 0x00);
-    ata_io_wait(io_base);
+static int ata_decode_ide_ctrl_bar(uint32 bar, uint16* out_ctrl_port) {
+    if (!out_ctrl_port) return -1;
+    uint16 block_base = 0;
+    if (ata_decode_ide_io_bar(bar, &block_base) != 0) return -1;
+    *out_ctrl_port = (uint16)(block_base + 2u);
+    return 0;
+}
+
+static void ata_ide_pci_enum_cb(const pci_device_info* info, void* user) {
+    ata_ide_pci_info_t* out = (ata_ide_pci_info_t*)user;
+    if (!info || !out || out->found) return;
+    if (info->class_code != PCI_CLASS_MASS_STORAGE || info->subclass != PCI_SUBCLASS_IDE) return;
+
+    out->found = 1;
+    out->bus = info->bus;
+    out->device = info->device;
+    out->function = info->function;
+    out->prog_if = info->prog_if;
+    out->vendor_id = info->vendor_id;
+    out->device_id = info->device_id;
+    out->bar0 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR0);
+    out->bar1 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR1);
+    out->bar2 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR2);
+    out->bar3 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR3);
+}
+
+static void ata_configure_channels_from_pci(void) {
+    g_ata_channel_io_base[0] = ATA_PRIMARY_IO;
+    g_ata_channel_io_base[1] = ATA_SECONDARY_IO;
+    g_ata_channel_ctrl_base[0] = ATA_PRIMARY_CTRL;
+    g_ata_channel_ctrl_base[1] = ATA_SECONDARY_CTRL;
+    g_ata_channel_native_mode[0] = 0;
+    g_ata_channel_native_mode[1] = 0;
+    g_ata_channel_configured_by_pci[0] = 0;
+    g_ata_channel_configured_by_pci[1] = 0;
+
+    ata_ide_pci_info_t ide;
+    memset(&ide, 0, sizeof(ide));
+    pci_enumerate(ata_ide_pci_enum_cb, &ide);
+
+    if (!ide.found) {
+        printf("[ata] pci ide: no controller found, using legacy channels\n");
+        return;
+    }
+
+    printf("[ata] pci ide: bdf=%u:%u.%u ven=0x%X dev=0x%X prog_if=0x%X\n",
+           (unsigned)ide.bus,
+           (unsigned)ide.device,
+           (unsigned)ide.function,
+           (unsigned)ide.vendor_id,
+           (unsigned)ide.device_id,
+           (unsigned)ide.prog_if);
+
+    if (ide.prog_if & ATA_PCI_PROGIF_PRIMARY_NATIVE) {
+        uint16 io = 0;
+        uint16 ctrl = 0;
+        if (ata_decode_ide_io_bar(ide.bar0, &io) == 0 && ata_decode_ide_ctrl_bar(ide.bar1, &ctrl) == 0) {
+            g_ata_channel_io_base[0] = io;
+            g_ata_channel_ctrl_base[0] = ctrl;
+            g_ata_channel_native_mode[0] = 1;
+            g_ata_channel_configured_by_pci[0] = 1;
+        } else {
+            printf("[ata] pci ide: primary native requested but BAR decode failed, keeping legacy\n");
+        }
+    }
+
+    if (ide.prog_if & ATA_PCI_PROGIF_SECONDARY_NATIVE) {
+        uint16 io = 0;
+        uint16 ctrl = 0;
+        if (ata_decode_ide_io_bar(ide.bar2, &io) == 0 && ata_decode_ide_ctrl_bar(ide.bar3, &ctrl) == 0) {
+            g_ata_channel_io_base[1] = io;
+            g_ata_channel_ctrl_base[1] = ctrl;
+            g_ata_channel_native_mode[1] = 1;
+            g_ata_channel_configured_by_pci[1] = 1;
+        } else {
+            printf("[ata] pci ide: secondary native requested but BAR decode failed, keeping legacy\n");
+        }
+    }
+
+    printf("[ata] channel0: mode=%s io=0x%X ctrl=0x%X source=%s\n",
+           g_ata_channel_native_mode[0] ? "native" : "compat",
+           (unsigned)g_ata_channel_io_base[0],
+           (unsigned)g_ata_channel_ctrl_base[0],
+           g_ata_channel_configured_by_pci[0] ? "pci" : "legacy");
+    printf("[ata] channel1: mode=%s io=0x%X ctrl=0x%X source=%s\n",
+           g_ata_channel_native_mode[1] ? "native" : "compat",
+           (unsigned)g_ata_channel_io_base[1],
+           (unsigned)g_ata_channel_ctrl_base[1],
+           g_ata_channel_configured_by_pci[1] ? "pci" : "legacy");
+}
+
+static uint16 ata_drive_io_base(uint8 drive) {
+    return g_ata_channel_io_base[(drive & 2u) ? 1u : 0u];
+}
+
+static uint16 ata_drive_ctrl_base(uint8 drive) {
+    return g_ata_channel_ctrl_base[(drive & 2u) ? 1u : 0u];
+}
+
+static void ata_io_wait(uint16 ctrl_base) {
+    for (int i = 0; i < 4; i++) inportb(ctrl_base);
+}
+
+static void ata_soft_reset(uint16 ctrl_base) {
+    outportb(ctrl_base, 0x04); /* SRST */
+    ata_io_wait(ctrl_base);
+    outportb(ctrl_base, 0x00);
+    ata_io_wait(ctrl_base);
 }
 
 static int ata_poll(uint16 io_base) {
@@ -253,6 +387,7 @@ static int ata_compute_drive_max_lba(uint8 drive, uint32* out_max_lba) {
 
 static int ata_try_recover_after_failure(uint8 drive,
                                          uint16 io_base,
+                                         uint16 ctrl_base,
                                          const char* op,
                                          uint32 lba,
                                          int attempt,
@@ -302,9 +437,9 @@ static int ata_try_recover_after_failure(uint8 drive,
                (unsigned)status);
     }
 
-    ata_soft_reset(io_base);
+    ata_soft_reset(ctrl_base);
     outportb(io_base + ATA_REG_HDDEVSEL, (drive & 1u) ? 0xB0 : 0xA0);
-    ata_io_wait(io_base);
+    ata_io_wait(ctrl_base);
 
     uint8 shift = g_ata_reset_backoff_shift[channel];
     if (shift > ATA_RESET_BACKOFF_MAX_SHIFT) shift = ATA_RESET_BACKOFF_MAX_SHIFT;
@@ -363,7 +498,12 @@ static void ata_run_lba48_smoke(void) {
 #endif
 }
 
-static int ata_program_sector_address(uint8 drive, uint16 io_base, uint32 lba, uint8* out_cmd, int is_write) {
+static int ata_program_sector_address(uint8 drive,
+                                      uint16 io_base,
+                                      uint16 ctrl_base,
+                                      uint32 lba,
+                                      uint8* out_cmd,
+                                      int is_write) {
     if (!out_cmd) return -1;
 
     uint32 max_lba = 0;
@@ -397,7 +537,7 @@ static int ata_program_sector_address(uint8 drive, uint16 io_base, uint32 lba, u
 
             /* LBA48 taskfile write order: high bytes first, then low bytes. */
             outportb(io_base + ATA_REG_HDDEVSEL, (uint8)(0x40 | (is_slave ? 0x10 : 0x00)));
-            ata_io_wait(io_base);
+            ata_io_wait(ctrl_base);
 
             outportb(io_base + ATA_REG_SECCOUNT0, 0x00);
             outportb(io_base + ATA_REG_LBA0, 0x00);
@@ -415,7 +555,7 @@ static int ata_program_sector_address(uint8 drive, uint16 io_base, uint32 lba, u
 
         outportb(io_base + ATA_REG_HDDEVSEL,
                  (uint8)(0xE0 | (is_slave ? 0x10 : 0x00) | ((lba >> 24) & 0x0Fu)));
-        ata_io_wait(io_base);
+        ata_io_wait(ctrl_base);
         outportb(io_base + ATA_REG_SECCOUNT0, 1);
         outportb(io_base + ATA_REG_LBA0, (uint8)(lba & 0xFFu));
         outportb(io_base + ATA_REG_LBA1, (uint8)((lba >> 8) & 0xFFu));
@@ -453,7 +593,7 @@ static int ata_program_sector_address(uint8 drive, uint16 io_base, uint32 lba, u
 
     outportb(io_base + ATA_REG_HDDEVSEL,
              (uint8)(0xA0 | (is_slave ? 0x10 : 0x00) | (chs_head & 0x0Fu)));
-    ata_io_wait(io_base);
+    ata_io_wait(ctrl_base);
     outportb(io_base + ATA_REG_SECCOUNT0, 1);
     outportb(io_base + ATA_REG_LBA0, chs_sector);
     outportb(io_base + ATA_REG_LBA1, (uint8)(chs_cyl & 0xFFu));
@@ -466,13 +606,14 @@ static int ata_program_sector_address(uint8 drive, uint16 io_base, uint32 lba, u
 // Enhanced drive detection for SATA compatibility
 int ata_detect_drive(uint8 drive) {
     if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
-    uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
+    uint16 io_base = ata_drive_io_base(drive);
+    uint16 ctrl_base = ata_drive_ctrl_base(drive);
     uint8 slavebit = (drive & 1) ? 0xB0 : 0xA0;
     
     // Reset the drive first
     outportb(io_base + ATA_REG_HDDEVSEL, slavebit);
-    ata_io_wait(io_base);
-    ata_soft_reset(io_base);
+    ata_io_wait(ctrl_base);
+    ata_soft_reset(ctrl_base);
     
     // Try to detect if drive is present
     uint8 status = inportb(io_base + ATA_REG_STATUS);
@@ -576,6 +717,8 @@ void ata_init_drives() {
     g_ata_reset_backoff_shift[0] = 0;
     g_ata_reset_backoff_shift[1] = 0;
 
+    ata_configure_channels_from_pci();
+
     // Clear drive info
     for (int i = 0; i < 8; i++) {
         detected_drives[i].present = 0;
@@ -616,13 +759,14 @@ void ata_init_drives() {
 
 int ata_identify(uint8 drive, uint16* identify_data) {
     if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
-    uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
+    uint16 io_base = ata_drive_io_base(drive);
+    uint16 ctrl_base = ata_drive_ctrl_base(drive);
     uint8 slavebit = (drive & 1) ? 0xB0 : 0xA0;
     
     // Reset drive
     outportb(io_base + ATA_REG_HDDEVSEL, slavebit);
-    ata_io_wait(io_base);
-    ata_soft_reset(io_base);
+    ata_io_wait(ctrl_base);
+    ata_soft_reset(ctrl_base);
     
     // Clear registers
     outportb(io_base + ATA_REG_SECCOUNT0, 0);
@@ -632,7 +776,7 @@ int ata_identify(uint8 drive, uint16* identify_data) {
     
     // Send IDENTIFY command
     outportb(io_base + ATA_REG_COMMAND, ATA_CMD_IDENTIFY);
-    ata_io_wait(io_base);
+    ata_io_wait(ctrl_base);
     
     uint8 status = inportb(io_base + ATA_REG_STATUS);
     
@@ -654,7 +798,7 @@ int ata_identify(uint8 drive, uint16* identify_data) {
         uint8 lba2 = inportb(io_base + ATA_REG_LBA2);
         if ((lba1 == 0x14 && lba2 == 0xEB) || (lba1 == 0x69 && lba2 == 0x96)) {
             outportb(io_base + ATA_REG_COMMAND, ATA_CMD_IDENTIFY_PACKET);
-            ata_io_wait(io_base);
+            ata_io_wait(ctrl_base);
         } else {
             return -1;
         }
@@ -713,11 +857,12 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
     }
     g_ata_busy = 1;
 
-    uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
+    uint16 io_base = ata_drive_io_base(drive);
+    uint16 ctrl_base = ata_drive_ctrl_base(drive);
 
     for (int attempt = 1; attempt <= ATA_PIO_MAX_ATTEMPTS; ++attempt) {
         uint8 cmd = ATA_CMD_READ_PIO;
-        if (ata_program_sector_address(drive, io_base, lba, &cmd, 0) != 0) {
+        if (ata_program_sector_address(drive, io_base, ctrl_base, lba, &cmd, 0) != 0) {
             g_ata_busy = 0;
             return -1;
         }
@@ -730,7 +875,7 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
 
         // Send read command
         outportb(io_base + ATA_REG_COMMAND, cmd);
-        ata_io_wait(io_base);
+        ata_io_wait(ctrl_base);
 
         int timeout = ATA_PIO_BSY_TIMEOUT;
         uint8 status = 0;
@@ -741,6 +886,7 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
             arch_irq_restore(irq_state);
             if (ata_try_recover_after_failure(drive,
                                               io_base,
+                                              ctrl_base,
                                               "read",
                                               lba,
                                               attempt,
@@ -760,6 +906,7 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
             arch_irq_restore(irq_state);
             if (ata_try_recover_after_failure(drive,
                                               io_base,
+                                              ctrl_base,
                                               "read",
                                               lba,
                                               attempt,
@@ -791,6 +938,7 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
             arch_irq_restore(irq_state);
             if (ata_try_recover_after_failure(drive,
                                               io_base,
+                                              ctrl_base,
                                               "read",
                                               lba,
                                               attempt,
@@ -816,7 +964,7 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
             buf[i * 2 + 1] = (data >> 8) & 0xFF;
         }
 
-        ata_io_wait(io_base);
+        ata_io_wait(ctrl_base);
         arch_irq_restore(irq_state);
         ata_note_io_success(drive);
         g_ata_busy = 0;
@@ -840,11 +988,12 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
     }
     g_ata_busy = 1;
 
-    uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
+    uint16 io_base = ata_drive_io_base(drive);
+    uint16 ctrl_base = ata_drive_ctrl_base(drive);
 
     for (int attempt = 1; attempt <= ATA_PIO_MAX_ATTEMPTS; ++attempt) {
         uint8 cmd = ATA_CMD_WRITE_PIO;
-        if (ata_program_sector_address(drive, io_base, lba, &cmd, 1) != 0) {
+        if (ata_program_sector_address(drive, io_base, ctrl_base, lba, &cmd, 1) != 0) {
             g_ata_busy = 0;
             return -1;
         }
@@ -854,7 +1003,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
 
         // Send write command
         outportb(io_base + ATA_REG_COMMAND, cmd);
-        ata_io_wait(io_base);
+        ata_io_wait(ctrl_base);
 
         int timeout = ATA_PIO_BSY_TIMEOUT;
         uint8 status = 0;
@@ -865,6 +1014,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
             arch_irq_restore(irq_state);
             if (ata_try_recover_after_failure(drive,
                                               io_base,
+                                              ctrl_base,
                                               "write",
                                               lba,
                                               attempt,
@@ -884,6 +1034,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
             arch_irq_restore(irq_state);
             if (ata_try_recover_after_failure(drive,
                                               io_base,
+                                              ctrl_base,
                                               "write",
                                               lba,
                                               attempt,
@@ -915,6 +1066,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
             arch_irq_restore(irq_state);
             if (ata_try_recover_after_failure(drive,
                                               io_base,
+                                              ctrl_base,
                                               "write",
                                               lba,
                                               attempt,
@@ -939,7 +1091,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
             outw(io_base + ATA_REG_DATA, data);
         }
 
-        ata_io_wait(io_base);
+        ata_io_wait(ctrl_base);
 
         timeout = ATA_PIO_POST_WRITE_BSY_TIMEOUT;
         while ((status = inportb(io_base + ATA_REG_STATUS)) & ATA_SR_BSY) {
@@ -949,6 +1101,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
             arch_irq_restore(irq_state);
             if (ata_try_recover_after_failure(drive,
                                               io_base,
+                                              ctrl_base,
                                               "write",
                                               lba,
                                               attempt,
@@ -974,6 +1127,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
             arch_irq_restore(irq_state);
             if (ata_try_recover_after_failure(drive,
                                               io_base,
+                                              ctrl_base,
                                               "write",
                                               lba,
                                               attempt,
@@ -992,6 +1146,7 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
             arch_irq_restore(irq_state);
             if (ata_try_recover_after_failure(drive,
                                               io_base,
+                                              ctrl_base,
                                               "write",
                                               lba,
                                               attempt,
