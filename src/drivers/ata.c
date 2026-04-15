@@ -58,6 +58,18 @@
 
 #define ATA_IDENTIFY_BSY_TIMEOUT 200000
 #define ATA_IDENTIFY_DRQ_TIMEOUT 200000
+#define ATA_PIO_BSY_TIMEOUT 500000
+#define ATA_PIO_DRQ_TIMEOUT 500000
+#define ATA_PIO_POST_WRITE_BSY_TIMEOUT 1000000
+#define ATA_PIO_POST_WRITE_DRDY_TIMEOUT 1000000
+#define ATA_PIO_MAX_ATTEMPTS 3
+
+#ifndef CONFIG_ATA_LBA48_SMOKE
+#define CONFIG_ATA_LBA48_SMOKE 0
+#endif
+
+#define ATA_LBA28_MAX_SECTOR 0x0FFFFFFFu
+#define ATA_LBA48_SMOKE_TARGET_LBA 0x10000000u
 
 // SATA specific features
 #define ATA_FEATURE_SATA_ENABLE 0x10
@@ -90,6 +102,7 @@ static uint8 detected_drive_lba48[8];
 static uint16 detected_drive_cylinders[8];
 static uint16 detected_drive_heads[8];
 static uint16 detected_drive_spt[8];
+static uint64 detected_drive_lba48_sectors[8];
 
 /*
  * ABI-INVARIANT: ATA re-entrancy guard.
@@ -171,13 +184,106 @@ static int ata_get_chs_geometry(uint8 drive, uint16* out_cyl, uint16* out_heads,
     return 0;
 }
 
+static uint32 ata_u64_to_u32_sat(uint64 value) {
+    if (value > (uint64)0xFFFFFFFFu) {
+        return 0xFFFFFFFFu;
+    }
+    return (uint32)value;
+}
+
+static int ata_try_recover_after_failure(uint8 drive,
+                                         uint16 io_base,
+                                         const char* op,
+                                         uint32 lba,
+                                         int attempt,
+                                         int max_attempts,
+                                         const char* reason,
+                                         uint8 status,
+                                         int error_code) {
+    if (attempt >= max_attempts) {
+        return -1;
+    }
+
+    if (error_code >= 0) {
+        printf("[ata] %s recover: drive=%u lba=%u attempt=%d/%d reason=%s status=0x%X err=0x%X\n",
+               op,
+               (unsigned)drive,
+               (unsigned)lba,
+               attempt,
+               max_attempts,
+               reason,
+               (unsigned)status,
+               (unsigned)error_code);
+    } else {
+        printf("[ata] %s recover: drive=%u lba=%u attempt=%d/%d reason=%s status=0x%X\n",
+               op,
+               (unsigned)drive,
+               (unsigned)lba,
+               attempt,
+               max_attempts,
+               reason,
+               (unsigned)status);
+    }
+
+    ata_soft_reset(io_base);
+    outportb(io_base + ATA_REG_HDDEVSEL, (drive & 1u) ? 0xB0 : 0xA0);
+    ata_io_wait(io_base);
+    if (ata_poll(io_base) != 0) {
+        printf("[ata] %s recover warning: drive=%u not ready after soft reset\n",
+               op,
+               (unsigned)drive);
+    }
+    return 0;
+}
+
+static void ata_run_lba48_smoke(void) {
+#if CONFIG_ATA_LBA48_SMOKE
+    int ran = 0;
+    uint8 sector[512];
+
+    printf("[ata] lba48 smoke: enabled\n");
+    for (uint8 drive = 0; drive < 8; ++drive) {
+        if (!detected_drives[drive].present) continue;
+        if (!detected_drive_lba48[drive]) continue;
+
+        uint64 total = detected_drive_lba48_sectors[drive];
+        if (total <= (uint64)ATA_LBA48_SMOKE_TARGET_LBA) {
+            printf("[ata] lba48 smoke skip: drive=%u total_sectors=%u (insufficient high-lba range)\n",
+                   (unsigned)drive,
+                   (unsigned)ata_u64_to_u32_sat(total));
+            continue;
+        }
+
+        uint64 target64 = (total - 1u);
+        if (target64 > (uint64)0xFFFFFFFFu) {
+            target64 = (uint64)ATA_LBA48_SMOKE_TARGET_LBA;
+        }
+        if (target64 <= (uint64)ATA_LBA28_MAX_SECTOR) {
+            target64 = (uint64)ATA_LBA48_SMOKE_TARGET_LBA;
+        }
+
+        uint32 target = (uint32)target64;
+        int rc = ata_read_sector(drive, target, sector);
+        printf("[ata] lba48 smoke: drive=%u lba=%u result=%s\n",
+               (unsigned)drive,
+               (unsigned)target,
+               (rc == 0) ? "ok" : "fail");
+        ran = 1;
+    }
+
+    if (!ran) {
+        printf("[ata] lba48 smoke: no eligible drives\n");
+    }
+#endif
+}
+
 static int ata_program_sector_address(uint8 drive, uint16 io_base, uint32 lba, uint8* out_cmd, int is_write) {
     if (!out_cmd) return -1;
 
     uint8 is_slave = (drive & 1u) ? 1u : 0u;
 
     if (detected_drive_lba[drive]) {
-        if (lba > 0x0FFFFFFFu) {
+        if (lba > ATA_LBA28_MAX_SECTOR) {
             if (!detected_drive_lba48[drive]) {
                 printf("ATA %s error: Drive %d LBA %u exceeds LBA28 and drive lacks LBA48\n",
                        is_write ? "write" : "read",
@@ -304,12 +410,23 @@ int ata_detect_drive(uint8 drive) {
             detected_drive_cylinders[drive] = identify_data[1];
             detected_drive_heads[drive] = identify_data[3];
             detected_drive_spt[drive] = identify_data[6];
+
+            if (detected_drive_lba48[drive]) {
+                detected_drive_lba48_sectors[drive] =
+                    (uint64)identify_data[100] |
+                    ((uint64)identify_data[101] << 16) |
+                    ((uint64)identify_data[102] << 32) |
+                    ((uint64)identify_data[103] << 48);
+            }
         }
 
         if (detected_drive_lba[drive]) {
             uint32 lba28_sectors = (uint32)identify_data[60] | ((uint32)identify_data[61] << 16);
             if (lba28_sectors != 0) {
                 detected_drives[drive].sectors = lba28_sectors;
+            }
+            if (detected_drive_lba48[drive] && detected_drive_lba48_sectors[drive] != 0) {
+                detected_drives[drive].sectors = ata_u64_to_u32_sat(detected_drive_lba48_sectors[drive]);
             }
         } else {
             uint16 chs_cyl = detected_drive_cylinders[drive];
@@ -364,12 +481,15 @@ void ata_init_drives() {
         detected_drive_cylinders[i] = 0;
         detected_drive_heads[i] = 0;
         detected_drive_spt[i] = 0;
+        detected_drive_lba48_sectors[i] = 0;
     }
     
     // Probe classic primary/secondary master/slave.
     for (int drive = 0; drive < 4; drive++) {
         ata_detect_drive(drive);
     }
+
+    ata_run_lba48_smoke();
     
     // initialize logical drive mapping after detection
     init_logical_drive_mapping();
@@ -485,69 +605,116 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
     g_ata_busy = 1;
 
     uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
-    uint8 cmd = ATA_CMD_READ_PIO;
-    if (ata_program_sector_address(drive, io_base, lba, &cmd, 0) != 0) {
+
+    for (int attempt = 1; attempt <= ATA_PIO_MAX_ATTEMPTS; ++attempt) {
+        uint8 cmd = ATA_CMD_READ_PIO;
+        if (ata_program_sector_address(drive, io_base, lba, &cmd, 0) != 0) {
+            g_ata_busy = 0;
+            return -1;
+        }
+
+        /*
+         * ABI-INVARIANT: Interrupts must be disabled from command-send through
+         * data-read to prevent timer-IRQ-triggered re-entrant ATA access.
+         */
+        arch_irq_state_t irq_state = arch_irq_save();
+
+        // Send read command
+        outportb(io_base + ATA_REG_COMMAND, cmd);
+        ata_io_wait(io_base);
+
+        int timeout = ATA_PIO_BSY_TIMEOUT;
+        uint8 status = 0;
+        while ((status = inportb(io_base + ATA_REG_STATUS)) & ATA_SR_BSY) {
+            if (--timeout == 0) break;
+        }
+        if (timeout == 0) {
+            arch_irq_restore(irq_state);
+            if (ata_try_recover_after_failure(drive,
+                                              io_base,
+                                              "read",
+                                              lba,
+                                              attempt,
+                                              ATA_PIO_MAX_ATTEMPTS,
+                                              "bsy-timeout",
+                                              status,
+                                              -1) == 0) {
+                continue;
+            }
+            g_ata_busy = 0;
+            printf("ATA read timeout: Drive %d LBA %d - BSY timeout\n", (int)drive, (int)lba);
+            return -1;
+        }
+
+        if (status & (ATA_SR_ERR | ATA_SR_DF)) {
+            int error_code = (status & ATA_SR_ERR) ? (int)inportb(io_base + ATA_REG_ERROR) : -1;
+            arch_irq_restore(irq_state);
+            if (ata_try_recover_after_failure(drive,
+                                              io_base,
+                                              "read",
+                                              lba,
+                                              attempt,
+                                              ATA_PIO_MAX_ATTEMPTS,
+                                              (status & ATA_SR_DF) ? "device-fault" : "status-error",
+                                              status,
+                                              error_code) == 0) {
+                continue;
+            }
+            g_ata_busy = 0;
+            if (status & ATA_SR_ERR) {
+                printf("ATA read error: Drive %d LBA %d - Error 0x%x\n", (int)drive, (int)lba, error_code);
+            } else {
+                printf("ATA read fault: Drive %d LBA %d - Status 0x%x\n", (int)drive, (int)lba, (int)status);
+            }
+            return -1;
+        }
+
+        timeout = ATA_PIO_DRQ_TIMEOUT;
+        while (timeout > 0) {
+            status = inportb(io_base + ATA_REG_STATUS);
+            if (status & ATA_SR_DRQ) break;
+            if (status & (ATA_SR_ERR | ATA_SR_DF)) break;
+            --timeout;
+        }
+
+        if (!(status & ATA_SR_DRQ)) {
+            int error_code = (status & ATA_SR_ERR) ? (int)inportb(io_base + ATA_REG_ERROR) : -1;
+            arch_irq_restore(irq_state);
+            if (ata_try_recover_after_failure(drive,
+                                              io_base,
+                                              "read",
+                                              lba,
+                                              attempt,
+                                              ATA_PIO_MAX_ATTEMPTS,
+                                              (timeout == 0) ? "drq-timeout" : "drq-error",
+                                              status,
+                                              error_code) == 0) {
+                continue;
+            }
+            g_ata_busy = 0;
+            if (timeout == 0) {
+                printf("ATA read timeout: Drive %d LBA %d - DRQ timeout\n", (int)drive, (int)lba);
+            } else {
+                printf("ATA read error: Drive %d LBA %d - Status 0x%x\n", (int)drive, (int)lba, (int)status);
+            }
+            return -1;
+        }
+
+        // Read data
+        for (int i = 0; i < 256; i++) {
+            uint16 data = inw(io_base + ATA_REG_DATA);
+            buf[i * 2] = data & 0xFF;
+            buf[i * 2 + 1] = (data >> 8) & 0xFF;
+        }
+
+        ata_io_wait(io_base);
+        arch_irq_restore(irq_state);
         g_ata_busy = 0;
-        return -1;
+        return 0;
     }
 
-    /*
-     * ABI-INVARIANT: Interrupts must be disabled from command-send through
-     * data-read to prevent timer-IRQ-triggered re-entrant ATA access.
-     * g_ata_busy (above) handles synchronous PF re-entrancy; arch_irq_save
-     * handles asynchronous IRQ re-entrancy.  Both guards are required.
-     *
-     * Interrupts are re-enabled immediately after the last inw/ata_io_wait.
-     * On QEMU emulated IDE, BSY clears within a handful of iterations, so
-     * the window with interrupts disabled is brief (microseconds).
-     */
-    arch_irq_state_t irq_state = arch_irq_save();
-
-    // Send read command
-    outportb(io_base + ATA_REG_COMMAND, cmd);
-    ata_io_wait(io_base);
-    
-    // Wait for BSY to clear
-    int timeout = 500000;
-    while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout);
-    if (timeout == 0) {
-        arch_irq_restore(irq_state);
-        g_ata_busy = 0;
-        printf("ATA read timeout: Drive %d LBA %d - BSY timeout\n", (int)drive, (int)lba);
-        return -1;
-    }
-    
-    // Check for errors before waiting for DRQ
-    uint8 status = inportb(io_base + ATA_REG_STATUS);
-    if (status & ATA_SR_ERR) {
-        arch_irq_restore(irq_state);
-        g_ata_busy = 0;
-        uint8 error = inportb(io_base + ATA_REG_ERROR);
-        printf("ATA read error: Drive %d LBA %d - Error 0x%x\n", (int)drive, (int)lba, (int)error);
-        return -1;
-    }
-    
-    // Wait for DRQ to set
-    timeout = 500000;
-    while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRQ) && --timeout);
-    if (timeout == 0) {
-        arch_irq_restore(irq_state);
-        g_ata_busy = 0;
-        printf("ATA read timeout: Drive %d LBA %d - DRQ timeout\n", (int)drive, (int)lba);
-        return -1;
-    }
-    
-    // Read data
-    for (int i = 0; i < 256; i++) {
-        uint16 data = inw(io_base + ATA_REG_DATA);
-        buf[i*2] = data & 0xFF;
-        buf[i*2+1] = (data >> 8) & 0xFF;
-    }
-    
-    ata_io_wait(io_base);
-    arch_irq_restore(irq_state);
     g_ata_busy = 0;
-    return 0;
+    return -1;
 }
 
 int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
@@ -564,85 +731,177 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
     g_ata_busy = 1;
 
     uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
-    uint8 cmd = ATA_CMD_WRITE_PIO;
-    if (ata_program_sector_address(drive, io_base, lba, &cmd, 1) != 0) {
-        g_ata_busy = 0;
-        return -1;
-    }
 
-    /* Same IRQ guard as ata_read_sector -- see comment there. */
-    arch_irq_state_t irq_state = arch_irq_save();
+    for (int attempt = 1; attempt <= ATA_PIO_MAX_ATTEMPTS; ++attempt) {
+        uint8 cmd = ATA_CMD_WRITE_PIO;
+        if (ata_program_sector_address(drive, io_base, lba, &cmd, 1) != 0) {
+            g_ata_busy = 0;
+            return -1;
+        }
 
-    // Send write command
-    outportb(io_base + ATA_REG_COMMAND, cmd);
-    ata_io_wait(io_base);
+        /* Same IRQ guard as ata_read_sector -- see comment there. */
+        arch_irq_state_t irq_state = arch_irq_save();
 
-    // Wait for BSY to clear
-    int timeout = 500000;
-    while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout);
-    if (timeout == 0) {
+        // Send write command
+        outportb(io_base + ATA_REG_COMMAND, cmd);
+        ata_io_wait(io_base);
+
+        int timeout = ATA_PIO_BSY_TIMEOUT;
+        uint8 status = 0;
+        while ((status = inportb(io_base + ATA_REG_STATUS)) & ATA_SR_BSY) {
+            if (--timeout == 0) break;
+        }
+        if (timeout == 0) {
+            arch_irq_restore(irq_state);
+            if (ata_try_recover_after_failure(drive,
+                                              io_base,
+                                              "write",
+                                              lba,
+                                              attempt,
+                                              ATA_PIO_MAX_ATTEMPTS,
+                                              "bsy-timeout",
+                                              status,
+                                              -1) == 0) {
+                continue;
+            }
+            g_ata_busy = 0;
+            printf("ATA write timeout: Drive %d LBA %d - BSY timeout\n", (int)drive, (int)lba);
+            return -1;
+        }
+
+        if (status & (ATA_SR_ERR | ATA_SR_DF)) {
+            int error_code = (status & ATA_SR_ERR) ? (int)inportb(io_base + ATA_REG_ERROR) : -1;
+            arch_irq_restore(irq_state);
+            if (ata_try_recover_after_failure(drive,
+                                              io_base,
+                                              "write",
+                                              lba,
+                                              attempt,
+                                              ATA_PIO_MAX_ATTEMPTS,
+                                              (status & ATA_SR_DF) ? "device-fault" : "status-error",
+                                              status,
+                                              error_code) == 0) {
+                continue;
+            }
+            g_ata_busy = 0;
+            if (status & ATA_SR_ERR) {
+                printf("ATA write error: Drive %d LBA %d - Error 0x%x\n", (int)drive, (int)lba, error_code);
+            } else {
+                printf("ATA write fault: Drive %d LBA %d - Status 0x%x\n", (int)drive, (int)lba, (int)status);
+            }
+            return -1;
+        }
+
+        timeout = ATA_PIO_DRQ_TIMEOUT;
+        while (timeout > 0) {
+            status = inportb(io_base + ATA_REG_STATUS);
+            if (status & ATA_SR_DRQ) break;
+            if (status & (ATA_SR_ERR | ATA_SR_DF)) break;
+            --timeout;
+        }
+
+        if (!(status & ATA_SR_DRQ)) {
+            int error_code = (status & ATA_SR_ERR) ? (int)inportb(io_base + ATA_REG_ERROR) : -1;
+            arch_irq_restore(irq_state);
+            if (ata_try_recover_after_failure(drive,
+                                              io_base,
+                                              "write",
+                                              lba,
+                                              attempt,
+                                              ATA_PIO_MAX_ATTEMPTS,
+                                              (timeout == 0) ? "drq-timeout" : "drq-error",
+                                              status,
+                                              error_code) == 0) {
+                continue;
+            }
+            g_ata_busy = 0;
+            if (timeout == 0) {
+                printf("ATA write timeout: Drive %d LBA %d - DRQ timeout\n", (int)drive, (int)lba);
+            } else {
+                printf("ATA write error: Drive %d LBA %d - Status 0x%x\n", (int)drive, (int)lba, (int)status);
+            }
+            return -1;
+        }
+
+        // Write the data
+        for (int i = 0; i < 256; i++) {
+            uint16 data = buf[i * 2] | (buf[i * 2 + 1] << 8);
+            outw(io_base + ATA_REG_DATA, data);
+        }
+
+        ata_io_wait(io_base);
+
+        timeout = ATA_PIO_POST_WRITE_BSY_TIMEOUT;
+        while ((status = inportb(io_base + ATA_REG_STATUS)) & ATA_SR_BSY) {
+            if (--timeout == 0) break;
+        }
+        if (timeout == 0) {
+            arch_irq_restore(irq_state);
+            if (ata_try_recover_after_failure(drive,
+                                              io_base,
+                                              "write",
+                                              lba,
+                                              attempt,
+                                              ATA_PIO_MAX_ATTEMPTS,
+                                              "post-write-bsy-timeout",
+                                              status,
+                                              -1) == 0) {
+                continue;
+            }
+            g_ata_busy = 0;
+            return -1;
+        }
+
+        timeout = ATA_PIO_POST_WRITE_DRDY_TIMEOUT;
+        while (timeout > 0) {
+            status = inportb(io_base + ATA_REG_STATUS);
+            if (status & ATA_SR_DRDY) break;
+            if (status & (ATA_SR_ERR | ATA_SR_DF)) break;
+            --timeout;
+        }
+        if (!(status & ATA_SR_DRDY)) {
+            int error_code = (status & ATA_SR_ERR) ? (int)inportb(io_base + ATA_REG_ERROR) : -1;
+            arch_irq_restore(irq_state);
+            if (ata_try_recover_after_failure(drive,
+                                              io_base,
+                                              "write",
+                                              lba,
+                                              attempt,
+                                              ATA_PIO_MAX_ATTEMPTS,
+                                              (timeout == 0) ? "post-write-drdy-timeout" : "post-write-status-error",
+                                              status,
+                                              error_code) == 0) {
+                continue;
+            }
+            g_ata_busy = 0;
+            return -1;
+        }
+
+        if (status & (ATA_SR_ERR | ATA_SR_DF)) {
+            int error_code = (status & ATA_SR_ERR) ? (int)inportb(io_base + ATA_REG_ERROR) : -1;
+            arch_irq_restore(irq_state);
+            if (ata_try_recover_after_failure(drive,
+                                              io_base,
+                                              "write",
+                                              lba,
+                                              attempt,
+                                              ATA_PIO_MAX_ATTEMPTS,
+                                              "post-write-final-status",
+                                              status,
+                                              error_code) == 0) {
+                continue;
+            }
+            g_ata_busy = 0;
+            return -1;
+        }
+
         arch_irq_restore(irq_state);
         g_ata_busy = 0;
-        printf("ATA write timeout: Drive %d LBA %d - BSY timeout\n", (int)drive, (int)lba);
-        return -1;
-    }
-    
-    // Check for errors before waiting for DRQ
-    uint8 status = inportb(io_base + ATA_REG_STATUS);
-    if (status & ATA_SR_ERR) {
-        arch_irq_restore(irq_state);
-        g_ata_busy = 0;
-        uint8 error = inportb(io_base + ATA_REG_ERROR);
-        printf("ATA write error: Drive %d LBA %d - Error 0x%x\n", (int)drive, (int)lba, (int)error);
-        return -1;
-    }
-    
-    // Wait for DRQ to set
-    timeout = 500000;
-    while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRQ) && --timeout);
-    if (timeout == 0) {
-        arch_irq_restore(irq_state);
-        g_ata_busy = 0;
-        printf("ATA write timeout: Drive %d LBA %d - DRQ timeout\n", (int)drive, (int)lba);
-        return -1;
+        return 0;
     }
 
-    // Write the data
-    for (int i = 0; i < 256; i++) {
-        uint16 data = buf[i*2] | (buf[i*2+1] << 8);
-        outw(io_base + ATA_REG_DATA, data);
-    }
-
-    ata_io_wait(io_base);
-
-    // Wait for BSY to clear and DRDY to set after writing
-    timeout = 1000000;
-    while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout);
-    if (timeout == 0) {
-        arch_irq_restore(irq_state);
-        g_ata_busy = 0;
-        return -1;
-    }
-    
-    timeout = 1000000;
-    while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRDY) && --timeout);
-    if (timeout == 0) {
-        arch_irq_restore(irq_state);
-        g_ata_busy = 0;
-        return -1;
-    }
-
-    // Check for errors
-    uint8 final_status = inportb(io_base + ATA_REG_STATUS);
-    if (final_status & (ATA_SR_ERR | ATA_SR_DF)) {
-        arch_irq_restore(irq_state);
-        g_ata_busy = 0;
-        return -1;
-    }
-
-    arch_irq_restore(irq_state);
     g_ata_busy = 0;
-    return 0;
+    return -1;
 }
 
 // Get drive information

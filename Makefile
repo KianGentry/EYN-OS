@@ -27,6 +27,7 @@ CONFIG_SCHED_MLFQ_Q0_MS ?= 10
 CONFIG_SCHED_MLFQ_Q1_MS ?= 25
 CONFIG_SCHED_MLFQ_Q2_MS ?= 50
 CONFIG_SCHED_MLFQ_BOOST_MS ?= 1000
+CONFIG_ATA_LBA48_SMOKE ?= 0
 
 ARCH_KERNEL_CFLAGS_i386 = -m32 -march=i386 -mtune=i386 -DEYNOS_ARCH_I386=1
 ARCH_KERNEL_CFLAGS_amd64 = -m64 -march=x86-64 -mtune=generic -mno-red-zone -DEYNOS_ARCH_AMD64=1
@@ -40,6 +41,7 @@ KERNEL_CFLAGS = $(ARCH_KERNEL_CFLAGS_$(ARCH)) -c -ffreestanding -fno-builtin -fn
 		 -DCONFIG_SCHED_MLFQ_Q1_MS=$(CONFIG_SCHED_MLFQ_Q1_MS) \
 		 -DCONFIG_SCHED_MLFQ_Q2_MS=$(CONFIG_SCHED_MLFQ_Q2_MS) \
 		 -DCONFIG_SCHED_MLFQ_BOOST_MS=$(CONFIG_SCHED_MLFQ_BOOST_MS) \
+		 -DCONFIG_ATA_LBA48_SMOKE=$(CONFIG_ATA_LBA48_SMOKE) \
 		 -fdata-sections -ffunction-sections \
 		 -I include/ -I include/cpu -I include/drivers -I include/misc -I include/graphics -I include/network -I include/utilities -I include/utilities/shell \
 		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \
