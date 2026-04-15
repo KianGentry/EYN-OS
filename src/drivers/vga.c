@@ -61,6 +61,44 @@ static uint16 vbe_dispi_read(uint16 index) {
 
 static vga_capabilities_t g_vga_caps;
 
+typedef struct {
+	uint16 mode;
+	uint16 width;
+	uint16 height;
+	uint8 bpp;
+} vbe_mode_map_t;
+
+/*
+ * Common VBE mode IDs used by many 1990s BIOS implementations.
+ * This table is intentionally conservative and is used only for selecting
+ * candidate BIOS modes in the i386 backend path.
+ */
+static const vbe_mode_map_t g_vbe_mode_map[] = {
+	{0x111, 640,  480, 16},
+	{0x114, 800,  600, 16},
+	{0x117, 1024, 768, 16},
+	{0x11A, 1280, 1024, 16},
+	{0x112, 640,  480, 24},
+	{0x115, 800,  600, 24},
+	{0x118, 1024, 768, 24},
+	{0x11B, 1280, 1024, 24},
+	/* 32bpp VBE mode IDs are less consistent; include common BIOS IDs. */
+	{0x141, 640,  480, 32},
+	{0x144, 800,  600, 32},
+	{0x147, 1024, 768, 32},
+};
+
+static uint16 vga_resolve_standard_vbe_mode(int width, int height, int bpp) {
+	for (size_t i = 0; i < sizeof(g_vbe_mode_map) / sizeof(g_vbe_mode_map[0]); ++i) {
+		if ((int)g_vbe_mode_map[i].width == width &&
+		    (int)g_vbe_mode_map[i].height == height &&
+		    (int)g_vbe_mode_map[i].bpp == bpp) {
+			return g_vbe_mode_map[i].mode;
+		}
+	}
+	return 0;
+}
+
 static int vga_bpp_to_bytes(uint8 bpp) {
 	if (bpp == 16) return 2;
 	if (bpp == 24) return 3;
@@ -80,6 +118,47 @@ static int vga_boot_framebuffer_valid(const multiboot_info_t* mbi) {
 	if (mbi->framebuffer_pitch < min_pitch) return 0;
 
 	return 1;
+}
+
+static int vga_try_bios_vbe_set_mode_i386(int mode_w, int mode_h, int bpp, const vga_capabilities_t* caps) {
+#if defined(EYNOS_ARCH_I386)
+	if (!caps || !caps->bios_runtime_mode_switch_available) {
+		printf("[gfx] bios mode switch fail: backend unavailable\n");
+		return -1;
+	}
+
+	uint16 candidate = vga_resolve_standard_vbe_mode(mode_w, mode_h, bpp);
+	if (!candidate) {
+		printf("[gfx] bios mode switch fail: no standard VBE mode mapping for %dx%dx%d\n",
+		       mode_w,
+		       mode_h,
+		       bpp);
+		return -1;
+	}
+
+	uint16 active_mode = (uint16)(caps->bios_active_mode & 0x01FFu);
+	uint16 target_mode = (uint16)(candidate & 0x01FFu);
+	if (active_mode == target_mode && caps->valid_boot_framebuffer) {
+		printf("[gfx] bios mode switch: mode 0x%X already active via boot framebuffer\n",
+		       (unsigned)candidate);
+		return 0;
+	}
+
+	/*
+	 * Phase C note: this path now resolves/validates BIOS mode IDs and is wired
+	 * into backend selection. The protected->real mode thunk is added next.
+	 */
+	printf("[gfx] bios mode switch fail: mode 0x%X selected but thunk is not wired yet\n",
+	       (unsigned)candidate);
+	return -1;
+#else
+	(void)mode_w;
+	(void)mode_h;
+	(void)bpp;
+	(void)caps;
+	printf("[gfx] bios mode switch fail: backend requires i386\n");
+	return -1;
+#endif
 }
 
 static void vga_refresh_capabilities_internal(int probe_dispi) {
@@ -106,6 +185,14 @@ static void vga_refresh_capabilities_internal(int probe_dispi) {
 		g_vga_caps.boot_vbe_mode = g_mbi->vbe_mode;
 		g_vga_caps.boot_vbe_control_info = g_mbi->vbe_control_info;
 		g_vga_caps.boot_vbe_mode_info = g_mbi->vbe_mode_info;
+		g_vga_caps.bios_active_mode = g_mbi->vbe_mode;
+
+#if defined(EYNOS_ARCH_I386)
+		if (g_vga_caps.has_multiboot_vbe_info && g_mbi->vbe_mode && g_mbi->vbe_mode != 0xFFFFu) {
+			g_vga_caps.bios_vbe_backend_available = 1;
+			g_vga_caps.bios_runtime_mode_switch_available = 1;
+		}
+#endif
 	}
 
 	if (probe_dispi || dispi_id == 0) {
@@ -114,7 +201,8 @@ static void vga_refresh_capabilities_internal(int probe_dispi) {
 
 	g_vga_caps.bochs_dispi_id = dispi_id;
 	g_vga_caps.bochs_dispi_available = (dispi_id >= VBE_DISPI_ID0 && dispi_id <= VBE_DISPI_ID5) ? 1 : 0;
-	g_vga_caps.runtime_mode_switch_available = g_vga_caps.bochs_dispi_available;
+	g_vga_caps.runtime_mode_switch_available =
+		(g_vga_caps.bochs_dispi_available || g_vga_caps.bios_runtime_mode_switch_available) ? 1 : 0;
 	g_vga_caps.fallback_grub_fb_eligible = g_vga_caps.valid_boot_framebuffer ? 1 : 0;
 }
 
@@ -169,9 +257,18 @@ void vga_log_boot_capabilities(void) {
 	       (int)caps.runtime_mode_switch_available,
 	       (int)caps.fallback_grub_fb_eligible,
 	       (int)caps.fallback_text_eligible);
+	printf("[gfx] bios backend: available=%d runtime=%d active_mode=0x%X\n",
+	       (int)caps.bios_vbe_backend_available,
+	       (int)caps.bios_runtime_mode_switch_available,
+	       (unsigned)caps.bios_active_mode);
 
-	printf("[gfx] runtime mode path: %s\n",
-	       caps.runtime_mode_switch_available ? "bochs/qemu-dispi" : "unavailable");
+	const char* runtime_path = "unavailable";
+	if (caps.bochs_dispi_available) {
+		runtime_path = "bochs/qemu-dispi";
+	} else if (caps.bios_runtime_mode_switch_available) {
+		runtime_path = "bios-vbe-i386";
+	}
+	printf("[gfx] runtime mode path: %s\n", runtime_path);
 }
 
 int vga_set_mode(int mode_w, int mode_h, int bpp) {
@@ -195,6 +292,28 @@ int vga_set_mode(int mode_w, int mode_h, int bpp) {
 		       (int)caps.fallback_grub_fb_eligible,
 		       (int)caps.fallback_text_eligible);
 		return -1;
+	}
+
+	if (!caps.bochs_dispi_available) {
+		int bios_rc = vga_try_bios_vbe_set_mode_i386(mode_w, mode_h, bpp, &caps);
+		if (bios_rc != 0) {
+			return -1;
+		}
+
+		/* Mode may already be active (no-op case) or updated by backend thunk. */
+		vga_refresh_capabilities_internal(1);
+		vga_init_double_buffer();
+		clearScreen();
+		vga_begin_frame();
+		vga_mark_dirty_rect(0, 0,
+					  (int)(g_mbi ? g_mbi->framebuffer_width : (uint32)mode_w),
+					  (int)(g_mbi ? g_mbi->framebuffer_height : (uint32)mode_h));
+		vga_swap_buffers();
+		printf("[gfx] mode switch: backend=bios-vbe-i386 requested=%dx%dx%d\n",
+		       mode_w,
+		       mode_h,
+		       bpp);
+		return 0;
 	}
 
 	vbe_dispi_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);

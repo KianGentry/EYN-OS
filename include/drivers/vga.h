@@ -147,12 +147,15 @@ typedef struct {
 	uint8 has_framebuffer_geometry;
 	uint8 valid_boot_framebuffer;
 	uint8 bochs_dispi_available;
+	uint8 bios_vbe_backend_available;
+	uint8 bios_runtime_mode_switch_available;
 	uint8 runtime_mode_switch_available;
 	uint8 fallback_grub_fb_eligible;
 	uint8 fallback_text_eligible;
 	uint8 boot_fb_bpp;
 	uint16 bochs_dispi_id;
 	uint16 boot_vbe_mode;
+	uint16 bios_active_mode;
 	uint32 boot_fb_addr;
 	uint32 boot_fb_pitch;
 	uint32 boot_fb_width;
