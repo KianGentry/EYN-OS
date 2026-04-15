@@ -38,6 +38,8 @@
 // Enhanced commands for SATA compatibility
 #define ATA_CMD_READ_PIO   0x20
 #define ATA_CMD_WRITE_PIO  0x30
+#define ATA_CMD_READ_PIO_EXT 0x24
+#define ATA_CMD_WRITE_PIO_EXT 0x34
 #define ATA_CMD_IDENTIFY   0xEC
 #define ATA_CMD_IDENTIFY_PACKET 0xA1
 #define ATA_CMD_SET_FEATURES 0xEF
@@ -53,6 +55,9 @@
 #define ATA_SR_CORR    0x04
 #define ATA_SR_IDX     0x02
 #define ATA_SR_ERR     0x01
+
+#define ATA_IDENTIFY_BSY_TIMEOUT 200000
+#define ATA_IDENTIFY_DRQ_TIMEOUT 200000
 
 // SATA specific features
 #define ATA_FEATURE_SATA_ENABLE 0x10
@@ -82,6 +87,9 @@ static uint8 detected_drive_atapi[8];
 static uint8 detected_drive_dma[8];
 static uint8 detected_drive_lba[8];
 static uint8 detected_drive_lba48[8];
+static uint16 detected_drive_cylinders[8];
+static uint16 detected_drive_heads[8];
+static uint16 detected_drive_spt[8];
 
 /*
  * ABI-INVARIANT: ATA re-entrancy guard.
@@ -146,6 +154,106 @@ static const char* ata_drive_slot_name(uint8 drive) {
     }
 }
 
+static int ata_get_chs_geometry(uint8 drive, uint16* out_cyl, uint16* out_heads, uint16* out_spt) {
+    if (!out_cyl || !out_heads || !out_spt) return -1;
+    if (drive >= 8) return -1;
+
+    uint16 cyl = detected_drive_cylinders[drive];
+    uint16 heads = detected_drive_heads[drive];
+    uint16 spt = detected_drive_spt[drive];
+
+    if (cyl == 0 || heads == 0 || spt == 0) return -1;
+    if (heads > 16 || spt > 63) return -1;
+
+    *out_cyl = cyl;
+    *out_heads = heads;
+    *out_spt = spt;
+    return 0;
+}
+
+static int ata_program_sector_address(uint8 drive, uint16 io_base, uint32 lba, uint8* out_cmd, int is_write) {
+    if (!out_cmd) return -1;
+
+    uint8 is_slave = (drive & 1u) ? 1u : 0u;
+
+    if (detected_drive_lba[drive]) {
+        if (lba > 0x0FFFFFFFu) {
+            if (!detected_drive_lba48[drive]) {
+                printf("ATA %s error: Drive %d LBA %u exceeds LBA28 and drive lacks LBA48\n",
+                       is_write ? "write" : "read",
+                       (int)drive,
+                       (unsigned)lba);
+                return -1;
+            }
+
+            /* LBA48 taskfile write order: high bytes first, then low bytes. */
+            outportb(io_base + ATA_REG_HDDEVSEL, (uint8)(0x40 | (is_slave ? 0x10 : 0x00)));
+            ata_io_wait(io_base);
+
+            outportb(io_base + ATA_REG_SECCOUNT0, 0x00);
+            outportb(io_base + ATA_REG_LBA0, 0x00);
+            outportb(io_base + ATA_REG_LBA1, 0x00);
+            outportb(io_base + ATA_REG_LBA2, 0x00);
+
+            outportb(io_base + ATA_REG_SECCOUNT0, 0x01);
+            outportb(io_base + ATA_REG_LBA0, (uint8)(lba & 0xFFu));
+            outportb(io_base + ATA_REG_LBA1, (uint8)((lba >> 8) & 0xFFu));
+            outportb(io_base + ATA_REG_LBA2, (uint8)((lba >> 16) & 0xFFu));
+
+            *out_cmd = is_write ? ATA_CMD_WRITE_PIO_EXT : ATA_CMD_READ_PIO_EXT;
+            return 0;
+        }
+
+        outportb(io_base + ATA_REG_HDDEVSEL,
+                 (uint8)(0xE0 | (is_slave ? 0x10 : 0x00) | ((lba >> 24) & 0x0Fu)));
+        ata_io_wait(io_base);
+        outportb(io_base + ATA_REG_SECCOUNT0, 1);
+        outportb(io_base + ATA_REG_LBA0, (uint8)(lba & 0xFFu));
+        outportb(io_base + ATA_REG_LBA1, (uint8)((lba >> 8) & 0xFFu));
+        outportb(io_base + ATA_REG_LBA2, (uint8)((lba >> 16) & 0xFFu));
+
+        *out_cmd = is_write ? ATA_CMD_WRITE_PIO : ATA_CMD_READ_PIO;
+        return 0;
+    }
+
+    uint16 cyl = 0;
+    uint16 heads = 0;
+    uint16 spt = 0;
+    if (ata_get_chs_geometry(drive, &cyl, &heads, &spt) != 0) {
+        printf("ATA %s error: Drive %d lacks valid CHS geometry for non-LBA access\n",
+               is_write ? "write" : "read",
+               (int)drive);
+        return -1;
+    }
+
+    uint32 sectors_per_cylinder = (uint32)heads * (uint32)spt;
+    uint32 total_chs_sectors = (uint32)cyl * sectors_per_cylinder;
+    if (sectors_per_cylinder == 0 || lba >= total_chs_sectors) {
+        printf("ATA %s error: Drive %d CHS range exceeded for LBA %u (max=%u)\n",
+               is_write ? "write" : "read",
+               (int)drive,
+               (unsigned)lba,
+               (unsigned)(total_chs_sectors ? (total_chs_sectors - 1u) : 0u));
+        return -1;
+    }
+
+    uint16 chs_cyl = (uint16)(lba / sectors_per_cylinder);
+    uint32 rem = lba % sectors_per_cylinder;
+    uint8 chs_head = (uint8)(rem / spt);
+    uint8 chs_sector = (uint8)((rem % spt) + 1u);
+
+    outportb(io_base + ATA_REG_HDDEVSEL,
+             (uint8)(0xA0 | (is_slave ? 0x10 : 0x00) | (chs_head & 0x0Fu)));
+    ata_io_wait(io_base);
+    outportb(io_base + ATA_REG_SECCOUNT0, 1);
+    outportb(io_base + ATA_REG_LBA0, chs_sector);
+    outportb(io_base + ATA_REG_LBA1, (uint8)(chs_cyl & 0xFFu));
+    outportb(io_base + ATA_REG_LBA2, (uint8)((chs_cyl >> 8) & 0xFFu));
+
+    *out_cmd = is_write ? ATA_CMD_WRITE_PIO : ATA_CMD_READ_PIO;
+    return 0;
+}
+
 // Enhanced drive detection for SATA compatibility
 int ata_detect_drive(uint8 drive) {
     if (!ata_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return -1;
@@ -193,9 +301,32 @@ int ata_detect_drive(uint8 drive) {
             detected_drive_dma[drive] = (caps49 & (1u << 8)) ? 1u : 0u;
             detected_drive_lba[drive] = (caps49 & (1u << 9)) ? 1u : 0u;
             detected_drive_lba48[drive] = (caps83 & (1u << 10)) ? 1u : 0u;
+            detected_drive_cylinders[drive] = identify_data[1];
+            detected_drive_heads[drive] = identify_data[3];
+            detected_drive_spt[drive] = identify_data[6];
         }
 
-        printf("[ata] detect %u (%s): model='%s' sectors=%u lba=%u lba48=%u dma=%u atapi=%u\n",
+        if (detected_drive_lba[drive]) {
+            uint32 lba28_sectors = (uint32)identify_data[60] | ((uint32)identify_data[61] << 16);
+            if (lba28_sectors != 0) {
+                detected_drives[drive].sectors = lba28_sectors;
+            }
+        } else {
+            uint16 chs_cyl = detected_drive_cylinders[drive];
+            uint16 chs_heads = detected_drive_heads[drive];
+            uint16 chs_spt = detected_drive_spt[drive];
+            if (chs_cyl && chs_heads && chs_spt) {
+                detected_drives[drive].sectors = (uint32)chs_cyl * (uint32)chs_heads * (uint32)chs_spt;
+            }
+        }
+        detected_drives[drive].size_mb = (detected_drives[drive].sectors / 2048);
+
+        const char* addr_mode = "chs";
+        if (detected_drive_lba[drive]) {
+            addr_mode = detected_drive_lba48[drive] ? "lba48" : "lba28";
+        }
+
+        printf("[ata] detect %u (%s): model='%s' sectors=%u lba=%u lba48=%u dma=%u atapi=%u addr=%s chs=%u/%u/%u\n",
                (unsigned)drive,
                ata_drive_slot_name(drive),
                detected_drives[drive].model,
@@ -203,7 +334,11 @@ int ata_detect_drive(uint8 drive) {
                (unsigned)detected_drive_lba[drive],
                (unsigned)detected_drive_lba48[drive],
                (unsigned)detected_drive_dma[drive],
-               (unsigned)detected_drive_atapi[drive]);
+               (unsigned)detected_drive_atapi[drive],
+               addr_mode,
+               (unsigned)detected_drive_cylinders[drive],
+               (unsigned)detected_drive_heads[drive],
+               (unsigned)detected_drive_spt[drive]);
         
         return 0;
     }
@@ -226,6 +361,9 @@ void ata_init_drives() {
         detected_drive_dma[i] = 0;
         detected_drive_lba[i] = 0;
         detected_drive_lba48[i] = 0;
+        detected_drive_cylinders[i] = 0;
+        detected_drive_heads[i] = 0;
+        detected_drive_spt[i] = 0;
     }
     
     // Probe classic primary/secondary master/slave.
@@ -273,8 +411,8 @@ int ata_identify(uint8 drive, uint16* identify_data) {
         return -1;
     }
     
-    // Wait for BSY to clear (reduced timeout for faster boot)
-    int timeout = 10000; // Reduced from 1000000
+    // Older drives can take longer to clear BSY after IDENTIFY.
+    int timeout = ATA_IDENTIFY_BSY_TIMEOUT;
     while ((inportb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) && --timeout);
     if (timeout == 0) {
         return -1;
@@ -293,8 +431,8 @@ int ata_identify(uint8 drive, uint16* identify_data) {
         }
     }
     
-    // Wait for DRQ to set (reduced timeout for faster boot)
-    timeout = 10000; // Reduced from 1000000
+    // Give legacy devices time to assert DRQ after IDENTIFY/IDENTIFY PACKET.
+    timeout = ATA_IDENTIFY_DRQ_TIMEOUT;
     while (!(inportb(io_base + ATA_REG_STATUS) & ATA_SR_DRQ) && --timeout);
     if (timeout == 0) {
         return -1;
@@ -347,14 +485,11 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
     g_ata_busy = 1;
 
     uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
-    uint8 slavebit = (drive & 1) ? 0xF0 : 0xE0;
-    
-    // Set up LBA addressing
-    outportb(io_base + ATA_REG_HDDEVSEL, slavebit | ((lba >> 24) & 0x0F));
-    outportb(io_base + ATA_REG_SECCOUNT0, 1);
-    outportb(io_base + ATA_REG_LBA0, (uint8)(lba & 0xFF));
-    outportb(io_base + ATA_REG_LBA1, (uint8)((lba >> 8) & 0xFF));
-    outportb(io_base + ATA_REG_LBA2, (uint8)((lba >> 16) & 0xFF));
+    uint8 cmd = ATA_CMD_READ_PIO;
+    if (ata_program_sector_address(drive, io_base, lba, &cmd, 0) != 0) {
+        g_ata_busy = 0;
+        return -1;
+    }
 
     /*
      * ABI-INVARIANT: Interrupts must be disabled from command-send through
@@ -369,7 +504,7 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
     arch_irq_state_t irq_state = arch_irq_save();
 
     // Send read command
-    outportb(io_base + ATA_REG_COMMAND, ATA_CMD_READ_PIO);
+    outportb(io_base + ATA_REG_COMMAND, cmd);
     ata_io_wait(io_base);
     
     // Wait for BSY to clear
@@ -429,20 +564,17 @@ int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
     g_ata_busy = 1;
 
     uint16 io_base = (drive & 2) ? ATA_SECONDARY_IO : ATA_PRIMARY_IO;
-    uint8 slavebit = (drive & 1) ? 0xF0 : 0xE0;
-    
-    // Set up LBA addressing
-    outportb(io_base + ATA_REG_HDDEVSEL, slavebit | ((lba >> 24) & 0x0F));
-    outportb(io_base + ATA_REG_SECCOUNT0, 1);
-    outportb(io_base + ATA_REG_LBA0, (uint8)(lba & 0xFF));
-    outportb(io_base + ATA_REG_LBA1, (uint8)((lba >> 8) & 0xFF));
-    outportb(io_base + ATA_REG_LBA2, (uint8)((lba >> 16) & 0xFF));
+    uint8 cmd = ATA_CMD_WRITE_PIO;
+    if (ata_program_sector_address(drive, io_base, lba, &cmd, 1) != 0) {
+        g_ata_busy = 0;
+        return -1;
+    }
 
     /* Same IRQ guard as ata_read_sector -- see comment there. */
     arch_irq_state_t irq_state = arch_irq_save();
 
     // Send write command
-    outportb(io_base + ATA_REG_COMMAND, ATA_CMD_WRITE_PIO);
+    outportb(io_base + ATA_REG_COMMAND, cmd);
     ata_io_wait(io_base);
 
     // Wait for BSY to clear
@@ -547,7 +679,17 @@ void ata_identify_drive(uint8 drive, char* model, uint32* sectors) {
         model[40] = '\0';
     }
     if (sectors) {
-        *sectors = id[60] | (id[61] << 16);
+        uint16 caps49 = id[49];
+        int has_lba = (caps49 & (1u << 9)) ? 1 : 0;
+        uint32 lba28 = (uint32)id[60] | ((uint32)id[61] << 16);
+        if (has_lba && lba28) {
+            *sectors = lba28;
+        } else {
+            uint16 chs_cyl = id[1];
+            uint16 chs_heads = id[3];
+            uint16 chs_spt = id[6];
+            *sectors = (uint32)chs_cyl * (uint32)chs_heads * (uint32)chs_spt;
+        }
     }
 }
 
