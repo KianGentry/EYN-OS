@@ -122,6 +122,8 @@ static uint8 g_ata_channel_configured_by_pci[2];
 
 typedef struct {
     uint8 found;
+    uint8 candidates_seen;
+    uint8 candidates_conflict;
     uint8 bus;
     uint8 device;
     uint8 function;
@@ -222,11 +224,57 @@ static uint8 ata_count_detected_physical_drives(void) {
     return physical_count;
 }
 
+static int ata_port_ranges_overlap(uint16 base_a, uint16 size_a, uint16 base_b, uint16 size_b) {
+    uint32 a0 = (uint32)base_a;
+    uint32 b0 = (uint32)base_b;
+    uint32 a1 = a0 + (uint32)size_a - 1u;
+    uint32 b1 = b0 + (uint32)size_b - 1u;
+    return (a1 < b0 || b1 < a0) ? 0 : 1;
+}
+
+static int ata_candidate_layout_is_safe(const pci_device_info* info,
+                                        uint32 bar0,
+                                        uint32 bar1,
+                                        uint32 bar2,
+                                        uint32 bar3) {
+    uint16 io0 = ATA_PRIMARY_IO;
+    uint16 ctrl0 = ATA_PRIMARY_CTRL;
+    uint16 io1 = ATA_SECONDARY_IO;
+    uint16 ctrl1 = ATA_SECONDARY_CTRL;
+
+    if (info->prog_if & ATA_PCI_PROGIF_PRIMARY_NATIVE) {
+        if (ata_decode_ide_io_bar(bar0, &io0) != 0 || ata_decode_ide_ctrl_bar(bar1, &ctrl0) != 0) {
+            return 0;
+        }
+    }
+
+    if (info->prog_if & ATA_PCI_PROGIF_SECONDARY_NATIVE) {
+        if (ata_decode_ide_io_bar(bar2, &io1) != 0 || ata_decode_ide_ctrl_bar(bar3, &ctrl1) != 0) {
+            return 0;
+        }
+    }
+
+    /*
+     * Command block uses 8 ports, control block uses 2 ports.
+     * Reject controllers that collapse channel address windows unexpectedly.
+     */
+    if (ata_port_ranges_overlap(io0, 8, io1, 8)) return 0;
+    if (ata_port_ranges_overlap(io0, 8, ctrl1, 2)) return 0;
+    if (ata_port_ranges_overlap(io1, 8, ctrl0, 2)) return 0;
+    if (ata_port_ranges_overlap(ctrl0, 2, ctrl1, 2)) return 0;
+
+    return 1;
+}
+
 static int ata_score_ide_candidate(const pci_device_info* info,
                                    uint32 bar0,
                                    uint32 bar1,
                                    uint32 bar2,
                                    uint32 bar3) {
+    if (!ata_candidate_layout_is_safe(info, bar0, bar1, bar2, bar3)) {
+        return -1000;
+    }
+
     int score = 0;
     int primary_native = (info->prog_if & ATA_PCI_PROGIF_PRIMARY_NATIVE) ? 1 : 0;
     int secondary_native = (info->prog_if & ATA_PCI_PROGIF_SECONDARY_NATIVE) ? 1 : 0;
@@ -237,7 +285,7 @@ static int ata_score_ide_candidate(const pci_device_info* info,
         if (ata_decode_ide_io_bar(bar0, &io) == 0 && ata_decode_ide_ctrl_bar(bar1, &ctrl) == 0) {
             score += 16;
         } else {
-            score -= 8;
+            score -= 64;
         }
     } else {
         score += 2;
@@ -249,7 +297,7 @@ static int ata_score_ide_candidate(const pci_device_info* info,
         if (ata_decode_ide_io_bar(bar2, &io) == 0 && ata_decode_ide_ctrl_bar(bar3, &ctrl) == 0) {
             score += 16;
         } else {
-            score -= 8;
+            score -= 64;
         }
     } else {
         score += 2;
@@ -267,12 +315,18 @@ static void ata_ide_pci_enum_cb(const pci_device_info* info, void* user) {
     if (!info || !out) return;
     if (info->class_code != PCI_CLASS_MASS_STORAGE || info->subclass != PCI_SUBCLASS_IDE) return;
 
+    out->candidates_seen++;
+
     uint32 bar0 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR0);
     uint32 bar1 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR1);
     uint32 bar2 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR2);
     uint32 bar3 = pci_read_config_dword(info->bus, info->device, info->function, ATA_PCI_BAR3);
 
     int score = ata_score_ide_candidate(info, bar0, bar1, bar2, bar3);
+    if (score <= -1000) {
+        out->candidates_conflict++;
+        return;
+    }
 
     if (out->found && score <= out->score) {
         return;
@@ -299,8 +353,20 @@ static void ata_configure_channels_from_pci(void) {
     memset(&ide, 0, sizeof(ide));
     pci_enumerate(ata_ide_pci_enum_cb, &ide);
 
+    if (ide.candidates_seen) {
+        printf("[ata] pci ide: candidates seen=%u rejected=%u\n",
+               (unsigned)ide.candidates_seen,
+               (unsigned)ide.candidates_conflict);
+    }
+
     if (!ide.found) {
         printf("[ata] pci ide: no controller found, using legacy channels\n");
+        ata_log_channel_config();
+        return;
+    }
+
+    if (ide.score <= -512) {
+        printf("[ata] pci ide: no safe controller candidate, using legacy channels\n");
         ata_log_channel_config();
         return;
     }
