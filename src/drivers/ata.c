@@ -147,6 +147,9 @@ typedef struct {
 
 static ata_ide_pci_info_t g_ata_ide_selected_candidate;
 static ata_ide_pci_info_t g_ata_ide_secondary_candidate;
+static ata_ide_pci_info_t g_ata_prev_selected_candidate;
+static int g_ata_prev_selected_weight = 0;
+static int g_ata_prev_legacy_weight = 0;
 
 /*
  * ABI-INVARIANT: ATA re-entrancy guard.
@@ -184,6 +187,7 @@ static void ata_log_channel_config(void);
 static uint8 ata_count_detected_physical_drives(void);
 static void ata_clear_detected_drive_state(void);
 static uint8 ata_probe_standard_slots_with_health(void);
+static int ata_candidate_matches_identity(const ata_ide_pci_info_t* a, const ata_ide_pci_info_t* b);
 
 static int ata_decode_ide_io_bar(uint32 bar, uint16* out_base) {
     if (!out_base) return -1;
@@ -279,6 +283,17 @@ static uint8 ata_probe_standard_slots_with_health(void) {
     return physical_count;
 }
 
+static int ata_candidate_matches_identity(const ata_ide_pci_info_t* a, const ata_ide_pci_info_t* b) {
+    if (!a || !b) return 0;
+    if (!a->found || !b->found) return 0;
+
+    return (a->bus == b->bus &&
+            a->device == b->device &&
+            a->function == b->function &&
+            a->vendor_id == b->vendor_id &&
+            a->device_id == b->device_id) ? 1 : 0;
+}
+
 static int ata_port_ranges_overlap(uint16 base_a, uint16 size_a, uint16 base_b, uint16 size_b) {
     uint32 a0 = (uint32)base_a;
     uint32 b0 = (uint32)base_b;
@@ -361,6 +376,30 @@ static int ata_score_ide_candidate(const pci_device_info* info,
     if (primary_native && secondary_native) {
         score += 1;
     }
+
+    int native_channels = primary_native + secondary_native;
+    int compat_channels = 2 - native_channels;
+
+    {
+        ata_ide_pci_info_t current;
+        memset(&current, 0, sizeof(current));
+        current.found = 1;
+        current.bus = info->bus;
+        current.device = info->device;
+        current.function = info->function;
+        current.vendor_id = info->vendor_id;
+        current.device_id = info->device_id;
+
+        if (ata_candidate_matches_identity(&current, &g_ata_prev_selected_candidate)) {
+            score += g_ata_prev_selected_weight;
+        }
+
+        score += (g_ata_prev_legacy_weight * compat_channels);
+        score -= (g_ata_prev_legacy_weight * native_channels);
+    }
+
+    if (score > 200) score = 200;
+    if (score < -200) score = -200;
 
     return score;
 }
@@ -941,18 +980,25 @@ void ata_init_drives() {
 
     ata_clear_detected_drive_state();
     uint8 physical_count = ata_probe_standard_slots_with_health();
+    int selected_attempted = g_ata_ide_selected_candidate.found ? 1 : 0;
+    int selected_succeeded = (physical_count > 0) ? 1 : 0;
+    int legacy_attempted = 0;
+    int legacy_succeeded = 0;
 
     {
         int any_native = (g_ata_channel_native_mode[0] || g_ata_channel_native_mode[1]) ? 1 : 0;
         if (any_native && physical_count == 0) {
             printf("[ata] pci ide: native probe found no drives, retrying legacy compatibility channels\n");
+            legacy_attempted = 1;
             ata_set_legacy_channels();
             ata_log_channel_config();
 
             ata_clear_detected_drive_state();
             physical_count = ata_probe_standard_slots_with_health();
+            legacy_succeeded = (physical_count > 0) ? 1 : 0;
             if (physical_count > 0) {
                 printf("[ata] pci ide: legacy compatibility channels promoted after native demotion\n");
+                selected_succeeded = 1;
             }
         }
     }
@@ -967,10 +1013,37 @@ void ata_init_drives() {
             g_ata_ide_selected_candidate = g_ata_ide_secondary_candidate;
             memset(&g_ata_ide_secondary_candidate, 0, sizeof(g_ata_ide_secondary_candidate));
             printf("[ata] pci ide: secondary candidate promoted\n");
+            selected_succeeded = 1;
         } else {
             printf("[ata] pci ide: secondary candidate also yielded no drives\n");
+            selected_succeeded = 0;
         }
     }
+
+    if (selected_attempted && g_ata_ide_selected_candidate.found) {
+        g_ata_prev_selected_candidate = g_ata_ide_selected_candidate;
+        if (selected_succeeded) {
+            g_ata_prev_selected_weight += 8;
+        } else {
+            g_ata_prev_selected_weight -= 16;
+        }
+        if (g_ata_prev_selected_weight > 32) g_ata_prev_selected_weight = 32;
+        if (g_ata_prev_selected_weight < -64) g_ata_prev_selected_weight = -64;
+    }
+
+    if (legacy_attempted) {
+        if (legacy_succeeded) {
+            g_ata_prev_legacy_weight += 4;
+        } else {
+            g_ata_prev_legacy_weight -= 8;
+        }
+        if (g_ata_prev_legacy_weight > 16) g_ata_prev_legacy_weight = 16;
+        if (g_ata_prev_legacy_weight < -32) g_ata_prev_legacy_weight = -32;
+    }
+
+    printf("[ata] pci ide: persistence weights selected=%d legacy=%d\n",
+           g_ata_prev_selected_weight,
+           g_ata_prev_legacy_weight);
 
     ata_run_lba48_smoke();
     
