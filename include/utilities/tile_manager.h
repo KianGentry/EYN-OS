@@ -172,6 +172,13 @@ void tile_clear_background(int tile_idx);
  */
 void tile_draw_file_icon(const char* icon_name, int x, int y);
 
+// Post a non-blocking desktop notification toast from kernel/user syscall paths.
+// level: 0=info, 1=warning, 2=error. timeout_ms is clamped to a sane range.
+int tile_notify_post(const char* title, const char* message, int level, uint32 timeout_ms);
+
+// Dismiss all active taskbar toasts immediately. Returns number dismissed.
+int tile_notify_dismiss_all(void);
+
 // --- Theme (window/tile chrome) ---
 typedef struct {
 	uint8 title_focused_r, title_focused_g, title_focused_b;

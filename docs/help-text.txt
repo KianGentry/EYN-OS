@@ -62,7 +62,9 @@ GUI/Window Commands:
   setfont         - Set runtime system font (.hex/.otf/.ttf).
   stats           - Open the stats GUI.
   theme           - Open the theme editor.
+  title           - Run the title command.
   view            - Dispatch a file to a view backend from /.view.
+  win_test        - Open compositor window test.
 
 Development Commands:
 --------------------
@@ -80,7 +82,9 @@ Development Commands:
 Utility Commands:
 ----------------
   alias           - Create or remove command aliases.
+  breakout        - Arcade brick-breaker with paddle controls.
   calc            - Integer calculator supporting + - * /.
+  cat             - Print a file to stdout.
   diskmgr         - Manage logical drives from userland.
   download        - Download a file over HTTP/1.1 or HTTPS/TLS (GET only) with DNS support.
   echo            - Print arguments to stdout.
@@ -92,22 +96,27 @@ Utility Commands:
   format          - Run the format command.
   gui_demo        - Run the gui_demo command.
   hello           - Run the hello command.
+  hello_c         - Print Hello World.
   history         - Show or clear command history.
-  install         - Install packages from the EYN-OS package index.
+  install         - Install, update, remove, and search packages.
   installer       - EYN-OS graphical installer.
   jobs            - List background jobs.
   jsonparse       - Parse and normalize JSON files.
   list            - List directory entries with terminal icons.
   metadata        - Show metadata for a file or directory.
+  notify          - Show a graphical notification popup.
   pipe            - Run a command pipeline from userspace command launcher.
   random          - Generate random numbers.
   search          - Search for text in filenames and file contents.
   settings        - Open system settings (video + customization).
   sha256          - Compute SHA-256 digests for files or strings.
+  snake           - Classic snake game with keyboard controls.
   sort            - Sort strings alphabetically.
   spam            - Spam 'EYN-OS' to stdout 100 times.
+  tetris          - Play classic falling-block puzzle game.
   tiling          - Launch the tiling manager.
   view_backend_bmp - Run the view_backend_bmp command.
+  view_backend_builtin - Open an REI, BMP image, REIV video, REIS audio, or WAV audio viewer.
   view_backend_rei - Run the view_backend_rei command.
   view_backend_reis - Play a REIS audio file in a dedicated backend.
   view_backend_reiv - Play a REIV video file in a dedicated backend.

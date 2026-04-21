@@ -288,6 +288,9 @@ enum {
     // Runtime hardware display mode switch/query.
     EYN_SYSCALL_SET_DISPLAY_MODE = 142,
     EYN_SYSCALL_GET_DISPLAY_MODE = 143,
+
+    // Post a kernel-rendered desktop notification toast.
+    EYN_SYSCALL_NOTIFY_POST = 144,
 };
 
 typedef struct {
@@ -816,6 +819,18 @@ static inline int eyn_sys_set_display_mode(const eyn_display_mode_set_t* req) {
 
 static inline int eyn_sys_get_display_mode(eyn_display_mode_t* out) {
     return eyn_syscall1(EYN_SYSCALL_GET_DISPLAY_MODE, (int)(uintptr_t)out);
+}
+
+static inline int eyn_sys_notify_post(const char* title,
+                                      const char* message,
+                                      int level,
+                                      uint32_t timeout_ms) {
+    if (level < 0) level = 0;
+    if (level > 2) level = 2;
+    if (timeout_ms > 0x00FFFFFFu) timeout_ms = 0x00FFFFFFu;
+
+    uint32_t packed = (timeout_ms << 8) | ((uint32_t)level & 0xFFu);
+    return eyn_syscall3_ppi(EYN_SYSCALL_NOTIFY_POST, title, message, (int)packed);
 }
 
 static inline int eyn_sys_chdir(const char* path) {

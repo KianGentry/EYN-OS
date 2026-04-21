@@ -1202,50 +1202,54 @@ int eynfs_delete_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
         fs_txn_touch(drive, FS_TXN_TAG_DIR, (uint32)sizeof(eynfs_dir_entry_t));
         fs_txn_touch(drive, FS_TXN_TAG_FILE, 0u);
     }
-    
-    // Use stack-local buffer to avoid heap allocations
-    enum { DELETE_MAX_ENTRIES = 64 };
-    eynfs_dir_entry_t entries[DELETE_MAX_ENTRIES];
-    memset(entries, 0, sizeof(entries));
-    
-    int entry_count = eynfs_count_dir_entries(drive, parent_block);
-    if (entry_count < 0) return -1;
-    if (entry_count > DELETE_MAX_ENTRIES) entry_count = DELETE_MAX_ENTRIES;
-    
-    int count = eynfs_read_dir_table(drive, parent_block, entries, entry_count);
-    if (count < 0) return -1;
-    
-    for (int i = 0; i < count; ++i) {
-        if (entries[i].name[0] == '\0') continue;
-        if (strncmp(entries[i].name, name, EYNFS_NAME_MAX) == 0) {
-            // Free all blocks in the chain
-            uint32_t block_num = entries[i].first_block;
-            while (block_num != 0) {
-                if (current_command_context) {
-                    scheduler_account(current_command_context->wo, SCHED_COST_FS);
-                    scheduler_yield_if_needed(current_command_context->wo);
-                    if (sched_det_is_enabled()) current_command_context->det_seq++;
-                }
-                uint8 tmp[EYNFS_BLOCK_SIZE];
-                if (ata_read_sector(drive, eynfs_block_to_lba(block_num), tmp) != 0) break;
-                uint32_t next_block = *(uint32_t*)tmp;
-                eynfs_free_block(drive, sb, block_num);
-                block_num = next_block;
-            }
-            
-            // Clear the entry
-            memset(&entries[i], 0, sizeof(eynfs_dir_entry_t));
-            
-            int res = eynfs_write_dir_table(drive, parent_block, entries, count);
-            if (res < 0) return -1;
-            
-            // Clear cache to ensure deleted entries are no longer visible
-            eynfs_cache_clear();
-            
-            return 0;
-        }
+
+    eynfs_dir_entry_t victim;
+    uint32_t entry_index = 0;
+    if (eynfs_find_in_dir(drive, sb, parent_block, name, &victim, &entry_index) != 0) {
+        return -1;
     }
-    return -1; // Entry not found
+
+    // Free all blocks in the target entry's chain.
+    uint32_t block_num = victim.first_block;
+    while (block_num != 0) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
+        uint8 tmp[EYNFS_BLOCK_SIZE];
+        if (ata_read_sector(drive, eynfs_block_to_lba(block_num), tmp) != 0) break;
+        uint32_t next_block = *(uint32_t*)tmp;
+        eynfs_free_block(drive, sb, block_num);
+        block_num = next_block;
+    }
+
+    // Clear only the targeted directory slot in place. This avoids rewriting
+    // the whole directory table and preserves entries past 64 items.
+    const uint32_t entries_per_block = (uint32_t)((EYNFS_BLOCK_SIZE - 4) / sizeof(eynfs_dir_entry_t));
+    const uint32_t block_steps = entry_index / entries_per_block;
+    const uint32_t slot = entry_index % entries_per_block;
+
+    uint32_t cur = parent_block;
+    const uint32_t max_blocks = 4096;
+    for (uint32_t i = 0; i < block_steps; ++i) {
+        if (cur == 0 || i >= max_blocks) return -1;
+        uint8 dirblk[EYNFS_BLOCK_SIZE];
+        if (eynfs_cache_get_block(drive, cur, dirblk) != 0) return -1;
+        cur = *(uint32_t*)dirblk;
+    }
+    if (cur == 0) return -1;
+
+    uint8 dirblk[EYNFS_BLOCK_SIZE];
+    if (eynfs_cache_get_block(drive, cur, dirblk) != 0) return -1;
+    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)(dirblk + 4);
+    memset(&entries[slot], 0, sizeof(eynfs_dir_entry_t));
+
+    eynfs_cache_invalidate_block(cur);
+    if (eynfs_cache_write_block(drive, cur, dirblk) != 0) return -1;
+
+    eynfs_dir_cache_invalidate(parent_block);
+    return 0;
 }
 
 // Read up to bufsize bytes from a file's data block chain, starting at offset

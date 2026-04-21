@@ -11,6 +11,249 @@ static int g_dropdown_hover = -1;  // hovered overflow item (-1 = none)
 static int g_programs_active = 0;  // Programs submenu open
 static int g_programs_hover = -1;  // hovered program index
 
+#define TASKBAR_TOAST_MAX 6
+#define TASKBAR_TOAST_TITLE_MAX 64
+#define TASKBAR_TOAST_MESSAGE_MAX 176
+#define TASKBAR_TOAST_DEFAULT_TIMEOUT_MS 7000u
+#define TASKBAR_TOAST_MIN_TIMEOUT_MS 1000u
+#define TASKBAR_TOAST_MAX_TIMEOUT_MS 60000u
+
+typedef struct {
+    int used;
+    int level;
+    uint32 seq;
+    uint32 born_tick;
+    uint32 timeout_ticks;
+    char title[TASKBAR_TOAST_TITLE_MAX];
+    char message[TASKBAR_TOAST_MESSAGE_MAX];
+} taskbar_toast_t;
+
+static taskbar_toast_t g_taskbar_toasts[TASKBAR_TOAST_MAX];
+static uint32 g_taskbar_toast_seq = 0;
+
+static void taskbar_toast_sanitize_copy(char* dst, int cap, const char* src, const char* fallback) {
+    if (!dst || cap <= 0) return;
+
+    const char* use = (src && src[0]) ? src : fallback;
+    if (!use) use = "";
+
+    int di = 0;
+    for (int si = 0; use[si] && di + 1 < cap; ++si) {
+        char c = use[si];
+        if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+        dst[di++] = c;
+    }
+    dst[di] = '\0';
+
+    if (di == 0 && fallback && fallback[0] && use != fallback) {
+        di = 0;
+        for (int si = 0; fallback[si] && di + 1 < cap; ++si) {
+            char c = fallback[si];
+            if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+            dst[di++] = c;
+        }
+        dst[di] = '\0';
+    }
+}
+
+static uint32 taskbar_toast_timeout_ticks(uint32 timeout_ms) {
+    uint32 hz = sched_get_tick_hz();
+    if (!hz) hz = 100;
+
+    uint32 ticks = (timeout_ms * hz + 999u) / 1000u;
+    if (ticks == 0) ticks = 1;
+    return ticks;
+}
+
+static int taskbar_toast_prune(void) {
+    uint32 now = sched_get_tick_count();
+    int removed = 0;
+    for (int i = 0; i < TASKBAR_TOAST_MAX; ++i) {
+        taskbar_toast_t* t = &g_taskbar_toasts[i];
+        if (!t->used) continue;
+        if (t->timeout_ticks == 0) continue;
+        if ((uint32)(now - t->born_tick) >= t->timeout_ticks) {
+            t->used = 0;
+            removed++;
+        }
+    }
+    return removed;
+}
+
+static int taskbar_toast_find_slot(void) {
+    int free_slot = -1;
+    int oldest_slot = 0;
+    uint32 oldest_seq = 0xFFFFFFFFu;
+
+    for (int i = 0; i < TASKBAR_TOAST_MAX; ++i) {
+        if (!g_taskbar_toasts[i].used) {
+            free_slot = i;
+            break;
+        }
+        if (g_taskbar_toasts[i].seq < oldest_seq) {
+            oldest_seq = g_taskbar_toasts[i].seq;
+            oldest_slot = i;
+        }
+    }
+
+    if (free_slot >= 0) return free_slot;
+    return oldest_slot;
+}
+
+static void taskbar_toast_draw_clamped_text(int x,
+                                            int y,
+                                            const char* text,
+                                            int max_chars,
+                                            int r,
+                                            int g,
+                                            int b) {
+    if (!text || max_chars <= 0) return;
+
+    int len = (int)strlen(text);
+    int clipped = (len > max_chars) ? 1 : 0;
+    int draw_len = clipped ? max_chars : len;
+    if (clipped && max_chars >= 3) {
+        draw_len = max_chars - 3;
+    }
+
+    for (int i = 0; i < draw_len; ++i) {
+        drawCharAt(x + i * vga_text_cell_w(), y, (unsigned char)text[i], r, g, b);
+    }
+
+    if (clipped && max_chars >= 3) {
+        drawCharAt(x + draw_len * vga_text_cell_w(), y, (unsigned char)'.', r, g, b);
+        drawCharAt(x + (draw_len + 1) * vga_text_cell_w(), y, (unsigned char)'.', r, g, b);
+        drawCharAt(x + (draw_len + 2) * vga_text_cell_w(), y, (unsigned char)'.', r, g, b);
+    }
+}
+
+static void taskbar_draw_toasts(int taskbar_h, int cw, int ch) {
+    int removed = taskbar_toast_prune();
+    if (removed > 0) {
+        // Toast expiration reveals underlying content. Trigger one compositor
+        // refresh so stale toast pixels are actively cleaned up.
+        g_force_full_redraw = 1;
+        g_tiles_full_content_redraw = 1;
+    }
+
+    int order[TASKBAR_TOAST_MAX];
+    int order_count = 0;
+
+    for (int i = 0; i < TASKBAR_TOAST_MAX; ++i) {
+        if (g_taskbar_toasts[i].used) {
+            order[order_count++] = i;
+        }
+    }
+
+    if (order_count == 0) return;
+
+    for (int i = 1; i < order_count; ++i) {
+        int key = order[i];
+        int j = i - 1;
+        while (j >= 0 && g_taskbar_toasts[order[j]].seq < g_taskbar_toasts[key].seq) {
+            order[j + 1] = order[j];
+            --j;
+        }
+        order[j + 1] = key;
+    }
+
+    int card_w = cw * 44;
+    int max_w = screen_w - 16;
+    if (card_w > max_w) card_w = max_w;
+    if (card_w < cw * 20) card_w = cw * 20;
+
+    int card_h = ch * 2 + 14;
+    if (card_h < 28) card_h = 28;
+
+    int x = screen_w - card_w - 6;
+    int y0 = taskbar_h + 6;
+    int max_visible = 3;
+    uint32 now = sched_get_tick_count();
+
+    for (int n = 0; n < order_count && n < max_visible; ++n) {
+        taskbar_toast_t* t = &g_taskbar_toasts[order[n]];
+        int y = y0 + n * (card_h + 5);
+        if (y + card_h > screen_h) break;
+
+        int accent_r = 186;
+        int accent_g = 186;
+        int accent_b = 186;
+        if (t->level == 1) {
+            accent_r = 156;
+            accent_g = 156;
+            accent_b = 156;
+        } else if (t->level == 2) {
+            accent_r = 228;
+            accent_g = 228;
+            accent_b = 228;
+        }
+
+        drawRect(x, y, card_w, card_h, 36, 36, 36);
+        drawRect(x, y, card_w, 3, accent_r, accent_g, accent_b);
+
+        int max_chars = (card_w - 12) / cw;
+        if (max_chars < 1) max_chars = 1;
+
+        taskbar_toast_draw_clamped_text(x + 6, y + 4, t->title, max_chars, 242, 242, 242);
+        taskbar_toast_draw_clamped_text(x + 6, y + 6 + ch, t->message, max_chars, 206, 206, 206);
+
+        if (t->timeout_ticks > 0) {
+            uint32 elapsed = (uint32)(now - t->born_tick);
+            if (elapsed > t->timeout_ticks) elapsed = t->timeout_ticks;
+            int track_w = card_w - 2;
+            uint32 remain = t->timeout_ticks - elapsed;
+            int fill_w = (int)((remain * (uint32)track_w) / t->timeout_ticks);
+            if (fill_w > 0) {
+                drawRect(x + 1, y + card_h - 2, fill_w, 1, accent_r, accent_g, accent_b);
+            }
+        }
+
+        vga_mark_dirty_rect(x, y, card_w, card_h);
+    }
+}
+
+int tile_notify_post(const char* title, const char* message, int level, uint32 timeout_ms) {
+    if (level < 0 || level > 2) level = 0;
+    if (timeout_ms == 0) timeout_ms = TASKBAR_TOAST_DEFAULT_TIMEOUT_MS;
+    if (timeout_ms < TASKBAR_TOAST_MIN_TIMEOUT_MS) timeout_ms = TASKBAR_TOAST_MIN_TIMEOUT_MS;
+    if (timeout_ms > TASKBAR_TOAST_MAX_TIMEOUT_MS) timeout_ms = TASKBAR_TOAST_MAX_TIMEOUT_MS;
+
+    (void)taskbar_toast_prune();
+
+    int slot = taskbar_toast_find_slot();
+    if (slot < 0 || slot >= TASKBAR_TOAST_MAX) return -1;
+
+    taskbar_toast_t* t = &g_taskbar_toasts[slot];
+    memset(t, 0, sizeof(*t));
+
+    t->used = 1;
+    t->level = level;
+    t->seq = ++g_taskbar_toast_seq;
+    t->born_tick = sched_get_tick_count();
+    t->timeout_ticks = taskbar_toast_timeout_ticks(timeout_ms);
+    taskbar_toast_sanitize_copy(t->title, sizeof(t->title), title, "Notification");
+    taskbar_toast_sanitize_copy(t->message, sizeof(t->message), message, "(empty)");
+
+    g_force_full_redraw = 1;
+    return 0;
+}
+
+int tile_notify_dismiss_all(void) {
+    int cleared = 0;
+    for (int i = 0; i < TASKBAR_TOAST_MAX; ++i) {
+        if (g_taskbar_toasts[i].used) {
+            g_taskbar_toasts[i].used = 0;
+            cleared++;
+        }
+    }
+
+    if (cleared > 0) {
+        g_force_full_redraw = 1;
+        g_tiles_full_content_redraw = 1;
+    }
+    return cleared;
+}
+
 /* (Context menu state declared near top of file with other globals.) */
 
 /*
@@ -428,6 +671,8 @@ static void draw_taskbar(void) {
         }
         vga_mark_dirty_rect(menu_x, th, menu_w, menu_h);
     }
+
+    taskbar_draw_toasts(th, cw, ch);
 
     vga_mark_dirty_rect(0, 0, screen_w, th);
 }

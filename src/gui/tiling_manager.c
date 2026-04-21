@@ -619,9 +619,17 @@ void start_tiling_manager() {
         // If a modal is active, draw it now on top of everything
         if (g_bg_modal.active) { draw_bg_modal(); }
         if (g_ctx_active) { draw_ctx_menu(); }
+
+        // Track which redraw flags were consumed by this frame so requests
+        // raised during draw_taskbar (for example, toast expiry) can persist
+        // into the next frame.
+        int clear_force_full_redraw = g_force_full_redraw ? 1 : 0;
+        int clear_tiles_full_content_redraw = g_tiles_full_content_redraw ? 1 : 0;
+
         draw_taskbar();
-    if (g_force_full_redraw) g_force_full_redraw = 0;
-    if (g_tiles_full_content_redraw) g_tiles_full_content_redraw = 0;
+
+        if (clear_force_full_redraw) g_force_full_redraw = 0;
+        if (clear_tiles_full_content_redraw) g_tiles_full_content_redraw = 0;
         tui_refresh();
         // Build swap exclusion to preserve overlays (cursor and live-drag)
         int ex_x = -1, ex_y = -1, ex_w = 0, ex_h = 0;

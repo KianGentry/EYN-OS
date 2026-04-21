@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-15 22:48:52
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-21 14:36:18
 
-**Total Commands:** 91
+**Total Commands:** 100
 
 ## Table of Contents
 
@@ -776,6 +776,22 @@ theme /fonts/unscii-16.hex
 
 ---
 
+### title
+
+**Binary:** `testdir/binaries/title`
+
+**Metadata Source:** `(metadata not found)`
+
+**Description:**
+Run the title command.
+
+**Example:**
+```bash
+title
+```
+
+---
+
 ### view
 
 **Binary:** `testdir/binaries/view`
@@ -788,6 +804,22 @@ Dispatch a file to a view backend from /.view.
 **Example:**
 ```bash
 view /images/picture.rei
+```
+
+---
+
+### win_test
+
+**Binary:** `testdir/binaries/win_test`
+
+**Metadata Source:** `EYN-packages/packages/win_test/win_test_uelf.c`
+
+**Description:**
+Open compositor window test.
+
+**Example:**
+```bash
+win_test
 ```
 
 ---
@@ -972,6 +1004,22 @@ alias ll ls -l
 
 ---
 
+### breakout
+
+**Binary:** `testdir/binaries/breakout`
+
+**Metadata Source:** `EYN-packages/packages/breakout/breakout_uelf.c`
+
+**Description:**
+Arcade brick-breaker with paddle controls.
+
+**Example:**
+```bash
+breakout
+```
+
+---
+
 ### calc
 
 **Binary:** `testdir/binaries/calc`
@@ -984,6 +1032,22 @@ Integer calculator supporting + - * /.
 **Example:**
 ```bash
 calc 2+3*4
+```
+
+---
+
+### cat
+
+**Binary:** `testdir/binaries/cat`
+
+**Metadata Source:** `EYN-packages/packages/cat/cat_uelf.c`
+
+**Description:**
+Print a file to stdout.
+
+**Example:**
+```bash
+read /test.txt
 ```
 
 ---
@@ -1164,6 +1228,22 @@ hello
 
 ---
 
+### hello_c
+
+**Binary:** `testdir/binaries/hello_c`
+
+**Metadata Source:** `EYN-packages/packages/hello_c/hello_c_uelf.c`
+
+**Description:**
+Print Hello World.
+
+**Example:**
+```bash
+hello
+```
+
+---
+
 ### history
 
 **Binary:** `testdir/binaries/history`
@@ -1187,11 +1267,11 @@ history
 **Metadata Source:** `EYN-packages/packages/install/install_uelf.c`
 
 **Description:**
-Install packages from the EYN-OS package index.
+Install, update, remove, and search packages.
 
 **Example:**
 ```bash
-install hello
+install --update-all
 ```
 
 ---
@@ -1276,6 +1356,22 @@ metadata /binaries/ping
 
 ---
 
+### notify
+
+**Binary:** `testdir/binaries/notify`
+
+**Metadata Source:** `EYN-packages/packages/notify/notify_uelf.c`
+
+**Description:**
+Show a graphical notification popup.
+
+**Example:**
+```bash
+notify --title Update --message 'Updates available'
+```
+
+---
+
 ### pipe
 
 **Binary:** `testdir/binaries/pipe`
@@ -1356,6 +1452,22 @@ sha256 /test.txt
 
 ---
 
+### snake
+
+**Binary:** `testdir/binaries/snake`
+
+**Metadata Source:** `EYN-packages/packages/snake/snake_uelf.c`
+
+**Description:**
+Classic snake game with keyboard controls.
+
+**Example:**
+```bash
+snake
+```
+
+---
+
 ### sort
 
 **Binary:** `testdir/binaries/sort`
@@ -1388,6 +1500,22 @@ spam
 
 ---
 
+### tetris
+
+**Binary:** `testdir/binaries/tetris`
+
+**Metadata Source:** `EYN-packages/packages/tetris/tetris_uelf.c`
+
+**Description:**
+Play classic falling-block puzzle game.
+
+**Example:**
+```bash
+tetris
+```
+
+---
+
 ### tiling
 
 **Binary:** `testdir/binaries/tiling`
@@ -1416,6 +1544,22 @@ Run the view_backend_bmp command.
 **Example:**
 ```bash
 view_backend_bmp
+```
+
+---
+
+### view_backend_builtin
+
+**Binary:** `testdir/binaries/view_backend_builtin`
+
+**Metadata Source:** `EYN-packages/packages/view_backend_builtin/view_backend_builtin_uelf.c`
+
+**Description:**
+Open an REI, BMP image, REIV video, REIS audio, or WAV audio viewer.
+
+**Example:**
+```bash
+view /images/picture.rei
 ```
 
 ---
@@ -1492,7 +1636,7 @@ xeyes
 | System Commands | 9 |
 | Network Commands | 6 |
 | Memory Commands | 7 |
-| GUI/Window Commands | 10 |
+| GUI/Window Commands | 12 |
 | Development Commands | 10 |
-| Utility Commands | 33 |
+| Utility Commands | 40 |
 

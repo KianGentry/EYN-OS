@@ -877,9 +877,16 @@ int net_dns_resolve(const char* name, uint8 out_ip[4], int timeout_spins)
     rc = net_udp_send_socket(socket_id, local_ip, dns_ip, (uint16)NET_DNS_PORT, msg, off, 800000);
     if (rc != 0) { net_udp_close(socket_id); return -7; }
 
-    if (timeout_spins <= 0) timeout_spins = 8000000;
+    if (timeout_spins <= 0) timeout_spins = 2000000;
+    uint32 ui_ticks = 0;
     for (int spin = 0; spin < timeout_spins; spin++) {
-        if ((spin & 0x1FFF) == 0) watchdog_kick("net-dns-wait");
+        if ((spin & 0x1FFF) == 0) {
+            watchdog_kick("net-dns-wait");
+            // Keep the GUI alive while resolver waits in a blocking syscall.
+            if (tile_is_tiling_active() && (++ui_ticks & 0x1F) == 0) {
+                tile_render_once();
+            }
+        }
         (void)net_poll(local_ip, 32);
 
         net_udp_rx_packet pkt;
@@ -1199,14 +1206,6 @@ int net_tcp_recv(net_tcp_rx_packet* out)
 {
     if (!out) return -1;
 
-    // Make a quick poll pass so callers can receive data even if the system
-    // isn't running a background net_poll loop at this moment.
-    if (g_net.inited) {
-        uint8 local_ip[4];
-        net_get_local_ip(local_ip);
-        (void)net_poll(local_ip, 8);
-    }
-
     uint32 cap = (uint32)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0]));
     for (uint32 n = 0; n < cap; n++) {
         uint32 idx = (g_net.tcp_rxq_head + n) % cap;
@@ -1217,6 +1216,25 @@ int net_tcp_recv(net_tcp_rx_packet* out)
             return 1;
         }
     }
+
+    // Queue is empty: perform one poll pass and try once more.
+    // This avoids enqueueing bursts before draining already-queued packets.
+    if (g_net.inited) {
+        uint8 local_ip[4];
+        net_get_local_ip(local_ip);
+        (void)net_poll(local_ip, 8);
+
+        for (uint32 n = 0; n < cap; n++) {
+            uint32 idx = (g_net.tcp_rxq_head + n) % cap;
+            if (g_net.tcp_rxq[idx].valid) {
+                *out = g_net.tcp_rxq[idx].pkt;
+                g_net.tcp_rxq[idx].valid = 0;
+                g_net.tcp_rxq_head = (idx + 1u) % cap;
+                return 1;
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -2207,9 +2225,16 @@ int net_tcp_connect(const uint8 local_ip[4], uint16 local_port,
     tcp_retx_arm(TCP_FLAG_SYN, g_net.tcp.seq, 0, NULL, 0);
     if (rc != 0) return rc;
 
-    if (timeout_spins <= 0) timeout_spins = 12000000;
+    if (timeout_spins <= 0) timeout_spins = 2000000;
+    uint32 ui_ticks = 0;
     for (int spin = 0; spin < timeout_spins; spin++) {
-        if ((spin & 0x1FFF) == 0) watchdog_kick("net-tcp-connect");
+        if ((spin & 0x1FFF) == 0) {
+            watchdog_kick("net-tcp-connect");
+            // Keep the GUI alive while connect waits in a blocking syscall.
+            if (tile_is_tiling_active() && (++ui_ticks & 0x1F) == 0) {
+                tile_render_once();
+            }
+        }
         (void)net_poll(local_ip, 16);
         if (g_net.tcp.state == TCP_ESTABLISHED) break;
     }

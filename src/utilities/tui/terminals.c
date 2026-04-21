@@ -254,7 +254,13 @@ void vterm_write_char(int idx, char ch) {
         t->version++;
     }
 
-    if (ch == '\r') return;
+    // Carriage return: move to column 0 on the current row so callers can
+    // update in-place status/progress lines.
+    if (ch == '\r') {
+        t->cur_x = 0;
+        t->version++;
+        return;
+    }
 
     // Explicit newline
     if (ch == '\n') {

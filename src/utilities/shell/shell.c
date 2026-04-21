@@ -30,6 +30,7 @@ static command_hash_entry_t g_command_hash_table[COMMAND_HASH_SIZE];
 static int g_command_hash_initialized = 0;
 static int g_command_hash_disabled = 0; // Fallback to linear search when table would be full
 static int g_boot_installer_autorun_done = 0;
+static int g_boot_package_update_check_done = 0;
 
 static int shell_disk_has_installer_binary(void) {
     uint8 logical_count = ata_get_num_logical_drives();
@@ -382,6 +383,19 @@ void launch_shell(int n) {
             g_boot_installer_autorun_done = 1;
             printf("%c[installer] launching RAM:/binaries/installer\n", 140, 220, 255);
             (void)user_elf_run_argv(VFS_DRIVE_RAM, "/binaries/installer", 0, NULL);
+        }
+    }
+
+    if (disk_has_installer && !g_boot_package_update_check_done) {
+        vfs_stat_t install_st;
+        if (vfs_stat(g_current_drive, "/binaries/install", &install_st) == 0
+            && install_st.type == VFS_NODE_FILE) {
+            const char* check_argv[3];
+            check_argv[0] = "--check-updates";
+            check_argv[1] = "--notify";
+            check_argv[2] = "--quiet";
+            g_boot_package_update_check_done = 1;
+            (void)user_elf_run_argv(g_current_drive, "/binaries/install", 3, check_argv);
         }
     }
     

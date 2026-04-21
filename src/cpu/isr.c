@@ -592,6 +592,7 @@ uint32 get_last_error_eip() {
 #define SYSCALL_GET_DISPLAY_PROFILE 141
 #define SYSCALL_SET_DISPLAY_MODE 142
 #define SYSCALL_GET_DISPLAY_MODE 143
+#define SYSCALL_NOTIFY_POST 144
 
 /*
  * SYSCALL_AUDIO_PROBE (113): Detect whether an AC97 audio controller is
@@ -3409,6 +3410,41 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             out.can_switch = mode.can_switch;
 
             regs->eax = (copyout(user_out, &out, sizeof(out)) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_NOTIFY_POST: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+
+            const char* user_title = (const char*)arg1;
+            const char* user_message = (const char*)arg2;
+            if (!user_message) { regs->eax = (uint32)-1; break; }
+
+            char title_tmp[96];
+            char message_tmp[192];
+            title_tmp[0] = '\0';
+
+            if (user_title) {
+                if (copyin_cstr(title_tmp, sizeof(title_tmp), user_title) != 0) {
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+                trim_trailing_crlf(title_tmp);
+            }
+
+            if (copyin_cstr(message_tmp, sizeof(message_tmp), user_message) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            trim_trailing_crlf(message_tmp);
+
+            uint32 packed = (uint32)arg3;
+            int level = (int)(packed & 0xFFu);
+            uint32 timeout_ms = packed >> 8;
+            if (timeout_ms == 0) timeout_ms = 7000u;
+
+            regs->eax = (tile_notify_post(title_tmp, message_tmp, level, timeout_ms) == 0)
+                ? 0u
+                : (uint32)-1;
             break;
         }
         case SYSCALL_CHDIR: {
