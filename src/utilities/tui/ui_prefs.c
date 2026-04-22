@@ -3,6 +3,7 @@
 #include <fs/vfs.h>
 #include <tile_manager.h>
 #include <vga.h>
+#include <mm/vmm.h>
 #include <string.h>
 #include <crashlog.h>
 
@@ -17,6 +18,14 @@ static int g_ui_display_width = 640;
 static int g_ui_display_height = 480;
 static int g_ui_display_bpp = 32;
 static uint32 g_ui_prefs_epoch = 1;
+
+/*
+ * Boot-time scalable font guard:
+ * very large OTF/TTF files can take too long to rasterize before IRQ/scheduler
+ * startup, appearing as a boot freeze at "Loading UI preferences...".
+ */
+#define UI_PREFS_BOOT_SCALABLE_MAX_BYTES (1024u * 1024u)
+#define UI_PREFS_BOOT_MIN_FREE_FRAMES 1024u
 
 typedef struct ui_prefs_snapshot_t {
     char font_path[96];
@@ -135,6 +144,40 @@ static int parse_u32(const char* s, uint32* out_v, const char** out_end) {
     return 0;
 }
 
+static char ui_prefs_ascii_tolower(char c) {
+    if (c >= 'A' && c <= 'Z') return (char)('a' + (c - 'A'));
+    return c;
+}
+
+static int ui_prefs_ends_with_icase(const char* s, const char* suffix) {
+    if (!s || !suffix) return 0;
+    int sl = (int)strlen(s);
+    int su = (int)strlen(suffix);
+    if (su <= 0 || sl < su) return 0;
+    const char* tail = s + (sl - su);
+    for (int i = 0; i < su; ++i) {
+        if (ui_prefs_ascii_tolower(tail[i]) != ui_prefs_ascii_tolower(suffix[i])) return 0;
+    }
+    return 1;
+}
+
+static int ui_prefs_is_scalable_font_path(const char* path) {
+    if (!path || !path[0]) return 0;
+    return ui_prefs_ends_with_icase(path, ".otf") || ui_prefs_ends_with_icase(path, ".ttf");
+}
+
+static int ui_prefs_should_defer_font_load(uint8 drive, const char* path) {
+    if (!ui_prefs_is_scalable_font_path(path)) return 0;
+
+    uint32 free_frames = vmm_get_free_frames();
+    if (free_frames && free_frames < UI_PREFS_BOOT_MIN_FREE_FRAMES) return 1;
+
+    uint32 size = 0;
+    if (vfs_get_file_size(drive, path, &size) != 0) return 1;
+    if (size > UI_PREFS_BOOT_SCALABLE_MAX_BYTES) return 1;
+    return 0;
+}
+
 static int parse_int01(const char* s, int* out_v) {
     int v = 0;
     const char* end = NULL;
@@ -181,7 +224,9 @@ int ui_prefs_load_apply(uint8 drive) {
     ui_prefs_snapshot_t snap;
     if (crashlog_recover_latest(CRASHLOG_OBJ_UI_PREFS, 1, &snap, sizeof(snap), &g_ui_prefs_epoch) > 0) {
         if (snap.font_path[0]) {
-            if (vga_system_font_set(drive, snap.font_path) == 0) {
+            ui_prefs_set_font_path(snap.font_path);
+            if (!ui_prefs_should_defer_font_load(drive, snap.font_path) &&
+                vga_system_font_set(drive, snap.font_path) == 0) {
                 ui_prefs_set_font_path(snap.font_path);
             }
         }
@@ -217,9 +262,13 @@ int ui_prefs_load_apply(uint8 drive) {
 
         if (starts_with(key, "font")) {
             if (val[0]) {
-                // Best-effort apply; if it fails, keep defaults.
-                if (vga_system_font_set(drive, val) == 0) {
+                ui_prefs_set_font_path(val);
+                // Best-effort apply; keep defaults if rejected/failed.
+                if (!ui_prefs_should_defer_font_load(drive, val) &&
+                    vga_system_font_set(drive, val) == 0) {
                     ui_prefs_set_font_path(val);
+                    ok = 1;
+                } else {
                     ok = 1;
                 }
             }

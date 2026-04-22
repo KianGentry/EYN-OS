@@ -599,8 +599,11 @@ int vga_font_line_height(int font_handle) {
 
 int vga_font_advance_width(int font_handle) {
 	vga_font_entry_t* e = vga_font_entry_from_handle(font_handle);
-	if (!e || !e->rows || e->max_advance == 0) return VGA_FONT_DEFAULT_ADVANCE;
-	return (int)e->max_advance;
+	if (!e || !e->rows) return VGA_FONT_DEFAULT_ADVANCE;
+	uint8 adv = e->advance[(unsigned int)'W'];
+	if (adv == 0) adv = e->advance[(unsigned int)'M'];
+	if (adv == 0) adv = (e->max_advance > 0) ? e->max_advance : (uint8)VGA_FONT_DEFAULT_ADVANCE;
+	return (int)adv;
 }
 
 int vga_font_char_advance(int font_handle, int charnum) {
@@ -662,8 +665,11 @@ int vga_system_font_set(uint8 drive, const char* path) {
 int vga_text_cell_w(void) {
 	int h = vga_get_system_font_handle_raw();
 	vga_font_entry_t* e = vga_font_entry_from_handle(h);
-	if (!e || !e->rows || e->max_advance == 0) return VGA_FONT_DEFAULT_ADVANCE;
-	return (int)e->max_advance;
+	if (!e || !e->rows) return VGA_FONT_DEFAULT_ADVANCE;
+	uint8 adv = e->advance[(unsigned int)'W'];
+	if (adv == 0) adv = e->advance[(unsigned int)'M'];
+	if (adv == 0) adv = (e->max_advance > 0) ? e->max_advance : (uint8)VGA_FONT_DEFAULT_ADVANCE;
+	return (int)adv;
 }
 
 int vga_text_cell_h(void) {

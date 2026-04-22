@@ -188,23 +188,23 @@ static void taskbar_draw_toasts(int taskbar_h, int cw, int ch) {
             accent_b = 228;
         }
 
-        drawRect(x, y, card_w, card_h, 36, 36, 36);
-        drawRect(x, y, card_w, 3, accent_r, accent_g, accent_b);
+        draw_raised_box(x, y, card_w, card_h, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
+        drawRect(x + 2, y + 2, card_w - 4, 2, accent_r, accent_g, accent_b);
 
         int max_chars = (card_w - 12) / cw;
         if (max_chars < 1) max_chars = 1;
 
-        taskbar_toast_draw_clamped_text(x + 6, y + 4, t->title, max_chars, 242, 242, 242);
-        taskbar_toast_draw_clamped_text(x + 6, y + 6 + ch, t->message, max_chars, 206, 206, 206);
+        taskbar_toast_draw_clamped_text(x + 6, y + 6, t->title, max_chars, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+        taskbar_toast_draw_clamped_text(x + 6, y + 8 + ch, t->message, max_chars, UI_TEXT_DIM_R, UI_TEXT_DIM_G, UI_TEXT_DIM_B);
 
         if (t->timeout_ticks > 0) {
             uint32 elapsed = (uint32)(now - t->born_tick);
             if (elapsed > t->timeout_ticks) elapsed = t->timeout_ticks;
-            int track_w = card_w - 2;
+            int track_w = card_w - 6;
             uint32 remain = t->timeout_ticks - elapsed;
             int fill_w = (int)((remain * (uint32)track_w) / t->timeout_ticks);
             if (fill_w > 0) {
-                drawRect(x + 1, y + card_h - 2, fill_w, 1, accent_r, accent_g, accent_b);
+                drawRect(x + 3, y + card_h - 4, fill_w, 2, accent_r, accent_g, accent_b);
             }
         }
 
@@ -352,19 +352,18 @@ static void draw_taskbar(void) {
     int th   = ch + 6;                    // slightly taller for padding
     int text_y = (th - ch) / 2;
 
-    /* ---- Materia palette ---- */
-    int bar_r = 48, bar_g = 48, bar_b = 48;   // taskbar background
-    int fg    = 230;                           // default icon/text
-    int accent_r = 72, accent_g = 72, accent_b = 72; // focused button bg
-    int hover_r  = 58, hover_g  = 58, hover_b  = 58; // hovered button bg
-    (void)hover_r; (void)hover_g; (void)hover_b;
+    int fg = UI_TEXT_R;
+    int fg_dim = UI_TEXT_DIM_R;
 
-    /* Background fill */
-    drawRect(0, 0, screen_w, th, bar_r, bar_g, bar_b);
+    /* Background panel */
+    draw_raised_box(0, 0, screen_w, th, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
 
     /* --- Left: Start button "!" --- */
     int start_w = cw + 10;
-    drawRect(2, 1, start_w, th - 2, accent_r, accent_g, accent_b);
+    if (g_start_active)
+        draw_sunken_box(2, 1, start_w, th - 2, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
+    else
+        draw_raised_box(2, 1, start_w, th - 2, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
     drawCharAt(2 + (start_w - cw) / 2, text_y, '!', fg, fg, fg);
     int tx = start_w + 6;  // running x cursor for app buttons
 
@@ -439,23 +438,22 @@ static void draw_taskbar(void) {
 
         /* Button background */
         if (is_active)
-            drawRect(tx, 1, bw, th - 2, accent_r, accent_g, accent_b);
+            draw_sunken_box(tx, 1, bw, th - 2, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
+        else
+            draw_raised_box(tx, 1, bw, th - 2, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
 
         /* Icon: first letter of title */
         char icon_ch = apps[i].title[0];
-        drawCharAt(tx + 3, text_y, (unsigned char)icon_ch, fg, fg, fg);
+        int app_fg = is_active ? fg : fg_dim;
+        drawCharAt(tx + 3, text_y, (unsigned char)icon_ch, app_fg, app_fg, app_fg);
 
         /* Title text (after icon) */
         int text_start = tx + 3 + cw + 2;
         for (int c = 1; c < title_len; ++c) {
             int px = text_start + (c - 1) * cw;
             if (px + cw > tx + bw - 2) break;
-            drawCharAt(px, text_y, (unsigned char)apps[i].title[c], fg, fg, fg);
+            drawCharAt(px, text_y, (unsigned char)apps[i].title[c], app_fg, app_fg, app_fg);
         }
-
-        /* Active indicator: thin line at bottom */
-        if (is_active)
-            drawRect(tx, th - 2, bw, 2, 180, 180, 180);
 
         /* Record hit rect */
         if (g_tb_button_count < TB_MAX_BUTTONS) {
@@ -470,7 +468,10 @@ static void draw_taskbar(void) {
 
     /* Overflow arrow button (downward arrow) */
     if (need_overflow) {
-        drawRect(tx, 1, overflow_icon_w, th - 2, accent_r, accent_g, accent_b);
+        if (g_dropdown_active)
+            draw_sunken_box(tx, 1, overflow_icon_w, th - 2, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
+        else
+            draw_raised_box(tx, 1, overflow_icon_w, th - 2, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
         /* draw a small downward arrow glyph */
         int ax = tx + overflow_icon_w / 2;
         int ay = text_y + ch / 2 - 2;
@@ -535,17 +536,16 @@ static void draw_taskbar(void) {
     for (int d = 0; d < g_desktop_count; ++d) {
         int px = ds_x + d * (pill_w + pill_gap);
         int is_cur = (d == g_current_desktop);
-        /* Pill background */
-        drawRect(px, 2, pill_w, th - 4,
-                 is_cur ? 90 : 56,
-                 is_cur ? 90 : 56,
-                 is_cur ? 90 : 56);
+        if (is_cur)
+            draw_sunken_box(px, 2, pill_w, th - 4, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
+        else
+            draw_raised_box(px, 2, pill_w, th - 4, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
         char digit = '1' + (char)d;
         int dx = px + (pill_w - cw) / 2;
         drawCharAt(dx, text_y, digit,
-                   is_cur ? 255 : 160,
-                   is_cur ? 255 : 160,
-                   is_cur ? 255 : 160);
+                   is_cur ? UI_TEXT_R : UI_TEXT_DIM_R,
+                   is_cur ? UI_TEXT_G : UI_TEXT_DIM_G,
+                   is_cur ? UI_TEXT_B : UI_TEXT_DIM_B);
     }
 
     /* --- Dropdown: Start menu --- */
@@ -555,13 +555,11 @@ static void draw_taskbar(void) {
         const char* items[] = {"Programs", "Shell", "Files", "Settings", "Reboot", "Shutdown"};
         int item_count = 6;
         int menu_h = item_count * item_h + 4;
-        drawRect(0, th, menu_w, menu_h, 42, 42, 42);
-        /* thin top accent line */
-        drawRect(0, th, menu_w, 1, 90, 90, 90);
+        draw_raised_box(0, th, menu_w, menu_h, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
         int dy = th + 2;
         for (int i = 0; i < item_count; ++i) {
             if (i == g_start_hover)
-                drawRect(0, dy, menu_w, item_h, 60, 60, 60);
+                draw_sunken_box(2, dy, menu_w - 4, item_h, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
             int len = (int)strlen(items[i]);
             for (int j = 0; j < len; ++j)
                 drawCharAt(12 + j * cw, dy + (item_h - ch) / 2,
@@ -595,8 +593,7 @@ static void draw_taskbar(void) {
                 /* Up scroll arrow row */
                 int arrow_h = need_scroll ? item_h : 0;
                 if (need_scroll) sub_h += arrow_h * 2; /* top + bottom arrow rows */
-                drawRect(sub_x, sub_top, sub_w, sub_h, 42, 42, 42);
-                drawRect(sub_x, sub_top, sub_w, 1, 90, 90, 90);
+                draw_raised_box(sub_x, sub_top, sub_w, sub_h, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
                 int sy = sub_top + 2;
                 /* Draw scroll-up indicator */
                 if (need_scroll) {
@@ -612,7 +609,7 @@ static void draw_taskbar(void) {
                     int pi = vi + g_programs_scroll;
                     if (pi >= g_program_count) break;
                     if (vi == g_programs_hover)
-                        drawRect(sub_x, sy, sub_w, item_h, 60, 60, 60);
+                        draw_sunken_box(sub_x + 2, sy, sub_w - 4, item_h, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
                     int nlen = (int)strlen(g_program_names[pi]);
                     int max_ch_sub = (sub_w - 12) / cw;
                     if (nlen > max_ch_sub) nlen = max_ch_sub;
@@ -644,8 +641,7 @@ static void draw_taskbar(void) {
         int menu_h = g_tb_overflow_count * item_h + 4;
         int menu_x = g_tb_overflow_x;
         if (menu_x + menu_w > screen_w) menu_x = screen_w - menu_w;
-        drawRect(menu_x, th, menu_w, menu_h, 42, 42, 42);
-        drawRect(menu_x, th, menu_w, 1, 90, 90, 90);
+        draw_raised_box(menu_x, th, menu_w, menu_h, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
         int dy = th + 2;
         for (int i = 0; i < g_tb_overflow_count; ++i) {
             const char* name = NULL;
@@ -657,7 +653,7 @@ static void draw_taskbar(void) {
                 name = (wi >= 0 && wi < MAX_WINDOWS && g_windows[wi].title) ? g_windows[wi].title : "Window";
             }
             if (i == g_dropdown_hover)
-                drawRect(menu_x, dy, menu_w, item_h, 60, 60, 60);
+                draw_sunken_box(menu_x + 2, dy, menu_w - 4, item_h, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
             /* icon: first letter */
             char ic = (name && name[0]) ? name[0] : '?';
             drawCharAt(menu_x + 6, dy + (item_h - ch) / 2, (unsigned char)ic, fg, fg, fg);
@@ -702,20 +698,8 @@ static int handle_bg_modal_key(int key) {
         int mode = g_bg_modal.only_scale ? BG_SCALE : (g_bg_modal.selected==0?BG_TILE:(g_bg_modal.selected==1?BG_SCALE:BG_CENTER));
         int ti = g_bg_modal.tile;
         if (ti >= 0 && ti < MAX_TILES) {
-            // Clear old
-            if (g_tile_bg[ti].img) { rei_free_image(g_tile_bg[ti].img); free(g_tile_bg[ti].img); g_tile_bg[ti].img = NULL; }
-            g_tile_bg[ti].img = g_bg_modal.img; g_bg_modal.img = NULL;
-            // For backgrounds, if image has alpha, convert to RGB with alpha->black
-            if (g_tile_bg[ti].img && g_tile_bg[ti].img->header.depth == REI_DEPTH_RGBA) {
-                bg_convert_rgba_to_rgb(g_tile_bg[ti].img);
-            }
-            g_tile_bg[ti].mode = (bg_mode_t)mode;
-            g_tile_bg[ti].darken = 16; // keep global darken light; rely on local darken under text
-            g_tile_bg[ti].adapt_text = 0; // keep terminal default colours (often white) consistent
-            g_tile_bg[ti].text_shadow = 1; // default: enable shadow for readability
-            g_tile_bg[ti].local_darken = 1; // darken only behind text
-            // Force content redraw
-            g_tiles_full_content_redraw = 1;
+            (void)tile_set_background_from_image(ti, g_bg_modal.img, mode);
+            g_bg_modal.img = NULL;
         } else {
             if (g_bg_modal.img) { rei_free_image(g_bg_modal.img); free(g_bg_modal.img); }
         }

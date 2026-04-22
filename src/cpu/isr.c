@@ -1574,6 +1574,83 @@ static int user_gui_pop_event(user_gui_t* e, user_gui_event_t* out) {
     return 1;
 }
 
+static int user_gui_clip_fill_rect(int* x, int* y, int* w, int* h, int l, int t, int r, int b) {
+    if (!x || !y || !w || !h) return 0;
+    int nx = *x, ny = *y, nw = *w, nh = *h;
+    if (nw <= 0 || nh <= 0) return 0;
+    if (nx < l) { nw -= (l - nx); nx = l; }
+    if (ny < t) { nh -= (t - ny); ny = t; }
+    if (nx + nw > r) nw = r - nx;
+    if (ny + nh > b) nh = b - ny;
+    if (nw <= 0 || nh <= 0) return 0;
+    *x = nx; *y = ny; *w = nw; *h = nh;
+    return 1;
+}
+
+enum {
+    USER_GUI_CS_LEFT = 1,
+    USER_GUI_CS_RIGHT = 2,
+    USER_GUI_CS_TOP = 4,
+    USER_GUI_CS_BOTTOM = 8,
+};
+
+static int user_gui_clip_line_outcode(int x, int y, int l, int t, int r, int b) {
+    int code = 0;
+    if (x < l) code |= USER_GUI_CS_LEFT;
+    else if (x >= r) code |= USER_GUI_CS_RIGHT;
+    if (y < t) code |= USER_GUI_CS_TOP;
+    else if (y >= b) code |= USER_GUI_CS_BOTTOM;
+    return code;
+}
+
+static int user_gui_clip_line(int* x1, int* y1, int* x2, int* y2, int l, int t, int r, int b) {
+    if (!x1 || !y1 || !x2 || !y2) return 0;
+    if (l >= r || t >= b) return 0;
+
+    int ax = *x1, ay = *y1, bx = *x2, by = *y2;
+    int code_a = user_gui_clip_line_outcode(ax, ay, l, t, r, b);
+    int code_b = user_gui_clip_line_outcode(bx, by, l, t, r, b);
+
+    while (1) {
+        if ((code_a | code_b) == 0) {
+            *x1 = ax; *y1 = ay; *x2 = bx; *y2 = by;
+            return 1;
+        }
+        if (code_a & code_b) {
+            return 0;
+        }
+
+        int code_out = code_a ? code_a : code_b;
+        int x = 0, y = 0;
+
+        if (code_out & USER_GUI_CS_TOP) {
+            if (by == ay) return 0;
+            x = ax + ((bx - ax) * (t - ay)) / (by - ay);
+            y = t;
+        } else if (code_out & USER_GUI_CS_BOTTOM) {
+            if (by == ay) return 0;
+            x = ax + ((bx - ax) * ((b - 1) - ay)) / (by - ay);
+            y = b - 1;
+        } else if (code_out & USER_GUI_CS_RIGHT) {
+            if (bx == ax) return 0;
+            y = ay + ((by - ay) * ((r - 1) - ax)) / (bx - ax);
+            x = r - 1;
+        } else {
+            if (bx == ax) return 0;
+            y = ay + ((by - ay) * (l - ax)) / (bx - ax);
+            x = l;
+        }
+
+        if (code_out == code_a) {
+            ax = x; ay = y;
+            code_a = user_gui_clip_line_outcode(ax, ay, l, t, r, b);
+        } else {
+            bx = x; by = y;
+            code_b = user_gui_clip_line_outcode(bx, by, l, t, r, b);
+        }
+    }
+}
+
 static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
     int handle = (int)(uintptr)userdata;
     user_gui_t* e = user_gui_get(handle);
@@ -1613,6 +1690,7 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
             int w = c->w;
             int h = c->h;
             if (w <= 0 || h <= 0) continue;
+            if (!user_gui_clip_fill_rect(&x, &y, &w, &h, clip_l, clip_t, clip_r, clip_b)) continue;
             drawRect(x, y, w, h, c->r, c->g, c->b);
             continue;
         }
@@ -1644,6 +1722,7 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
             int y1 = content_y + c->y;
             int x2 = content_x + c->x2;
             int y2 = content_y + c->y2;
+            if (!user_gui_clip_line(&x1, &y1, &x2, &y2, clip_l, clip_t, clip_r, clip_b)) continue;
             drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
             continue;
         }
@@ -1653,10 +1732,15 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
             int w = c->w;
             int h = c->h;
             if (w > 0 && h > 0) {
-                drawLine(x, y, x + w - 1, y, c->r, c->g, c->b);             /* top    */
-                drawLine(x, y + h - 1, x + w - 1, y + h - 1, c->r, c->g, c->b); /* bottom */
-                drawLine(x, y, x, y + h - 1, c->r, c->g, c->b);             /* left   */
-                drawLine(x + w - 1, y, x + w - 1, y + h - 1, c->r, c->g, c->b); /* right  */
+                int x1, y1, x2, y2;
+                x1 = x; y1 = y; x2 = x + w - 1; y2 = y;
+                if (user_gui_clip_line(&x1, &y1, &x2, &y2, clip_l, clip_t, clip_r, clip_b)) drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
+                x1 = x; y1 = y + h - 1; x2 = x + w - 1; y2 = y + h - 1;
+                if (user_gui_clip_line(&x1, &y1, &x2, &y2, clip_l, clip_t, clip_r, clip_b)) drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
+                x1 = x; y1 = y; x2 = x; y2 = y + h - 1;
+                if (user_gui_clip_line(&x1, &y1, &x2, &y2, clip_l, clip_t, clip_r, clip_b)) drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
+                x1 = x + w - 1; y1 = y; x2 = x + w - 1; y2 = y + h - 1;
+                if (user_gui_clip_line(&x1, &y1, &x2, &y2, clip_l, clip_t, clip_r, clip_b)) drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
             }
             continue;
         }
@@ -1677,6 +1761,8 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
             /* Render a named file icon from the kernel-side icon cache. */
             int x = content_x + c->x;
             int y = content_y + c->y;
+            int icon_px = (vga_text_cell_h() >= 16) ? 16 : 8;
+            if (x < clip_l || y < clip_t || x + icon_px > clip_r || y + icon_px > clip_b) continue;
             tile_draw_file_icon(c->text, x, y);
             continue;
         }
@@ -2458,6 +2544,102 @@ static int syscall_write_file_from_fd(user_fd_t* ufd, const void* user_src, int 
     ufd->offset = (uint32)written;
     ufd->size = (uint32)written;
     return written;
+}
+
+#define BMP_MAGIC_B0 0x42u
+#define BMP_MAGIC_B1 0x4Du
+#define BMP_BI_RGB 0u
+#define BMP_BI_BITFIELDS 3u
+#define BMP_FILEHEADER_SIZE 14u
+#define BMP_INFOHEADER_MIN 40u
+
+static uint16_t syscall_rgb565(uint8_t r, uint8_t g, uint8_t b) {
+    return (uint16_t)(((r & 0xF8u) << 8) | ((g & 0xFCu) << 3) | ((b & 0xF8u) >> 3));
+}
+
+static int syscall_parse_bmp_image(const uint8_t* buf, size_t size, rei_image_t* out) {
+    if (!buf || !out || size < BMP_FILEHEADER_SIZE + BMP_INFOHEADER_MIN) return -1;
+    if (buf[0] != BMP_MAGIC_B0 || buf[1] != BMP_MAGIC_B1) return -1;
+
+    uint32_t bf_off_bits = (uint32_t)buf[10] | ((uint32_t)buf[11] << 8) |
+                           ((uint32_t)buf[12] << 16) | ((uint32_t)buf[13] << 24);
+
+    if (size < BMP_FILEHEADER_SIZE + 4u) return -1;
+    uint32_t hdr_size = (uint32_t)buf[14] | ((uint32_t)buf[15] << 8) |
+                        ((uint32_t)buf[16] << 16) | ((uint32_t)buf[17] << 24);
+    if (hdr_size < BMP_INFOHEADER_MIN || (BMP_FILEHEADER_SIZE + hdr_size) > size) return -1;
+
+    const uint8_t* ih = buf + BMP_FILEHEADER_SIZE;
+    int32_t bi_width = (int32_t)((uint32_t)ih[4] | ((uint32_t)ih[5] << 8) |
+                                 ((uint32_t)ih[6] << 16) | ((uint32_t)ih[7] << 24));
+    int32_t bi_height = (int32_t)((uint32_t)ih[8] | ((uint32_t)ih[9] << 8) |
+                                  ((uint32_t)ih[10] << 16) | ((uint32_t)ih[11] << 24));
+    uint16_t bi_bit_count = (uint16_t)((uint16_t)ih[14] | ((uint16_t)ih[15] << 8));
+    uint32_t bi_compression = (uint32_t)ih[16] | ((uint32_t)ih[17] << 8) |
+                              ((uint32_t)ih[18] << 16) | ((uint32_t)ih[19] << 24);
+
+    if (bi_width <= 0 || bi_width > 4096) return -1;
+    int top_down = 0;
+    int height;
+    if (bi_height < 0) {
+        top_down = 1;
+        height = -bi_height;
+    } else {
+        height = bi_height;
+    }
+    if (height <= 0 || height > 4096) return -1;
+
+    int bytes_per_pixel;
+    if (bi_bit_count == 24 && bi_compression == BMP_BI_RGB) {
+        bytes_per_pixel = 3;
+    } else if (bi_bit_count == 32 && (bi_compression == BMP_BI_RGB || bi_compression == BMP_BI_BITFIELDS)) {
+        bytes_per_pixel = 4;
+    } else {
+        return -1;
+    }
+
+    int width = (int)bi_width;
+    size_t row_bytes_raw = (size_t)width * (size_t)bytes_per_pixel;
+    size_t row_stride = (row_bytes_raw + 3u) & ~(size_t)3u;
+    if (bf_off_bits >= size) return -1;
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    size_t out_size = pixel_count * 3u;
+    uint8_t* out_data = (uint8_t*)malloc(out_size);
+    if (!out_data) return -1;
+
+    for (int row = 0; row < height; ++row) {
+        size_t src_off = (size_t)bf_off_bits + (size_t)row * row_stride;
+        if (src_off + row_stride > size) {
+            free(out_data);
+            return -1;
+        }
+        const uint8_t* row_buf = buf + src_off;
+        int dest_row = top_down ? row : (height - 1 - row);
+        uint8_t* dst_row = out_data + (size_t)dest_row * (size_t)width * 3u;
+
+        for (int col = 0; col < width; ++col) {
+            size_t off = (size_t)col * (size_t)bytes_per_pixel;
+            uint8_t b = row_buf[off + 0];
+            uint8_t g = row_buf[off + 1];
+            uint8_t r = row_buf[off + 2];
+            uint16_t c = syscall_rgb565(r, g, b);
+            dst_row[(size_t)col * 3u + 0] = (uint8_t)((c >> 11) << 3);
+            dst_row[(size_t)col * 3u + 1] = (uint8_t)(((c >> 5) & 0x3F) << 2);
+            dst_row[(size_t)col * 3u + 2] = (uint8_t)((c & 0x1F) << 3);
+        }
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->header.magic = REI_MAGIC;
+    out->header.width = (uint16_t)width;
+    out->header.height = (uint16_t)height;
+    out->header.depth = REI_DEPTH_RGB;
+    out->header.reserved1 = 0;
+    out->header.reserved2 = 0;
+    out->data = out_data;
+    out->data_size = out_size;
+    return 0;
 }
 
 static int syscall_seek_fd(user_fd_t* ufd, int32 offset, int whence) {
@@ -3287,6 +3469,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             if (!syscall_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             const char* user_path = (const char*)arg1;
             if (!user_path) { regs->eax = (uint32)-1; break; }
+            int mode = (int)arg2;
             char path[128];
             if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
 
@@ -3299,9 +3482,21 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             char abspath[128];
             resolve_path(path, cwd, abspath, sizeof(abspath));
 
+            if (mode < 1 || mode > 3) mode = 0;
+
             vfs_stat_t st;
-            if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) { regs->eax = (uint32)-1; break; }
-            if (st.size == 0 || st.size > 512 * 1024) { regs->eax = (uint32)-1; break; }
+            if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) {
+                int focused = tile_get_focused();
+                if (focused >= 0) tile_clear_background(focused);
+                regs->eax = (uint32)-1;
+                break;
+            }
+            if (st.size == 0 || st.size > 512 * 1024) {
+                int focused = tile_get_focused();
+                if (focused >= 0) tile_clear_background(focused);
+                regs->eax = (uint32)-1;
+                break;
+            }
 
             uint8* buf = (uint8*)malloc(st.size);
             if (!buf) { regs->eax = (uint32)-1; break; }
@@ -3310,13 +3505,35 @@ static uint32 syscall_dispatch_core(regs_t* regs,
 
             rei_image_t* img = (rei_image_t*)malloc(sizeof(rei_image_t));
             if (!img) { free(buf); regs->eax = (uint32)-1; break; }
-            if (rei_parse_image(buf, br, img) != 0) { free(buf); free(img); regs->eax = (uint32)-1; break; }
+
+            int parse_ok = 0;
+            memset(img, 0, sizeof(*img));
+            if (rei_parse_image(buf, br, img) == 0) {
+                parse_ok = 1;
+            } else {
+                memset(img, 0, sizeof(*img));
+                if (syscall_parse_bmp_image(buf, (size_t)br, img) == 0) {
+                    parse_ok = 1;
+                }
+            }
             free(buf);
+
+            if (!parse_ok) {
+                free(img);
+                int focused = tile_get_focused();
+                if (focused >= 0) tile_clear_background(focused);
+                regs->eax = (uint32)-1;
+                break;
+            }
 
             int focused = tile_get_focused();
             if (focused < 0) { rei_free_image(img); free(img); regs->eax = (uint32)-1; break; }
 
-            regs->eax = (tile_begin_set_background_from_rei(focused, img) == 0) ? 0u : (uint32)-1;
+            if (mode == 0) {
+                regs->eax = (tile_begin_set_background_from_rei(focused, img) == 0) ? 0u : (uint32)-1;
+            } else {
+                regs->eax = (tile_set_background_from_image(focused, img, mode) == 0) ? 0u : (uint32)-1;
+            }
             if (regs->eax != 0u) {
                 rei_free_image(img);
                 free(img);
@@ -5248,26 +5465,38 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             user_gui_t* e = user_gui_get(handle);
             if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
 
-            int new_font = vga_system_font_acquire();
+            int new_font = 0;
+            int loaded_custom = 0;
             if (user_path) {
                 char path[128];
                 if (copyin_cstr(path, sizeof(path), user_path) == 0) {
                     trim_trailing_crlf(path);
                     if (path[0]) {
+                        loaded_custom = 1;
                         const char* cwd = "/";
                         if (g_user_task_active) cwd = vterm_get_cwd(g_user_task_term);
                         char abspath[128];
                         resolve_path(path, cwd, abspath, sizeof(abspath));
                         uint8 drive = g_current_drive;
                         int h = vga_font_acquire_path(drive, abspath);
-                        if (h > 0) new_font = h;
+                        if (h <= 0) { regs->eax = (uint32)-1; break; }
+                        new_font = h;
                     }
                 }
             }
 
+            if (!loaded_custom) {
+                new_font = vga_system_font_acquire();
+            }
+
+            if (new_font <= 0) { regs->eax = (uint32)-1; break; }
+
             if (e->font_handle != new_font) {
                 if (e->font_handle > 0) vga_font_release(e->font_handle);
                 e->font_handle = new_font;
+            } else {
+                // Avoid leaking refs when acquiring the same handle again.
+                vga_font_release(new_font);
             }
             regs->eax = 0;
             break;
@@ -5583,26 +5812,38 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
             if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
 
-            int new_font = vga_system_font_acquire();
+            int new_font = 0;
+            int loaded_custom = 0;
             if (user_path) {
                 char path[128];
                 if (copyin_cstr(path, sizeof(path), user_path) == 0) {
                     trim_trailing_crlf(path);
                     if (path[0]) {
+                        loaded_custom = 1;
                         const char* cwd = "/";
                         if (g_user_task_active) cwd = vterm_get_cwd(g_user_task_term);
                         char abspath[128];
                         resolve_path(path, cwd, abspath, sizeof(abspath));
                         uint8 drive = g_current_drive;
                         int h = vga_font_acquire_path(drive, abspath);
-                        if (h > 0) new_font = h;
+                        if (h <= 0) { regs->eax = (uint32)-1; break; }
+                        new_font = h;
                     }
                 }
             }
 
+            if (!loaded_custom) {
+                new_font = vga_system_font_acquire();
+            }
+
+            if (new_font <= 0) { regs->eax = (uint32)-1; break; }
+
             if (e->font_handle != new_font) {
                 if (e->font_handle > 0) vga_font_release(e->font_handle);
                 e->font_handle = new_font;
+            } else {
+                // Avoid leaking refs when acquiring the same handle again.
+                vga_font_release(new_font);
             }
             regs->eax = 0;
             break;

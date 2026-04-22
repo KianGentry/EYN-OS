@@ -67,20 +67,30 @@ static void draw_decorations(tile_t* t, int is_focused) {
 
     /* Reserve right side for buttons so title text doesn't overlap */
     int btn_zone = 3 * (btn_side + btn_gap) + btn_margin;
+    drawRect(t->x, t->y, t->width, 1, UI_HILITE_OUTER_R, UI_HILITE_OUTER_G, UI_HILITE_OUTER_B);
+    drawRect(t->x, t->y, 1, t->height, UI_HILITE_OUTER_R, UI_HILITE_OUTER_G, UI_HILITE_OUTER_B);
+    drawRect(t->x + t->width - 1, t->y, 1, t->height, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+    drawRect(t->x, t->y + t->height - 1, t->width, 1, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
     // In low mode, draw simpler title/borders (status is an Alt-held overlay drawn later)
     if (g_gui_low_mode) {
         if (title_h > 0) {
-            int title_y = t->y;
             int title_colour_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
             int title_colour_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
             int title_colour_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
-            drawRect(t->x, title_y, t->width, title_h, title_colour_r, title_colour_g, title_colour_b);
+            int title_x = t->x + 2;
+            int title_y = t->y + 2;
+            int title_w = t->width - 4;
+            int title_h_inner = title_h - 2;
+            if (title_w > 0 && title_h_inner > 0)
+                draw_sunken_box(title_x, title_y, title_w, title_h_inner, title_colour_r, title_colour_g, title_colour_b);
             if (t->title && t->title[0]) {
                 int title_len = (int)strlen(t->title);
                 int avail_chars = (t->width - 8 - btn_zone) / cw;
                 if (avail_chars < 0) avail_chars = 0;
-                int text_y = title_y + (title_h - fh) / 2;
-                int cr = is_focused ? 230 : 160, cg = is_focused ? 230 : 160, cb = is_focused ? 230 : 160;
+                int text_y = t->y + (title_h - fh) / 2;
+                int cr = is_focused ? UI_TEXT_R : UI_TEXT_DIM_R;
+                int cg = is_focused ? UI_TEXT_G : UI_TEXT_DIM_G;
+                int cb = is_focused ? UI_TEXT_B : UI_TEXT_DIM_B;
                 /* Left-aligned title */
                 int draw_len = title_len;
                 if (draw_len > avail_chars) draw_len = avail_chars;
@@ -93,39 +103,46 @@ static void draw_decorations(tile_t* t, int is_focused) {
             }
             /* Low-mode tile buttons: simple fallback glyphs */
             if (title_h >= 12) {
+                draw_raised_box(close_bx, close_by, btn_side, btn_side, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
                 /* Close: X */
-                drawCharAt(close_bx + 2, close_by + 1, (unsigned char)'X', 255, 255, 255);
+                drawCharAt(close_bx + 2, close_by + 1, (unsigned char)'X', UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+
+                draw_raised_box(max_bx, max_by, btn_side, btn_side, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
                 /* Maximize: square outline */
-                drawRect(max_bx + 3, max_by + 3, btn_side - 6, 1, 255, 255, 255);
-                drawRect(max_bx + 3, max_by + btn_side - 4, btn_side - 6, 1, 255, 255, 255);
-                drawRect(max_bx + 3, max_by + 3, 1, btn_side - 6, 255, 255, 255);
-                drawRect(max_bx + btn_side - 4, max_by + 3, 1, btn_side - 6, 255, 255, 255);
+                drawRect(max_bx + 3, max_by + 3, btn_side - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+                drawRect(max_bx + 3, max_by + btn_side - 4, btn_side - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+                drawRect(max_bx + 3, max_by + 3, 1, btn_side - 6, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+                drawRect(max_bx + btn_side - 4, max_by + 3, 1, btn_side - 6, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+
+                draw_raised_box(min_bx, min_by, btn_side, btn_side, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
                 /* Minimize: horizontal line */
-                drawRect(min_bx + 3, min_by + btn_side / 2, btn_side - 6, 1, 255, 255, 255);
+                drawRect(min_bx + 3, min_by + btn_side / 2, btn_side - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
             }
         }
-        // status overlay is drawn after content
-        int border_r = is_focused ? 80 : 50, border_g = is_focused ? 80 : 50, border_b = is_focused ? 80 : 50;
-        drawRect(t->x, t->y, t->width, 1, border_r, border_g, border_b);
-        drawRect(t->x, t->y + t->height - 1, t->width, 1, border_r, border_g, border_b);
-        drawRect(t->x, t->y, 1, t->height, border_r, border_g, border_b);
-        drawRect(t->x + t->width - 1, t->y, 1, t->height, border_r, border_g, border_b);
+        if (t->width > 4 && title_h > 0) {
+            int sep_y = t->y + title_h - 1;
+            drawRect(t->x + 2, sep_y, t->width - 4, 1, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+        }
         return;
     }
     if (title_h > 0) {
-        int title_y = t->y;
         int title_colour_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
         int title_colour_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
         int title_colour_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
-        drawRect(t->x, title_y, t->width, title_h, title_colour_r, title_colour_g, title_colour_b);
+        int title_x = t->x + 2;
+        int title_y = t->y + 2;
+        int title_w = t->width - 4;
+        int title_h_inner = title_h - 2;
+        if (title_w > 0 && title_h_inner > 0)
+            draw_sunken_box(title_x, title_y, title_w, title_h_inner, title_colour_r, title_colour_g, title_colour_b);
         if (t->title && t->title[0]) {
             int title_len = (int)strlen(t->title);
             int avail_chars = (t->width - 8 - btn_zone) / cw;
             if (avail_chars < 0) avail_chars = 0;
-            int text_y = title_y + (title_h - fh) / 2;
-            int colour_r = is_focused ? 230 : 160;
-            int colour_g = is_focused ? 230 : 160;
-            int colour_b = is_focused ? 230 : 160;
+            int text_y = t->y + (title_h - fh) / 2;
+            int colour_r = is_focused ? UI_TEXT_R : UI_TEXT_DIM_R;
+            int colour_g = is_focused ? UI_TEXT_G : UI_TEXT_DIM_G;
+            int colour_b = is_focused ? UI_TEXT_B : UI_TEXT_DIM_B;
             /* Left-aligned title (modern desktop style) */
             int draw_len = title_len;
             if (draw_len > avail_chars) draw_len = avail_chars;
@@ -139,6 +156,7 @@ static void draw_decorations(tile_t* t, int is_focused) {
         /* Tile title bar buttons (close, maximize, minimize) -- same icons as floating windows */
         if (title_h >= 12) {
             /* Close */
+            draw_button_box(close_bx, close_by, btn_side, btn_side, t->pressed_button == 1, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
             if (g_close_icon_loaded && g_close_icon.data) {
                 if (is_focused) {
                     wm_draw_icon_into_button(&g_close_icon, g_close_icon_loaded, close_bx, close_by, btn_side, btn_side);
@@ -150,11 +168,12 @@ static void draw_decorations(tile_t* t, int is_focused) {
                 }
             } else {
                 for (int fi = 0; fi < 6; ++fi) {
-                    drawRect(close_bx + 3 + fi, close_by + 3 + fi, 1, 1, 255, 255, 255);
-                    drawRect(close_bx + btn_side - 4 - fi, close_by + 3 + fi, 1, 1, 255, 255, 255);
+                    drawRect(close_bx + 3 + fi, close_by + 3 + fi, 1, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+                    drawRect(close_bx + btn_side - 4 - fi, close_by + 3 + fi, 1, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
                 }
             }
             /* Maximize */
+            draw_button_box(max_bx, max_by, btn_side, btn_side, t->pressed_button == 2, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
             if (g_max_icon_loaded && g_max_icon.data) {
                 if (is_focused) {
                     wm_draw_icon_into_button(&g_max_icon, g_max_icon_loaded, max_bx, max_by, btn_side, btn_side);
@@ -165,12 +184,13 @@ static void draw_decorations(tile_t* t, int is_focused) {
                         wm_draw_icon_into_button(&g_max_icon, g_max_icon_loaded, max_bx, max_by, btn_side, btn_side);
                 }
             } else {
-                drawRect(max_bx + 3, max_by + 3, btn_side - 6, 1, 255, 255, 255);
-                drawRect(max_bx + 3, max_by + btn_side - 4, btn_side - 6, 1, 255, 255, 255);
-                drawRect(max_bx + 3, max_by + 3, 1, btn_side - 6, 255, 255, 255);
-                drawRect(max_bx + btn_side - 4, max_by + 3, 1, btn_side - 6, 255, 255, 255);
+                drawRect(max_bx + 3, max_by + 3, btn_side - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+                drawRect(max_bx + 3, max_by + btn_side - 4, btn_side - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+                drawRect(max_bx + 3, max_by + 3, 1, btn_side - 6, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+                drawRect(max_bx + btn_side - 4, max_by + 3, 1, btn_side - 6, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
             }
             /* Minimize */
+            draw_button_box(min_bx, min_by, btn_side, btn_side, t->pressed_button == 3, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
             if (g_min_icon_loaded && g_min_icon.data) {
                 if (is_focused) {
                     wm_draw_icon_into_button(&g_min_icon, g_min_icon_loaded, min_bx, min_by, btn_side, btn_side);
@@ -181,19 +201,14 @@ static void draw_decorations(tile_t* t, int is_focused) {
                         wm_draw_icon_into_button(&g_min_icon, g_min_icon_loaded, min_bx, min_by, btn_side, btn_side);
                 }
             } else {
-                drawRect(min_bx + 3, min_by + btn_side / 2, btn_side - 6, 1, 255, 255, 255);
+                drawRect(min_bx + 3, min_by + btn_side / 2, btn_side - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
             }
         }
     }
-    // status overlay is drawn after content
-    // borders -- subtle Materia gray
-    int border_r = is_focused ? 80 : 50;
-    int border_g = is_focused ? 80 : 50;
-    int border_b = is_focused ? 80 : 50;
-    drawRect(t->x, t->y, t->width, 1, border_r, border_g, border_b);
-    drawRect(t->x, t->y + t->height - 1, t->width, 1, border_r, border_g, border_b);
-    drawRect(t->x, t->y, 1, t->height, border_r, border_g, border_b);
-    drawRect(t->x + t->width - 1, t->y, 1, t->height, border_r, border_g, border_b);
+    if (t->width > 4 && title_h > 0) {
+        int sep_y = t->y + title_h - 1;
+        drawRect(t->x + 2, sep_y, t->width - 4, 1, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+    }
 }
 
 static void draw_tile_status_overlay(tile_t* t) {
@@ -227,8 +242,7 @@ static void draw_tile_status_overlay(tile_t* t) {
 
 static void draw_static_tile(tile_t* t, int is_focused) {
     if (t->type == TILE_EMPTY) return;
-    // Draw background once and then draw decorations on top
-    drawRect(t->x, t->y, t->width, t->height, 0, 0, 0);
+    // Draw decorations only; content region is rendered by draw_tile_content.
     draw_decorations(t, is_focused);
     t->static_drawn = 1;
     // Update decoration caches
@@ -611,18 +625,19 @@ static void draw_bg_modal() {
     int dbw = box_w + pad*2; if (dbx + dbw > screen_w) dbw = screen_w - dbx;
     int dbh = box_h + pad*2; if (dby + dbh > screen_h) dbh = screen_h - dby;
     drawRect(dbx, dby, dbw, dbh, 0, 0, 0);
-    // border and title
-    drawRect(bx, by, box_w, box_h, 32, 32, 32);
+    draw_raised_box(bx, by, box_w, box_h, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
     const char* title = "Background Mode";
-    for (int i = 0; title[i]; ++i) drawCharAt(bx + 8 + i*8, by + 8, (int)(unsigned char)title[i], 220, 220, 220);
+    for (int i = 0; title[i]; ++i) drawCharAt(bx + 8 + i*8, by + 8, (int)(unsigned char)title[i], UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
     const char* hint = "Enter=Select  Esc=Cancel";
-    for (int i = 0; hint[i]; ++i) drawCharAt(bx + 8 + i*8, by + 24, (int)(unsigned char)hint[i], 200, 200, 200);
+    for (int i = 0; hint[i]; ++i) drawCharAt(bx + 8 + i*8, by + 24, (int)(unsigned char)hint[i], UI_TEXT_DIM_R, UI_TEXT_DIM_G, UI_TEXT_DIM_B);
     int y0 = by + 40;
     for (int i = 0; i < opt_count; ++i) {
-        int rr = (i == g_bg_modal.selected) ? 220 : 200;
-        int gg = (i == g_bg_modal.selected) ? 220 : 200;
-        int bb = (i == g_bg_modal.selected) ? 220 : 200;
-        for (int j = 0; opts[i][j]; ++j) drawCharAt(bx + 16 + j*8, y0 + i*12, (int)(unsigned char)opts[i][j], rr, gg, bb);
+        if (i == g_bg_modal.selected) {
+            draw_sunken_box(bx + 10, y0 + i*12 - 2, box_w - 20, 12, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
+        }
+        for (int j = 0; opts[i][j]; ++j) {
+            drawCharAt(bx + 16 + j*8, y0 + i*12, (int)(unsigned char)opts[i][j], UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+        }
     }
     // mark only the modal region dirty to keep the blit minimal
     vga_mark_dirty_rect(dbx, dby, dbw, dbh);
@@ -646,18 +661,15 @@ static void draw_ctx_menu(void) {
     if (mx < 0) mx = 0;
     if (my < 0) my = 0;
 
-    /* Background */
-    drawRect(mx, my, menu_w, menu_h, 42, 42, 42);
-    /* Top accent line */
-    drawRect(mx, my, menu_w, 1, 90, 90, 90);
+    draw_raised_box(mx, my, menu_w, menu_h, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
 
     const char* items[CTX_ITEM_COUNT] = {"Desktop 1", "Desktop 2", "Kill"};
-    int fg = 230;
+    int fg = UI_TEXT_R;
 
     int dy = my + 2;
     for (int i = 0; i < CTX_ITEM_COUNT; ++i) {
         if (i == g_ctx_hover)
-            drawRect(mx, dy, menu_w, item_h, 60, 60, 60);
+            draw_sunken_box(mx + 2, dy, menu_w - 4, item_h, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
 
         /* Checkmark for current desktop assignment */
         if (i < g_desktop_count) {

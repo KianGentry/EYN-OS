@@ -160,8 +160,17 @@ void tiler_gui_print_status(void);
 // Returns 0 on success (prompt shown or background applied), -1 on failure (tiler inactive or bad params).
 int tile_begin_set_background_from_rei(int tile_idx, rei_image_t* image);
 
+// Apply a background image directly using an explicit mode.
+// mode uses BG_TILE/BG_SCALE/BG_CENTER. The function takes ownership of image.
+int tile_set_background_from_image(int tile_idx, rei_image_t* image, int mode);
+
 // Clear any configured background image for the given tile (no-op if none).
 void tile_clear_background(int tile_idx);
+
+// Track which tile background should also be used for the compositor desktop backdrop.
+void tile_desktop_background_set(int tile_idx);
+void tile_desktop_background_clear(int tile_idx);
+void tile_desktop_background_remap(int old_idx, int new_idx);
 
 /*
  * Draw a file-type icon by name at pixel position (x, y).

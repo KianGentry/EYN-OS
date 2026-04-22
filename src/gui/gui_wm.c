@@ -11,40 +11,72 @@ static void wm_draw_decor(window_t* w, int is_focused) {
     if (g_gui_low_mode) {
         int th = win_title_height(w);
         int sh = 0;
-        // frame background
-        drawRect(w->x, w->y, w->w, w->h, 0, 0, 0);
-        // title bar
+        drawRect(w->x, w->y, w->w, 1, UI_HILITE_OUTER_R, UI_HILITE_OUTER_G, UI_HILITE_OUTER_B);
+        drawRect(w->x, w->y, 1, w->h, UI_HILITE_OUTER_R, UI_HILITE_OUTER_G, UI_HILITE_OUTER_B);
+        drawRect(w->x + w->w - 1, w->y, 1, w->h, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+        drawRect(w->x, w->y + w->h - 1, w->w, 1, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+        // Title bar is a shallow inset strip.
         int title_colour_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
         int title_colour_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
         int title_colour_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
-        drawRect(w->x, w->y, w->w, th, title_colour_r, title_colour_g, title_colour_b);
+        int title_x = w->x + 2;
+        int title_y = w->y + 2;
+        int title_w = w->w - 4;
+        int title_h = th - 2;
+        if (title_w > 0 && title_h > 0)
+            draw_sunken_box(title_x, title_y, title_w, title_h, title_colour_r, title_colour_g, title_colour_b);
         if (w->title && w->title[0]) {
             int len = (int)strlen(w->title);
             int max_chars = (w->w - 12) / cw; if (max_chars < 0) max_chars = 0;
-            int colour_r = is_focused ? 230 : 160, colour_g = is_focused ? 230 : 160, colour_b = is_focused ? 230 : 160;
+            int colour_r = is_focused ? UI_TEXT_R : UI_TEXT_DIM_R;
+            int colour_g = is_focused ? UI_TEXT_G : UI_TEXT_DIM_G;
+            int colour_b = is_focused ? UI_TEXT_B : UI_TEXT_DIM_B;
             int text_y = w->y + (th - fh) / 2;
             if (len > max_chars) len = max_chars;
             int start_x = w->x + 6;
             for (int i = 0; i < len; ++i) drawCharAt(start_x + i * cw, text_y, (unsigned char)w->title[i], colour_r, colour_g, colour_b);
         }
+        if (th >= 12) {
+            int bx, by, bw, bh;
+
+            wm_get_close_rect(w, &bx, &by, &bw, &bh);
+            draw_button_box(bx, by, bw, bh, w->pressed_button == 1, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
+            drawCharAt(bx + 2, by + 1, (unsigned char)'X', UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+
+            wm_get_max_rect(w, &bx, &by, &bw, &bh);
+            draw_button_box(bx, by, bw, bh, w->pressed_button == 2, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
+            drawRect(bx + 3, by + 3, bw - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+            drawRect(bx + 3, by + bh - 4, bw - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+            drawRect(bx + 3, by + 3, 1, bh - 6, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+            drawRect(bx + bw - 4, by + 3, 1, bh - 6, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+
+            wm_get_min_rect(w, &bx, &by, &bw, &bh);
+            draw_button_box(bx, by, bw, bh, w->pressed_button == 3, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
+            drawRect(bx + 3, by + bh/2, bw - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+        }
         (void)sh;
-        // border -- Materia gray
-        int br = is_focused ? 80 : 56, bg2 = is_focused ? 80 : 56, bb = is_focused ? 80 : 56;
-        drawRect(w->x, w->y, w->w, 1, br, bg2, bb);
-        drawRect(w->x, w->y + w->h - 1, w->w, 1, br, bg2, bb);
-        drawRect(w->x, w->y, 1, w->h, br, bg2, bb);
-        drawRect(w->x + w->w - 1, w->y, 1, w->h, br, bg2, bb);
+        if (w->w > 4 && th > 0) {
+            int sep_y = w->y + th - 1;
+            drawRect(w->x + 2, sep_y, w->w - 4, 1, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+        }
         return;
     }
     int th = win_title_height(w);
     int sh = 0;
-    // frame background
-    drawRect(w->x, w->y, w->w, w->h, 0, 0, 0);
-    // title bar
+    drawRect(w->x, w->y, w->w, 1, UI_HILITE_OUTER_R, UI_HILITE_OUTER_G, UI_HILITE_OUTER_B);
+    drawRect(w->x, w->y, 1, w->h, UI_HILITE_OUTER_R, UI_HILITE_OUTER_G, UI_HILITE_OUTER_B);
+    drawRect(w->x + w->w - 1, w->y, 1, w->h, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+    drawRect(w->x, w->y + w->h - 1, w->w, 1, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+    // Title bar is a shallow inset strip.
     int title_colour_r = is_focused ? g_wm_theme.title_focused_r : g_wm_theme.title_unfocused_r;
     int title_colour_g = is_focused ? g_wm_theme.title_focused_g : g_wm_theme.title_unfocused_g;
     int title_colour_b = is_focused ? g_wm_theme.title_focused_b : g_wm_theme.title_unfocused_b;
-    drawRect(w->x, w->y, w->w, th, title_colour_r, title_colour_g, title_colour_b);
+    int title_x = w->x + 2;
+    int title_y = w->y + 2;
+    int title_w = w->w - 4;
+    int title_h = th - 2;
+    if (title_w > 0 && title_h > 0)
+        draw_sunken_box(title_x, title_y, title_w, title_h, title_colour_r, title_colour_g, title_colour_b);
     if (w->title && w->title[0]) {
         int len = (int)strlen(w->title);
         // Reserve space for the three titlebar buttons on the right
@@ -52,9 +84,9 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         int avail_chars = (w->w - 8 - btn_zone) / cw;
         if (avail_chars < 0) avail_chars = 0;
         int text_y = w->y + (th - fh) / 2;
-        int colour_r = is_focused ? 230 : 160;
-        int colour_g = is_focused ? 230 : 160;
-        int colour_b = is_focused ? 230 : 160;
+        int colour_r = is_focused ? UI_TEXT_R : UI_TEXT_DIM_R;
+        int colour_g = is_focused ? UI_TEXT_G : UI_TEXT_DIM_G;
+        int colour_b = is_focused ? UI_TEXT_B : UI_TEXT_DIM_B;
         // Left-aligned title (with small left padding)
         int draw_len = len;
         if (draw_len > avail_chars) draw_len = avail_chars;
@@ -67,6 +99,7 @@ static void wm_draw_decor(window_t* w, int is_focused) {
         // Close
         {
             int bx, by, bw, bh; wm_get_close_rect(w, &bx, &by, &bw, &bh);
+            draw_raised_box(bx, by, bw, bh, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
             if (g_close_icon_loaded && g_close_icon.data) {
                 if (is_focused) {
                     wm_draw_icon_into_button(&g_close_icon, g_close_icon_loaded, bx, by, bw, bh);
@@ -80,17 +113,18 @@ static void wm_draw_decor(window_t* w, int is_focused) {
             } else {
                 if (bw >= 8 && bh >= 8) {
                     for (int i = 0; i < 6; ++i) {
-                        drawRect(bx + 3 + i, by + 3 + i, 1, 1, 255, 255, 255);
-                        drawRect(bx + bw - 4 - i, by + 3 + i, 1, 1, 255, 255, 255);
+                        drawRect(bx + 3 + i, by + 3 + i, 1, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+                        drawRect(bx + bw - 4 - i, by + 3 + i, 1, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
                     }
                 } else {
-                    drawCharAt(bx + 2, by + 1, (unsigned char)'X', 255, 255, 255);
+                    drawCharAt(bx + 2, by + 1, (unsigned char)'X', UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
                 }
             }
         }
         // Maximize
         {
             int bx, by, bw, bh; wm_get_max_rect(w, &bx, &by, &bw, &bh);
+            draw_raised_box(bx, by, bw, bh, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
             if (g_max_icon_loaded && g_max_icon.data) {
                 if (is_focused) {
                     wm_draw_icon_into_button(&g_max_icon, g_max_icon_loaded, bx, by, bw, bh);
@@ -102,15 +136,16 @@ static void wm_draw_decor(window_t* w, int is_focused) {
                 }
             } else {
                 // fallback: a square outline
-                drawRect(bx + 3, by + 3, bw - 6, 1, 255, 255, 255);
-                drawRect(bx + 3, by + bh - 4, bw - 6, 1, 255, 255, 255);
-                drawRect(bx + 3, by + 3, 1, bh - 6, 255, 255, 255);
-                drawRect(bx + bw - 4, by + 3, 1, bh - 6, 255, 255, 255);
+                drawRect(bx + 3, by + 3, bw - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+                drawRect(bx + 3, by + bh - 4, bw - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+                drawRect(bx + 3, by + 3, 1, bh - 6, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
+                drawRect(bx + bw - 4, by + 3, 1, bh - 6, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
             }
         }
         // Minimize
         {
             int bx, by, bw, bh; wm_get_min_rect(w, &bx, &by, &bw, &bh);
+            draw_raised_box(bx, by, bw, bh, UI_SURFACE_R, UI_SURFACE_G, UI_SURFACE_B);
             if (g_min_icon_loaded && g_min_icon.data) {
                 if (is_focused) {
                     wm_draw_icon_into_button(&g_min_icon, g_min_icon_loaded, bx, by, bw, bh);
@@ -122,17 +157,15 @@ static void wm_draw_decor(window_t* w, int is_focused) {
                 }
             } else {
                 // fallback: a horizontal line
-                drawRect(bx + 3, by + bh/2, bw - 6, 1, 255, 255, 255);
+                drawRect(bx + 3, by + bh/2, bw - 6, 1, UI_TEXT_R, UI_TEXT_G, UI_TEXT_B);
             }
         }
     }
     (void)sh;
-    // border -- subtle gray, slightly brighter when focused
-    int br = is_focused ? 80 : 56, wbg = is_focused ? 80 : 56, bb = is_focused ? 80 : 56;
-    drawRect(w->x, w->y, w->w, 1, br, wbg, bb);
-    drawRect(w->x, w->y + w->h - 1, w->w, 1, br, wbg, bb);
-    drawRect(w->x, w->y, 1, w->h, br, wbg, bb);
-    drawRect(w->x + w->w - 1, w->y, 1, w->h, br, wbg, bb);
+    if (w->w > 4 && th > 0) {
+        int sep_y = w->y + th - 1;
+        drawRect(w->x + 2, sep_y, w->w - 4, 1, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+    }
 }
 
 static void wm_get_close_rect(const window_t* w, int* rx, int* ry, int* rw, int* rh) {
@@ -271,6 +304,7 @@ static void wm_draw_content(window_t* w) {
     int cw = w->w - 2;
     int ch = w->h - (th + sh) - 2;
     if (cw > 0 && ch > 0) {
+        draw_sunken_box(cx - 1, cy - 1, cw + 2, ch + 2, 0, 0, 0);
         drawRect(cx, cy, cw, ch, 0, 0, 0);
         if (!w->minimized) {
             if (w->draw_cb) w->draw_cb((int)(w - g_windows), cx, cy, cw, ch, w->userdata);

@@ -482,7 +482,7 @@ void start_tiling_manager() {
     g_any_tile_content_redrew = 0;
     // On full redraws, paint the desktop background so exposed areas are not garbage.
     if (g_force_full_redraw) {
-        drawRect(0, 0, screen_w, screen_h, 38, 38, 38);
+        draw_desktop_background(0, 0, screen_w, screen_h);
         vga_mark_dirty_rect(0, 0, screen_w, screen_h);
     }
     // draw all tiles
@@ -1214,52 +1214,26 @@ void start_tiling_manager() {
                         }
                     }
                     int did_action = 0;
-                    // Close
-                    {
-                        int bx, by, bw, bh; wm_get_close_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
+                    int bx, by, bw, bh;
+                    wm_get_close_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
+                    if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
+                        g_windows[w_hit].pressed_button = 1;
+                        g_windows[w_hit].static_drawn = 0;
+                        did_action = 1;
+                    }
+                    if (!did_action) {
+                        wm_get_max_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
                         if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
-                            wm_close_window(w_hit);
-                            g_force_full_redraw = 1; g_tiles_full_content_redraw = 1;
-                            drag_active = 0; drag_win = -1;
+                            g_windows[w_hit].pressed_button = 2;
+                            g_windows[w_hit].static_drawn = 0;
                             did_action = 1;
                         }
                     }
-                    // Maximize toggle
                     if (!did_action) {
-                        int bx, by, bw, bh; wm_get_max_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
+                        wm_get_min_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
                         if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
-                            window_t* w = &g_windows[w_hit];
-                            int taskbar_h_win = vga_text_cell_h() + 6;
-                            if (taskbar_h_win < 0) taskbar_h_win = 0;
-                            if (taskbar_h_win > screen_h - 32) taskbar_h_win = screen_h - 32;
-                            if (!w->maximized) {
-                                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
-                                w->prev_x = w->x; w->prev_y = w->y; w->prev_w = w->w; w->prev_h = w->h;
-                                w->x = 0; w->y = taskbar_h_win; w->w = screen_w; w->h = screen_h - taskbar_h_win;
-                                w->maximized = 1; w->minimized = 0;
-                                w->static_drawn = 0; w->needs_redraw = 1;
-                                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
-                                g_tiles_full_content_redraw = 1;
-                            } else {
-                                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
-                                w->x = w->prev_x; w->y = w->prev_y; w->w = w->prev_w; w->h = w->prev_h;
-                                w->maximized = 0; w->static_drawn = 0; w->needs_redraw = 1;
-                                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
-                                g_tiles_full_content_redraw = 1;
-                            }
-                            did_action = 1;
-                        }
-                    }
-                    // Minimize toggle
-                    if (!did_action) {
-                        int bx, by, bw, bh; wm_get_min_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
-                        if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
-                            window_t* w = &g_windows[w_hit];
-                            w->minimized = !w->minimized; w->needs_redraw = 1; w->static_drawn = 0;
-                            if (w->minimized) g_win_focused = -1;
-                            int th2 = win_title_height(w); int sh2 = win_status_height(w);
-                            int cx2 = w->x + 1; int cy2 = w->y + th2 + sh2 + 1; int cw2 = w->w - 2; int ch2 = w->h - (th2 + sh2) - 2;
-                            if (cw2 > 0 && ch2 > 0) vga_mark_dirty_rect(cx2, cy2, cw2, ch2);
+                            g_windows[w_hit].pressed_button = 3;
+                            g_windows[w_hit].static_drawn = 0;
                             did_action = 1;
                         }
                     }
@@ -1314,51 +1288,24 @@ void start_tiling_manager() {
                             int t_max_by   = t_close_by;
                             int t_min_bx   = t_max_bx - t_btn_side - t_btn_gap;
                             int t_min_by   = t_close_by;
-                            /* Close button */
                             if (point_in_rect(me.x, me.y, t_close_bx, t_close_by, t_btn_side, t_btn_side)) {
-                                tile_close(hit);
-                                g_force_full_redraw = 1;
-                                layout_tiles();
-                                goto after_mouse_handling;
-                            }
-                            /* Maximize button: toggle fullscreen */
-                            if (point_in_rect(me.x, me.y, t_max_bx, t_max_by, t_btn_side, t_btn_side)) {
-                                fullscreen_tile = -1;
-                                int taskbar_h_tile = vga_text_cell_h() + 6;
-                                if (taskbar_h_tile < 0) taskbar_h_tile = 0;
-                                if (taskbar_h_tile > screen_h - 32) taskbar_h_tile = screen_h - 32;
-                                if (!tiles[hit].maximized) {
-                                    tiles[hit].prev_x = tiles[hit].x;
-                                    tiles[hit].prev_y = tiles[hit].y;
-                                    tiles[hit].prev_w = tiles[hit].width;
-                                    tiles[hit].prev_h = tiles[hit].height;
-                                    tiles[hit].x = 0;
-                                    tiles[hit].y = taskbar_h_tile;
-                                    tiles[hit].width = screen_w;
-                                    tiles[hit].height = screen_h - taskbar_h_tile;
-                                    tiles[hit].maximized = 1;
-                                    tiles[hit].minimized = 0;
-                                } else {
-                                    if (tiles[hit].prev_w > 0 && tiles[hit].prev_h > 0) {
-                                        tiles[hit].x = tiles[hit].prev_x;
-                                        tiles[hit].y = tiles[hit].prev_y;
-                                        tiles[hit].width = tiles[hit].prev_w;
-                                        tiles[hit].height = tiles[hit].prev_h;
-                                    }
-                                    tiles[hit].maximized = 0;
-                                }
+                                tiles[hit].pressed_button = 1;
                                 tiles[hit].static_drawn = 0;
                                 focused = hit;
                                 g_force_full_redraw = 1;
                                 goto after_mouse_handling;
                             }
-                            /* Minimize button: hide tile (collapse to just a taskbar entry) */
-                            if (point_in_rect(me.x, me.y, t_min_bx, t_min_by, t_btn_side, t_btn_side)) {
-                                fullscreen_tile = -1;
-                                tiles[hit].minimized = 1;
-                                tiles[hit].maximized = 0;
+                            if (point_in_rect(me.x, me.y, t_max_bx, t_max_by, t_btn_side, t_btn_side)) {
+                                tiles[hit].pressed_button = 2;
                                 tiles[hit].static_drawn = 0;
-                                tile_ensure_valid_focus();
+                                focused = hit;
+                                g_force_full_redraw = 1;
+                                goto after_mouse_handling;
+                            }
+                            if (point_in_rect(me.x, me.y, t_min_bx, t_min_by, t_btn_side, t_btn_side)) {
+                                tiles[hit].pressed_button = 3;
+                                tiles[hit].static_drawn = 0;
+                                focused = hit;
                                 g_force_full_redraw = 1;
                                 goto after_mouse_handling;
                             }
@@ -1419,6 +1366,135 @@ void start_tiling_manager() {
                 }
             }
             if (release_edge) { 
+                int release_hit = wm_hit_test(me.x, me.y);
+                if (release_hit >= 0 && release_hit < MAX_WINDOWS && g_windows[release_hit].used) {
+                    window_t* wrel = &g_windows[release_hit];
+                    if (wrel->pressed_button == 1) {
+                        int bx, by, bw, bh; wm_get_close_rect(wrel, &bx, &by, &bw, &bh);
+                        if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
+                            if (!wrel->close_cb || wrel->close_cb(release_hit, wrel->userdata)) {
+                                wm_close_window(release_hit);
+                                if (g_user_task_active) {
+                                    g_user_interrupt = 1;
+                                    g_force_full_redraw = 1;
+                                }
+                                layout_tiles();
+                                g_force_full_redraw = 1;
+                            }
+                        }
+                    } else if (wrel->pressed_button == 2) {
+                        int bx, by, bw, bh; wm_get_max_rect(wrel, &bx, &by, &bw, &bh);
+                        if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
+                            fullscreen_tile = -1;
+                            int taskbar_h_win = vga_text_cell_h() + 6;
+                            if (taskbar_h_win < 0) taskbar_h_win = 0;
+                            if (taskbar_h_win > screen_h - 32) taskbar_h_win = screen_h - 32;
+                            if (!wrel->maximized) {
+                                vga_mark_dirty_rect(wrel->x, wrel->y, wrel->w, wrel->h);
+                                wrel->prev_x = wrel->x; wrel->prev_y = wrel->y; wrel->prev_w = wrel->w; wrel->prev_h = wrel->h;
+                                wrel->x = 0; wrel->y = taskbar_h_win; wrel->w = screen_w; wrel->h = screen_h - taskbar_h_win;
+                                wrel->maximized = 1; wrel->minimized = 0;
+                                wrel->static_drawn = 0; wrel->needs_redraw = 1;
+                                vga_mark_dirty_rect(wrel->x, wrel->y, wrel->w, wrel->h);
+                                g_tiles_full_content_redraw = 1;
+                            } else {
+                                vga_mark_dirty_rect(wrel->x, wrel->y, wrel->w, wrel->h);
+                                wrel->x = wrel->prev_x; wrel->y = wrel->prev_y; wrel->w = wrel->prev_w; wrel->h = wrel->prev_h;
+                                wrel->maximized = 0; wrel->static_drawn = 0; wrel->needs_redraw = 1;
+                                vga_mark_dirty_rect(wrel->x, wrel->y, wrel->w, wrel->h);
+                                g_tiles_full_content_redraw = 1;
+                            }
+                        }
+                    } else if (wrel->pressed_button == 3) {
+                        int bx, by, bw, bh; wm_get_min_rect(wrel, &bx, &by, &bw, &bh);
+                        if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
+                            wrel->minimized = !wrel->minimized;
+                            wrel->needs_redraw = 1;
+                            wrel->static_drawn = 0;
+                            if (wrel->minimized) g_win_focused = -1;
+                            int th2 = win_title_height(wrel); int sh2 = win_status_height(wrel);
+                            int cx2 = wrel->x + 1; int cy2 = wrel->y + th2 + sh2 + 1; int cw2 = wrel->w - 2; int ch2 = wrel->h - (th2 + sh2) - 2;
+                            if (cw2 > 0 && ch2 > 0) vga_mark_dirty_rect(cx2, cy2, cw2, ch2);
+                        }
+                    }
+                }
+
+                for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                    if (g_windows[wi].used && g_windows[wi].pressed_button) {
+                        g_windows[wi].pressed_button = 0;
+                        g_windows[wi].static_drawn = 0;
+                    }
+                }
+
+                for (int ti = 0; ti < tile_count; ++ti) {
+                    if (tiles[ti].pressed_button == 1 || tiles[ti].pressed_button == 2 || tiles[ti].pressed_button == 3) {
+                        int t_th = get_title_height(&tiles[ti]);
+                        int t_btn_side = 12;
+                        if (g_close_icon_loaded) {
+                            int iw2 = g_close_icon.header.width;
+                            int ih2 = g_close_icon.header.height;
+                            int m2 = (iw2 > ih2) ? iw2 : ih2;
+                            if (m2 > t_btn_side) t_btn_side = m2;
+                        }
+                        if (t_btn_side > t_th) t_btn_side = t_th;
+                        int t_btn_margin = 2, t_btn_gap = 2;
+                        int t_btn_pad_y = (t_th - t_btn_side) / 2;
+                        int t_close_bx = tiles[ti].x + tiles[ti].width - t_btn_side - t_btn_margin;
+                        int t_close_by = tiles[ti].y + t_btn_pad_y;
+                        int t_max_bx = t_close_bx - t_btn_side - t_btn_gap;
+                        int t_max_by = t_close_by;
+                        int t_min_bx = t_max_bx - t_btn_side - t_btn_gap;
+                        int t_min_by = t_close_by;
+
+                        int fire = 0;
+                        if (tiles[ti].pressed_button == 1 && point_in_rect(me.x, me.y, t_close_bx, t_close_by, t_btn_side, t_btn_side)) {
+                            tile_close(ti);
+                            layout_tiles();
+                            g_force_full_redraw = 1;
+                            fire = 1;
+                        } else if (tiles[ti].pressed_button == 2 && point_in_rect(me.x, me.y, t_max_bx, t_max_by, t_btn_side, t_btn_side)) {
+                            fullscreen_tile = -1;
+                            int taskbar_h_tile = vga_text_cell_h() + 6;
+                            if (taskbar_h_tile < 0) taskbar_h_tile = 0;
+                            if (taskbar_h_tile > screen_h - 32) taskbar_h_tile = screen_h - 32;
+                            if (!tiles[ti].maximized) {
+                                tiles[ti].prev_x = tiles[ti].x;
+                                tiles[ti].prev_y = tiles[ti].y;
+                                tiles[ti].prev_w = tiles[ti].width;
+                                tiles[ti].prev_h = tiles[ti].height;
+                                tiles[ti].x = 0;
+                                tiles[ti].y = taskbar_h_tile;
+                                tiles[ti].width = screen_w;
+                                tiles[ti].height = screen_h - taskbar_h_tile;
+                                tiles[ti].maximized = 1;
+                                tiles[ti].minimized = 0;
+                            } else {
+                                if (tiles[ti].prev_w > 0 && tiles[ti].prev_h > 0) {
+                                    tiles[ti].x = tiles[ti].prev_x;
+                                    tiles[ti].y = tiles[ti].prev_y;
+                                    tiles[ti].width = tiles[ti].prev_w;
+                                    tiles[ti].height = tiles[ti].prev_h;
+                                }
+                                tiles[ti].maximized = 0;
+                            }
+                            focused = ti;
+                            g_force_full_redraw = 1;
+                            fire = 1;
+                        } else if (tiles[ti].pressed_button == 3 && point_in_rect(me.x, me.y, t_min_bx, t_min_by, t_btn_side, t_btn_side)) {
+                            fullscreen_tile = -1;
+                            tiles[ti].minimized = 1;
+                            tiles[ti].maximized = 0;
+                            tile_ensure_valid_focus();
+                            g_force_full_redraw = 1;
+                            fire = 1;
+                        }
+
+                        tiles[ti].pressed_button = 0;
+                        tiles[ti].static_drawn = 0;
+                        if (fire) break;
+                    }
+                }
+
                 drag_active = 0; drag_win = -1;
                 resize_active = 0; resize_win = -1; resize_edges = 0;
                 tile_resize_active = 0; tile_resize_mode = 0;

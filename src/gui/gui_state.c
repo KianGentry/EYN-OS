@@ -54,6 +54,7 @@ typedef struct {
     int last_show_status;
     int minimized;
     int maximized;
+    int pressed_button;
     int prev_x, prev_y, prev_w, prev_h;
     int desktop;             /* which virtual desktop this tile belongs to */
 } tile_t;
@@ -392,13 +393,88 @@ static rei_image_t g_max_icon_unf;
 static int g_max_icon_unf_loaded = 0;
 
 // --- Runtime theme (tile/window chrome colours) ---
-// Materia-inspired gray palette: neutral mid-grays for chrome, white text/icons.
+// Classic gray palette with high-contrast beveled edges.
 static wm_theme_t g_wm_theme = {
-    .title_focused_r = 66, .title_focused_g = 66, .title_focused_b = 66,
-    .title_unfocused_r = 48, .title_unfocused_g = 48, .title_unfocused_b = 48,
-    .status_r = 38, .status_g = 38, .status_b = 38,
-    .status_text_r = 222, .status_text_g = 222, .status_text_b = 222,
+    .title_focused_r = 112, .title_focused_g = 112, .title_focused_b = 112,
+    .title_unfocused_r = 86, .title_unfocused_g = 86, .title_unfocused_b = 86,
+    .status_r = 74, .status_g = 74, .status_b = 74,
+    .status_text_r = 240, .status_text_g = 240, .status_text_b = 240,
 };
+
+static const int UI_SURFACE_R = 100;
+static const int UI_SURFACE_G = 100;
+static const int UI_SURFACE_B = 100;
+static const int UI_SURFACE_DARK_R = 84;
+static const int UI_SURFACE_DARK_G = 84;
+static const int UI_SURFACE_DARK_B = 84;
+static const int UI_HILITE_OUTER_R = 196;
+static const int UI_HILITE_OUTER_G = 196;
+static const int UI_HILITE_OUTER_B = 196;
+static const int UI_HILITE_INNER_R = 154;
+static const int UI_HILITE_INNER_G = 154;
+static const int UI_HILITE_INNER_B = 154;
+static const int UI_SHADOW_INNER_R = 60;
+static const int UI_SHADOW_INNER_G = 60;
+static const int UI_SHADOW_INNER_B = 60;
+static const int UI_SHADOW_OUTER_R = 34;
+static const int UI_SHADOW_OUTER_G = 34;
+static const int UI_SHADOW_OUTER_B = 34;
+static const int UI_TEXT_R = 240;
+static const int UI_TEXT_G = 240;
+static const int UI_TEXT_B = 240;
+static const int UI_TEXT_DIM_R = 206;
+static const int UI_TEXT_DIM_G = 206;
+static const int UI_TEXT_DIM_B = 206;
+
+static void draw_raised_box(int x, int y, int w, int h, int fill_r, int fill_g, int fill_b) {
+    if (w <= 0 || h <= 0) return;
+    drawRect(x, y, w, h, fill_r, fill_g, fill_b);
+    if (w < 2 || h < 2) return;
+
+    drawRect(x, y, w, 1, UI_HILITE_OUTER_R, UI_HILITE_OUTER_G, UI_HILITE_OUTER_B);
+    drawRect(x, y, 1, h, UI_HILITE_OUTER_R, UI_HILITE_OUTER_G, UI_HILITE_OUTER_B);
+    drawRect(x + w - 1, y, 1, h, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+    drawRect(x, y + h - 1, w, 1, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+
+    if (w >= 4 && h >= 4) {
+        drawRect(x + 1, y + 1, w - 2, 1, UI_HILITE_INNER_R, UI_HILITE_INNER_G, UI_HILITE_INNER_B);
+        drawRect(x + 1, y + 1, 1, h - 2, UI_HILITE_INNER_R, UI_HILITE_INNER_G, UI_HILITE_INNER_B);
+        drawRect(x + w - 2, y + 1, 1, h - 2, UI_SHADOW_INNER_R, UI_SHADOW_INNER_G, UI_SHADOW_INNER_B);
+        drawRect(x + 1, y + h - 2, w - 2, 1, UI_SHADOW_INNER_R, UI_SHADOW_INNER_G, UI_SHADOW_INNER_B);
+    }
+}
+
+static void draw_sunken_box(int x, int y, int w, int h, int fill_r, int fill_g, int fill_b) {
+    if (w <= 0 || h <= 0) return;
+    drawRect(x, y, w, h, fill_r, fill_g, fill_b);
+    if (w < 2 || h < 2) return;
+
+    drawRect(x, y, w, 1, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+    drawRect(x, y, 1, h, UI_SHADOW_OUTER_R, UI_SHADOW_OUTER_G, UI_SHADOW_OUTER_B);
+    drawRect(x + w - 1, y, 1, h, UI_HILITE_OUTER_R, UI_HILITE_OUTER_G, UI_HILITE_OUTER_B);
+    drawRect(x, y + h - 1, w, 1, UI_HILITE_OUTER_R, UI_HILITE_OUTER_G, UI_HILITE_OUTER_B);
+
+    if (w >= 4 && h >= 4) {
+        drawRect(x + 1, y + 1, w - 2, 1, UI_SHADOW_INNER_R, UI_SHADOW_INNER_G, UI_SHADOW_INNER_B);
+        drawRect(x + 1, y + 1, 1, h - 2, UI_SHADOW_INNER_R, UI_SHADOW_INNER_G, UI_SHADOW_INNER_B);
+        drawRect(x + w - 2, y + 1, 1, h - 2, UI_HILITE_INNER_R, UI_HILITE_INNER_G, UI_HILITE_INNER_B);
+        drawRect(x + 1, y + h - 2, w - 2, 1, UI_HILITE_INNER_R, UI_HILITE_INNER_G, UI_HILITE_INNER_B);
+    }
+}
+
+static void draw_button_box(int x, int y, int w, int h, int pressed, int fill_r, int fill_g, int fill_b) {
+    int hovered = (cursor_prev_x >= x && cursor_prev_x < x + w && cursor_prev_y >= y && cursor_prev_y < y + h);
+    if (pressed) {
+        draw_sunken_box(x, y, w, h, fill_r, fill_g, fill_b);
+    } else if (hovered) {
+        int hr = fill_r + 12; if (hr > 255) hr = 255;
+        int hg = fill_g + 12; if (hg > 255) hg = 255;
+        int hb = fill_b + 12; if (hb > 255) hb = 255;
+        draw_raised_box(x, y, w, h, hr, hg, hb);
+    } else {
+        draw_raised_box(x, y, w, h, fill_r, fill_g, fill_b);
+    }
+}
 
 void wm_theme_get(wm_theme_t* out) {
     if (!out) return;
@@ -413,10 +489,10 @@ void wm_theme_set(const wm_theme_t* in) {
 }
 
 void wm_theme_reset_defaults(void) {
-    g_wm_theme.title_focused_r = 66; g_wm_theme.title_focused_g = 66; g_wm_theme.title_focused_b = 66;
-    g_wm_theme.title_unfocused_r = 48; g_wm_theme.title_unfocused_g = 48; g_wm_theme.title_unfocused_b = 48;
-    g_wm_theme.status_r = 38; g_wm_theme.status_g = 38; g_wm_theme.status_b = 38;
-    g_wm_theme.status_text_r = 222; g_wm_theme.status_text_g = 222; g_wm_theme.status_text_b = 222;
+    g_wm_theme.title_focused_r = 112; g_wm_theme.title_focused_g = 112; g_wm_theme.title_focused_b = 112;
+    g_wm_theme.title_unfocused_r = 86; g_wm_theme.title_unfocused_g = 86; g_wm_theme.title_unfocused_b = 86;
+    g_wm_theme.status_r = 74; g_wm_theme.status_g = 74; g_wm_theme.status_b = 74;
+    g_wm_theme.status_text_r = 240; g_wm_theme.status_text_g = 240; g_wm_theme.status_text_b = 240;
     g_force_full_redraw = 1;
 }
 
@@ -431,6 +507,26 @@ typedef struct {
     uint8_t local_darken; // 1=darken only behind visible terminal text cells instead of the whole background
 } tile_bg_t;
 static tile_bg_t g_tile_bg[MAX_TILES];
+static int g_desktop_bg_tile_idx = -1;
+
+void tile_desktop_background_set(int tile_idx) {
+    if (tile_idx < 0 || tile_idx >= MAX_TILES) return;
+    g_desktop_bg_tile_idx = tile_idx;
+}
+
+void tile_desktop_background_clear(int tile_idx) {
+    if (tile_idx < 0 || tile_idx >= MAX_TILES) return;
+    if (g_desktop_bg_tile_idx == tile_idx) g_desktop_bg_tile_idx = -1;
+}
+
+void tile_desktop_background_remap(int old_idx, int new_idx) {
+    if (old_idx < 0 || old_idx >= MAX_TILES || new_idx < 0 || new_idx >= MAX_TILES) return;
+    if (g_desktop_bg_tile_idx == old_idx) {
+        g_desktop_bg_tile_idx = new_idx;
+    } else if (g_desktop_bg_tile_idx > old_idx) {
+        g_desktop_bg_tile_idx--;
+    }
+}
 
 // GCC -fanalyzer can miss that some allocations intentionally escape via
 // struct fields. Keep a volatile escape sink so the analyzer treats these
@@ -493,6 +589,100 @@ static inline uint8_t rgb_luma(uint8_t r8, uint8_t g8, uint8_t b8) {
     return (uint8_t)((77*r8 + 150*g8 + 29*b8) >> 8);
 }
 
+static void draw_desktop_background(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    if (g_desktop_bg_tile_idx >= 0 && g_desktop_bg_tile_idx < MAX_TILES) {
+        tile_bg_t* bg = &g_tile_bg[g_desktop_bg_tile_idx];
+        if (bg->img && bg->img->data && bg->mode != BG_NONE) {
+            const rei_image_t* im = bg->img;
+            int iw = im->header.width;
+            int ih = im->header.height;
+            int depth = im->header.depth;
+            const uint8_t* base = im->data;
+            if (iw > 0 && ih > 0) {
+                if (bg->mode == BG_TILE) {
+                    for (int yy = 0; yy < h; ++yy) {
+                        int sy = yy % ih;
+                        const uint8_t* row = base + sy * iw * depth;
+                        int py = y + yy;
+                        for (int xx = 0; xx < w; ++xx) {
+                            int sx = xx % iw;
+                            int px = x + xx;
+                            if (depth == REI_DEPTH_MONO) {
+                                uint8_t v = row[sx];
+                                apply_darken(&v, &v, &v, bg->darken);
+                                drawPixel(px, py, v, v, v);
+                            } else if (depth == REI_DEPTH_RGB) {
+                                const uint8_t* p = row + sx * 3;
+                                uint8_t r8 = p[0], g8 = p[1], b8 = p[2];
+                                apply_darken(&r8, &g8, &b8, bg->darken);
+                                drawPixel(px, py, r8, g8, b8);
+                            } else if (depth == REI_DEPTH_RGBA) {
+                                const uint8_t* p = row + sx * 4;
+                                if (p[3] >= 128) {
+                                    uint8_t r8 = p[0], g8 = p[1], b8 = p[2];
+                                    apply_darken(&r8, &g8, &b8, bg->darken);
+                                    drawPixel(px, py, r8, g8, b8);
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+                if (bg->mode == BG_CENTER || bg->mode == BG_SCALE) {
+                    int draw_w = iw;
+                    int draw_h = ih;
+                    if (bg->mode == BG_SCALE) {
+                        int sx_num = w, sx_den = iw;
+                        int sy_num = h, sy_den = ih;
+                        int use_x = ((long long)sx_num * sy_den <= (long long)sy_num * sx_den);
+                        int num = use_x ? sx_num : sy_num;
+                        int den = use_x ? sx_den : sy_den;
+                        if (den > 0 && num > 0) {
+                            draw_w = (iw * num) / den;
+                            draw_h = (ih * num) / den;
+                        }
+                    }
+                    int ox = x + (w - draw_w) / 2;
+                    int oy = y + (h - draw_h) / 2;
+                    for (int yy = 0; yy < draw_h; ++yy) {
+                        int sy = (bg->mode == BG_SCALE) ? ((yy * ih) / draw_h) : yy;
+                        if (sy < 0 || sy >= ih) continue;
+                        const uint8_t* row = base + sy * iw * depth;
+                        int py = oy + yy;
+                        if (py < y || py >= y + h) continue;
+                        for (int xx = 0; xx < draw_w; ++xx) {
+                            int sx = (bg->mode == BG_SCALE) ? ((xx * iw) / draw_w) : xx;
+                            if (sx < 0 || sx >= iw) continue;
+                            int px = ox + xx;
+                            if (px < x || px >= x + w) continue;
+                            if (depth == REI_DEPTH_MONO) {
+                                uint8_t v = row[sx];
+                                apply_darken(&v, &v, &v, bg->darken);
+                                drawPixel(px, py, v, v, v);
+                            } else if (depth == REI_DEPTH_RGB) {
+                                const uint8_t* p = row + sx * 3;
+                                uint8_t r8 = p[0], g8 = p[1], b8 = p[2];
+                                apply_darken(&r8, &g8, &b8, bg->darken);
+                                drawPixel(px, py, r8, g8, b8);
+                            } else if (depth == REI_DEPTH_RGBA) {
+                                const uint8_t* p = row + sx * 4;
+                                if (p[3] >= 128) {
+                                    uint8_t r8 = p[0], g8 = p[1], b8 = p[2];
+                                    apply_darken(&r8, &g8, &b8, bg->darken);
+                                    drawPixel(px, py, r8, g8, b8);
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+    drawRect(x, y, w, h, UI_SURFACE_DARK_R, UI_SURFACE_DARK_G, UI_SURFACE_DARK_B);
+}
+
 // Rectangle intersection helper (used widely; keep it early for prototypes)
 static inline int rects_intersect(int ax, int ay, int aw, int ah, int bx, int by, int bw, int bh) {
     if (aw <= 0 || ah <= 0 || bw <= 0 || bh <= 0) return 0;
@@ -535,6 +725,7 @@ typedef struct {
     // state
     int minimized;
     int maximized;
+    int pressed_button;
     int prev_x, prev_y, prev_w, prev_h; // for restore after maximize
     int desktop;             // which virtual desktop this window belongs to
 } window_t;

@@ -14,10 +14,39 @@ int tile_begin_set_background_from_rei(int tile_idx, rei_image_t* image) {
     return 0;
 }
 
+int tile_set_background_from_image(int tile_idx, rei_image_t* image, int mode) {
+    if (tile_idx < 0 || tile_idx >= MAX_TILES || !image) return -1;
+
+    if (mode != BG_TILE && mode != BG_SCALE && mode != BG_CENTER) {
+        mode = BG_SCALE;
+    }
+
+    if (g_tile_bg[tile_idx].img) {
+        rei_free_image(g_tile_bg[tile_idx].img);
+        free(g_tile_bg[tile_idx].img);
+        g_tile_bg[tile_idx].img = NULL;
+    }
+
+    g_tile_bg[tile_idx].img = image;
+    if (g_tile_bg[tile_idx].img && g_tile_bg[tile_idx].img->header.depth == REI_DEPTH_RGBA) {
+        bg_convert_rgba_to_rgb(g_tile_bg[tile_idx].img);
+    }
+    g_tile_bg[tile_idx].mode = (bg_mode_t)mode;
+    g_tile_bg[tile_idx].darken = 16;
+    g_tile_bg[tile_idx].adapt_text = 0;
+    g_tile_bg[tile_idx].text_shadow = 1;
+    g_tile_bg[tile_idx].local_darken = 1;
+    tile_desktop_background_set(tile_idx);
+    g_tiles_full_content_redraw = 1;
+    g_force_full_redraw = 1;
+    return 0;
+}
+
 void tile_clear_background(int tile_idx) {
     if (tile_idx < 0 || tile_idx >= MAX_TILES) return;
     if (g_tile_bg[tile_idx].img) { rei_free_image(g_tile_bg[tile_idx].img); free(g_tile_bg[tile_idx].img); g_tile_bg[tile_idx].img = NULL; }
     g_tile_bg[tile_idx].mode = BG_NONE; g_tile_bg[tile_idx].darken = 0; g_tile_bg[tile_idx].adapt_text = 0; g_tile_bg[tile_idx].text_shadow = 0; g_tile_bg[tile_idx].local_darken = 0;
+    tile_desktop_background_clear(tile_idx);
     g_tiles_full_content_redraw = 1;
 }
 
@@ -78,6 +107,9 @@ void tile_close(int tile_idx) {
             gui_key_cb[i] = gui_key_cb[old_idx];
             gui_userdata[i] = gui_userdata[old_idx];
             gui_needs_redraw[i] = gui_needs_redraw[old_idx];
+            g_tile_bg[i] = g_tile_bg[old_idx];
+            memset(&g_tile_bg[old_idx], 0, sizeof(g_tile_bg[old_idx]));
+            tile_desktop_background_remap(old_idx, i);
             gui_draw_cb[old_idx] = NULL;
             gui_key_cb[old_idx] = NULL;
             gui_userdata[old_idx] = NULL;
@@ -263,8 +295,8 @@ void tile_render_once(void) {
     g_force_full_redraw = 1;
     g_tiles_full_content_redraw = 1;
 
-    // Paint desktop background first so exposed regions never leave trails.
-    drawRect(0, 0, screen_w, screen_h, 38, 38, 38);
+    // Paint the same desktop background used by the main compositor path.
+    draw_desktop_background(0, 0, screen_w, screen_h);
     vga_mark_dirty_rect(0, 0, screen_w, screen_h);
 
     // Draw tiles.

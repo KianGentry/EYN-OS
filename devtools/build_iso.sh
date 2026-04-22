@@ -124,6 +124,17 @@ find_grub_platform_dir() {
   return 1
 }
 
+find_grub_boot_hybrid_img() {
+  local platform_dir
+  if platform_dir="$(find_grub_platform_dir i386-pc 2>/dev/null)"; then
+    if [[ -f "${platform_dir}/boot_hybrid.img" ]]; then
+      echo "${platform_dir}/boot_hybrid.img"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 
 # If the system has a partial/broken x86_64-efi directory (e.g. contains only *.efi,
 # missing moddep.lst/modules), grub2-mkrescue errors out even for BIOS/QEMU use.
@@ -136,6 +147,11 @@ if grub_i386_dir="$(find_grub_platform_dir i386-pc 2>/dev/null)"; then
     echo "Note: Detected incomplete GRUB x86_64-efi; forcing BIOS-only build using ${grub_i386_dir}." >&2
     mkrescue_dir_arg=(--directory="${grub_i386_dir}")
   fi
+fi
+
+grub_boot_hybrid_img=""
+if ! grub_boot_hybrid_img="$(find_grub_boot_hybrid_img 2>/dev/null)"; then
+  echo "Warning: Could not locate boot_hybrid.img; xorriso EFI-strip rebuild may fail." >&2
 fi
 
 run_mkrescue() {
@@ -168,7 +184,7 @@ ls -lh "${ISO_OUT}"
 
 echo "Attempting to strip EFI content (optional)..."
 # Skip EFI cleanup if sudo isn't available non-interactively; the ISO from grub2-mkrescue works fine for QEMU.
-if sudo -n true 2>/dev/null; then
+if sudo -n true 2>/dev/null && [[ -n "${grub_boot_hybrid_img}" ]]; then
   echo "Cleaning ISO EFI content with sudo..."
   iso_edit_dir="$(mktemp -d "${TMP_ROOT}/iso_edit.XXXXXX")"
   iso_clean_dir="$(mktemp -d "${TMP_ROOT}/iso_clean.XXXXXX")"
@@ -185,12 +201,12 @@ if sudo -n true 2>/dev/null; then
 
   TMPDIR="${TMP_ROOT}" xorriso -as mkisofs -o "${ISO_OUT}" \
     -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table \
-    --grub2-boot-info --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
+    --grub2-boot-info --grub2-mbr "${grub_boot_hybrid_img}" \
     -r -V "EYN-OS" -iso-level 3 -joliet-long "${iso_clean_dir}"
 
   echo "EFI content stripped from ISO."
 else
-  echo "Skipping EFI cleanup (no sudo available). Using original grub2-mkrescue ISO."
+  echo "Skipping EFI cleanup (no sudo available or boot_hybrid.img missing). Using original grub2-mkrescue ISO."
 fi
 
 echo "ISO ready: EYNOS.iso"

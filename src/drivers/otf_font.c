@@ -1,6 +1,7 @@
 #include <drivers/otf_font.h>
 
 #include <fs/vfs.h>
+#include <mm/vmm.h>
 #include <util.h>
 #include <watchdog.h>
 
@@ -118,7 +119,8 @@ static double otf_local_pow(double x, double y) {
  * Disk-format-sensitive: No.
  * Security-critical: Yes (bounds allocation and parser input size).
  */
-#define OTF_FONT_MAX_FILE_BYTES (2u * 1024u * 1024u)
+#define OTF_FONT_MAX_FILE_BYTES (32u * 1024u * 1024u)
+#define OTF_FONT_HEAP_BUFFER_LIMIT (1024u * 1024u)
 
 /*
  * SECURITY-INVARIANT: Rasterizer only emits 8-pixel-wide rows because the
@@ -143,17 +145,58 @@ static double otf_local_pow(double x, double y) {
 #define OTF_GLYPH_H_MAX 64
 #define OTF_GLYPH_W_MAX 64
 
-static int otf_font_read_all(uint8 drive, const char* path, uint8** out_data, uint32* out_size) {
-    if (!path || !out_data || !out_size) return -1;
+typedef enum {
+    OTF_BUF_NONE = 0,
+    OTF_BUF_HEAP = 1,
+    OTF_BUF_CONTIG_FRAMES = 2,
+} otf_buf_kind_t;
+
+static void otf_font_free_buffer(uint8* data, otf_buf_kind_t kind, uint32 pages) {
+    if (!data) return;
+    if (kind == OTF_BUF_HEAP) {
+        free(data);
+        return;
+    }
+    if (kind == OTF_BUF_CONTIG_FRAMES) {
+        uint32 va = (uint32)(uintptr)data;
+        if (va < KERNEL_BASE || pages == 0) return;
+        uint32 phys = va - KERNEL_BASE;
+        for (uint32 i = 0; i < pages; ++i) {
+            frame_free(phys + (i * PAGE_SIZE));
+        }
+    }
+}
+
+static int otf_font_read_all(uint8 drive, const char* path, uint8** out_data, uint32* out_size, otf_buf_kind_t* out_kind, uint32* out_pages) {
+    if (!path || !out_data || !out_size || !out_kind || !out_pages) return -1;
     *out_data = NULL;
     *out_size = 0;
+    *out_kind = OTF_BUF_NONE;
+    *out_pages = 0;
 
     uint32 size = 0;
     if (vfs_get_file_size(drive, path, &size) != 0) return -1;
     if (size == 0 || size > OTF_FONT_MAX_FILE_BYTES) return -1;
 
-    uint8* data = (uint8*)malloc((size_t)size);
-    if (!data) return -1;
+    uint8* data = NULL;
+    otf_buf_kind_t kind = OTF_BUF_NONE;
+    uint32 pages = 0;
+
+    if (size > OTF_FONT_HEAP_BUFFER_LIMIT) {
+        pages = (size + PAGE_SIZE - 1u) / PAGE_SIZE;
+        uint32 phys = frame_alloc_contiguous(pages);
+        if (phys != 0) {
+            data = (uint8*)(uintptr)(KERNEL_BASE + phys);
+            kind = OTF_BUF_CONTIG_FRAMES;
+        }
+    }
+
+    if (!data) {
+        data = (uint8*)malloc((size_t)size);
+        if (!data) return -1;
+        kind = OTF_BUF_HEAP;
+        pages = 0;
+    }
 
     uint32 off = 0;
     uint32 kick_next_off = 0;
@@ -162,7 +205,7 @@ static int otf_font_read_all(uint8 drive, const char* path, uint8** out_data, ui
         if (to_read > 4096) to_read = 4096;
         int n = vfs_read_file_at(drive, path, (char*)(data + off), to_read, off);
         if (n <= 0) {
-            free(data);
+            otf_font_free_buffer(data, kind, pages);
             return -1;
         }
         off += (uint32)n;
@@ -174,6 +217,8 @@ static int otf_font_read_all(uint8 drive, const char* path, uint8** out_data, ui
 
     *out_data = data;
     *out_size = size;
+    *out_kind = kind;
+    *out_pages = pages;
     return 0;
 }
 
@@ -186,7 +231,9 @@ int otf_font_rasterize_mono_from_vfs(uint8 drive, const char* path, int glyph_h,
 
     uint8* data = NULL;
     uint32 size = 0;
-    if (otf_font_read_all(drive, path, &data, &size) != 0) return -1;
+    otf_buf_kind_t buf_kind = OTF_BUF_NONE;
+    uint32 buf_pages = 0;
+    if (otf_font_read_all(drive, path, &data, &size, &buf_kind, &buf_pages) != 0) return -1;
 
     int rc = -1;
     stbtt_fontinfo font;
@@ -258,7 +305,8 @@ int otf_font_rasterize_mono_from_vfs(uint8 drive, const char* path, int glyph_h,
             for (int px = 0; px < bw; ++px) {
                 int cell_x = px;
                 if (cell_x < 0 || cell_x >= draw_w) continue;
-                if (src_row[px] >= 128u) {
+                // A lower threshold preserves thin strokes at small pixel sizes.
+                if (src_row[px] >= 64u) {
                     glyph_rows[cell_y] |= (uint64_t)1uLL << (63u - (unsigned)cell_x);
                     any_on = 1;
                 }
@@ -273,6 +321,8 @@ int otf_font_rasterize_mono_from_vfs(uint8 drive, const char* path, int glyph_h,
     rc = 0;
 
 out:
-    if (data) free(data);
+    if (data) {
+        otf_font_free_buffer(data, buf_kind, buf_pages);
+    }
     return rc;
 }

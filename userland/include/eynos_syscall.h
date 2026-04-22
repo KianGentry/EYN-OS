@@ -797,6 +797,10 @@ static inline int eyn_sys_setbg_path(const char* path) {
     return eyn_syscall1(EYN_SYSCALL_SETBG_PATH, (int)(uintptr_t)path);
 }
 
+static inline int eyn_sys_setbg_path_mode(const char* path, int mode) {
+    return eyn_syscall3_pii(EYN_SYSCALL_SETBG_PATH, path, mode, 0);
+}
+
 static inline int eyn_sys_clearbg_focused(void) {
     return eyn_syscall0(EYN_SYSCALL_CLEARBG_FOCUSED);
 }
