@@ -18,6 +18,14 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 #define USER_TASK_WAIT_NOHANG 1
 
 int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char* const* argv);
+int user_task_spawn_argv_stdio(uint8 drive,
+							   const char* abspath,
+							   int argc,
+							   const char* const* argv,
+							   int stdin_fd,
+							   int stdout_fd,
+							   int stderr_fd,
+							   int inherit_mode);
 int user_task_waitpid(int pid, int* out_status, int flags);
 
 // Record completion status for the currently running spawned user task.

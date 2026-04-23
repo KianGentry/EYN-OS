@@ -598,6 +598,8 @@ uint32 get_last_error_eip() {
 #define SYSCALL_TTY_SET_WINSIZE 147
 #define SYSCALL_TTY_GET_WINSIZE 148
 #define SYSCALL_PTY_OPEN 149
+#define SYSCALL_SPAWN_EX 150
+#define SYSCALL_FD_GET_STDIO 151
 
 #define TTY_MODE_RAW 0x0001
 
@@ -1453,6 +1455,12 @@ void syscall_reset_user_stdio_fds(void) {
     g_user_stdio_stdin_fd = 0;
     g_user_stdio_stdout_fd = 1;
     g_user_stdio_stderr_fd = 2;
+}
+
+void syscall_get_user_stdio_fds(int* stdin_fd, int* stdout_fd, int* stderr_fd) {
+    if (stdin_fd) *stdin_fd = g_user_stdio_stdin_fd;
+    if (stdout_fd) *stdout_fd = g_user_stdio_stdout_fd;
+    if (stderr_fd) *stderr_fd = g_user_stdio_stderr_fd;
 }
 
 int syscall_kernel_close_user_fd(int fd) {
@@ -4627,6 +4635,21 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             regs->eax = 0;
             break;
         }
+        case SYSCALL_FD_GET_STDIO: {
+            int* user_stdio = (int*)arg1;
+            if (!user_stdio) { regs->eax = (uint32)-1; break; }
+
+            int out[3];
+            out[0] = g_user_stdio_stdin_fd;
+            out[1] = g_user_stdio_stdout_fd;
+            out[2] = g_user_stdio_stderr_fd;
+            if (copyout(user_stdio, out, sizeof(out)) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            regs->eax = 0;
+            break;
+        }
         case SYSCALL_FD_SET_NONBLOCK: {
             int fd = (int)arg1;
             int enabled = (int)arg2;
@@ -4677,6 +4700,87 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             resolve_path(path, cwd, abspath, sizeof(abspath));
 
             int pid = user_task_spawn_argv(g_current_drive, abspath, kargc, kargv);
+            regs->eax = (pid > 0) ? (uint32)pid : (uint32)-1;
+            break;
+        }
+        case SYSCALL_SPAWN_EX: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+
+            typedef struct {
+                uint32 path;
+                uint32 argv;
+                int32 argc;
+                int32 stdin_fd;
+                int32 stdout_fd;
+                int32 stderr_fd;
+                int32 inherit_mode;
+            } syscall_spawn_ex_req_u32_t;
+
+            const syscall_spawn_ex_req_u32_t* user_req = (const syscall_spawn_ex_req_u32_t*)arg1;
+            if (!user_req) { regs->eax = (uint32)-1; break; }
+
+            syscall_spawn_ex_req_u32_t req;
+            if (copyin(&req, user_req, sizeof(req)) != 0) { regs->eax = (uint32)-1; break; }
+            if (!req.path || req.argc < 0) { regs->eax = (uint32)-1; break; }
+            if (req.argc > 0 && !req.argv) { regs->eax = (uint32)-1; break; }
+
+            if (req.stdin_fd < 0 || req.stdin_fd >= USER_FD_MAX ||
+                req.stdout_fd < 0 || req.stdout_fd >= USER_FD_MAX ||
+                req.stderr_fd < 0 || req.stderr_fd >= USER_FD_MAX) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            if (req.stdin_fd > 2 && !user_fd_get(req.stdin_fd)) { regs->eax = (uint32)-1; break; }
+            if (req.stdout_fd > 2 && !user_fd_get(req.stdout_fd)) { regs->eax = (uint32)-1; break; }
+            if (req.stderr_fd > 2 && !user_fd_get(req.stderr_fd)) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), (const char*)(uintptr)req.path) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            const int max_args = 16;
+            const int max_arg_len = 64;
+            char arg_buf[16][64];
+            const char* kargv[16];
+            int kargc = 0;
+
+            int argc = (int)req.argc;
+            if (argc > max_args) argc = max_args;
+            const char* const* user_argv = (const char* const*)(uintptr)req.argv;
+            for (int i = 0; i < argc; ++i) {
+                const char* user_arg_ptr = NULL;
+                if (copyin(&user_arg_ptr, user_argv + i, sizeof(user_arg_ptr)) != 0) {
+                    regs->eax = (uint32)-1;
+                    return regs->eax;
+                }
+                if (!user_arg_ptr) continue;
+                if (copyin_cstr(arg_buf[kargc], (size_t)max_arg_len, user_arg_ptr) != 0) {
+                    regs->eax = (uint32)-1;
+                    return regs->eax;
+                }
+                kargv[kargc] = arg_buf[kargc];
+                kargc++;
+            }
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                const char* t = vterm_get_cwd(g_user_task_term);
+                if (t && t[0] == '/') cwd = t;
+            }
+
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            int pid = user_task_spawn_argv_stdio(g_current_drive,
+                                                 abspath,
+                                                 kargc,
+                                                 kargv,
+                                                 (int)req.stdin_fd,
+                                                 (int)req.stdout_fd,
+                                                 (int)req.stderr_fd,
+                                                 req.inherit_mode ? 1 : 0);
             regs->eax = (pid > 0) ? (uint32)pid : (uint32)-1;
             break;
         }

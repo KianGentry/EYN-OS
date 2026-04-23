@@ -621,6 +621,10 @@ typedef struct {
     uint8 mlfq_level;
     uint8 in_runq;
     uint16 _pad0;
+    int fd_inherit_mode;
+    int stdin_fd;
+    int stdout_fd;
+    int stderr_fd;
     int runq_next;
     uint32 mlfq_slice_left;
     user_task_runtime_t runtime;
@@ -871,6 +875,18 @@ static void user_task_image_free(user_task_image_t* image) {
     free(image);
 }
 
+static void user_task_capture_stdio_state(user_task_slot_t* slot) {
+    if (!slot) return;
+    slot->fd_inherit_mode = syscall_get_user_fd_inherit_mode();
+    syscall_get_user_stdio_fds(&slot->stdin_fd, &slot->stdout_fd, &slot->stderr_fd);
+}
+
+static void user_task_apply_stdio_state(const user_task_slot_t* slot) {
+    if (!slot) return;
+    syscall_set_user_fd_inherit_mode(slot->fd_inherit_mode ? 1 : 0);
+    syscall_set_user_stdio_fds(slot->stdin_fd, slot->stdout_fd, slot->stderr_fd);
+}
+
 static int user_task_launch_slot(user_task_slot_t* slot) {
     if (!slot || !slot->image) return -1;
 
@@ -890,6 +906,7 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
     slot->syscall_frame_generation = 0;
     g_user_task_active_slot = slot;
     g_user_task_pending_pid = slot->pid;
+    user_task_apply_stdio_state(slot);
 
     int rc = user_elf_run_argv(slot->image->drive,
                                slot->image->path,
@@ -1238,6 +1255,7 @@ int user_task_try_preempt_from_irq(void* frame) {
 
     regs_t live_regs;
     user_task_regs_from_irq_frame((const user_task_irq_frame64_t*)frame, &live_regs);
+    user_task_capture_stdio_state(current);
     current->last_syscall_frame = live_regs;
     current->has_syscall_frame = 1;
     current->syscall_frame_generation = g_user_task_runtime_generation;
@@ -1254,6 +1272,7 @@ int user_task_try_preempt_from_irq(void* frame) {
     }
 
     user_task_regs_to_irq_frame((user_task_irq_frame64_t*)frame, &target->last_syscall_frame);
+    user_task_apply_stdio_state(target);
     target->state = USER_TASK_STATE_RUNNING;
     g_user_task_active_slot = target;
     g_user_task_running_pid = target->pid;
@@ -1285,6 +1304,7 @@ int user_task_try_preempt_from_irq(void* frame) {
 
     regs_t live_regs;
     user_task_regs_from_irq_frame((const user_task_irq_frame32_t*)frame, &live_regs);
+    user_task_capture_stdio_state(current);
     current->last_syscall_frame = live_regs;
     current->has_syscall_frame = 1;
     current->syscall_frame_generation = g_user_task_runtime_generation;
@@ -1301,6 +1321,7 @@ int user_task_try_preempt_from_irq(void* frame) {
     }
 
     user_task_regs_to_irq_frame((user_task_irq_frame32_t*)frame, &target->last_syscall_frame);
+    user_task_apply_stdio_state(target);
     target->state = USER_TASK_STATE_RUNNING;
     g_user_task_active_slot = target;
     g_user_task_running_pid = target->pid;
@@ -1350,6 +1371,7 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
 
     if (!target) return 0;
 
+    user_task_capture_stdio_state(current);
     current->last_syscall_frame = *regs;
     current->has_syscall_frame = 1;
     current->syscall_frame_generation = g_user_task_runtime_generation;
@@ -1366,6 +1388,7 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
     }
 
     *regs = target->last_syscall_frame;
+    user_task_apply_stdio_state(target);
     target->state = USER_TASK_STATE_RUNNING;
     g_user_task_active_slot = target;
     g_user_task_running_pid = target->pid;
@@ -1393,6 +1416,7 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
     slot->in_runq = 0;
     slot->runq_next = -1;
+    user_task_capture_stdio_state(slot);
     if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
 
     if (sched_mlfq_is_enabled()) {
@@ -1406,6 +1430,59 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
      * - If a task is active, leave this slot queued; abort continuation will
      *   launch it when the current task exits.
      */
+    if (!g_user_task_active) {
+        if (sched_mlfq_is_enabled()) {
+            (void)user_task_continue_or_schedule();
+        } else {
+            if (user_task_launch_slot(slot) != 0) {
+                return slot->pid;
+            }
+        }
+    } else {
+        user_task_request_schedule();
+    }
+
+    return slot->pid;
+}
+
+int user_task_spawn_argv_stdio(uint8 drive,
+                               const char* abspath,
+                               int argc,
+                               const char* const* argv,
+                               int stdin_fd,
+                               int stdout_fd,
+                               int stderr_fd,
+                               int inherit_mode) {
+    user_task_slot_t* slot = user_task_alloc_slot();
+    if (!slot) return -1;
+
+    user_task_image_t* image = user_task_image_build(drive, abspath, argc, argv);
+    if (!image) return -1;
+
+    memset(slot, 0, sizeof(*slot));
+    slot->used = 1;
+    slot->pid = g_user_task_next_pid++;
+    slot->image = image;
+    slot->state = USER_TASK_STATE_RUNNABLE;
+    slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->wake_tick = 0;
+    slot->block_reason = USER_TASK_BLOCK_NONE;
+    slot->mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
+    slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
+    slot->in_runq = 0;
+    slot->runq_next = -1;
+    slot->fd_inherit_mode = inherit_mode ? 1 : 0;
+    slot->stdin_fd = stdin_fd;
+    slot->stdout_fd = stdout_fd;
+    slot->stderr_fd = stderr_fd;
+    if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
+
+    if (sched_mlfq_is_enabled()) {
+        user_task_runq_bootstrap();
+        user_task_runq_enqueue(slot);
+    }
+
     if (!g_user_task_active) {
         if (sched_mlfq_is_enabled()) {
             (void)user_task_continue_or_schedule();
@@ -1538,6 +1615,10 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
     slot->in_runq = 0;
     slot->runq_next = -1;
+    slot->fd_inherit_mode = 0;
+    slot->stdin_fd = 0;
+    slot->stdout_fd = 1;
+    slot->stderr_fd = 2;
     slot->has_syscall_frame = 0;
     slot->syscall_frame_generation = 0;
     user_task_request_schedule();

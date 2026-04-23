@@ -80,6 +80,7 @@ int syscall_get_user_fd_inherit_mode(void);
 // Configure fd numbers backing user stdin/stdout/stderr for the next/active task.
 void syscall_set_user_stdio_fds(int stdin_fd, int stdout_fd, int stderr_fd);
 void syscall_reset_user_stdio_fds(void);
+void syscall_get_user_stdio_fds(int* stdin_fd, int* stdout_fd, int* stderr_fd);
 
 // Kernel-side helpers for creating/closing user FD entries for shell plumbing.
 int syscall_kernel_pipe_create(int* out_read_fd, int* out_write_fd);

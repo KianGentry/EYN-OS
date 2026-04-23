@@ -101,6 +101,7 @@ enum {
     EYN_SYSCALL_FD_SET_NONBLOCK = 130,
     EYN_SYSCALL_SPAWN = 131,
     EYN_SYSCALL_WAITPID = 132,
+    EYN_SYSCALL_SPAWN_EX = 150,
     EYN_SYSCALL_GUI_LOAD_FONT = 137,
     EYN_SYSCALL_GUI_DRAW_TEXT_FONT = 138,
     EYN_SYSCALL_GUI_DRAW_CHAR_FONT = 139,
@@ -117,6 +118,16 @@ typedef struct {
     uint16_t rows;
     uint16_t cols;
 } eyn_tty_winsize_t;
+
+typedef struct {
+    const char* path;
+    const char* const* argv;
+    int argc;
+    int stdin_fd;
+    int stdout_fd;
+    int stderr_fd;
+    int inherit_mode;
+} eyn_spawn_ex_req_t;
 
 enum {
     EYN_CAP_OBJ_USER_FD = 1,
@@ -217,6 +228,17 @@ static inline int eyn_sys_pty_open(int out_fds[2]) {
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_PTY_OPEN), "b"(out_fds)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_spawn_ex(const eyn_spawn_ex_req_t* req) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_SPAWN_EX), "b"(req)
         : "memory"
     );
     return ret;

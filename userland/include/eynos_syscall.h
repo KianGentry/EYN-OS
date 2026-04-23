@@ -268,6 +268,8 @@ enum {
     EYN_SYSCALL_SPAWN = 131,
     // Wait for a spawned PID: args (int pid, int* out_status, int flags)
     EYN_SYSCALL_WAITPID = 132,
+    // Spawn with explicit stdio/inherit snapshot: args (spawn_ex_req_t* req)
+    EYN_SYSCALL_SPAWN_EX = 150,
 
     // Installer disk management syscalls
     EYN_SYSCALL_INSTALLER_PREPARE_DRIVE = 133,
@@ -311,6 +313,16 @@ typedef struct {
     uint16_t rows;
     uint16_t cols;
 } eyn_tty_winsize_t;
+
+typedef struct {
+    const char* path;
+    const char* const* argv;
+    int argc;
+    int stdin_fd;
+    int stdout_fd;
+    int stderr_fd;
+    int inherit_mode;
+} eyn_spawn_ex_req_t;
 
 typedef struct {
     uint8_t bus;
@@ -874,6 +886,10 @@ static inline int eyn_sys_tty_get_winsize(eyn_tty_winsize_t* out) {
 
 static inline int eyn_sys_pty_open(int out_fds[2]) {
     return eyn_syscall1(EYN_SYSCALL_PTY_OPEN, (int)(uintptr_t)out_fds);
+}
+
+static inline int eyn_sys_spawn_ex(const eyn_spawn_ex_req_t* req) {
+    return eyn_syscall1(EYN_SYSCALL_SPAWN_EX, (int)(uintptr_t)req);
 }
 
 static inline int eyn_sys_chdir(const char* path) {
