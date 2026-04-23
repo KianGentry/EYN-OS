@@ -301,6 +301,8 @@ enum {
     EYN_SYSCALL_TTY_SET_WINSIZE = 147,
     // get winsize: args (eyn_tty_winsize_t* out)
     EYN_SYSCALL_TTY_GET_WINSIZE = 148,
+    // allocate PTY endpoints: args (int out_fds[2]) -> 0 or -1
+    EYN_SYSCALL_PTY_OPEN = 149,
 };
 
 #define EYN_TTY_MODE_RAW 0x0001
@@ -868,6 +870,10 @@ static inline int eyn_sys_tty_set_winsize(uint16_t rows, uint16_t cols) {
 
 static inline int eyn_sys_tty_get_winsize(eyn_tty_winsize_t* out) {
     return eyn_syscall1(EYN_SYSCALL_TTY_GET_WINSIZE, (int)(uintptr_t)out);
+}
+
+static inline int eyn_sys_pty_open(int out_fds[2]) {
+    return eyn_syscall1(EYN_SYSCALL_PTY_OPEN, (int)(uintptr_t)out_fds);
 }
 
 static inline int eyn_sys_chdir(const char* path) {

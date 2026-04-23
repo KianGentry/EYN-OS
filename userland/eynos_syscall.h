@@ -108,6 +108,7 @@ enum {
     EYN_SYSCALL_TTY_GET_MODE = 146,
     EYN_SYSCALL_TTY_SET_WINSIZE = 147,
     EYN_SYSCALL_TTY_GET_WINSIZE = 148,
+    EYN_SYSCALL_PTY_OPEN = 149,
 };
 
 #define EYN_TTY_MODE_RAW 0x0001
@@ -205,6 +206,17 @@ static inline int eyn_sys_tty_get_winsize(eyn_tty_winsize_t* out) {
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_TTY_GET_WINSIZE), "b"(out)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_pty_open(int out_fds[2]) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_PTY_OPEN), "b"(out_fds)
         : "memory"
     );
     return ret;

@@ -597,6 +597,7 @@ uint32 get_last_error_eip() {
 #define SYSCALL_TTY_GET_MODE 146
 #define SYSCALL_TTY_SET_WINSIZE 147
 #define SYSCALL_TTY_GET_WINSIZE 148
+#define SYSCALL_PTY_OPEN 149
 
 #define TTY_MODE_RAW 0x0001
 
@@ -856,12 +857,18 @@ enum {
 typedef enum {
     USER_FD_KIND_FILE = 0,
     USER_FD_KIND_PIPE = 1,
+    USER_FD_KIND_PTY = 2,
 } user_fd_kind_t;
 
 typedef enum {
     USER_PIPE_END_READ = 0,
     USER_PIPE_END_WRITE = 1,
 } user_pipe_end_t;
+
+typedef enum {
+    USER_PTY_END_MASTER = 0,
+    USER_PTY_END_SLAVE = 1,
+} user_pty_end_t;
 
 /*
  * SECURITY-INVARIANT: Maximum concurrent kernel IPC pipe objects.
@@ -889,6 +896,9 @@ typedef enum {
  */
 #define USER_PIPE_BUFFER_BYTES 4096
 
+#define USER_PTY_MAX 8
+#define USER_PTY_BUFFER_BYTES 4096
+
 typedef struct {
     int used;
     int persistent_fifo;
@@ -909,11 +919,29 @@ typedef struct {
 
 typedef struct {
     int used;
+    int master_refs;
+    int slave_refs;
+
+    uint32 m2s_read_pos;
+    uint32 m2s_write_pos;
+    uint32 m2s_bytes_used;
+    uint8 m2s_buf[USER_PTY_BUFFER_BYTES];
+
+    uint32 s2m_read_pos;
+    uint32 s2m_write_pos;
+    uint32 s2m_bytes_used;
+    uint8 s2m_buf[USER_PTY_BUFFER_BYTES];
+} user_pty_t;
+
+typedef struct {
+    int used;
     int is_dir;
     int nonblock;
     int kind;
     int pipe_id;
     int pipe_end;
+    int pty_id;
+    int pty_end;
     uint32 offset;
     uint32 dir_pos;
     uint32 size;
@@ -966,6 +994,7 @@ typedef struct {
 #define USER_FD_MAX 16
 static user_fd_t g_user_fds[USER_FD_MAX];
 static user_pipe_t g_user_pipes[USER_PIPE_MAX];
+static user_pty_t g_user_ptys[USER_PTY_MAX];
 
 static int g_user_fd_inherit_mode = 0;
 static int g_user_stdio_stdin_fd = 0;
@@ -1171,6 +1200,120 @@ static int user_pipe_write(int pipe_id, const void* user_src, int len, int nonbl
     return n;
 }
 
+static void user_pty_maybe_destroy(int pty_id) {
+    if (pty_id < 0 || pty_id >= USER_PTY_MAX) return;
+    user_pty_t* p = &g_user_ptys[pty_id];
+    if (!p->used) return;
+    if (p->master_refs == 0 && p->slave_refs == 0) {
+        memset(p, 0, sizeof(*p));
+    }
+}
+
+static int user_pty_alloc(void) {
+    for (int i = 0; i < USER_PTY_MAX; ++i) {
+        if (g_user_ptys[i].used) continue;
+        memset(&g_user_ptys[i], 0, sizeof(g_user_ptys[i]));
+        g_user_ptys[i].used = 1;
+        return i;
+    }
+    return -1;
+}
+
+static int user_pty_read(int pty_id, int end, void* user_dst, int maxlen, int nonblock) {
+    if (pty_id < 0 || pty_id >= USER_PTY_MAX || maxlen < 0 || !user_dst) return -1;
+    user_pty_t* p = &g_user_ptys[pty_id];
+    if (!p->used) return -1;
+    if (maxlen == 0) return 0;
+
+    uint8* src_buf = NULL;
+    uint32* src_read = NULL;
+    uint32* src_used = NULL;
+    int peer_refs = 0;
+
+    if (end == USER_PTY_END_MASTER) {
+        src_buf = p->s2m_buf;
+        src_read = &p->s2m_read_pos;
+        src_used = &p->s2m_bytes_used;
+        peer_refs = p->slave_refs;
+    } else if (end == USER_PTY_END_SLAVE) {
+        src_buf = p->m2s_buf;
+        src_read = &p->m2s_read_pos;
+        src_used = &p->m2s_bytes_used;
+        peer_refs = p->master_refs;
+    } else {
+        return -1;
+    }
+
+    while (*src_used == 0) {
+        if (peer_refs == 0) return 0;
+        if (nonblock) return -1;
+        if (g_user_interrupt) return -1;
+        watchdog_kick("pty-read");
+        __asm__ __volatile__("sti");
+        __asm__ __volatile__("hlt");
+        peer_refs = (end == USER_PTY_END_MASTER) ? p->slave_refs : p->master_refs;
+    }
+
+    int n = 0;
+    while (n < maxlen && *src_used > 0) {
+        uint8 b = src_buf[*src_read];
+        if (copyout((uint8*)user_dst + n, &b, 1) != 0) return -1;
+        *src_read = (*src_read + 1u) % USER_PTY_BUFFER_BYTES;
+        (*src_used)--;
+        n++;
+    }
+    return n;
+}
+
+static int user_pty_write(int pty_id, int end, const void* user_src, int len, int nonblock) {
+    if (pty_id < 0 || pty_id >= USER_PTY_MAX || len < 0 || !user_src) return -1;
+    user_pty_t* p = &g_user_ptys[pty_id];
+    if (!p->used) return -1;
+    if (len == 0) return 0;
+
+    uint8* dst_buf = NULL;
+    uint32* dst_write = NULL;
+    uint32* dst_used = NULL;
+    int peer_refs = 0;
+
+    if (end == USER_PTY_END_MASTER) {
+        dst_buf = p->m2s_buf;
+        dst_write = &p->m2s_write_pos;
+        dst_used = &p->m2s_bytes_used;
+        peer_refs = p->slave_refs;
+    } else if (end == USER_PTY_END_SLAVE) {
+        dst_buf = p->s2m_buf;
+        dst_write = &p->s2m_write_pos;
+        dst_used = &p->s2m_bytes_used;
+        peer_refs = p->master_refs;
+    } else {
+        return -1;
+    }
+
+    if (peer_refs == 0) return -1;
+
+    int n = 0;
+    while (n < len) {
+        while (*dst_used >= USER_PTY_BUFFER_BYTES) {
+            if (peer_refs == 0) return (n > 0) ? n : -1;
+            if (nonblock) return (n > 0) ? n : -1;
+            if (g_user_interrupt) return (n > 0) ? n : -1;
+            watchdog_kick("pty-write");
+            __asm__ __volatile__("sti");
+            __asm__ __volatile__("hlt");
+            peer_refs = (end == USER_PTY_END_MASTER) ? p->slave_refs : p->master_refs;
+        }
+
+        uint8 b = 0;
+        if (copyin(&b, (const uint8*)user_src + n, 1) != 0) return -1;
+        dst_buf[*dst_write] = b;
+        *dst_write = (*dst_write + 1u) % USER_PTY_BUFFER_BYTES;
+        (*dst_used)++;
+        n++;
+    }
+    return n;
+}
+
 static int user_fd_release(int fd) {
     if (fd < 0 || fd >= USER_FD_MAX) return -1;
     user_fd_t* ufd = &g_user_fds[fd];
@@ -1188,6 +1331,17 @@ static int user_fd_release(int fd) {
             user_pipe_maybe_destroy(ufd->pipe_id);
         }
     }
+    if (ufd->kind == USER_FD_KIND_PTY && ufd->pty_id >= 0 && ufd->pty_id < USER_PTY_MAX) {
+        user_pty_t* p = &g_user_ptys[ufd->pty_id];
+        if (p->used) {
+            if (ufd->pty_end == USER_PTY_END_MASTER) {
+                if (p->master_refs > 0) p->master_refs--;
+            } else if (ufd->pty_end == USER_PTY_END_SLAVE) {
+                if (p->slave_refs > 0) p->slave_refs--;
+            }
+            user_pty_maybe_destroy(ufd->pty_id);
+        }
+    }
 
     if (ufd->kbuf) {
         free(ufd->kbuf);
@@ -1200,6 +1354,8 @@ static int user_fd_release(int fd) {
     ufd->kind = USER_FD_KIND_FILE;
     ufd->pipe_id = -1;
     ufd->pipe_end = -1;
+    ufd->pty_id = -1;
+    ufd->pty_end = -1;
     ufd->offset = 0;
     ufd->dir_pos = 0;
     ufd->size = 0;
@@ -1231,6 +1387,8 @@ static int user_fd_duplicate_into(int oldfd, int newfd) {
     dst->kind = src->kind;
     dst->pipe_id = src->pipe_id;
     dst->pipe_end = src->pipe_end;
+    dst->pty_id = src->pty_id;
+    dst->pty_end = src->pty_end;
     dst->offset = src->offset;
     dst->dir_pos = src->dir_pos;
     dst->size = src->size;
@@ -1251,6 +1409,15 @@ static int user_fd_duplicate_into(int oldfd, int newfd) {
         }
         if (dst->pipe_end == USER_PIPE_END_READ) p->reader_refs++;
         else if (dst->pipe_end == USER_PIPE_END_WRITE) p->writer_refs++;
+    }
+    if (dst->kind == USER_FD_KIND_PTY && dst->pty_id >= 0 && dst->pty_id < USER_PTY_MAX) {
+        user_pty_t* p = &g_user_ptys[dst->pty_id];
+        if (!p->used) {
+            memset(dst, 0, sizeof(*dst));
+            return -1;
+        }
+        if (dst->pty_end == USER_PTY_END_MASTER) p->master_refs++;
+        else if (dst->pty_end == USER_PTY_END_SLAVE) p->slave_refs++;
     }
 
     return newfd;
@@ -1351,12 +1518,61 @@ int syscall_kernel_pipe_create(int* out_read_fd, int* out_write_fd) {
     return 0;
 }
 
+static int syscall_kernel_pty_create(int* out_master_fd, int* out_slave_fd) {
+    if (!out_master_fd || !out_slave_fd) return -1;
+    int pty_id = user_pty_alloc();
+    if (pty_id < 0) return -1;
+
+    int master_fd = -1;
+    int slave_fd = -1;
+    for (int i = 3; i < USER_FD_MAX; ++i) {
+        if (!g_user_fds[i].used) { master_fd = i; break; }
+    }
+    if (master_fd < 0) {
+        memset(&g_user_ptys[pty_id], 0, sizeof(g_user_ptys[pty_id]));
+        return -1;
+    }
+    for (int i = master_fd + 1; i < USER_FD_MAX; ++i) {
+        if (!g_user_fds[i].used) { slave_fd = i; break; }
+    }
+    if (slave_fd < 0) {
+        memset(&g_user_ptys[pty_id], 0, sizeof(g_user_ptys[pty_id]));
+        return -1;
+    }
+
+    memset(&g_user_fds[master_fd], 0, sizeof(g_user_fds[master_fd]));
+    g_user_fds[master_fd].used = 1;
+    g_user_fds[master_fd].kind = USER_FD_KIND_PTY;
+    g_user_fds[master_fd].pipe_id = -1;
+    g_user_fds[master_fd].pipe_end = -1;
+    g_user_fds[master_fd].pty_id = pty_id;
+    g_user_fds[master_fd].pty_end = USER_PTY_END_MASTER;
+
+    memset(&g_user_fds[slave_fd], 0, sizeof(g_user_fds[slave_fd]));
+    g_user_fds[slave_fd].used = 1;
+    g_user_fds[slave_fd].kind = USER_FD_KIND_PTY;
+    g_user_fds[slave_fd].pipe_id = -1;
+    g_user_fds[slave_fd].pipe_end = -1;
+    g_user_fds[slave_fd].pty_id = pty_id;
+    g_user_fds[slave_fd].pty_end = USER_PTY_END_SLAVE;
+
+    g_user_ptys[pty_id].master_refs = 1;
+    g_user_ptys[pty_id].slave_refs = 1;
+
+    *out_master_fd = master_fd;
+    *out_slave_fd = slave_fd;
+    return 0;
+}
+
 void syscall_reset_user_fds(void) {
     for (int i = 0; i < USER_FD_MAX; ++i) {
         (void)user_fd_release(i);
     }
     for (int i = 0; i < USER_PIPE_MAX; ++i) {
         memset(&g_user_pipes[i], 0, sizeof(g_user_pipes[i]));
+    }
+    for (int i = 0; i < USER_PTY_MAX; ++i) {
+        memset(&g_user_ptys[i], 0, sizeof(g_user_ptys[i]));
     }
 }
 
@@ -2125,11 +2341,16 @@ static int user_fd_alloc(void) {
             g_user_fds[i].kind = USER_FD_KIND_FILE;
             g_user_fds[i].pipe_id = -1;
             g_user_fds[i].pipe_end = -1;
+            g_user_fds[i].pty_id = -1;
+            g_user_fds[i].pty_end = -1;
             g_user_fds[i].offset = 0;
             g_user_fds[i].dir_pos = 0;
             g_user_fds[i].size = 0;
             g_user_fds[i].drive = 0;
             g_user_fds[i].path[0] = '\0';
+            g_user_fds[i].eynfs_first_block = 0;
+            g_user_fds[i].cur_block = 0;
+            g_user_fds[i].cur_block_off = 0;
             return i;
         }
     }
@@ -3920,6 +4141,11 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
                 break;
             }
+            if (ufd->kind == USER_FD_KIND_PTY) {
+                int n = user_pty_write(ufd->pty_id, ufd->pty_end, user_buf, len, ufd->nonblock);
+                regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
+                break;
+            }
 
             if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             int n = syscall_write_file_from_fd(ufd, user_buf, len);
@@ -4053,6 +4279,11 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
                 break;
             }
+            if (ufd->kind == USER_FD_KIND_PTY) {
+                int n = user_pty_read(ufd->pty_id, ufd->pty_end, (char*)arg2, maxlen, ufd->nonblock);
+                regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
+                break;
+            }
 
             if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             if (ufd->is_dir) { regs->eax = (uint32)-1; break; }
@@ -4105,6 +4336,8 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 ufd->pipe_end = ((open_flags & (OPEN_FLAG_WRONLY | OPEN_FLAG_RDWR)) != 0)
                               ? USER_PIPE_END_WRITE
                               : USER_PIPE_END_READ;
+                ufd->pty_id = -1;
+                ufd->pty_end = -1;
                 ufd->nonblock = ((open_flags & OPEN_FLAG_NONBLOCK) != 0) ? 1 : 0;
                 ufd->is_dir = 0;
                 ufd->size = 0;
@@ -4149,6 +4382,8 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             ufd->kind = USER_FD_KIND_FILE;
             ufd->pipe_id = -1;
             ufd->pipe_end = -1;
+            ufd->pty_id = -1;
+            ufd->pty_end = -1;
             ufd->drive = drive;
             strncpy(ufd->path, abspath, sizeof(ufd->path) - 1);
             ufd->path[sizeof(ufd->path) - 1] = '\0';
@@ -4275,6 +4510,27 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             if (copyout(user_pipefd, out, sizeof(out)) != 0) {
                 (void)user_fd_release(read_fd);
                 (void)user_fd_release(write_fd);
+                regs->eax = (uint32)-1;
+                break;
+            }
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_PTY_OPEN: {
+            int* user_ptyfd = (int*)arg1;
+            if (!user_ptyfd) { regs->eax = (uint32)-1; break; }
+            int master_fd = -1;
+            int slave_fd = -1;
+            if (syscall_kernel_pty_create(&master_fd, &slave_fd) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            int out[2];
+            out[0] = master_fd;
+            out[1] = slave_fd;
+            if (copyout(user_ptyfd, out, sizeof(out)) != 0) {
+                (void)user_fd_release(master_fd);
+                (void)user_fd_release(slave_fd);
                 regs->eax = (uint32)-1;
                 break;
             }
@@ -4483,9 +4739,14 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             user_fd_t* ufd = user_fd_from_cap(&cap, CAP_R_READ, NULL);
             if (!ufd) { regs->eax = (uint32)-1; break; }
 
-            int n = (ufd->kind == USER_FD_KIND_PIPE)
-                ? user_pipe_read(ufd->pipe_id, user_buf, maxlen, ufd->nonblock)
-                : syscall_read_file(ufd, user_buf, maxlen);
+            int n = -1;
+            if (ufd->kind == USER_FD_KIND_PIPE) {
+                n = user_pipe_read(ufd->pipe_id, user_buf, maxlen, ufd->nonblock);
+            } else if (ufd->kind == USER_FD_KIND_PTY) {
+                n = user_pty_read(ufd->pty_id, ufd->pty_end, user_buf, maxlen, ufd->nonblock);
+            } else {
+                n = syscall_read_file(ufd, user_buf, maxlen);
+            }
             regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
             break;
         }
@@ -4513,9 +4774,14 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             user_fd_t* ufd = user_fd_from_cap(&cap, CAP_R_WRITE, NULL);
             if (!ufd) { regs->eax = (uint32)-1; break; }
 
-            int written = (ufd->kind == USER_FD_KIND_PIPE)
-                        ? user_pipe_write(ufd->pipe_id, user_buf, len, ufd->nonblock)
-                        : syscall_write_file_from_fd(ufd, user_buf, len);
+            int written = -1;
+            if (ufd->kind == USER_FD_KIND_PIPE) {
+                written = user_pipe_write(ufd->pipe_id, user_buf, len, ufd->nonblock);
+            } else if (ufd->kind == USER_FD_KIND_PTY) {
+                written = user_pty_write(ufd->pty_id, ufd->pty_end, user_buf, len, ufd->nonblock);
+            } else {
+                written = syscall_write_file_from_fd(ufd, user_buf, len);
+            }
             regs->eax = (written < 0) ? (uint32)-1 : (uint32)written;
             break;
         }
