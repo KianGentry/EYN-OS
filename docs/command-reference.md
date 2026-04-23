@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-23 02:00:30
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-23 14:44:13
 
-**Total Commands:** 100
+**Total Commands:** 101
 
 ## Table of Contents
 
@@ -1500,6 +1500,22 @@ spam
 
 ---
 
+### ssh
+
+**Binary:** `testdir/binaries/ssh`
+
+**Metadata Source:** `EYN-packages/packages/ssh/ssh_uelf.c`
+
+**Description:**
+SSH client scaffold with banner+KEX smoke and PTY spawn smoke.
+
+**Example:**
+```bash
+ssh user@192.168.1.10
+```
+
+---
+
 ### tetris
 
 **Binary:** `testdir/binaries/tetris`
@@ -1638,5 +1654,5 @@ xeyes
 | Memory Commands | 7 |
 | GUI/Window Commands | 12 |
 | Development Commands | 10 |
-| Utility Commands | 40 |
+| Utility Commands | 41 |
 
