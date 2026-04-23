@@ -72,6 +72,9 @@ typedef struct {
     char stdin_buf[256];
     volatile int stdin_len;        // current bytes in stdin_buf
     volatile int stdin_ready;      // 1 when line is complete (Enter pressed), 0 otherwise
+    volatile int stdin_raw_mode;   // 1 for byte-stream mode, 0 for canonical line mode
+    uint16_t tty_rows;
+    uint16_t tty_cols;
 } vterm_t;
 
 static vterm_t vterms[4];
@@ -165,6 +168,9 @@ void vterm_init_all() {
         vterms[i].stdin_buf[0] = '\0';
         vterms[i].stdin_len = 0;
         vterms[i].stdin_ready = 0;
+        vterms[i].stdin_raw_mode = 0;
+        vterms[i].tty_rows = TERM_ROWS;
+        vterms[i].tty_cols = TERM_COLS;
     }
 }
 
@@ -908,6 +914,9 @@ void vterm_move_state(int dst_idx, int src_idx) {
     src->stdin_buf[0] = '\0';
     src->stdin_len = 0;
     src->stdin_ready = 0;
+    src->stdin_raw_mode = 0;
+    src->tty_rows = TERM_ROWS;
+    src->tty_cols = TERM_COLS;
 }
 
 int vterm_get_cursor_row(int idx) {
@@ -970,6 +979,16 @@ void vterm_stdin_clear(int idx) {
 int vterm_stdin_putchar(int idx, char ch) {
     if (idx < 0 || idx >= 4) return 0;
     vterm_t* t = &vterms[idx];
+
+    if (t->stdin_raw_mode) {
+        if (t->stdin_len < (int)sizeof(t->stdin_buf) - 1) {
+            t->stdin_buf[t->stdin_len++] = ch;
+            t->stdin_buf[t->stdin_len] = '\0';
+            t->stdin_ready = 1;
+            return 1;
+        }
+        return 0;
+    }
     
     // Handle backspace
     if (ch == '\b' || ch == 127) {
@@ -1023,5 +1042,57 @@ void vterm_stdin_consume(int idx) {
     t->stdin_buf[0] = '\0';
     t->stdin_len = 0;
     t->stdin_ready = 0;
+}
+
+void vterm_stdin_consume_bytes(int idx, int count) {
+    if (idx < 0 || idx >= 4) return;
+    if (count <= 0) return;
+
+    vterm_t* t = &vterms[idx];
+    if (count >= t->stdin_len) {
+        vterm_stdin_consume(idx);
+        return;
+    }
+
+    int remain = t->stdin_len - count;
+    memmove(t->stdin_buf, t->stdin_buf + count, (size_t)remain);
+    t->stdin_len = remain;
+    t->stdin_buf[remain] = '\0';
+    t->stdin_ready = t->stdin_raw_mode ? (remain > 0 ? 1 : 0) : 0;
+}
+
+void vterm_stdin_set_raw(int idx, int enabled) {
+    if (idx < 0 || idx >= 4) return;
+    vterm_t* t = &vterms[idx];
+    t->stdin_raw_mode = enabled ? 1 : 0;
+    if (!t->stdin_raw_mode) {
+        // Canonical mode expects complete lines.
+        t->stdin_ready = 0;
+    } else if (t->stdin_len > 0) {
+        t->stdin_ready = 1;
+    }
+}
+
+int vterm_stdin_is_raw(int idx) {
+    if (idx < 0 || idx >= 4) return 0;
+    return vterms[idx].stdin_raw_mode;
+}
+
+void vterm_stdin_set_winsize(int idx, uint16_t rows, uint16_t cols) {
+    if (idx < 0 || idx >= 4) return;
+    if (rows == 0 || cols == 0) return;
+    vterm_t* t = &vterms[idx];
+    t->tty_rows = rows;
+    t->tty_cols = cols;
+}
+
+void vterm_stdin_get_winsize(int idx, uint16_t* out_rows, uint16_t* out_cols) {
+    if (out_rows) *out_rows = (uint16_t)TERM_ROWS;
+    if (out_cols) *out_cols = (uint16_t)TERM_COLS;
+    if (idx < 0 || idx >= 4) return;
+
+    vterm_t* t = &vterms[idx];
+    if (out_rows) *out_rows = t->tty_rows;
+    if (out_cols) *out_cols = t->tty_cols;
 }
 

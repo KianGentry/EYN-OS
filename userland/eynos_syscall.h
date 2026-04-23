@@ -104,7 +104,18 @@ enum {
     EYN_SYSCALL_GUI_LOAD_FONT = 137,
     EYN_SYSCALL_GUI_DRAW_TEXT_FONT = 138,
     EYN_SYSCALL_GUI_DRAW_CHAR_FONT = 139,
+    EYN_SYSCALL_TTY_SET_MODE = 145,
+    EYN_SYSCALL_TTY_GET_MODE = 146,
+    EYN_SYSCALL_TTY_SET_WINSIZE = 147,
+    EYN_SYSCALL_TTY_GET_WINSIZE = 148,
 };
+
+#define EYN_TTY_MODE_RAW 0x0001
+
+typedef struct {
+    uint16_t rows;
+    uint16_t cols;
+} eyn_tty_winsize_t;
 
 enum {
     EYN_CAP_OBJ_USER_FD = 1,
@@ -150,6 +161,50 @@ static inline int eyn_sys_read(int fd, void* buf, int len) {
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_READ), "b"(fd), "c"(buf), "d"(len)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_tty_set_mode(int mode_flags) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_TTY_SET_MODE), "b"(mode_flags)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_tty_get_mode(void) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_TTY_GET_MODE)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_tty_set_winsize(uint16_t rows, uint16_t cols) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_TTY_SET_WINSIZE), "b"((int)rows), "c"((int)cols)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_tty_get_winsize(eyn_tty_winsize_t* out) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_TTY_GET_WINSIZE), "b"(out)
         : "memory"
     );
     return ret;

@@ -291,7 +291,24 @@ enum {
 
     // Post a kernel-rendered desktop notification toast.
     EYN_SYSCALL_NOTIFY_POST = 144,
+
+    // Minimal TTY/PTY control for interactive clients.
+    // set mode: args (int mode_flags) -> previous mode flags
+    EYN_SYSCALL_TTY_SET_MODE = 145,
+    // get mode: args () -> current mode flags
+    EYN_SYSCALL_TTY_GET_MODE = 146,
+    // set winsize: args (uint16 rows, uint16 cols)
+    EYN_SYSCALL_TTY_SET_WINSIZE = 147,
+    // get winsize: args (eyn_tty_winsize_t* out)
+    EYN_SYSCALL_TTY_GET_WINSIZE = 148,
 };
+
+#define EYN_TTY_MODE_RAW 0x0001
+
+typedef struct {
+    uint16_t rows;
+    uint16_t cols;
+} eyn_tty_winsize_t;
 
 typedef struct {
     uint8_t bus;
@@ -835,6 +852,22 @@ static inline int eyn_sys_notify_post(const char* title,
 
     uint32_t packed = (timeout_ms << 8) | ((uint32_t)level & 0xFFu);
     return eyn_syscall3_ppi(EYN_SYSCALL_NOTIFY_POST, title, message, (int)packed);
+}
+
+static inline int eyn_sys_tty_set_mode(int mode_flags) {
+    return eyn_syscall1(EYN_SYSCALL_TTY_SET_MODE, mode_flags);
+}
+
+static inline int eyn_sys_tty_get_mode(void) {
+    return eyn_syscall0(EYN_SYSCALL_TTY_GET_MODE);
+}
+
+static inline int eyn_sys_tty_set_winsize(uint16_t rows, uint16_t cols) {
+    return eyn_syscall3_iii(EYN_SYSCALL_TTY_SET_WINSIZE, (int)rows, (int)cols, 0);
+}
+
+static inline int eyn_sys_tty_get_winsize(eyn_tty_winsize_t* out) {
+    return eyn_syscall1(EYN_SYSCALL_TTY_GET_WINSIZE, (int)(uintptr_t)out);
 }
 
 static inline int eyn_sys_chdir(const char* path) {

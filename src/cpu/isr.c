@@ -593,6 +593,12 @@ uint32 get_last_error_eip() {
 #define SYSCALL_SET_DISPLAY_MODE 142
 #define SYSCALL_GET_DISPLAY_MODE 143
 #define SYSCALL_NOTIFY_POST 144
+#define SYSCALL_TTY_SET_MODE 145
+#define SYSCALL_TTY_GET_MODE 146
+#define SYSCALL_TTY_SET_WINSIZE 147
+#define SYSCALL_TTY_GET_WINSIZE 148
+
+#define TTY_MODE_RAW 0x0001
 
 /*
  * SYSCALL_AUDIO_PROBE (113): Detect whether an AC97 audio controller is
@@ -3664,6 +3670,52 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 : (uint32)-1;
             break;
         }
+        case SYSCALL_TTY_SET_MODE: {
+            if (!syscall_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (!g_user_task_active || g_user_task_term < 0) { regs->eax = (uint32)-1; break; }
+
+            int term = g_user_task_term;
+            int prev = vterm_stdin_is_raw(term) ? TTY_MODE_RAW : 0;
+            int new_mode = ((int)arg1 & TTY_MODE_RAW) ? TTY_MODE_RAW : 0;
+            vterm_stdin_set_raw(term, (new_mode & TTY_MODE_RAW) ? 1 : 0);
+            regs->eax = (uint32)prev;
+            break;
+        }
+        case SYSCALL_TTY_GET_MODE: {
+            if (!syscall_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (!g_user_task_active || g_user_task_term < 0) { regs->eax = (uint32)-1; break; }
+
+            int mode = vterm_stdin_is_raw(g_user_task_term) ? TTY_MODE_RAW : 0;
+            regs->eax = (uint32)mode;
+            break;
+        }
+        case SYSCALL_TTY_SET_WINSIZE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (!g_user_task_active || g_user_task_term < 0) { regs->eax = (uint32)-1; break; }
+
+            uint16 rows = (uint16)((uint32)arg1 & 0xFFFFu);
+            uint16 cols = (uint16)((uint32)arg2 & 0xFFFFu);
+            if (rows == 0 || cols == 0) { regs->eax = (uint32)-1; break; }
+
+            vterm_stdin_set_winsize(g_user_task_term, rows, cols);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_TTY_GET_WINSIZE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (!g_user_task_active || g_user_task_term < 0) { regs->eax = (uint32)-1; break; }
+
+            void* user_out = (void*)arg1;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+
+            struct {
+                uint16 rows;
+                uint16 cols;
+            } ws;
+            vterm_stdin_get_winsize(g_user_task_term, &ws.rows, &ws.cols);
+            regs->eax = (copyout(user_out, &ws, sizeof(ws)) == 0) ? 0u : (uint32)-1;
+            break;
+        }
         case SYSCALL_CHDIR: {
             if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             if (!g_user_task_active || g_user_task_term < 0) { regs->eax = (uint32)-1; break; }
@@ -3903,16 +3955,21 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 // polling the keyboard directly. The TUI routes input to this buffer.
                 const char* s = NULL;
                 int slen = 0;
+                int term = -1;
+                int raw_mode = 0;
+                int consume_n = -1;
                 
                 if (tile_is_tiling_active() && g_user_task_term >= 0) {
-                    int term = g_user_task_term;  // Cache to avoid race conditions
+                    term = g_user_task_term;  // Cache to avoid race conditions
+                    raw_mode = vterm_stdin_is_raw(term);
                     
                     // Wait for a complete line in the stdin buffer.
                     // This is a busy-wait but the PIT IRQ will feed the buffer
                     // and can also set g_user_interrupt for Ctrl+C.
                     // Enable interrupts so the PIT can fire and process keyboard input.
                     __asm__ __volatile__("sti");
-                    while (!vterm_stdin_ready(term)) {
+                    while ((raw_mode && vterm_stdin_len(term) <= 0) ||
+                           (!raw_mode && !vterm_stdin_ready(term))) {
                         if (g_user_interrupt) {
                             // User pressed Ctrl+C - return error
                             regs->eax = (uint32)-1;
@@ -3947,7 +4004,11 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 if (maxlen <= 0) { regs->eax = 0; goto stdin_cleanup; }
 
                 int n = slen;
-                if (n > maxlen - 1) n = maxlen - 1;
+                if (raw_mode) {
+                    if (n > maxlen) n = maxlen;
+                } else {
+                    if (n > maxlen - 1) n = maxlen - 1;
+                }
                 if (n < 0) n = 0;
 
                 char* user_dst = (char*)arg2;
@@ -3958,23 +4019,27 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                     regs->eax = (uint32)-1;
                     goto stdin_cleanup;
                 }
-                if (copyout(user_dst + n, "\0", 1) != 0) {
-                    if (SYSCALL_DEBUG) {
-                        printf("[stdin] copyout NUL failed\n");
+                if (!raw_mode) {
+                    if (copyout(user_dst + n, "\0", 1) != 0) {
+                        if (SYSCALL_DEBUG) {
+                            printf("[stdin] copyout NUL failed\n");
+                        }
+                        regs->eax = (uint32)-1;
+                        goto stdin_cleanup;
                     }
-                    regs->eax = (uint32)-1;
-                    goto stdin_cleanup;
                 }
 
                 if (SYSCALL_DEBUG) {
                     printf("[stdin] returning %d bytes to user\n", n);
                 }
                 regs->eax = (uint32)n;
+                if (raw_mode) consume_n = n;
                 
             stdin_cleanup:
                 // Clear the stdin buffer after consuming
-                if (tile_is_tiling_active() && g_user_task_term >= 0) {
-                    vterm_stdin_consume(g_user_task_term);
+                if (term >= 0) {
+                    if (consume_n >= 0) vterm_stdin_consume_bytes(term, consume_n);
+                    else vterm_stdin_consume(term);
                 }
             stdin_done:
                 break;
