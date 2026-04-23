@@ -25,6 +25,8 @@ void add_to_history(command_history_t* history, const char* command);
 void clear_history(command_history_t* history);
 void show_history(command_history_t* history);
 
+extern int g_boot_text_mode;
+
 // Command lookup function
 typedef void (*shell_cmd_handler_t)(const shell_args_t* args);
 shell_cmd_handler_t find_command(const char* name);

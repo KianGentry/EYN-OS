@@ -22,6 +22,9 @@
 #include <utilities/shell/shell_script.h>
 #include <ata.h>
 #define COMMAND_HASH_SIZE 256
+
+extern uint8 g_current_drive;
+
 typedef struct {
     const char* name;                 // command name key
     shell_cmd_handler_t handler;      // command handler value
@@ -31,6 +34,7 @@ static int g_command_hash_initialized = 0;
 static int g_command_hash_disabled = 0; // Fallback to linear search when table would be full
 static int g_boot_installer_autorun_done = 0;
 static int g_boot_package_update_check_done = 0;
+int g_boot_text_mode = 0;
 
 static int shell_disk_has_installer_binary(void) {
     uint8 logical_count = ata_get_num_logical_drives();
@@ -46,6 +50,65 @@ static int shell_disk_has_installer_binary(void) {
         }
     }
     return 0;
+}
+
+typedef struct shell_list_entry_t {
+    char name[56];
+    uint8 is_dir;
+} shell_list_entry_t;
+
+typedef struct shell_list_ctx_t {
+    shell_list_entry_t entries[256];
+    int count;
+} shell_list_ctx_t;
+
+static int shell_list_cb(const char* name, vfs_node_type_t type, uint32 size, void* user) {
+    (void)size;
+    shell_list_ctx_t* ctx = (shell_list_ctx_t*)user;
+    if (!ctx || !name || !name[0]) return 0;
+    if (ctx->count >= 256) return 0;
+
+    int idx = ctx->count;
+    int i = 0;
+    for (; i < (int)sizeof(ctx->entries[idx].name) - 1 && name[i]; ++i) {
+        ctx->entries[idx].name[i] = name[i];
+    }
+    ctx->entries[idx].name[i] = '\0';
+    ctx->entries[idx].is_dir = (type == VFS_NODE_DIR) ? 1 : 0;
+    ctx->count++;
+    return 0;
+}
+
+static void shell_cmd_list(const char* path) {
+    shell_list_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    const char* target = path;
+    if (!target || !target[0]) target = shell_current_path;
+    if (!target || !target[0]) target = "/";
+
+    if (vfs_listdir_typed(g_current_drive, target, shell_list_cb, &ctx) != 0) {
+        printf("%c list: failed to open: %s\n", 255, target);
+        return;
+    }
+
+    for (int i = 1; i < ctx.count; ++i) {
+        shell_list_entry_t key = ctx.entries[i];
+        int j = i - 1;
+        while (j >= 0 && strcmp(ctx.entries[j].name, key.name) > 0) {
+            ctx.entries[j + 1] = ctx.entries[j];
+            --j;
+        }
+        ctx.entries[j + 1] = key;
+    }
+
+    for (int i = 0; i < ctx.count; ++i) {
+        if (ctx.entries[i].is_dir) {
+            printf("  %s/\n", ctx.entries[i].name);
+        } else {
+            printf("  %s\n", ctx.entries[i].name);
+        }
+    }
 }
 
 static size_t shell_command_count(void) {
@@ -327,6 +390,26 @@ void handle_shell_command(string input) {
     if (shell_args_parse(&diag_args, current) == 0 &&
         diag_args.argc > 0 &&
         diag_args.argv[0] &&
+        strcmp(diag_args.argv[0], "clear") == 0) {
+        clearScreen();
+        goto cleanup;
+    }
+
+    if (shell_args_parse(&diag_args, current) == 0 &&
+        diag_args.argc > 0 &&
+        diag_args.argv[0] &&
+        strcmp(diag_args.argv[0], "list") == 0) {
+        const char* path = NULL;
+        if (diag_args.argc >= 2 && diag_args.argv[1] && diag_args.argv[1][0]) {
+            path = diag_args.argv[1];
+        }
+        shell_cmd_list(path);
+        goto cleanup;
+    }
+
+    if (shell_args_parse(&diag_args, current) == 0 &&
+        diag_args.argc > 0 &&
+        diag_args.argv[0] &&
         strcmp(diag_args.argv[0], "schedstat") == 0) {
         sched_debug_print();
         goto cleanup;
@@ -377,7 +460,7 @@ void launch_shell(int n) {
         printf("%c[installer] defaulting shell drive to RAM:/\n", 140, 220, 255);
     }
 
-    if (!disk_has_installer && !g_boot_installer_autorun_done) {
+    if (!g_boot_text_mode && !disk_has_installer && !g_boot_installer_autorun_done) {
         vfs_stat_t st;
         if (vfs_stat(VFS_DRIVE_RAM, "/binaries/installer", &st) == 0 && st.type == VFS_NODE_FILE) {
             g_boot_installer_autorun_done = 1;
@@ -386,7 +469,7 @@ void launch_shell(int n) {
         }
     }
 
-    if (disk_has_installer && !g_boot_package_update_check_done) {
+    if (!g_boot_text_mode && disk_has_installer && !g_boot_package_update_check_done) {
         vfs_stat_t install_st;
         if (vfs_stat(g_current_drive, "/binaries/install", &install_st) == 0
             && install_st.type == VFS_NODE_FILE) {

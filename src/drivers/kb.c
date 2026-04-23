@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <watchdog.h>
 
 extern multiboot_info_t *g_mbi;
 
@@ -111,7 +112,10 @@ string readStr() {
     
     while(reading)
     {
-                if ((spin++ & 0x3FFu) == 0u) kb_ctx_account(SCHED_COST_CONSOLE);
+                if ((spin++ & 0x3FFu) == 0u) {
+                        kb_ctx_account(SCHED_COST_CONSOLE);
+                        watchdog_kick("shell-input");
+                }
                 {
                         uint8 status = inportb(0x64);
                         if (!(status & 0x1)) {

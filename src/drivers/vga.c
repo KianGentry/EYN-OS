@@ -1522,6 +1522,38 @@ static const unsigned char* vga_builtin_font(void) {
 	return font;
 }
 
+static void vga_console_scroll_one_line(int line_h) {
+	if (!g_mbi) return;
+	int fb_h = (int)g_mbi->framebuffer_height;
+	if (fb_h <= 0) return;
+	if (line_h <= 0) line_h = 8;
+	if (line_h >= fb_h) {
+		clearScreen();
+		return;
+	}
+
+	int pitch = (int)g_mbi->framebuffer_pitch;
+	if (pitch <= 0) return;
+
+	int src_off = line_h * pitch;
+	int move_bytes = (fb_h - line_h) * pitch;
+
+	unsigned char* fb = (unsigned char*)(uintptr_t)g_mbi->framebuffer_addr;
+	if (fb) {
+		memmove(fb, fb + src_off, (size_t)move_bytes);
+		memset(fb + move_bytes, 0, (size_t)(line_h * pitch));
+	}
+
+	if (g_backbuffer && g_backbuffer_w == (int)g_mbi->framebuffer_width && g_backbuffer_h == fb_h) {
+		memmove(g_backbuffer, g_backbuffer + src_off, (size_t)move_bytes);
+		memset(g_backbuffer + move_bytes, 0, (size_t)(line_h * pitch));
+	}
+
+	width = 0;
+	height = fb_h - line_h;
+	if (height < 0) height = 0;
+}
+
 void drawText(int charnum, int r, int g, int b)
 {
 	int font_handle = vga_get_system_font_handle_raw();
@@ -1560,11 +1592,6 @@ void drawText(int charnum, int r, int g, int b)
 		return;
 	}
 
-
-	if (height == (int)(g_mbi->framebuffer_height)) 
-    {
-		clearScreen(); // "scrolling"
-	}
 
 	// charnum = charnum + 1;
 	// Moving the cursor to the next line when we reached the end of the existing line
@@ -1607,6 +1634,10 @@ void drawText(int charnum, int r, int g, int b)
 		int adv = vga_draw_glyph8xN_at(font_handle, width, height, charnum, r, g, b);
 		if (adv <= 0) adv = nominal_w;
 		width = width + adv;
+	}
+
+	if (height > (int)(g_mbi->framebuffer_height - line_h)) {
+		vga_console_scroll_one_line(line_h);
 	}
 }
 

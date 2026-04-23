@@ -18,6 +18,8 @@
 #include <serial.h>
 #include <watchdog.h>
 #include <help_tui.h>
+#include <fs/vfs.h>
+#include <misc/tui.h>
 #include <mm/vmm.h>
 #include <partition.h>
 #include <gdt.h>
@@ -79,6 +81,116 @@ static void amd64_patch_bootstrap_framebuffer_mapping(multiboot_info_t* mbi) {
            (unsigned)fb_size);
 }
 #endif
+
+static char boot_ascii_tolower(char c) {
+    if (c >= 'A' && c <= 'Z') return (char)('a' + (c - 'A'));
+    return c;
+}
+
+static int boot_starts_with_icase(const char* s, const char* pfx) {
+    if (!s || !pfx) return 0;
+    while (*pfx) {
+        if (boot_ascii_tolower(*s++) != boot_ascii_tolower(*pfx++)) return 0;
+    }
+    return 1;
+}
+
+static const char* boot_skip_ws(const char* s) {
+    while (s && (*s == ' ' || *s == '\t' || *s == '\r')) ++s;
+    return s;
+}
+
+static void boot_trim_trailing_ws(char* s) {
+    if (!s) return;
+    int len = 0;
+    while (s[len]) ++len;
+    while (len > 0) {
+        char c = s[len - 1];
+        if (c != ' ' && c != '\t' && c != '\r' && c != '\n') break;
+        s[len - 1] = '\0';
+        --len;
+    }
+}
+
+static int boot_parse_bool(const char* s, int* out_value) {
+    s = boot_skip_ws(s);
+    if (!s || !*s) return -1;
+
+    if (boot_starts_with_icase(s, "true") || boot_starts_with_icase(s, "yes") || boot_starts_with_icase(s, "on")) {
+        if (out_value) *out_value = 1;
+        return 0;
+    }
+    if (boot_starts_with_icase(s, "false") || boot_starts_with_icase(s, "no") || boot_starts_with_icase(s, "off")) {
+        if (out_value) *out_value = 0;
+        return 0;
+    }
+
+    if (*s >= '0' && *s <= '9') {
+        int v = 0;
+        while (*s >= '0' && *s <= '9') {
+            v = v * 10 + (*s - '0');
+            ++s;
+        }
+        if (out_value) *out_value = (v != 0);
+        return 0;
+    }
+
+    return -1;
+}
+
+static int boot_cfg_line_requests_text_mode(const char* line) {
+    if (!line) return 0;
+
+    const char* s = boot_skip_ws(line);
+    if (!*s || *s == '#') return 0;
+
+    const char* eq = s;
+    while (*eq && *eq != '=' && *eq != ':' && *eq != ' ' && *eq != '\t') ++eq;
+    if (*eq != '=' && *eq != ':') return 0;
+
+    int key_len = (int)(eq - s);
+    if (key_len != 4) return 0;
+    if (!(boot_ascii_tolower(s[0]) == 't' && boot_ascii_tolower(s[1]) == 'e' && boot_ascii_tolower(s[2]) == 'x' && boot_ascii_tolower(s[3]) == 't')) {
+        return 0;
+    }
+
+    int value = 0;
+    if (boot_parse_bool(eq + 1, &value) != 0) return 0;
+    return value ? 1 : 0;
+}
+
+static int boot_cfg_requests_text_mode(uint8 drive) {
+    char buf[512];
+    int n = vfs_read_file(drive, "/config/boot.cfg", buf, (int)sizeof(buf) - 1);
+    if (n < 0) {
+        n = vfs_read_file(drive, "/boot.cfg", buf, (int)sizeof(buf) - 1);
+        if (n < 0) return 0;
+    }
+    buf[n] = '\0';
+
+    char* line = buf;
+    while (line && *line) {
+        char* next = line;
+        while (*next && *next != '\n') ++next;
+        if (*next == '\n') {
+            *next = '\0';
+            ++next;
+        }
+        boot_trim_trailing_ws(line);
+        if (boot_cfg_line_requests_text_mode(line)) return 1;
+        line = next;
+    }
+
+    return 0;
+}
+
+static int boot_escape_requested(void) {
+    for (;;) {
+        int key = tui_read_key();
+        if (!key) return 0;
+        if (key == 27 || key == -27) return 1;
+    }
+}
 
 int kmain(uint32 magic, multiboot_info_t *mbi)
 {
@@ -196,6 +308,12 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     ui_prefs_load_apply(0);
     printf("Done.\n");
 
+    int boot_text_mode = boot_cfg_requests_text_mode(0) || boot_escape_requested();
+    g_boot_text_mode = boot_text_mode;
+    if (boot_text_mode) {
+        printf("Boot mode: text CLI\n");
+    }
+
     // Initialize predictive memory management system
     printf("Starting predictive memory manager...");
     predictive_memory_init();
@@ -254,12 +372,17 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     native_exec_init();
     printf("Done.\n");
     
-    // Launch interactive UI path.
-    printf("Starting Tiling Manager...");
-    start_tiling_manager();
+    if (boot_text_mode) {
+        clearScreen();
+        launch_shell(0);
+    } else {
+        // Launch interactive UI path.
+        printf("Starting Tiling Manager...");
+        start_tiling_manager();
 
-    // If tiling manager exits (e.g., user closes it), fall back to classic shell
-    launch_shell(0);
+        // If tiling manager exits (e.g., user closes it), fall back to classic shell
+        launch_shell(0);
+    }
     
     return 0;
 }

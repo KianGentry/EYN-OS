@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <watchdog.h>
 
 static int history_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -18,6 +19,14 @@ static int history_ctx_allow(uint32 caps, uint32 cost) {
         if (sched_det_is_enabled()) ctx->det_seq++;
     }
     return 1;
+}
+
+static void history_draw_cursor(void) {
+    // Keep as no-op in legacy shell input to avoid redraw artifacts.
+}
+
+static void history_erase_cursor(void) {
+    // Keep as no-op in legacy shell input to avoid redraw artifacts.
 }
 
 // Global command history instance
@@ -82,6 +91,7 @@ string readStr_with_history(command_history_t* history) {
     uint8 shift_pressed = 0;
     uint8 caps_lock = 0;
     uint8 ctrl_pressed = 0;
+    uint32 spin = 0;
     int history_index = -1; // -1 means not browsing history
     char original_input[MAX_COMMAND_LENGTH] = {0};
     
@@ -93,6 +103,10 @@ string readStr_with_history(command_history_t* history) {
     }
     
     while(reading) {
+        if ((spin++ & 0x3FFu) == 0u) {
+            (void)history_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE);
+            watchdog_kick("shell-input");
+        }
         uint8 status = inportb(0x64);
         if(status & 0x1) {
             // If output buffer contains AUX (mouse) data, do NOT consume it here.
@@ -133,6 +147,7 @@ string readStr_with_history(command_history_t* history) {
             // Check for Ctrl+C
             if(ctrl_pressed && scancode == 46) {  // 'c' key
                 g_user_interrupt = 1;
+                history_erase_cursor();
                 buffstr[0] = '\0';
                 reading = 0;
                 printf("%c^C\n", 255, 255, 255);
@@ -142,6 +157,7 @@ string readStr_with_history(command_history_t* history) {
             // Handle arrow keys for history navigation
             if (scancode == 72) {  // Up Arrow - go back in history
                 if (history && history->count > 0) {
+                    history_erase_cursor();
                     if (history_index == -1) {
                         // First time pressing up - save current input
                         strcpy(original_input, buffstr);
@@ -150,9 +166,8 @@ string readStr_with_history(command_history_t* history) {
                         history_index--;
                     }
                     
-                    // Clear current line and load history entry
                     while (i > 0) {
-                        printf("\b \b"); // Backspace and clear
+                        printf("\b \b");
                         i--;
                     }
                     strcpy(buffstr, history->commands[history_index]);
@@ -164,6 +179,7 @@ string readStr_with_history(command_history_t* history) {
             
             if (scancode == 80) {  // Down Arrow - go forward in history
                 if (history && history_index >= 0) {
+                    history_erase_cursor();
                     history_index++;
                     if (history_index >= history->count) {
                         // Back to original input
@@ -216,9 +232,9 @@ string readStr_with_history(command_history_t* history) {
             // Handle Backspace
             if (scancode == 14) {  // Backspace
                 if (i > 0) {
-                    printf("\b \b");
                     i--;
                     buffstr[i] = '\0';
+                    printf("\b \b");
                 }
                 continue;
             }
@@ -283,6 +299,7 @@ string readStr_with_history(command_history_t* history) {
                 drawText(c, 255, 255, 255);
                 buffstr[i] = c;
                 i++;
+                buffstr[i] = '\0';
             }
         }
     }
