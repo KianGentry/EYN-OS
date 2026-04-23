@@ -98,6 +98,22 @@ static void vterm_clear_line_icons(vterm_t* t, int row) {
     t->line_indent_px[row] = 0;
 }
 
+static int vterm_input_is_clear_command(const char* input) {
+    if (!input) return 0;
+
+    while (*input == ' ' || *input == '\t' || *input == '\r' || *input == '\n') {
+        input++;
+    }
+    if (input[0] != 'c' || input[1] != 'l' || input[2] != 'e' || input[3] != 'a' || input[4] != 'r') {
+        return 0;
+    }
+    input += 5;
+    while (*input == ' ' || *input == '\t' || *input == '\r' || *input == '\n') {
+        input++;
+    }
+    return *input == '\0';
+}
+
 const char* vterm_get_cwd(int idx) {
     if (idx < 0 || idx >= 4) return "/";
     return vterms[idx].cwd;
@@ -626,6 +642,15 @@ void vterm_handle_key(int idx, int key) {
             // Add to global history before command execution so parser/tokenizer mutations
             // in command handlers cannot alter what Up/Down navigation recalls.
             add_to_history(&g_command_history, raw_input);
+
+            if (vterm_input_is_clear_command(raw_input)) {
+                vterm_clear(idx);
+                vterm_print_prompt(idx);
+                t->history_idx = -1;
+                t->sel_active = 0;
+                t->version++;
+                return;
+            }
 
             // temporarily redirect shell output to vterm buffer by using start_shell_redirect / shell_redirect_buf
             // Swap global shell_current_path into this vterm's cwd so commands (like cd) operate per-vterm
