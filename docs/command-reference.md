@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-27 10:56:14
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-27 11:20:00
 
 **Total Commands:** 101
 
@@ -1502,7 +1502,7 @@ spam
 
 ### ssh
 
-**Binary:** `testdir/binaries/ssh.uelf`
+**Binary:** `testdir/binaries/ssh`
 
 **Metadata Source:** `EYN-packages/packages/ssh/ssh_uelf.c`
 

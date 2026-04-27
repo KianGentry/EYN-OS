@@ -598,7 +598,8 @@ void start_tiling_manager() {
                 if (w->desktop != g_current_desktop) continue;
                 int is_focused_win = (wi == g_win_focused);
                 // Redraw decorations if first time, focus changed, forced, or underlying tiles changed
-                if (!w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw || g_any_tile_content_redrew) {
+                int need_decor = (!g_gui_low_mode) || !w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw || g_any_tile_content_redrew;
+                if (need_decor) {
                     wm_draw_decor(w, is_focused_win);
                     wm_mark_decor_dirty(w);
                     w->static_drawn = 1;

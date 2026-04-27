@@ -322,7 +322,8 @@ void tile_render_once(void) {
             if (w->desktop != g_current_desktop) continue;
 
             int is_focused_win = (wi == g_win_focused);
-            if (!w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw) {
+            int need_decor = (!g_gui_low_mode) || !w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw;
+            if (need_decor) {
                 wm_draw_decor(w, is_focused_win);
                 wm_mark_decor_dirty(w);
                 w->static_drawn = 1;
@@ -868,6 +869,10 @@ int tile_pump_input_once(void) {
                 /* No floating window hit: check tile border resize and titlebar drag. */
                 {
                     int t_hit_p = tile_index_at(me.x, me.y);
+                    if (t_hit_p >= 0 && t_hit_p < tile_count) {
+                        focused = t_hit_p;
+                        g_win_focused = -1;
+                    }
                     if (t_hit_p >= 0 && t_hit_p < tile_count && !tiles[t_hit_p].maximized) {
                         int te = tile_border_resize_hit_test(&tiles[t_hit_p], me.x, me.y);
                         if (te) {
@@ -908,9 +913,11 @@ int tile_pump_input_once(void) {
             }
 
             int target_tile = focused;
-            if (g_user_task_term >= 0) {
-                int tt = tile_find_by_term(g_user_task_term);
-                if (tt >= 0 && tt < tile_count) target_tile = tt;
+            if (target_tile < 0 || target_tile >= tile_count) {
+                if (g_user_task_term >= 0) {
+                    int tt = tile_find_by_term(g_user_task_term);
+                    if (tt >= 0 && tt < tile_count) target_tile = tt;
+                }
             }
 
             int term = tiles[target_tile].term_idx;
@@ -963,8 +970,16 @@ int tile_pump_input_once(void) {
      * trigger shortcuts or echo characters.
      */
     if (key < 0) {
+        if (g_win_focused >= 0 && g_win_focused < MAX_WINDOWS && g_windows[g_win_focused].used) {
+            window_t* wfocus = &g_windows[g_win_focused];
+            if (wfocus->key_cb) {
+                wfocus->key_cb(g_win_focused, key, wfocus->userdata);
+                wfocus->needs_redraw = 1;
+                return 1;
+            }
+        }
         int target_tile = focused;
-        if (g_user_task_active && g_user_task_term >= 0) {
+        if ((target_tile < 0 || target_tile >= tile_count) && g_user_task_active && g_user_task_term >= 0) {
             int tt = tile_find_by_term(g_user_task_term);
             if (tt >= 0 && tt < tile_count) target_tile = tt;
         }
@@ -1009,10 +1024,14 @@ int tile_pump_input_once(void) {
     // route printable characters, backspace, and Enter to the stdin buffer
     // instead of the normal vterm command handling.
     if (g_user_task_active && g_user_task_term >= 0) {
+        int have_focused_window = (g_win_focused >= 0 && g_win_focused < MAX_WINDOWS &&
+                                   g_windows[g_win_focused].used && !g_windows[g_win_focused].minimized);
         int term = g_user_task_term;
         // If this ring3 task has attached a GUI key handler, prefer routing keys
         // to the GUI event queue instead of hijacking them into stdin.
-        if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
+        if (have_focused_window) {
+            // A floating window is explicitly focused; do not hijack keys into launcher stdin.
+        } else if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
             // fall through to normal routing
         } else {
         // Skip Super-modified keys (they go to tiler hotkeys below)
@@ -1276,18 +1295,17 @@ int tile_pump_input_once(void) {
     // Route input to focused window if any; else focused tile.
     if (g_win_focused >= 0 && g_windows[g_win_focused].used) {
         window_t* wfocus = &g_windows[g_win_focused];
-        if (wfocus->key_cb) {
-            wfocus->key_cb(g_win_focused, key & 0xFFFF, wfocus->userdata);
+            if (wfocus->key_cb) {
+            wfocus->key_cb(g_win_focused, key, wfocus->userdata);
             wfocus->needs_redraw = 1;
         }
         return 1;
     }
 
-    // While a ring3 task is active, route normal keys to the task's tile.
-    // Mouse-based focus switching is not pumped in the PIT path, so relying on
-    // 'focused' can starve the user task of input.
+    // Route normal keys to the currently focused tile.
+    // Fallback to the active user task tile only if focus is invalid.
     int target_tile = focused;
-    if (g_user_task_active && g_user_task_term >= 0) {
+    if ((target_tile < 0 || target_tile >= tile_count) && g_user_task_active && g_user_task_term >= 0) {
         int tt = tile_find_by_term(g_user_task_term);
         if (tt >= 0 && tt < tile_count) target_tile = tt;
     }
