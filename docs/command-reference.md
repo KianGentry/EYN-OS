@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-23 14:44:13
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-27 10:56:14
 
 **Total Commands:** 101
 
@@ -1502,12 +1502,12 @@ spam
 
 ### ssh
 
-**Binary:** `testdir/binaries/ssh`
+**Binary:** `testdir/binaries/ssh.uelf`
 
 **Metadata Source:** `EYN-packages/packages/ssh/ssh_uelf.c`
 
 **Description:**
-SSH client scaffold with banner+KEX smoke and PTY spawn smoke.
+SSH client with password auth and interactive shell relay.
 
 **Example:**
 ```bash
