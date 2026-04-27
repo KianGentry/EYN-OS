@@ -321,6 +321,11 @@ void tile_render_once(void) {
             if (!w->used || w->minimized) continue;
             if (w->desktop != g_current_desktop) continue;
 
+            if (w->needs_redraw || w->continuous_redraw || g_force_full_redraw) {
+                wm_draw_content(w);
+                if (!w->continuous_redraw) w->needs_redraw = 0;
+            }
+
             int is_focused_win = (wi == g_win_focused);
             int need_decor = (!g_gui_low_mode) || !w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw;
             if (need_decor) {
@@ -328,11 +333,6 @@ void tile_render_once(void) {
                 wm_mark_decor_dirty(w);
                 w->static_drawn = 1;
                 w->last_focused = is_focused_win;
-            }
-
-            if (w->needs_redraw || w->continuous_redraw || g_force_full_redraw) {
-                wm_draw_content(w);
-                if (!w->continuous_redraw) w->needs_redraw = 0;
             }
 
             if (status_overlay_visible()) {
@@ -609,10 +609,14 @@ int tile_pump_input_once(void) {
                     if (resize_edges & RESIZE_EDGE_T) new_y -= (48 - new_h);
                     new_h = 48;
                 }
+                int taskbar_h_resize = vga_text_cell_h() + 6;
+                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
+                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : taskbar_h_resize;
+                if (max_anchor_y < taskbar_h_resize) max_anchor_y = taskbar_h_resize;
                 if (new_x < 0) { if (resize_edges & RESIZE_EDGE_L) new_w += new_x; new_x = 0; }
-                if (new_y < 0) { if (resize_edges & RESIZE_EDGE_T) new_h += new_y; new_y = 0; }
-                if (new_x + new_w > screen_w) new_w = screen_w - new_x;
-                if (new_y + new_h > screen_h) new_h = screen_h - new_y;
+                if (new_y < taskbar_h_resize) { if (resize_edges & RESIZE_EDGE_T) new_h += (new_y - taskbar_h_resize); new_y = taskbar_h_resize; }
+                if (new_x > max_anchor_x) new_x = max_anchor_x;
+                if (new_y > max_anchor_y) new_y = max_anchor_y;
                 if (new_w < 64) new_w = 64;
                 if (new_h < 48) new_h = 48;
 
@@ -630,8 +634,11 @@ int tile_pump_input_once(void) {
                 window_t* w = &g_windows[drag_win];
                 int taskbar_h_drag = vga_text_cell_h() + 6;
                 if (taskbar_h_drag < 0) taskbar_h_drag = 0;
-                w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
-                w->y = clampi(me.y - drag_off_y, taskbar_h_drag, screen_h - w->h);
+                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
+                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : taskbar_h_drag;
+                if (max_anchor_y < taskbar_h_drag) max_anchor_y = taskbar_h_drag;
+                w->x = clampi(me.x - drag_off_x, 0, max_anchor_x);
+                w->y = clampi(me.y - drag_off_y, taskbar_h_drag, max_anchor_y);
                 w->static_drawn = 0;
                 w->needs_redraw = 1;
                 g_tiles_full_content_redraw = 1;

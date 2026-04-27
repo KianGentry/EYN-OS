@@ -497,8 +497,11 @@ int wm_create_window(const char* title, int x, int y, int w, int h, const char* 
         if (!g_windows[i].used) {
             g_windows[i].used = 1;
             int tb_h_clamp = vga_text_cell_h() + 6;
-            g_windows[i].x = clampi(x, 0, screen_w - 32);
-            g_windows[i].y = clampi(y, tb_h_clamp, screen_h - 32);
+            int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
+            int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tb_h_clamp;
+            if (max_anchor_y < tb_h_clamp) max_anchor_y = tb_h_clamp;
+            g_windows[i].x = clampi(x, 0, max_anchor_x);
+            g_windows[i].y = clampi(y, tb_h_clamp, max_anchor_y);
             g_windows[i].w = clampi(w, 64, screen_w);
             g_windows[i].h = clampi(h, 48, screen_h);
             g_windows[i].title = title ? title : "";

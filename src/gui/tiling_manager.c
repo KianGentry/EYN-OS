@@ -596,6 +596,12 @@ void start_tiling_manager() {
                 window_t* w = &g_windows[wi];
                 if (!w->used) continue;
                 if (w->desktop != g_current_desktop) continue;
+                // Redraw content if requested
+                if (w->needs_redraw || w->continuous_redraw || g_force_full_redraw || g_any_tile_content_redrew) {
+                    wm_draw_content(w);
+                    if (!w->continuous_redraw) w->needs_redraw = 0;
+                }
+
                 int is_focused_win = (wi == g_win_focused);
                 // Redraw decorations if first time, focus changed, forced, or underlying tiles changed
                 int need_decor = (!g_gui_low_mode) || !w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw || g_any_tile_content_redrew;
@@ -604,11 +610,6 @@ void start_tiling_manager() {
                     wm_mark_decor_dirty(w);
                     w->static_drawn = 1;
                     w->last_focused = is_focused_win;
-                }
-                // Redraw content if requested
-                if (w->needs_redraw || w->continuous_redraw || g_force_full_redraw || g_any_tile_content_redrew) {
-                    wm_draw_content(w);
-                    if (!w->continuous_redraw) w->needs_redraw = 0;
                 }
 
                 // Draw status overlay on top of window content.
@@ -1560,14 +1561,16 @@ void start_tiling_manager() {
                     if (resize_edges & RESIZE_EDGE_T) new_y -= (minh - new_h);
                     new_h = minh;
                 }
+                int taskbar_h_resize = vga_text_cell_h() + 6;
+                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
+                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : taskbar_h_resize;
+                if (max_anchor_y < taskbar_h_resize) max_anchor_y = taskbar_h_resize;
                 if (new_x < 0) { if (resize_edges & RESIZE_EDGE_L) { new_w += new_x; } new_x = 0; }
-                if (new_y < 0) { if (resize_edges & RESIZE_EDGE_T) { new_h += new_y; } new_y = 0; }
-                if (new_x + new_w > screen_w) new_w = screen_w - new_x;
-                if (new_y + new_h > screen_h) new_h = screen_h - new_y;
+                if (new_y < taskbar_h_resize) { if (resize_edges & RESIZE_EDGE_T) { new_h += (new_y - taskbar_h_resize); } new_y = taskbar_h_resize; }
+                if (new_x > max_anchor_x) new_x = max_anchor_x;
+                if (new_y > max_anchor_y) new_y = max_anchor_y;
                 if (new_w < minw) new_w = minw;
                 if (new_h < minh) new_h = minh;
-                if (new_x + new_w > screen_w) new_x = screen_w - new_w;
-                if (new_y + new_h > screen_h) new_y = screen_h - new_h;
 
                 if (!g_gui_low_mode) {
                     vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
@@ -1607,8 +1610,11 @@ void start_tiling_manager() {
                     } else {
                         g_last_drag_tick = nowt;
                         int tb_h_drag = vga_text_cell_h() + 6;
-                        w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
-                        w->y = clampi(me.y - drag_off_y, tb_h_drag, screen_h - w->h);
+                        int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
+                        int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tb_h_drag;
+                        if (max_anchor_y < tb_h_drag) max_anchor_y = tb_h_drag;
+                        w->x = clampi(me.x - drag_off_x, 0, max_anchor_x);
+                        w->y = clampi(me.y - drag_off_y, tb_h_drag, max_anchor_y);
                     }
                     // Do not mark tiles/windows dirty per-move; wireframe overlay handles visuals
                     w->static_drawn = 0; // so final commit repaints decor at new spot
@@ -1617,8 +1623,11 @@ void start_tiling_manager() {
                     vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
                     int old_x = w->x, old_y = w->y, old_w = w->w, old_h = w->h;
                     int tb_h_drag2 = vga_text_cell_h() + 6;
-                    w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
-                    w->y = clampi(me.y - drag_off_y, tb_h_drag2, screen_h - w->h);
+                    int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
+                    int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tb_h_drag2;
+                    if (max_anchor_y < tb_h_drag2) max_anchor_y = tb_h_drag2;
+                    w->x = clampi(me.x - drag_off_x, 0, max_anchor_x);
+                    w->y = clampi(me.y - drag_off_y, tb_h_drag2, max_anchor_y);
                     vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
                     w->static_drawn = 0;
                     w->needs_redraw = 1;
