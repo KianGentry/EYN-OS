@@ -1661,10 +1661,13 @@ void start_tiling_manager() {
                 if (new_w < t_minw) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_x -= (t_minw - new_w); new_w = t_minw; }
                 if (new_h < t_minh) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_y -= (t_minh - new_h); new_h = t_minh; }
                 int tbh_tbr = vga_text_cell_h() + 6;
+                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
+                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tbh_tbr;
+                if (max_anchor_y < tbh_tbr) max_anchor_y = tbh_tbr;
                 if (new_x < 0) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_w += new_x; new_x = 0; }
                 if (new_y < tbh_tbr) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_h += (new_y - tbh_tbr); new_y = tbh_tbr; }
-                if (new_x + new_w > screen_w) new_w = screen_w - new_x;
-                if (new_y + new_h > screen_h) new_h = screen_h - new_y;
+                if (new_x > max_anchor_x) new_x = max_anchor_x;
+                if (new_y > max_anchor_y) new_y = max_anchor_y;
                 if (new_w < t_minw) new_w = t_minw;
                 if (new_h < t_minh) new_h = t_minh;
                 t->x = new_x; t->y = new_y; t->width = new_w; t->height = new_h;
@@ -1676,8 +1679,11 @@ void start_tiling_manager() {
             if (tile_drag_active && tile_drag_idx >= 0 && tile_drag_idx < tile_count) {
                 tile_t* t = &tiles[tile_drag_idx];
                 int tbh_td = vga_text_cell_h() + 6;
-                t->x = clampi(me.x - tile_drag_off_x, 0, screen_w - t->width);
-                t->y = clampi(me.y - tile_drag_off_y, tbh_td, screen_h - t->height);
+                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
+                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tbh_td;
+                if (max_anchor_y < tbh_td) max_anchor_y = tbh_td;
+                t->x = clampi(me.x - tile_drag_off_x, 0, max_anchor_x);
+                t->y = clampi(me.y - tile_drag_off_y, tbh_td, max_anchor_y);
                 t->static_drawn = 0;
                 g_force_full_redraw = 1;
                 g_tiles_full_content_redraw = 1;

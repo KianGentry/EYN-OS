@@ -5193,8 +5193,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 break;
             }
 
-            int new_win = wm_create_window(e->title, 100 + (handle - 1) * 24,
-                                           60  + (handle - 1) * 24, 700, 480,
+            int new_win = wm_create_window(e->title, -1, -1, 700, 480,
                                            e->status_left);
             if (new_win < 0) {
                 user_gui_free_entry(e);
@@ -5248,8 +5247,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 break;
             }
 
-            int cap_win = wm_create_window(e->title, 100 + (handle - 1) * 24,
-                                            60  + (handle - 1) * 24, 700, 480,
+            int cap_win = wm_create_window(e->title, -1, -1, 700, 480,
                                             e->status_left);
             if (cap_win < 0) {
                 user_gui_free_entry(e);

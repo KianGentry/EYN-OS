@@ -497,13 +497,24 @@ int wm_create_window(const char* title, int x, int y, int w, int h, const char* 
         if (!g_windows[i].used) {
             g_windows[i].used = 1;
             int tb_h_clamp = vga_text_cell_h() + 6;
+            int init_w = clampi(w, 64, screen_w);
+            int init_h = clampi(h, 48, screen_h);
+            int init_x = x;
+            int init_y = y;
+
+            // Sentinel placement: negative x/y requests centered spawn.
+            if (x < 0 || y < 0) {
+                init_x = (screen_w - init_w) / 2;
+                init_y = (screen_h - init_h) / 2;
+            }
+
             int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
             int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tb_h_clamp;
             if (max_anchor_y < tb_h_clamp) max_anchor_y = tb_h_clamp;
-            g_windows[i].x = clampi(x, 0, max_anchor_x);
-            g_windows[i].y = clampi(y, tb_h_clamp, max_anchor_y);
-            g_windows[i].w = clampi(w, 64, screen_w);
-            g_windows[i].h = clampi(h, 48, screen_h);
+            g_windows[i].x = clampi(init_x, 0, max_anchor_x);
+            g_windows[i].y = clampi(init_y, tb_h_clamp, max_anchor_y);
+            g_windows[i].w = init_w;
+            g_windows[i].h = init_h;
             g_windows[i].title = title ? title : "";
             g_windows[i].status_left = status_left;
             g_windows[i].status_right = NULL;
