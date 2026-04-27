@@ -633,6 +633,11 @@ void vterm_handle_key(int idx, int key) {
     }
     // Enter - execute command in this vterm
     if (key == '\n' || key == 10) {
+        // End any active history-browsing session before command execution.
+        // This guarantees the next Up starts from the newest history entry.
+        t->history_idx = -1;
+        t->saved_input[0] = '\0';
+
         // append newline visually
         vterm_write_char(idx, '\n');
         // handle command: use existing handle_shell_command, but capture output via shell redirect
