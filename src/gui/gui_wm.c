@@ -501,6 +501,8 @@ int wm_create_window(const char* title, int x, int y, int w, int h, const char* 
             int init_h = clampi(h, 48, screen_h);
             int init_x = x;
             int init_y = y;
+            int title_h = win_title_height(NULL);
+            int title_visible_w = titlebar_min_visible_width_px(title_h);
 
             // Sentinel placement: negative x/y requests centered spawn.
             if (x < 0 || y < 0) {
@@ -508,8 +510,8 @@ int wm_create_window(const char* title, int x, int y, int w, int h, const char* 
                 init_y = (screen_h - init_h) / 2;
             }
 
-            int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
-            int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tb_h_clamp;
+            int max_anchor_x = (screen_w > title_visible_w) ? (screen_w - title_visible_w) : 0;
+            int max_anchor_y = (screen_h > title_h) ? (screen_h - title_h) : tb_h_clamp;
             if (max_anchor_y < tb_h_clamp) max_anchor_y = tb_h_clamp;
             g_windows[i].x = clampi(init_x, 0, max_anchor_x);
             g_windows[i].y = clampi(init_y, tb_h_clamp, max_anchor_y);

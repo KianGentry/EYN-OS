@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-27 11:50:05
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-27 12:05:17
 
 **Total Commands:** 101
 

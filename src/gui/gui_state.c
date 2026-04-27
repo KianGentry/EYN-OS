@@ -767,6 +767,11 @@ static int win_title_height(const window_t* w) {
     if (h < 16) h = 16;
     return h;
 }
+static int titlebar_min_visible_width_px(int title_h) {
+    int w = title_h * 8;
+    if (w < 96) w = 96;
+    return w;
+}
 static int win_status_height(const window_t* w) {
     (void)w;
     // Status is an Alt-held overlay and does not reserve layout space.

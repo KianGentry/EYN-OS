@@ -1661,8 +1661,10 @@ void start_tiling_manager() {
                 if (new_w < t_minw) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_x -= (t_minw - new_w); new_w = t_minw; }
                 if (new_h < t_minh) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_y -= (t_minh - new_h); new_h = t_minh; }
                 int tbh_tbr = vga_text_cell_h() + 6;
-                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
-                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tbh_tbr;
+                int title_h = get_title_height(&tiles[tile_border_resize_idx]);
+                int title_visible_w = titlebar_min_visible_width_px(title_h);
+                int max_anchor_x = (screen_w > title_visible_w) ? (screen_w - title_visible_w) : 0;
+                int max_anchor_y = (screen_h > title_h) ? (screen_h - title_h) : tbh_tbr;
                 if (max_anchor_y < tbh_tbr) max_anchor_y = tbh_tbr;
                 if (new_x < 0) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_w += new_x; new_x = 0; }
                 if (new_y < tbh_tbr) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_h += (new_y - tbh_tbr); new_y = tbh_tbr; }
@@ -1679,8 +1681,10 @@ void start_tiling_manager() {
             if (tile_drag_active && tile_drag_idx >= 0 && tile_drag_idx < tile_count) {
                 tile_t* t = &tiles[tile_drag_idx];
                 int tbh_td = vga_text_cell_h() + 6;
-                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
-                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tbh_td;
+                int title_h = get_title_height(t);
+                int title_visible_w = titlebar_min_visible_width_px(title_h);
+                int max_anchor_x = (screen_w > title_visible_w) ? (screen_w - title_visible_w) : 0;
+                int max_anchor_y = (screen_h > title_h) ? (screen_h - title_h) : tbh_td;
                 if (max_anchor_y < tbh_td) max_anchor_y = tbh_td;
                 t->x = clampi(me.x - tile_drag_off_x, 0, max_anchor_x);
                 t->y = clampi(me.y - tile_drag_off_y, tbh_td, max_anchor_y);

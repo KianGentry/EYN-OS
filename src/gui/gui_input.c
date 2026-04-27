@@ -595,6 +595,8 @@ int tile_pump_input_once(void) {
                 int new_y = resize_start_y;
                 int new_w = resize_start_w;
                 int new_h = resize_start_h;
+                int title_h = win_title_height(&g_windows[resize_win]);
+                int title_visible_w = titlebar_min_visible_width_px(title_h);
 
                 if (resize_edges & RESIZE_EDGE_L) { new_x = resize_start_x + dx; new_w = resize_start_w - dx; }
                 if (resize_edges & RESIZE_EDGE_R) { new_w = resize_start_w + dx; }
@@ -610,8 +612,8 @@ int tile_pump_input_once(void) {
                     new_h = 48;
                 }
                 int taskbar_h_resize = vga_text_cell_h() + 6;
-                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
-                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : taskbar_h_resize;
+                int max_anchor_x = (screen_w > title_visible_w) ? (screen_w - title_visible_w) : 0;
+                int max_anchor_y = (screen_h > title_h) ? (screen_h - title_h) : taskbar_h_resize;
                 if (max_anchor_y < taskbar_h_resize) max_anchor_y = taskbar_h_resize;
                 if (new_x < 0) { if (resize_edges & RESIZE_EDGE_L) new_w += new_x; new_x = 0; }
                 if (new_y < taskbar_h_resize) { if (resize_edges & RESIZE_EDGE_T) new_h += (new_y - taskbar_h_resize); new_y = taskbar_h_resize; }
@@ -634,8 +636,10 @@ int tile_pump_input_once(void) {
                 window_t* w = &g_windows[drag_win];
                 int taskbar_h_drag = vga_text_cell_h() + 6;
                 if (taskbar_h_drag < 0) taskbar_h_drag = 0;
-                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
-                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : taskbar_h_drag;
+                int title_h = win_title_height(w);
+                int title_visible_w = titlebar_min_visible_width_px(title_h);
+                int max_anchor_x = (screen_w > title_visible_w) ? (screen_w - title_visible_w) : 0;
+                int max_anchor_y = (screen_h > title_h) ? (screen_h - title_h) : taskbar_h_drag;
                 if (max_anchor_y < taskbar_h_drag) max_anchor_y = taskbar_h_drag;
                 w->x = clampi(me.x - drag_off_x, 0, max_anchor_x);
                 w->y = clampi(me.y - drag_off_y, taskbar_h_drag, max_anchor_y);
@@ -661,8 +665,10 @@ int tile_pump_input_once(void) {
                 if (new_w < t_minw2) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_x -= (t_minw2 - new_w); new_w = t_minw2; }
                 if (new_h < t_minh2) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_y -= (t_minh2 - new_h); new_h = t_minh2; }
                 int tbh_p = vga_text_cell_h() + 6;
-                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
-                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tbh_p;
+                int title_h = get_title_height(&tiles[tile_border_resize_idx]);
+                int title_visible_w = titlebar_min_visible_width_px(title_h);
+                int max_anchor_x = (screen_w > title_visible_w) ? (screen_w - title_visible_w) : 0;
+                int max_anchor_y = (screen_h > title_h) ? (screen_h - title_h) : tbh_p;
                 if (max_anchor_y < tbh_p) max_anchor_y = tbh_p;
                 if (new_x < 0) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_w += new_x; new_x = 0; }
                 if (new_y < tbh_p) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_h += (new_y - tbh_p); new_y = tbh_p; }
@@ -680,8 +686,10 @@ int tile_pump_input_once(void) {
             if (tile_drag_active && tile_drag_idx >= 0 && tile_drag_idx < tile_count) {
                 tile_t* t = &tiles[tile_drag_idx];
                 int tbh_tdp = vga_text_cell_h() + 6;
-                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
-                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tbh_tdp;
+                int title_h = get_title_height(t);
+                int title_visible_w = titlebar_min_visible_width_px(title_h);
+                int max_anchor_x = (screen_w > title_visible_w) ? (screen_w - title_visible_w) : 0;
+                int max_anchor_y = (screen_h > title_h) ? (screen_h - title_h) : tbh_tdp;
                 if (max_anchor_y < tbh_tdp) max_anchor_y = tbh_tdp;
                 t->x = clampi(me.x - tile_drag_off_x, 0, max_anchor_x);
                 t->y = clampi(me.y - tile_drag_off_y, tbh_tdp, max_anchor_y);
