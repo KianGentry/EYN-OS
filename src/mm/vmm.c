@@ -5,6 +5,7 @@
 #include <panic.h>
 #include <multiboot.h>
 #include <arch.h>
+#include <cpu/gdt.h>
 
 /* External multiboot info for framebuffer mapping */
 extern multiboot_info_t *g_mbi;
@@ -1628,6 +1629,14 @@ void vmm_init(uint32 total_ram_bytes) {
     if (ram_pdes < 4u)   ram_pdes = 4u;    /* Always cover at least 16 MB */
     if (ram_pdes > 254u) ram_pdes = 254u;  /* Kernel high-half has PDEs 768..1022 (254 slots) */
     g_kernel_phys_alias_bytes = ram_pdes * (4u * 1024u * 1024u);
+    
+    /* SAFETY: Explicitly clamp to prevent out-of-bounds PDE writes.
+       Page directory has 1024 entries (0-1023). High-half starts at 768.
+       So we can use PDE[768..1022] (255 slots) for identity mapping, leaving
+       PDE[1023] for the recursive mapping. Use 254 to be conservative. */
+    if (ram_pdes > 254u) {
+        ram_pdes = 254u;
+    }
 
     for (uint32 pdi = 0; pdi < ram_pdes; pdi++) {
         page_table_t* pt_low = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
@@ -1648,6 +1657,19 @@ void vmm_init(uint32 total_ram_bytes) {
 
         /* High mapping (0xC0000000+) - kernel's preferred addresses */
         kernel_pd->entries[768 + pdi] = vmm_ptr_to_u32(pt_high) | PTE_PRESENT | PTE_RW;
+    }
+    
+    /* CRITICAL: Ensure kernel code region is always mapped before paging enable.
+     * The kernel at 0xC0100000 needs PDE[768] to be valid.
+     * With 2GB RAM, ram_pdes gets clamped to 254, covering only 1GB in high-half.
+     * Verify that the kernel region (at least 16MB) is mapped. */
+    {
+        uint32 kernel_pde_idx = 768;  /* 0xC0000000 >> 22 */
+        uint32 kernel_pde_entry = kernel_pd->entries[kernel_pde_idx];
+        if (!(kernel_pde_entry & PTE_PRESENT)) {
+            printf("VMM ERROR: Kernel PDE not present! PDE[768] = 0x%X\n", (unsigned)kernel_pde_entry);
+            while(1) arch_halt();  /* Cannot proceed without kernel mapping */
+        }
     }
     
     /*
@@ -1686,9 +1708,6 @@ void vmm_init(uint32 total_ram_bytes) {
             /* Round fb_addr down to 4MB boundary for simpler mapping */
             uint32 fb_start = fb_addr & ~0x3FFFFF; /* Align to 4MB */
             uint32 fb_end = (fb_addr + fb_size + 0x3FFFFF) & ~0x3FFFFF;
-
-                 printf("VMM: Framebuffer map: flags=0x%X fb=0x%X size=%u bytes\n",
-                     g_mbi->flags, fb_addr, (unsigned)fb_size);
 
             /* Map each 4MB region (create page table for each PDE) */
             for (uint32 addr = fb_start; addr < fb_end; addr += 4 * 1024 * 1024) {
@@ -1759,14 +1778,27 @@ void vmm_enable_paging(void) {
     /* Enable paging by setting CR0.PG (bit 31) */
     uintptr cr0 = read_cr0();
     cr0 |= 0x80000000;  /* Set PG bit */
+
+    /* Enable paging, then perform a far jump to reload CS and serialize.
+     * A true far jump is more conservative on older x86 hardware than a
+     * near jump after CR0.PG transitions.
+     */
     write_cr0(cr0);
+    {
+        struct {
+            uint32 offset;
+            uint16 selector;
+        } __attribute__((packed)) far_jump = {
+            (uint32)(uintptr)&&paging_enabled_after_jump,
+            GDT_KERNEL_CS
+        };
+
+        asm volatile("ljmp *%0" :: "m"(far_jump) : "memory");
+    }
+
+paging_enabled_after_jump:
     
     paging_enabled = 1;
-    
-    /* Now executing with paging enabled!
-     * Thanks to identity mapping, current EIP is still valid. */
-    
-    printf("VMM: Paging enabled\n");
 }
 
 void vmm_mark_paging_enabled(void) {

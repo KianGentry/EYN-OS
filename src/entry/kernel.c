@@ -254,9 +254,10 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     vmm_init(ram);
         printf("Frames: %u total, %u free\n",
             (unsigned)vmm_get_total_frames(), (unsigned)vmm_get_free_frames());
+        printf("Enabling paging...");
 #if defined(EYNOS_ARCH_AMD64)
     vmm_mark_paging_enabled();
-    printf("VMM: Paging already active (amd64 bootstrap)\n");
+    printf("Paging already enabled by bootloader (AMD64)...");
 #else
     vmm_enable_paging();
 #endif
