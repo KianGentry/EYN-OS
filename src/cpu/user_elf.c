@@ -217,9 +217,67 @@ static uint32 user_stack_build_argv(uint32 user_stack_top,
     return sp;
 }
 
-/* Forward declarations for task slot prepopulation in user_elf_run_argv */
-typedef struct user_task_slot_t user_task_slot_t;
-static user_task_slot_t* user_task_find_slot_by_pid(int pid);
+/* Task management structures and state (moved before user_elf_run_argv for use in prepopulation) */
+typedef struct {
+    uint32 code_base;
+    uint32 code_pages;
+    uint32 stack_page;
+} user_task_runtime_t;
+
+#define USER_TASK_MAX_SPAWN_ARGC 16
+
+typedef struct {
+    uint8 drive;
+    int argc;
+    char* path;
+    const char* argv[USER_TASK_MAX_SPAWN_ARGC];
+    char* arg_storage[USER_TASK_MAX_SPAWN_ARGC];
+} user_task_image_t;
+
+typedef enum {
+    USER_TASK_STATE_UNUSED = 0,
+    USER_TASK_STATE_RUNNABLE = 1,
+    USER_TASK_STATE_RUNNING = 2,
+    USER_TASK_STATE_BLOCKED = 3,
+    USER_TASK_STATE_ZOMBIE = 4,
+} user_task_state_t;
+
+typedef enum {
+    USER_TASK_BLOCK_NONE = 0,
+    USER_TASK_BLOCK_SLEEP = 1,
+    USER_TASK_BLOCK_WAITPID = 2,
+    USER_TASK_BLOCK_GUI_EVENT = 3,
+} user_task_block_reason_t;
+
+typedef struct {
+    int used;
+    int pid;
+    int status;
+    user_task_state_t state;
+    int wait_target_pid;
+    int wait_gui_handle;
+    uint32 wake_tick;
+    uint8 block_reason;
+    uint8 mlfq_level;
+    uint8 in_runq;
+    uint16 _pad0;
+    int fd_inherit_mode;
+    int stdin_fd;
+    int stdout_fd;
+    int stderr_fd;
+    int runq_next;
+    uint32 mlfq_slice_left;
+    user_task_runtime_t runtime;
+    user_task_image_t* image;
+    int has_syscall_frame;
+    uint32 syscall_frame_generation;
+    regs_t last_syscall_frame;
+} user_task_slot_t;
+
+#define USER_TASK_MAX 16
+
+static user_task_slot_t g_user_tasks[USER_TASK_MAX];
+static user_task_slot_t* g_user_task_active_slot = NULL;
 
 int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
     if (!abspath || !abspath[0]) return -1;
@@ -560,6 +618,26 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     g_user_task_runtime_generation++;
     if (g_user_task_runtime_generation == 0) g_user_task_runtime_generation = 1;
 
+    /* Prepopulate the active task's resume frame so IRQ-time preemption can
+     * switch to it even before it has executed a syscall. This creates an
+     * initial `last_syscall_frame` representing the ELF entrypoint and
+     * initial user stack so other tasks (or the IRQ preemptor) can resume
+     * this slot via the existing resume path.
+     */
+    if (g_user_task_active_slot) {
+        regs_t init_regs;
+        memset(&init_regs, 0, sizeof(init_regs));
+        init_regs.eip = entry;
+        init_regs.esp = user_esp;
+        init_regs.useresp = user_esp;
+        init_regs.cs = g_user_segdom_cs;
+        init_regs.ss = g_user_segdom_ds;
+        init_regs.eflags = 0x202u; /* IF set */
+        g_user_task_active_slot->last_syscall_frame = init_regs;
+        g_user_task_active_slot->has_syscall_frame = 1;
+        g_user_task_active_slot->syscall_frame_generation = g_user_task_runtime_generation;
+    }
+
     // Enter ring3 at ELF entry.
     // printf("%c[elfrun] entering user mode: %s (entry=0x%X)\n", 0, 255, 0, abspath, (unsigned)entry);
     uint32 kernel_stack_u32 = user_elf_ptr_to_u32(&stack_space);
@@ -582,78 +660,7 @@ int user_elf_run(uint8 drive, const char* abspath) {
     return user_elf_run_argv(drive, abspath, 0, NULL);
 }
 
-typedef struct {
-    uint32 code_base;
-    uint32 code_pages;
-    uint32 stack_page;
-} user_task_runtime_t;
-
-#define USER_TASK_MAX_SPAWN_ARGC 16
-
-typedef struct {
-    uint8 drive;
-    int argc;
-    char* path;
-    const char* argv[USER_TASK_MAX_SPAWN_ARGC];
-    char* arg_storage[USER_TASK_MAX_SPAWN_ARGC];
-} user_task_image_t;
-
-typedef enum {
-    USER_TASK_STATE_UNUSED = 0,
-    USER_TASK_STATE_RUNNABLE = 1,
-    USER_TASK_STATE_RUNNING = 2,
-    USER_TASK_STATE_BLOCKED = 3,
-    USER_TASK_STATE_ZOMBIE = 4,
-} user_task_state_t;
-
-typedef enum {
-    USER_TASK_BLOCK_NONE = 0,
-    USER_TASK_BLOCK_SLEEP = 1,
-    USER_TASK_BLOCK_WAITPID = 2,
-    USER_TASK_BLOCK_GUI_EVENT = 3,
-} user_task_block_reason_t;
-
-typedef struct {
-    int used;
-    int pid;
-    int status;
-    user_task_state_t state;
-    int wait_target_pid;
-    int wait_gui_handle;
-    uint32 wake_tick;
-    uint8 block_reason;
-    uint8 mlfq_level;
-    uint8 in_runq;
-    uint16 _pad0;
-    int fd_inherit_mode;
-    int stdin_fd;
-    int stdout_fd;
-    int stderr_fd;
-    int runq_next;
-    uint32 mlfq_slice_left;
-    user_task_runtime_t runtime;
-    user_task_image_t* image;
-    int has_syscall_frame;
-    uint32 syscall_frame_generation;
-    regs_t last_syscall_frame;
-} user_task_slot_t;
-
-/*
- * ABI-INVARIANT: Maximum tracked spawned user tasks.
- *
- * Why: Bounds static kernel state for task lifecycle bookkeeping.
- * Invariant: PIDs are tracked in a fixed slot table; waitpid relies on this.
- * Breakage if changed:
- *   - Increasing grows .bss linearly.
- *   - Decreasing reduces number of concurrent tracked tasks.
- * ABI-sensitive: Yes (spawn failure behavior under load).
- * Security-critical: Yes (resource exhaustion boundary).
- */
-#define USER_TASK_MAX 16
-
-static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static int g_user_task_next_pid = 1;
-static user_task_slot_t* g_user_task_active_slot = NULL;
 static volatile int g_user_task_schedule_request = 0;
 static uint32 g_user_task_runtime_generation = 1;
 
