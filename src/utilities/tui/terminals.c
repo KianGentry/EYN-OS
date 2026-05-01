@@ -666,11 +666,13 @@ void vterm_handle_key(int idx, int key) {
             // temporarily redirect shell output to vterm buffer by using start_shell_redirect / shell_redirect_buf
             // Swap global shell_current_path into this vterm's cwd so commands (like cd) operate per-vterm
             char saved_global_cwd[128];
+            int saved_user_task_term = g_user_task_term;
             strncpy(saved_global_cwd, shell_current_path, sizeof(saved_global_cwd)-1);
             saved_global_cwd[sizeof(saved_global_cwd)-1] = '\0';
             // set global to this vterm's cwd for command execution
             strncpy(shell_current_path, t->cwd, 127);
             shell_current_path[127] = '\0';
+            g_user_task_term = idx;
 
             start_shell_redirect();
                 handle_shell_command(t->input_buf);
@@ -687,6 +689,7 @@ void vterm_handle_key(int idx, int key) {
             // restore previous global cwd
             strncpy(shell_current_path, saved_global_cwd, sizeof(saved_global_cwd)-1);
             shell_current_path[sizeof(saved_global_cwd)-1] = '\0';
+            g_user_task_term = saved_user_task_term;
         // append redirected output to vterm
                 if (shell_redirect_buf[0]) {
                     // The redirect buffer may contain multiple lines; append each line separately

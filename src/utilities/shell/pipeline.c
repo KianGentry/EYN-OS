@@ -53,6 +53,8 @@ typedef struct {
 
 static pipeline_runtime_t g_pipeline_rt = {0};
 
+static void pipeline_restore_stdio_defaults(void);
+
 extern uint8 g_current_drive;
 
 static int pipeline_ctx_allow(uint32 caps, uint32 cost) {
@@ -743,6 +745,14 @@ int execute_background_command(command_t* cmd) {
     
     // Execute through unified shell path (binaries-only resolution).
     handle_shell_command(cmd_str);
+
+    /* Background launches must not leave fd inheritance or stdio remapping
+     * armed for the next foreground command. The child task captures whatever
+     * state it needs at spawn time; the shell should always return to its
+     * default stdio configuration after dispatch.
+     */
+    pipeline_restore_stdio_defaults();
+    syscall_reset_user_fds();
     
     // Add to background process list (simulated PID)
     int simulated_pid = add_background_process(12345, cmd_str); // Simulated PID

@@ -122,5 +122,4 @@ Utility Commands:
   view_backend_reis - Play a REIS audio file in a dedicated backend.
   view_backend_reiv - Play a REIV video file in a dedicated backend.
   xeyes           - X11 xeyes - eyes that follow the mouse pointer.
-  zsnes_1_51      - Run the zsnes_1_51 command.
 
