@@ -217,6 +217,10 @@ static uint32 user_stack_build_argv(uint32 user_stack_top,
     return sp;
 }
 
+/* Forward declarations for task slot prepopulation in user_elf_run_argv */
+typedef struct user_task_slot_t user_task_slot_t;
+static user_task_slot_t* user_task_find_slot_by_pid(int pid);
+
 int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
     if (!abspath || !abspath[0]) return -1;
 
