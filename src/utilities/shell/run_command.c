@@ -70,8 +70,8 @@ void run_command(string arg) {
         (void)shell_script_run(g_current_drive, abspath, argc, argv);
         return;
     } else if (ext && strcmp(ext, ".uelf") == 0) {
-        // execute as ring3 ELF using the EYN-OS syscall ABI
-        (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
+        // execute as ring3 ELF using the EYN-OS syscall ABI (asynchronously)
+        (void)user_task_spawn_argv(g_current_drive, abspath, argc, argv);
         return;
     } else if ((ext && strcmp(ext, ".eyn") == 0) || (ext && strcmp(ext, ".bin") == 0) || (ext && strcmp(ext, ".flat") == 0)) {
         // execute as native program (explicit native extension)
@@ -86,7 +86,8 @@ void run_command(string arg) {
         uint8 magic[4] = {0, 0, 0, 0};
         vfs_read_file(g_current_drive, abspath, magic, 4);
         if (magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
-            (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
+            /* Execute as ring3 ELF asynchronously */
+            (void)user_task_spawn_argv(g_current_drive, abspath, argc, argv);
             return;
         }
         if (magic[0] == '#') {

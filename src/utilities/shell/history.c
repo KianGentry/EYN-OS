@@ -9,6 +9,7 @@
 #include <context.h>
 #include <misc/sched.h>
 #include <watchdog.h>
+#include <cpu/user_elf.h>
 
 static int history_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -106,6 +107,8 @@ string readStr_with_history(command_history_t* history) {
         if ((spin++ & 0x3FFu) == 0u) {
             (void)history_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE);
             watchdog_kick("shell-input");
+            /* Poll scheduler to run background tasks (spawned programs) while waiting for input */
+            (void)user_task_poll_scheduler();
         }
         uint8 status = inportb(0x64);
         if(status & 0x1) {

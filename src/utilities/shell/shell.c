@@ -175,7 +175,8 @@ static int try_run_uelf_at_path(uint8 drive, const char* abspath, int argc, cons
             (void)shell_script_run(drive, abspath, argc, argv);
             return 1;
         }
-        (void)user_elf_run_argv(drive, abspath, argc, argv);
+        /* Spawn program asynchronously instead of blocking */
+        (void)user_task_spawn_argv(drive, abspath, argc, argv);
         return 1;
     }
     return 0;
@@ -417,8 +418,11 @@ void handle_shell_command(string input) {
 
     // Resolve and execute userland binaries only.
     shell_args_t unknown_args;
-    if (shell_args_parse(&unknown_args, current) == 0 && try_run_unknown_as_uelf(&unknown_args))
+    if (shell_args_parse(&unknown_args, current) == 0 && try_run_unknown_as_uelf(&unknown_args)) {
+        /* Yield to scheduler to allow spawned programs to start running */
+        (void)user_task_poll_scheduler();
         goto cleanup;
+    }
 
     // Command not found
     if (unknown_args.argc > 0 && unknown_args.argv[0])
@@ -465,7 +469,8 @@ void launch_shell(int n) {
         if (vfs_stat(VFS_DRIVE_RAM, "/binaries/installer", &st) == 0 && st.type == VFS_NODE_FILE) {
             g_boot_installer_autorun_done = 1;
             printf("%c[installer] launching RAM:/binaries/installer\n", 140, 220, 255);
-            (void)user_elf_run_argv(VFS_DRIVE_RAM, "/binaries/installer", 0, NULL);
+            /* Spawn asynchronously to prevent UI blocking during installer load */
+            (void)user_task_spawn_argv(VFS_DRIVE_RAM, "/binaries/installer", 0, NULL);
         }
     }
 
@@ -478,7 +483,8 @@ void launch_shell(int n) {
             check_argv[1] = "--notify";
             check_argv[2] = "--quiet";
             g_boot_package_update_check_done = 1;
-            (void)user_elf_run_argv(g_current_drive, "/binaries/install", 3, check_argv);
+            /* Spawn asynchronously to prevent UI blocking during update check */
+            (void)user_task_spawn_argv(g_current_drive, "/binaries/install", 3, check_argv);
         }
     }
     

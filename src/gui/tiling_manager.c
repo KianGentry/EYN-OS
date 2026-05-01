@@ -371,8 +371,9 @@ void start_tiling_manager() {
                 installer_stat == 0 &&
                 st.type == VFS_NODE_FILE) {
                 printf("[installer] launching RAM:/binaries/installer\n");
-                int installer_rc = user_elf_run_argv(VFS_DRIVE_RAM, "/binaries/installer", 0, NULL);
-                printf("[installer] launcher returned rc=%d\n", installer_rc);
+                /* Spawn asynchronously to prevent UI blocking during installer load */
+                int installer_pid = user_task_spawn_argv(VFS_DRIVE_RAM, "/binaries/installer", 0, NULL);
+                printf("[installer] spawned installer pid=%d\n", installer_pid);
             }
 
             if (tm_launch_ctx_pushed) {

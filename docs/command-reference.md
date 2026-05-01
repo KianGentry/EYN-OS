@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-28 01:17:19
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-04-30 19:05:06
 
-**Total Commands:** 101
+**Total Commands:** 102
 
 ## Table of Contents
 
@@ -1644,6 +1644,22 @@ xeyes
 
 ---
 
+### zsnes_1_51
+
+**Binary:** `testdir/binaries/zsnes_1_51`
+
+**Metadata Source:** `(metadata not found)`
+
+**Description:**
+Run the zsnes_1_51 command.
+
+**Example:**
+```bash
+zsnes_1_51
+```
+
+---
+
 ## Command Statistics
 
 | Category | Count |
@@ -1654,5 +1670,5 @@ xeyes
 | Memory Commands | 7 |
 | GUI/Window Commands | 12 |
 | Development Commands | 10 |
-| Utility Commands | 41 |
+| Utility Commands | 42 |
 
