@@ -218,15 +218,19 @@ static void irq_dispatch_core(int irq_number, int send_eoi, void* frame_ptr) {
             }
         }
 
-        // Throttle renders (PIT is 50Hz). Only render when something changed.
+        // Throttle renders (PIT is 50Hz). Keep repainting while a user task is active
+        // so the desktop stays responsive even when the program emits no output.
         if (tile_is_tiling_active()) {
             static uint32 ui_div = 0;
             if (++ui_div >= 3) { // ~16 FPS max while user task active
                 ui_div = 0;
+                // Keep the compositor advancing even if the active task is silent.
+                // Some UI state only becomes visible after an actual frame swap,
+                // so waiting for stdout or menu activity makes the desktop look frozen.
                 if (g_user_task_ui_dirty) {
                     g_user_task_ui_dirty = 0;
-                    tile_render_once();
                 }
+                tile_render_once();
             }
         }
 
