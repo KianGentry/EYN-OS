@@ -129,6 +129,12 @@ void tile_close(int tile_idx) {
 
 int tile_get_focused() { return focused; }
 
+int tile_get_focused_term() {
+    if (focused < 0 || focused >= tile_count) return -1;
+    if (tiles[focused].type == TILE_EMPTY) return -1;
+    return tiles[focused].term_idx;
+}
+
 int tile_find_by_term(int term_idx) {
     if (term_idx < 0 || term_idx >= MAX_TILES) return -1;
     for (int i = 0; i < tile_count; ++i) {
@@ -1047,10 +1053,12 @@ int tile_pump_input_once(void) {
     if (g_user_task_active && g_user_task_term >= 0) {
         int have_focused_window = (g_win_focused >= 0 && g_win_focused < MAX_WINDOWS &&
                                    g_windows[g_win_focused].used && !g_windows[g_win_focused].minimized);
+        int have_focused_tile = (focused >= 0 && focused < tile_count &&
+                                 tiles[focused].type != TILE_EMPTY && !tiles[focused].minimized);
         int term = g_user_task_term;
         // If this ring3 task has attached a GUI key handler, prefer routing keys
         // to the GUI event queue instead of hijacking them into stdin.
-        if (have_focused_window) {
+        if (have_focused_window || (have_focused_tile && tiles[focused].term_idx != term)) {
             // A floating window is explicitly focused; do not hijack keys into launcher stdin.
         } else if (term >= 0 && term < MAX_TILES && gui_key_cb[term]) {
             // fall through to normal routing

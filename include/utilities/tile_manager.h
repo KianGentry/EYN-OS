@@ -21,6 +21,9 @@ void tile_close(int tile_idx);
 // Get the currently focused tile index (0..tile_count-1)
 int tile_get_focused();
 
+// Get the vterm index attached to the currently focused tile, or -1 if none.
+int tile_get_focused_term();
+
 // Find the tile index that is backed by a given vterm index.
 // Returns -1 if not found.
 int tile_find_by_term(int term_idx);

@@ -47,6 +47,10 @@ int user_task_current_is_blocked(void);
 void user_task_wake_waiters_for_pid(int pid);
 void user_task_wake_gui_waiters(int gui_handle);
 
+// Return the vterm index that should receive stdout/stderr for the current
+// running user task, or -1 if no task is active.
+int user_task_get_output_vterm(void);
+
 // Mapping ownership accessors used by abort/cleanup logic.
 void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* stack_page);
 void user_task_set_current_mapping_state(uint32 base, uint32 pages, uint32 stack_page);

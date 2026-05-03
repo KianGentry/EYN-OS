@@ -2507,7 +2507,8 @@ static void syscall_console_write(const char* buf, int len) {
     if (tile_is_tiling_active()) {
         int term = tile_get_focused();
         if (g_user_task_active) {
-            term = g_user_task_term;
+            int output_term = user_task_get_output_vterm();
+            if (output_term >= 0) term = output_term;
         }
         if (term < 0) term = 0;
         for (int i = 0; i < len; ++i) {

@@ -266,6 +266,7 @@ typedef struct {
     int stdout_fd;
     int stderr_fd;
     int runq_next;
+    int origin_vterm;  // Track which vterm spawned this task (for I/O routing)
     uint32 mlfq_slice_left;
     user_task_runtime_t runtime;
     user_task_image_t* image;
@@ -423,7 +424,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 
     g_user_interrupt = 0;
     g_user_task_active = 1;
-    g_user_task_term = tile_is_tiling_active() ? tile_get_focused() : -1;
+    g_user_task_term = tile_is_tiling_active() ? tile_get_focused_term() : -1;
     if (g_user_task_term < 0) g_user_task_term = 0;
     g_user_task_ui_dirty = 1;
 
@@ -917,6 +918,8 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
     slot->syscall_frame_generation = 0;
     g_user_task_active_slot = slot;
     g_user_task_pending_pid = slot->pid;
+    // Route output to the vterm that originally spawned this task
+    g_user_task_term = slot->origin_vterm;
     user_task_apply_stdio_state(slot);
 
     int rc = user_elf_run_argv(slot->image->drive,
@@ -1287,6 +1290,8 @@ int user_task_try_preempt_from_irq(void* frame) {
     target->state = USER_TASK_STATE_RUNNING;
     g_user_task_active_slot = target;
     g_user_task_running_pid = target->pid;
+    // Route output to the vterm that originally spawned this task
+    g_user_task_term = target->origin_vterm;
     g_user_task_schedule_request = 0;
     return 1;
 #else
@@ -1336,6 +1341,8 @@ int user_task_try_preempt_from_irq(void* frame) {
     target->state = USER_TASK_STATE_RUNNING;
     g_user_task_active_slot = target;
     g_user_task_running_pid = target->pid;
+    // Route output to the vterm that originally spawned this task
+    g_user_task_term = target->origin_vterm;
     g_user_task_schedule_request = 0;
     return 1;
 #endif
@@ -1403,6 +1410,8 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
     target->state = USER_TASK_STATE_RUNNING;
     g_user_task_active_slot = target;
     g_user_task_running_pid = target->pid;
+    // Route output to the vterm that originally spawned this task
+    g_user_task_term = target->origin_vterm;
     g_user_task_schedule_request = 0;
     return 1;
 }
@@ -1427,6 +1436,7 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
     slot->in_runq = 0;
     slot->runq_next = -1;
+    slot->origin_vterm = g_user_task_term;  // Capture which vterm spawned this task
     user_task_capture_stdio_state(slot);
     if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
 
@@ -1483,6 +1493,7 @@ int user_task_spawn_argv_stdio(uint8 drive,
     slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
     slot->in_runq = 0;
     slot->runq_next = -1;
+    slot->origin_vterm = g_user_task_term;  // Capture which vterm spawned this task
     slot->fd_inherit_mode = inherit_mode ? 1 : 0;
     slot->stdin_fd = stdin_fd;
     slot->stdout_fd = stdout_fd;
@@ -1634,4 +1645,11 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->syscall_frame_generation = 0;
     user_task_request_schedule();
     return pid;
+}
+
+int user_task_get_output_vterm(void) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (slot && slot->origin_vterm >= 0) return slot->origin_vterm;
+    if (g_user_task_term >= 0) return g_user_task_term;
+    return -1;
 }
