@@ -7,6 +7,7 @@
 #include <network/netstack.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <mm/vmm.h>
 
 // Very small per-process FD table for now
 #define LINUX_MAX_FD 32
@@ -300,6 +301,101 @@ static int sys_brk(native_process_t* proc, void* addr) {
 
 // --- Networking Syscalls ---
 
+/*
+ * Lightweight native-process mmap support (anonymous-only)
+ * Notes:
+ * - This implements a minimal mmap/munmap/mprotect for the native_process_t
+ *   loader model used by the current user-mode emulator. It does not touch
+ *   the full VMM address_space_t mapping APIs; that will be added when the
+ *   kernel switches to a full user process model.
+ */
+
+static inline uint32 align_up_u32(uint32 x, uint32 a) { return (x + a - 1) & ~(a - 1); }
+
+static int sys_mmap(native_process_t* proc, uint32 addr, uint32 length, int prot, int flags, int fd, uint32 offset) {
+    (void)offset; (void)fd;
+    if (!proc || length == 0) return -1;
+    uint32 len = align_up_u32(length, PAGE_SIZE);
+
+    /* Only support anonymous private mappings for now */
+    if (!(flags & MAP_ANONYMOUS)) return -1;
+
+    if (!linux_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
+    void* mem = malloc(len);
+    if (!mem) return -1;
+    memset(mem, 0, len);
+
+    /* Find free segment slot */
+    int slot = -1;
+    for (int s = 0; s < 8; s++) {
+        if (proc->segments[s].mem == NULL || proc->segments[s].memsz == 0) { slot = s; break; }
+    }
+    if (slot < 0) { free(mem); return -1; }
+
+    uint32 vaddr = addr;
+    if (vaddr == 0) {
+        if (proc->elf_vaddr_max > proc->elf_vaddr_min) vaddr = align_up_u32(proc->elf_vaddr_max, PAGE_SIZE);
+        else vaddr = USER_SHARED_BASE; /* fallback into shared region */
+    }
+
+    proc->segments[slot].vaddr = vaddr;
+    proc->segments[slot].memsz = len;
+    proc->segments[slot].filesz = 0;
+    proc->segments[slot].mem = mem;
+    proc->segments[slot].flags = (uint32)prot;
+    if (slot >= proc->segment_count) proc->segment_count = slot + 1;
+
+    if (proc->elf_vaddr_min == 0 || vaddr < proc->elf_vaddr_min) proc->elf_vaddr_min = vaddr;
+    if (proc->elf_vaddr_max < vaddr + len) proc->elf_vaddr_max = vaddr + len;
+
+    return (int)vaddr;
+}
+
+static int sys_munmap(native_process_t* proc, uint32 addr, uint32 length) {
+    if (!proc || length == 0) return -1;
+    uint32 end = addr + length;
+    for (int s = 0; s < proc->segment_count; s++) {
+        uint32 sv = proc->segments[s].vaddr;
+        uint32 sm = proc->segments[s].memsz;
+        if (sv == addr && sm == length) {
+            if (proc->segments[s].mem) free(proc->segments[s].mem);
+            proc->segments[s].mem = NULL;
+            proc->segments[s].memsz = 0;
+            proc->segments[s].filesz = 0;
+            proc->segments[s].vaddr = 0;
+            proc->segments[s].flags = 0;
+            /* Shrink segment_count if trailing slots are empty */
+            int new_count = proc->segment_count;
+            while (new_count > 0 && (proc->segments[new_count-1].mem == NULL || proc->segments[new_count-1].memsz == 0)) new_count--;
+            proc->segment_count = new_count;
+            /* Recompute elf_vaddr_min/max */
+            uint32 min = 0, max = 0;
+            for (int i = 0; i < proc->segment_count; i++) {
+                if (proc->segments[i].memsz == 0) continue;
+                if (min == 0 || proc->segments[i].vaddr < min) min = proc->segments[i].vaddr;
+                if (proc->segments[i].vaddr + proc->segments[i].memsz > max) max = proc->segments[i].vaddr + proc->segments[i].memsz;
+            }
+            proc->elf_vaddr_min = min;
+            proc->elf_vaddr_max = max;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int sys_mprotect(native_process_t* proc, uint32 addr, uint32 length, int prot) {
+    if (!proc || length == 0) return -1;
+    for (int s = 0; s < proc->segment_count; s++) {
+        uint32 sv = proc->segments[s].vaddr;
+        uint32 sm = proc->segments[s].memsz;
+        if (addr >= sv && (addr + length) <= (sv + sm)) {
+            proc->segments[s].flags = (uint32)prot;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int sys_net_socket(native_process_t* proc) {
     (void)proc;
     // For now, we only support UDP sockets; no socket type argument needed
@@ -455,6 +551,33 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
         }
         case __NR_brk: {
             int ret = sys_brk(proc, (void*)(uintptr)ebx);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_mmap:
+        case __NR_mmap2: {
+            uint32 addr = ebx;
+            uint32 len = ecx;
+            int prot = (int)edx;
+            uint32 flags = regs[6]; // esi
+            int fd = (int)regs[7]; // edi
+            uint32 off = regs[5]; // ebp
+            int ret = sys_mmap(proc, addr, len, prot, (int)flags, fd, off);
+            regs[0] = (uint32)ret;
+            return ret;
+        }
+        case __NR_munmap: {
+            uint32 addr = ebx;
+            uint32 len = ecx;
+            int ret = sys_munmap(proc, addr, len);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_mprotect: {
+            uint32 addr = ebx;
+            uint32 len = ecx;
+            int prot = (int)edx;
+            int ret = sys_mprotect(proc, addr, len, prot);
             regs[0] = ret;
             return ret;
         }

@@ -21,6 +21,23 @@
 #define __NR_set_thread_area 243
 #define __NR_exit_group   252
 
+// Memory-related syscalls (i386 numbers)
+#define __NR_mmap         90
+#define __NR_munmap       91
+#define __NR_mprotect     125
+#define __NR_mmap2        192
+
+// Prot flags
+#define PROT_READ  0x1
+#define PROT_WRITE 0x2
+#define PROT_EXEC  0x4
+
+// Map flags
+#define MAP_SHARED    0x01
+#define MAP_PRIVATE   0x02
+#define MAP_FIXED     0x10
+#define MAP_ANONYMOUS 0x20
+
 // EYN-OS custom networking syscalls (600-series for now)
 #define __NR_net_socket   600   // Create UDP socket: returns socket_id or <0
 #define __NR_net_bind     601   // Bind socket to port: (socket_id, port)
