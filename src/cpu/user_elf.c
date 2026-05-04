@@ -89,7 +89,10 @@ typedef struct {
 #define ELFDATA2LSB 1
 #define EM_386 3
 
+#define ET_DYN 3
+
 #define PT_LOAD 1
+#define PT_INTERP 3
 
 /*
  * ABI-INVARIANT: Maximum ELF file size the loader will read into kernel heap.
@@ -344,6 +347,33 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
         printf("%cError: ELF program headers out of range.\n", 255, 0, 0);
         free(file);
         return -1;
+    }
+
+    char interp_path[256];
+    interp_path[0] = '\0';
+    {
+        Elf32_Phdr* ph = (Elf32_Phdr*)(file + eh->e_phoff);
+        for (uint16 i = 0; i < eh->e_phnum; ++i) {
+            if (ph->p_type == PT_INTERP && ph->p_offset + ph->p_filesz <= (uint32)n) {
+                uint32 interp_len = ph->p_filesz;
+                if (interp_len >= sizeof(interp_path)) interp_len = sizeof(interp_path) - 1;
+                memcpy(interp_path, file + ph->p_offset, interp_len);
+                interp_path[interp_len] = '\0';
+                break;
+            }
+            ph = (Elf32_Phdr*)((char*)ph + eh->e_phentsize);
+        }
+    }
+
+    if (interp_path[0]) {
+        const char* interp_argv[USER_ELF_MAX_ARGC];
+        int interp_argc = 0;
+        interp_argv[interp_argc++] = abspath;
+        for (int i = 0; i < argc && interp_argc < USER_ELF_MAX_ARGC; ++i) {
+            if (argv && argv[i]) interp_argv[interp_argc++] = argv[i];
+        }
+        free(file);
+        return user_elf_run_argv(drive, interp_path, interp_argc - 1, interp_argv);
     }
 
     // Compute a single contiguous mapping range that covers all PT_LOAD segments.
