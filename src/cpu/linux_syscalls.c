@@ -12,6 +12,11 @@
 // Very small per-process FD table for now
 #define LINUX_MAX_FD 32
 
+/* Standard Linux errno values */
+#define EINVAL      22
+#define ENOMEM      12
+#define EBADF        9
+
 /*
  * ABI-INVARIANT: Linux-compat user pointers are 32-bit guest virtual addrs.
  *
@@ -233,8 +238,32 @@ static int sys_lseek(native_process_t* proc, uint32 fd, int32 offset, int whence
 
 // Lightweight stubs for common libc expectations
 static int sys_set_thread_area(native_process_t* proc, void* user_desc) {
-    (void)proc; (void)user_desc;
-    // Pretend success; we don't set up real TLS in this emulator
+    if (!proc || !user_desc) return -EINVAL;
+
+    /* i386 Linux user_desc structure (12 bytes):
+     * struct user_desc {
+     *     unsigned int entry_number;      // +0: GDT entry slot (typically 6-7)
+     *     unsigned int base_addr;         // +4: TLS base address
+     *     unsigned int limit;             // +8: size/limit (optional)
+     *     ... bitfields ...
+     * };
+     */
+    uint32* desc = (uint32*)user_desc;
+    uint32 entry_number = desc[0];
+    uint32 base_addr = desc[1];
+    
+    /* Only support entry numbers 6-7 (thread-local storage slots) */
+    if (entry_number < 6 || entry_number > 7) return -EINVAL;
+
+    /* Store TLS base for later use by dynamic linker */
+    proc->tls_base = base_addr;
+
+    /* On a real system, we would allocate/configure a GDT descriptor.
+     * For now, store the base and libc will read it via syscall or direct access.
+     * musl libc accesses %gs:0 for the TCB (thread control block), which is
+     * the base_addr we just stored.
+     */
+
     return 0;
 }
 
@@ -299,7 +328,114 @@ static int sys_brk(native_process_t* proc, void* addr) {
     return (int)proc->brk_end;
 }
 
+// --- VMM-backed mmap/munmap/mprotect support ---
+
+/*
+ * Create or return the address_space_t for a native process.
+ * This is lazily allocated on first mmap and is separate from the
+ * segment-based model, allowing coexistence.
+ */
+static address_space_t* linux_get_or_create_address_space(native_process_t* proc) {
+    if (!proc) return NULL;
+    if (proc->address_space) return proc->address_space;
+
+    extern address_space_t* create_address_space(void);
+    address_space_t* as = create_address_space();
+    if (!as) return NULL;
+
+    proc->address_space = as;
+    return as;
+}
+
+static int sys_mmap_vmm(native_process_t* proc, uint32 addr, uint32 length, int prot, int flags, int fd, uint32 offset) {
+    (void)offset; (void)fd; /* fd-backed not yet implemented */
+
+    if (!proc || length == 0) return -ENOMEM;
+
+    /* Only support anonymous private mappings for now */
+    if (!(flags & MAP_ANONYMOUS)) return -EBADF;
+
+    uint32 len_aligned = (length + PAGE_SIZE - 1) & PAGE_MASK;
+    if (len_aligned == 0) return -ENOMEM;
+
+    address_space_t* as = linux_get_or_create_address_space(proc);
+    if (!as) return -ENOMEM;
+
+    /* Determine target address: if addr is 0, pick one in shared region */
+    uint32 target_addr = addr;
+    if (target_addr == 0) {
+        /* Use a simple allocator: USER_SHARED_BASE + offset; could be smarter */
+        static uint32 next_mmap_va = USER_SHARED_BASE;
+        target_addr = next_mmap_va;
+        next_mmap_va += len_aligned;
+        if (next_mmap_va >= USER_SHARED_END) return -ENOMEM;  /* Out of shared space */
+    }
+
+    /* Convert prot to PTE flags */
+    uint32 pte_flags = PTE_USER | PTE_PRESENT;
+    if (prot & PROT_WRITE) pte_flags |= PTE_RW;
+    /* PROT_EXEC is noted but doesn't affect i386 paging (NX not available) */
+
+    /* Map each page */
+    for (uint32 va = target_addr; va < target_addr + len_aligned; va += PAGE_SIZE) {
+        uint32 frame = frame_alloc();
+        if (frame == 0) {
+            /* Out of memory: partial unmapping on failure left as exercise */
+            return -ENOMEM;
+        }
+
+        /* Zero the frame */
+        memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+
+        /* Map into address space */
+        if (vmm_map_page(as, va, frame, pte_flags) != 0) {
+            frame_free(frame);
+            return -ENOMEM;
+        }
+    }
+
+    return (int)target_addr;
+}
+
+static int sys_munmap_vmm(native_process_t* proc, uint32 addr, uint32 length) {
+    if (!proc || length == 0 || !proc->address_space) return -EINVAL;
+
+    address_space_t* as = proc->address_space;
+    uint32 len_aligned = (length + PAGE_SIZE - 1) & PAGE_MASK;
+
+    /* Unmap each page */
+    for (uint32 va = addr; va < addr + len_aligned; va += PAGE_SIZE) {
+        vmm_unmap_page(as, va);
+    }
+
+    return 0;
+}
+
+static int sys_mprotect_vmm(native_process_t* proc, uint32 addr, uint32 length, int prot) {
+    if (!proc || length == 0 || !proc->address_space) return -EINVAL;
+
+    address_space_t* as = proc->address_space;
+    uint32 len_aligned = (length + PAGE_SIZE - 1) & PAGE_MASK;
+
+    /* Convert prot to PTE flags */
+    uint32 pte_flags = PTE_USER | PTE_PRESENT;
+    if (prot & PROT_WRITE) pte_flags |= PTE_RW;
+
+    /* Update each page's protection */
+    for (uint32 va = addr; va < addr + len_aligned; va += PAGE_SIZE) {
+        pte_t* pte = vmm_walk_page_tables(as, va, 0);
+        if (pte && (*pte & PTE_PRESENT)) {
+            uint32 frame = *pte & PTE_FRAME_MASK;
+            *pte = (frame & PTE_FRAME_MASK) | (pte_flags & 0xFFF);
+            vm_invalidate_page((void*)va);
+        }
+    }
+
+    return 0;
+}
+
 // --- Networking Syscalls ---
+
 
 /*
  * Lightweight native-process mmap support (anonymous-only)
@@ -556,20 +692,23 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
         }
         case __NR_mmap:
         case __NR_mmap2: {
+            /* mmap(addr, len, prot, flags, fd, offset)
+             * i386 syscall args: ebx, ecx, edx, esi, edi, ebp
+             */
             uint32 addr = ebx;
             uint32 len = ecx;
             int prot = (int)edx;
-            uint32 flags = regs[6]; // esi
-            int fd = (int)regs[7]; // edi
-            uint32 off = regs[5]; // ebp
-            int ret = sys_mmap(proc, addr, len, prot, (int)flags, fd, off);
+            uint32 flags = regs[6];  /* esi */
+            int fd = (int)regs[7];   /* edi */
+            uint32 off = regs[5];    /* ebp */
+            int ret = sys_mmap_vmm(proc, addr, len, prot, (int)flags, fd, off);
             regs[0] = (uint32)ret;
             return ret;
         }
         case __NR_munmap: {
             uint32 addr = ebx;
             uint32 len = ecx;
-            int ret = sys_munmap(proc, addr, len);
+            int ret = sys_munmap_vmm(proc, addr, len);
             regs[0] = ret;
             return ret;
         }
@@ -577,7 +716,7 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             uint32 addr = ebx;
             uint32 len = ecx;
             int prot = (int)edx;
-            int ret = sys_mprotect(proc, addr, len, prot);
+            int ret = sys_mprotect_vmm(proc, addr, len, prot);
             regs[0] = ret;
             return ret;
         }

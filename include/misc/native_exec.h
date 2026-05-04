@@ -5,6 +5,8 @@
 #include <eyn_exe_format.h>
 
 // Process execution context
+typedef struct address_space address_space_t;  // Forward declare
+
 typedef struct {
     uint32 pid;                 // Process ID
     uint8 active;               // Process active flag
@@ -30,6 +32,9 @@ typedef struct {
     uint32 elf_vaddr_max;       // If loaded from ELF: highest virtual address mapped (exclusive)
     void*  linux_fd_table;      // optional per-process Linux-like fd table
     uint32 brk_end;             // simple brk end pointer for malloc
+    address_space_t* address_space;  // optional VMM address space for mmap/dynamic linking
+    uint32 tls_base;            // TLS base address (set by set_thread_area syscall)
+    char interpreter[256];      // PT_INTERP path for ET_DYN executables (dynamic linker)
 
     // Per-segment mapping for ELF PT_LOAD segments
     struct {

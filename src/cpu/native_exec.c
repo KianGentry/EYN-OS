@@ -7,51 +7,9 @@
 #include <vga.h>
 #include <kb.h>
 #include <drivers/flat_exe_format.h>
+#include <utilities/linker.h>
 #include <misc/sched.h>
 #include <context.h>
-
-// Minimal ELF32 structures for parsing 32-bit little-endian ELF files
-typedef struct {
-    unsigned char e_ident[16];
-    uint16 e_type;
-    uint16 e_machine;
-    uint32 e_version;
-    uint32 e_entry;
-    uint32 e_phoff;
-    uint32 e_shoff;
-    uint32 e_flags;
-    uint16 e_ehsize;
-    uint16 e_phentsize;
-    uint16 e_phnum;
-    uint16 e_shentsize;
-    uint16 e_shnum;
-    uint16 e_shstrndx;
-} Elf32_Ehdr;
-
-typedef struct {
-    uint32 p_type;
-    uint32 p_offset;
-    uint32 p_vaddr;
-    uint32 p_paddr;
-    uint32 p_filesz;
-    uint32 p_memsz;
-    uint32 p_flags;
-    uint32 p_align;
-} Elf32_Phdr;
-
-#define EI_MAG0 0
-#define EI_MAG1 1
-#define EI_MAG2 2
-#define EI_MAG3 3
-#define EI_CLASS 4
-#define ELFMAG0 0x7f
-#define ELFMAG1 'E'
-#define ELFMAG2 'L'
-#define ELFMAG3 'F'
-#define ELFCLASS32 1
-#define ELF_DATA_LSB 1
-#define EM_386 3
-#define PT_LOAD 1
 
 // Process management
 #define MAX_NATIVE_PROCESSES 8
@@ -68,9 +26,6 @@ static uint32 g_user_heap_ptr = USER_HEAP_BASE;
 static int g_current_index = -1;
 // Verbose tracing control (set to 1 to enable detailed trace prints)
 static int native_verbose = 0;
-
-// EYNFS constants
-#define EYNFS_SUPERBLOCK_LBA 2048
 
 static int native_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -187,15 +142,32 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
        run under the current native execution model. */
     if (size >= 16 && (uint8_t)buf[0] == ELFMAG0 && (uint8_t)buf[1] == ELFMAG1 && (uint8_t)buf[2] == ELFMAG2 && (uint8_t)buf[3] == ELFMAG3) {
         // Candidate ELF file
-        if ((uint8_t)buf[EI_CLASS] == ELFCLASS32 && (uint8_t)buf[5] == ELF_DATA_LSB) {
+        if ((uint8_t)buf[EI_CLASS] == ELFCLASS32 && (uint8_t)buf[5] == ELFDATA2LSB) {
             // Parse header bounds-safely
             if (size >= sizeof(Elf32_Ehdr)) {
                 Elf32_Ehdr* eh = (Elf32_Ehdr*)buf;
                 // Check machine
                 if (eh->e_machine == EM_386) {
-                    // Compute loadable segment bounds
                     uint32_t min_vaddr = 0xffffffffu;
                     uint32_t max_vaddr = 0;
+                    int load_count = 0;
+                    char interpreter_path[256];
+                    interpreter_path[0] = '\0';
+
+                    if (eh->e_type == ET_DYN && eh->e_phoff + (uint32_t)eh->e_phnum * (uint32_t)eh->e_phentsize <= size) {
+                        Elf32_Phdr* ph = (Elf32_Phdr*)(buf + eh->e_phoff);
+                        for (int i = 0; i < eh->e_phnum; i++) {
+                            if (ph->p_type == PT_INTERP && ph->p_offset + ph->p_filesz <= size) {
+                                uint32_t interp_len = ph->p_filesz;
+                                if (interp_len > sizeof(interpreter_path) - 1) interp_len = sizeof(interpreter_path) - 1;
+                                memcpy(interpreter_path, buf + ph->p_offset, interp_len);
+                                interpreter_path[interp_len] = '\0';
+                                break;
+                            }
+                            ph = (Elf32_Phdr*)((char*)ph + eh->e_phentsize);
+                        }
+                    }
+
                     if (eh->e_phoff + (uint32_t)eh->e_phnum * (uint32_t)eh->e_phentsize <= size) {
                         Elf32_Phdr* ph = (Elf32_Phdr*)(buf + eh->e_phoff);
                         for (int i = 0; i < eh->e_phnum; i++) {
@@ -203,130 +175,120 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
                                 if (ph->p_vaddr < min_vaddr) min_vaddr = ph->p_vaddr;
                                 uint32_t end = ph->p_vaddr + ph->p_memsz;
                                 if (end > max_vaddr) max_vaddr = end;
+                                load_count++;
                             }
                             ph = (Elf32_Phdr*)((char*)ph + eh->e_phentsize);
                         }
-                        if (min_vaddr != 0xffffffffu && max_vaddr > min_vaddr) {
-                            // Instead of a single contiguous image, allocate each PT_LOAD
-                            // segment separately. This simplifies ownership and makes
-                            // pointer translation clearer: each ELF vaddr maps into a
-                            // specific allocated buffer.
-                            memset(process, 0, sizeof(native_process_t));
-                            process->pid = g_next_pid++;
-                            process->segment_count = 0;
+                    }
 
-                            ph = (Elf32_Phdr*)(buf + eh->e_phoff);
-                            uint32_t first_exec_vaddr = 0;
-                            uint32_t first_exec_mem = 0;
-                            for (int i = 0; i < eh->e_phnum; i++) {
-                                if (ph->p_type == PT_LOAD) {
-                                    if (process->segment_count >= 8) break; // limit
-                                    uint32_t memsz = ph->p_memsz;
-                                    uint32_t filesz = ph->p_filesz;
-                                    void* segmem = malloc(memsz);
-                                    if (!segmem) {
-                                        // Free already allocated segments
-                                        for (int j = 0; j < process->segment_count; j++) {
-                                            free(process->segments[j].mem);
-                                            process->segments[j].mem = NULL;
-                                        }
-                                        free(buf);
-                                        return EXEC_ERROR_MEMORY_ALLOC;
-                                    }
-                                    memset(segmem, 0, memsz);
-                                    if (ph->p_offset + filesz <= (uint32_t)size && filesz > 0) {
-                                        memcpy(segmem, buf + ph->p_offset, filesz);
-                                    }
+                    if (load_count > 0 && min_vaddr != 0xffffffffu && max_vaddr > min_vaddr) {
+                        memset(process, 0, sizeof(native_process_t));
+                        process->pid = g_next_pid++;
+                        process->segment_count = 0;
 
-                                    process->segments[process->segment_count].vaddr = ph->p_vaddr;
-                                    process->segments[process->segment_count].memsz = memsz;
-                                    process->segments[process->segment_count].filesz = filesz;
-                                    process->segments[process->segment_count].mem = segmem;
-                                    process->segments[process->segment_count].flags = ph->p_flags;
-                                    process->segment_count++;
-
-                                    // record first executable segment as code_start
-                                    if ((ph->p_flags & 0x1) && first_exec_vaddr == 0) {
-                                        first_exec_vaddr = ph->p_vaddr;
-                                        first_exec_mem = (uint32)segmem;
+                        Elf32_Phdr* ph = (Elf32_Phdr*)(buf + eh->e_phoff);
+                        uint32_t first_exec_vaddr = 0;
+                        uint32_t first_exec_mem = 0;
+                        for (int i = 0; i < eh->e_phnum; i++) {
+                            if (ph->p_type == PT_LOAD) {
+                                if (process->segment_count >= 8) break;
+                                uint32_t memsz = ph->p_memsz;
+                                uint32_t filesz = ph->p_filesz;
+                                void* segmem = malloc(memsz);
+                                if (!segmem) {
+                                    for (int j = 0; j < process->segment_count; j++) {
+                                        free(process->segments[j].mem);
+                                        process->segments[j].mem = NULL;
                                     }
+                                    free(buf);
+                                    return EXEC_ERROR_MEMORY_ALLOC;
                                 }
-                                ph = (Elf32_Phdr*)((char*)ph + eh->e_phentsize);
-                            }
-
-                            if (process->segment_count == 0) {
-                                // No loadable segments
-                                free(buf);
-                                return EXEC_ERROR_INVALID_FORMAT;
-                            }
-
-                            // Determine ELF vaddr bounds
-                            process->elf_vaddr_min = min_vaddr;
-                            process->elf_vaddr_max = max_vaddr;
-
-                            // Choose code_start as first executable segment if found,
-                            // otherwise the lowest vaddr segment
-                            if (first_exec_vaddr != 0) {
-                                process->code_start = first_exec_mem;
-                                // determine code_size as memsz of that segment
-                                for (int s = 0; s < process->segment_count; s++) {
-                                    if (process->segments[s].vaddr == first_exec_vaddr) {
-                                        process->code_size = process->segments[s].memsz;
-                                        break;
-                                    }
+                                memset(segmem, 0, memsz);
+                                if (ph->p_offset + filesz <= (uint32_t)size && filesz > 0) {
+                                    memcpy(segmem, buf + ph->p_offset, filesz);
                                 }
-                            } else {
-                                // fallback: pick the lowest segment
-                                uint32_t lowv = 0xffffffffu;
-                                void* lowmem = NULL;
-                                uint32_t lowsz = 0;
-                                for (int s = 0; s < process->segment_count; s++) {
-                                    if (process->segments[s].vaddr < lowv) {
-                                        lowv = process->segments[s].vaddr;
-                                        lowmem = process->segments[s].mem;
-                                        lowsz = process->segments[s].memsz;
-                                    }
+
+                                process->segments[process->segment_count].vaddr = ph->p_vaddr;
+                                process->segments[process->segment_count].memsz = memsz;
+                                process->segments[process->segment_count].filesz = filesz;
+                                process->segments[process->segment_count].mem = segmem;
+                                process->segments[process->segment_count].flags = ph->p_flags;
+                                process->segment_count++;
+
+                                if ((ph->p_flags & 0x1) && first_exec_vaddr == 0) {
+                                    first_exec_vaddr = ph->p_vaddr;
+                                    first_exec_mem = (uint32)segmem;
                                 }
-                                process->code_start = (uint32)lowmem;
-                                process->code_size = lowsz;
                             }
+                            ph = (Elf32_Phdr*)((char*)ph + eh->e_phentsize);
+                        }
 
-                            // Stack allocation
-                            process->stack_start = (uint32_t)malloc(0x10000); // 64KB
-                            if (!process->stack_start) {
-                                for (int j = 0; j < process->segment_count; j++) free(process->segments[j].mem);
-                                free(buf);
-                                return EXEC_ERROR_MEMORY_ALLOC;
-                            }
-                            process->stack_size = 0x10000;
+                        if (process->segment_count == 0) {
+                            free(buf);
+                            return EXEC_ERROR_INVALID_FORMAT;
+                        }
 
-                            // Calculate rebased entry_point by finding which segment holds e_entry
-                            uint32_t e_entry = eh->e_entry;
-                            uint32_t entry_addr = 0;
+                        process->elf_vaddr_min = min_vaddr;
+                        process->elf_vaddr_max = max_vaddr;
+
+                        if (first_exec_vaddr != 0) {
+                            process->code_start = first_exec_mem;
                             for (int s = 0; s < process->segment_count; s++) {
-                                uint32_t seg_v = process->segments[s].vaddr;
-                                uint32_t seg_m = process->segments[s].memsz;
-                                if (e_entry >= seg_v && e_entry < seg_v + seg_m) {
-                                    entry_addr = (uint32)process->segments[s].mem + (e_entry - seg_v);
+                                if (process->segments[s].vaddr == first_exec_vaddr) {
+                                    process->code_size = process->segments[s].memsz;
                                     break;
                                 }
                             }
-                            if (entry_addr == 0) {
-                                // entry outside segments, use lowest segment base
-                                entry_addr = process->code_start;
+                        } else {
+                            uint32_t lowv = 0xffffffffu;
+                            void* lowmem = NULL;
+                            uint32_t lowsz = 0;
+                            for (int s = 0; s < process->segment_count; s++) {
+                                if (process->segments[s].vaddr < lowv) {
+                                    lowv = process->segments[s].vaddr;
+                                    lowmem = process->segments[s].mem;
+                                    lowsz = process->segments[s].memsz;
+                                }
                             }
-
-                            process->entry_point = entry_addr;
-                            // Prepare argc/argv/envp for Linux C binaries
-                            prepare_linux_user_stack(process, filename);
-                            if (!process->esp) process->esp = process->stack_start + process->stack_size - 4;
-                            process->eip = process->entry_point;
-                            process->active = 1;
-                            safe_strcpy(process->name, filename, sizeof(process->name));
-
-                            free(buf);
-                            return EXEC_SUCCESS;
+                            process->code_start = (uint32)lowmem;
+                            process->code_size = lowsz;
                         }
+
+                        process->stack_start = (uint32_t)malloc(0x10000);
+                        if (!process->stack_start) {
+                            for (int j = 0; j < process->segment_count; j++) free(process->segments[j].mem);
+                            free(buf);
+                            return EXEC_ERROR_MEMORY_ALLOC;
+                        }
+                        process->stack_size = 0x10000;
+
+                        uint32_t e_entry = eh->e_entry;
+                        uint32_t entry_addr = 0;
+                        for (int s = 0; s < process->segment_count; s++) {
+                            uint32_t seg_v = process->segments[s].vaddr;
+                            uint32_t seg_m = process->segments[s].memsz;
+                            if (e_entry >= seg_v && e_entry < seg_v + seg_m) {
+                                entry_addr = (uint32)process->segments[s].mem + (e_entry - seg_v);
+                                break;
+                            }
+                        }
+                        if (entry_addr == 0) {
+                            entry_addr = process->code_start;
+                        }
+
+                        process->entry_point = entry_addr;
+                        if (interpreter_path[0] != '\0') {
+                            safe_strcpy(process->interpreter, interpreter_path, sizeof(process->interpreter));
+                        }
+
+                        prepare_linux_user_stack(process, filename);
+                        if (!process->esp) process->esp = process->stack_start + process->stack_size - 4;
+                        process->eip = process->entry_point;
+                        process->active = 1;
+                        safe_strcpy(process->name, filename, sizeof(process->name));
+
+                        free(buf);
+                        return EXEC_SUCCESS;
                     }
                 }
             }
@@ -1224,6 +1186,13 @@ void native_cleanup_process(native_process_t* process) {
             if (g_current_index == i) g_current_index = -1;
             break;
         }
+    }
+
+    // Clean up VMM address space if allocated (must do before memset)
+    if (process->address_space) {
+        extern void destroy_address_space(address_space_t* as);
+        destroy_address_space(process->address_space);
+        process->address_space = NULL;
     }
 
     process->active = 0;
