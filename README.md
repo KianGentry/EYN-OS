@@ -74,6 +74,8 @@ xeyes           # run the X11 compatibility demo
 run hello.uelf  # run a userland program
 ```
 
+`run` is the normal launcher for ELF binaries and scripts. `ldso` is the dynamic loader used when an ELF binary declares an interpreter (`PT_INTERP`), so you usually run programs with `run` instead of invoking `ldso` directly.
+
 To try it on real hardware, write `EYNOS.iso` to a USB drive or CD and boot on a 32‑bit compatible machine.
 
 ## System requirements

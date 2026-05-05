@@ -76,6 +76,10 @@ int chdir(const char* path);
 /* Reposition the offset of an open file descriptor. */
 long lseek(int fd, long offset, int whence);
 
+/* Standard POSIX mmap/munmap wrappers backed by EYN-OS int 0x80 syscalls. */
+void* mmap(void* addr, size_t length, int prot, int flags, int fd, long offset);
+int munmap(void* addr, size_t length);
+
 // Low-memory streaming file writer (EYNFS only today).
 int eynfs_stream_begin(const char* path);
 ssize_t eynfs_stream_write(int handle, const void* buf, size_t len);

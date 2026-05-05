@@ -16,3 +16,4 @@ eynfs_format
 /testdir/doom.wad
 /testdir/helterskelter.reis
 .eynosconfig
+tmp*

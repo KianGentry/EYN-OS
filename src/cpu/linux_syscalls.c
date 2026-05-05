@@ -348,18 +348,33 @@ static address_space_t* linux_get_or_create_address_space(native_process_t* proc
 }
 
 static int sys_mmap_vmm(native_process_t* proc, uint32 addr, uint32 length, int prot, int flags, int fd, uint32 offset) {
-    (void)offset; (void)fd; /* fd-backed not yet implemented */
-
     if (!proc || length == 0) return -ENOMEM;
-
-    /* Only support anonymous private mappings for now */
-    if (!(flags & MAP_ANONYMOUS)) return -EBADF;
 
     uint32 len_aligned = (length + PAGE_SIZE - 1) & PAGE_MASK;
     if (len_aligned == 0) return -ENOMEM;
 
     address_space_t* as = linux_get_or_create_address_space(proc);
     if (!as) return -ENOMEM;
+
+    linux_fd* tbl = NULL;
+    const char* file_path = NULL;
+    uint32 file_size = 0;
+    int file_backed = 0;
+
+    if (!(flags & MAP_ANONYMOUS)) {
+        tbl = get_fd_table(proc);
+        if (!tbl || fd < 0 || fd >= LINUX_MAX_FD || !tbl[fd].in_use) return -EBADF;
+        file_path = tbl[fd].path;
+        if (!file_path || !file_path[0]) return -EBADF;
+        file_backed = 1;
+        if (tbl[fd].size > 0) {
+            file_size = tbl[fd].size;
+        } else {
+            if (vfs_get_file_size(0, file_path, &file_size) != 0) {
+                return -EBADF;
+            }
+        }
+    }
 
     /* Determine target address: if addr is 0, pick one in shared region */
     uint32 target_addr = addr;
@@ -377,21 +392,60 @@ static int sys_mmap_vmm(native_process_t* proc, uint32 addr, uint32 length, int 
     /* PROT_EXEC is noted but doesn't affect i386 paging (NX not available) */
 
     /* Map each page */
+    uint32 mapped = 0;
     for (uint32 va = target_addr; va < target_addr + len_aligned; va += PAGE_SIZE) {
         uint32 frame = frame_alloc();
         if (frame == 0) {
-            /* Out of memory: partial unmapping on failure left as exercise */
+            /* Out of memory: unwind partial mapping */
+            for (uint32 undo = target_addr; undo < va; undo += PAGE_SIZE) {
+                pte_t* pte = vmm_walk_page_tables(as, undo, 0);
+                if (pte && (*pte & PTE_PRESENT)) {
+                    uint32 prev_frame = *pte & PTE_FRAME_MASK;
+                    vmm_unmap_page(as, undo);
+                    frame_free(prev_frame);
+                }
+            }
             return -ENOMEM;
         }
 
         /* Zero the frame */
         memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
 
+        if (file_backed) {
+            uint32 file_off = offset + (va - target_addr);
+            if (file_off < file_size) {
+                uint32 to_copy = file_size - file_off;
+                if (to_copy > PAGE_SIZE) to_copy = PAGE_SIZE;
+                int got = vfs_read_file_at(0, file_path, (void*)(KERNEL_BASE + frame), (int)to_copy, file_off);
+                if (got < 0) {
+                    frame_free(frame);
+                    for (uint32 undo = target_addr; undo < va; undo += PAGE_SIZE) {
+                        pte_t* pte = vmm_walk_page_tables(as, undo, 0);
+                        if (pte && (*pte & PTE_PRESENT)) {
+                            uint32 prev_frame = *pte & PTE_FRAME_MASK;
+                            vmm_unmap_page(as, undo);
+                            frame_free(prev_frame);
+                        }
+                    }
+                    return -EBADF;
+                }
+            }
+        }
+
         /* Map into address space */
         if (vmm_map_page(as, va, frame, pte_flags) != 0) {
             frame_free(frame);
+            for (uint32 undo = target_addr; undo < va; undo += PAGE_SIZE) {
+                pte_t* pte = vmm_walk_page_tables(as, undo, 0);
+                if (pte && (*pte & PTE_PRESENT)) {
+                    uint32 prev_frame = *pte & PTE_FRAME_MASK;
+                    vmm_unmap_page(as, undo);
+                    frame_free(prev_frame);
+                }
+            }
             return -ENOMEM;
         }
+        mapped += PAGE_SIZE;
     }
 
     return (int)target_addr;

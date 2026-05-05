@@ -4005,7 +4005,99 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             break;
         }
         case SYSCALL_MMAP: {
-            int read_only = ((int)arg3 != 0) ? 1 : 0;
+            // Check if this is fd-based mmap (standard POSIX) or path-based (legacy EYN-OS)
+            // arg1=addr, arg2=len, arg3=prot, arg4=flags, arg5=fd
+            
+            uint32 addr = (uint32)arg1;
+            uint32 length = (uint32)arg2;
+            int prot = (int)arg3;
+            uint32 flags = (uint32)arg4;
+            int fd = (int)arg5;
+            uint32 offset = 0;  // Would be in ebp for legacy mmap2, not available here
+            
+            printf("%c[MMAP] syscall: addr=0x%x len=%u prot=%d flags=0x%x fd=%d\n", 
+                   255, 0, 0, addr, length, prot, flags, fd);
+            
+            // If fd >= 0 and flags indicates it's POSIX mmap, handle via fd-based mmap
+            if (fd >= 0 && !(flags & 0x100)) {  // Assume bit 0x100 indicates legacy path-based
+                // Standard POSIX mmap with file descriptor
+                if (!syscall_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) { 
+                    regs->eax = (uint32)-1; 
+                    break; 
+                }
+                
+                // Allocate memory for the file and read the file contents into it.
+                uint32 aligned_len = (length + 4096u - 1u) & ~(4096u - 1u);
+                uint8* buf = (uint8*)malloc(aligned_len);
+                if (!buf) {
+                    printf("%c[MMAP] FAILED: out of memory for %u bytes\n", 255, 165, 0, aligned_len);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+
+                /* Zero the buffer so any partial-page tail is defined */
+                memset(buf, 0, aligned_len);
+
+                /* Validate the FD and locate its kernel FD entry */
+                if (fd < 0 || fd >= USER_FD_MAX || !g_user_fds[fd].used) {
+                    printf("%c[MMAP] FAILED: bad fd %d\n", 255, 165, 0, fd);
+                    free(buf);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+                user_fd_t* ufd = &g_user_fds[fd];
+                if (ufd->kind != USER_FD_KIND_FILE || ufd->is_dir) {
+                    printf("%c[MMAP] FAILED: fd %d not a regular file\n", 255, 165, 0, fd);
+                    free(buf);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+
+                /* Ensure we know the file size */
+                uint32 file_size = ufd->size;
+                if (file_size == 0 && ufd->path[0]) {
+                    uint32 tmp_size = 0;
+                    if (vfs_get_file_size(ufd->drive, ufd->path, &tmp_size) == 0) file_size = tmp_size;
+                }
+
+                /* Read file into buffer in chunks. Use EYNFS fast path when available. */
+                uint32 to_read_total = (file_size > 0) ? ((file_size < length) ? file_size : length) : length;
+                uint32 off = 0;
+                while (off < to_read_total) {
+                    int chunk = (int)(to_read_total - off);
+                    if (chunk > 4096) chunk = 4096;
+                    int n = -1;
+                    if (ufd->eynfs_first_block != 0) {
+                        n = eynfs_read_file_fast(ufd->drive,
+                                                  ufd->eynfs_first_block,
+                                                  (uint32)file_size,
+                                                  buf + off,
+                                                  (size_t)chunk,
+                                                  (size_t)off,
+                                                  &ufd->cur_block,
+                                                  &ufd->cur_block_off);
+                    } else {
+                        n = vfs_read_file_at(ufd->drive, ufd->path, buf + off, chunk, off);
+                    }
+                    if (n < 0) {
+                        printf("%c[MMAP] FAILED: read error fd=%d off=%u\n", 255, 165, 0, fd, off);
+                        free(buf);
+                        regs->eax = (uint32)-1;
+                        goto _mmap_fd_done;
+                    }
+                    if (n == 0) break; /* EOF */
+                    off += (uint32)n;
+                }
+
+                printf("%c[MMAP] fd=%d based mmap: allocated %u bytes at %p (read %u)\n", 255, 0, 0, fd, aligned_len, buf, off);
+
+                regs->eax = (uint32)(uintptr_t)buf;
+                _mmap_fd_done: ;
+                break;
+            }
+            
+            // Legacy path-based mmap (arg1 is actually a path string)
+            int read_only = flags ? 1 : 0;  // Use flags to determine read-only
             uint32 caps = read_only ? (CAP_READ_FS | CAP_ALLOC_MEMORY) : (CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY);
             if (!syscall_ctx_allow(caps, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
 
@@ -4016,15 +4108,22 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             char path[128];
             if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
 
+            printf("%c[MMAP] legacy path-based: path=%s\n", 255, 0, 0, path);
+
             void* mapped_addr = NULL;
             size_t mapped_size = 0;
-            if (eynfs_mmap(path, &mapped_addr, &mapped_size, (uint8_t)read_only) != 0 || !mapped_addr) {
+            int mmap_rc = eynfs_mmap(path, &mapped_addr, &mapped_size, (uint8_t)read_only);
+            printf("%c[MMAP] eynfs_mmap returned: rc=%d addr=%p size=%u\n", 255, 0, 0, mmap_rc, mapped_addr, (unsigned)mapped_size);
+            
+            if (mmap_rc != 0 || !mapped_addr) {
+                printf("%c[MMAP] FAILED: cannot map %s\n", 255, 165, 0, path);
                 regs->eax = (uint32)-1;
                 break;
             }
 
             if (user_out_size && copyout(user_out_size, &mapped_size, sizeof(mapped_size)) != 0) {
                 (void)eynfs_munmap(mapped_addr, mapped_size);
+                printf("%c[MMAP] FAILED: copyout size\n", 255, 165, 0);
                 regs->eax = (uint32)-1;
                 break;
             }
@@ -4032,10 +4131,12 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             uint32 user_addr = 0;
             if (syscall_addr_to_u32((uintptr)mapped_addr, &user_addr) != 0) {
                 (void)eynfs_munmap(mapped_addr, mapped_size);
+                printf("%c[MMAP] FAILED: addr_to_u32\n", 255, 165, 0);
                 regs->eax = (uint32)-1;
                 break;
             }
 
+            printf("%c[MMAP] SUCCESS: returning addr 0x%x\n", 255, 0, 0, user_addr);
             regs->eax = user_addr;
             break;
         }
@@ -6632,8 +6733,8 @@ uint32 syscall_dispatch(regs_t* regs) {
                                  (uintptr)regs->ebx,
                                  (uintptr)regs->ecx,
                                  (uintptr)regs->edx,
-                                 0,
-                                 0);
+                                 (uintptr)regs->esi,
+                                 (uintptr)regs->edi);
 }
 
 

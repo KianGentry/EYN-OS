@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-05-04 19:10:52
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-05-05 01:04:40
 
-**Total Commands:** 101
+**Total Commands:** 102
 
 ## Table of Contents
 
@@ -1324,6 +1324,22 @@ jsonparse --pretty /config/settings.json
 
 ---
 
+### ldso
+
+**Binary:** `testdir/binaries/ldso`
+
+**Metadata Source:** `EYN-packages/packages/ldso/ldso_uelf.c`
+
+**Description:**
+Minimal ELF dynamic loader for EYN-OS. It is used automatically by `run` for ELF binaries that declare an interpreter (`PT_INTERP`).
+
+**Example:**
+```bash
+ldso <program> [args...]
+```
+
+---
+
 ### list
 
 **Binary:** `testdir/binaries/list`
@@ -1654,5 +1670,5 @@ xeyes
 | Memory Commands | 7 |
 | GUI/Window Commands | 12 |
 | Development Commands | 10 |
-| Utility Commands | 41 |
+| Utility Commands | 42 |
 

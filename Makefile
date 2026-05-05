@@ -413,8 +413,13 @@ eynfsimg:
 # Rebuild all userland C programs from EYN-packages package sources.
 # Run this after editing package *_uelf.c files, then run 'make build'.
 # Usage: make userland
-.PHONY: userland
-userland:
+.PHONY: sharedlibs userland
+sharedlibs:
+	bash devtools/build_libc_shared.sh
+	bash devtools/build_libX11.sh
+	bash devtools/build_libXi.sh
+
+userland: sharedlibs
 	$(MAKE) -C EYN-packages userland OUT_DIR=../testdir/binaries
 
 # Legacy non-partitioned disk image (for testing/compatibility)

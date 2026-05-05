@@ -102,6 +102,7 @@ Utility Commands:
   installer       - EYN-OS graphical installer.
   jobs            - List background jobs.
   jsonparse       - Parse and normalize JSON files.
+  ldso            - Minimal ELF dynamic loader for EYN-OS.
   list            - List directory entries with terminal icons.
   metadata        - Show metadata for a file or directory.
   notify          - Show a graphical notification popup.

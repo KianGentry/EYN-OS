@@ -163,6 +163,30 @@ long lseek(int fd, long offset, int whence) {
     );
 }
 
+void* mmap(void* addr, size_t length, int prot, int flags, int fd, long offset) {
+    int ret;
+    int off = (int)offset;
+
+    if (length == 0) return (void*)-1;
+
+    __asm__ __volatile__(
+        "push %%ebp\n\t"
+        "movl %7, %%ebp\n\t"
+        "int $0x80\n\t"
+        "pop %%ebp\n\t"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_MMAP), "b"(addr), "c"(length), "d"(prot), "S"(flags), "D"(fd), "m"(off)
+        : "memory"
+    );
+
+    if (ret < 0) return (void*)-1;
+    return (void*)(uintptr_t)ret;
+}
+
+int munmap(void* addr, size_t length) {
+    return eyn_syscall3_iii(EYN_SYSCALL_MUNMAP, (int)(uintptr_t)addr, (int)length, 0);
+}
+
 /*
  * access() -- check accessibility of a file path.
  *
