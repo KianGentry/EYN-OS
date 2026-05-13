@@ -49,4 +49,11 @@ obj="tmp_shared_x11compat.o"
 "$CC" -m32 -shared -Wl,-soname,libx11compat.so.6 -o "$out" "$obj" -Ltestdir/lib -lX11 -lc
 chmod 644 "$out"
 
+# A few legacy X11 SONAMEs are expected by the packaged xeyes binary.
+# They all resolve to the same compatibility shim.
+for alias in libXmu.so.6 libXt.so.6 libXext.so.6 libXrender.so.1 libX11-xcb.so.1 libxcb.so.1 libxcb-present.so.0 libxcb-damage.so.0 libxcb-xfixes.so.0; do
+  cp -f "$out_dir/libx11compat.so.6" "$out_dir/$alias"
+  chmod 644 "$out_dir/$alias"
+done
+
 echo "Built compatibility shim: $out"
