@@ -418,6 +418,7 @@ sharedlibs:
 	bash devtools/build_libc_shared.sh
 	bash devtools/build_libX11.sh
 	bash devtools/build_libXi.sh
+	bash devtools/build_x11_compat.sh
 
 userland: sharedlibs
 	$(MAKE) -C EYN-packages userland OUT_DIR=../testdir/binaries

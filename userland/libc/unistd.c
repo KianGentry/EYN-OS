@@ -164,7 +164,7 @@ long lseek(int fd, long offset, int whence) {
 }
 
 void* mmap(void* addr, size_t length, int prot, int flags, int fd, long offset) {
-    int ret;
+    uintptr_t ret;
     int off = (int)offset;
 
     if (length == 0) return (void*)-1;
@@ -179,7 +179,7 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, long offset) 
         : "memory"
     );
 
-    if (ret < 0) return (void*)-1;
+    if (ret == (uintptr_t)-1) return (void*)-1;
     return (void*)(uintptr_t)ret;
 }
 

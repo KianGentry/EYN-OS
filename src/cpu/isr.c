@@ -30,6 +30,8 @@
 #include <predictive_memory.h>
 #include <run_command.h>
 #include <paging.h>
+#include <mm/vmm.h>
+#include <misc/native_exec.h>
 #include <drivers/mouse.h>
 #include <cpu/user_elf.h>
 #include <partition.h>
@@ -42,6 +44,8 @@ extern multiboot_info_t *g_mbi;
 static volatile int system_error_count = 0;
 static volatile int last_error_code = 0;
 static volatile uint32 last_error_eip = 0;
+
+static uint32 g_next_fd_mmap_va = USER_SHARED_BASE;
 
 // Error severity levels
 #define ERROR_FATAL 0
@@ -4017,6 +4021,76 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             
             printf("%c[MMAP] syscall: addr=0x%x len=%u prot=%d flags=0x%x fd=%d\n", 
                    255, 0, 0, addr, length, prot, flags, fd);
+
+            if (flags & 0x20) {
+                if (!syscall_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) {
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+
+                native_process_t* cur_proc = native_get_current_process();
+                address_space_t* as = NULL;
+                if (cur_proc && cur_proc->address_space) {
+                    as = cur_proc->address_space;
+                } else {
+                    extern address_space_t* vmm_current_as;
+                    if (vmm_current_as) as = vmm_current_as;
+                }
+
+                if (!as) {
+                    printf("%c[MMAP] FAILED: no current process address space\n", 255, 165, 0);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+
+                uint32 aligned_len = (length + 4096u - 1u) & ~(4096u - 1u);
+                uint32 target_addr = addr;
+                if (target_addr == 0) {
+                    target_addr = (g_next_fd_mmap_va + 4095u) & ~4095u;
+                    g_next_fd_mmap_va = target_addr + aligned_len;
+                    if (g_next_fd_mmap_va >= USER_SHARED_END) {
+                        printf("%c[MMAP] FAILED: out of user mmap space\n", 255, 165, 0);
+                        regs->eax = (uint32)-1;
+                        break;
+                    }
+                } else if (target_addr < USER_SHARED_BASE || target_addr >= USER_SHARED_END) {
+                    printf("%c[MMAP] FAILED: target address 0x%x outside user mmap range\n", 255, 165, 0, target_addr);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+
+                uint32 mapped = 0;
+                uint32 pte_flags = PTE_USER;
+                if (prot & 0x2) pte_flags |= PTE_RW;
+
+                for (uint32 va = target_addr; va < target_addr + aligned_len; va += PAGE_SIZE) {
+                    uint32 frame = frame_alloc();
+                    if (frame == 0) {
+                        printf("%c[MMAP] FAILED: out of physical memory\n", 255, 165, 0);
+                        goto _mmap_anon_fail;
+                    }
+
+                    memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+
+                    if (vmm_map_page(as, va, frame, pte_flags) != 0) {
+                        printf("%c[MMAP] FAILED: map_page va=0x%x\n", 255, 165, 0, va);
+                        frame_free(frame);
+                        goto _mmap_anon_fail;
+                    }
+                    mapped += PAGE_SIZE;
+                }
+
+                printf("%c[MMAP] anonymous mmap: mapped %u bytes at 0x%x\n", 255, 0, 0, aligned_len, target_addr);
+                regs->eax = target_addr;
+                break;
+
+                _mmap_anon_fail:
+                for (uint32 undo = target_addr; undo < target_addr + mapped; undo += PAGE_SIZE) {
+                    vmm_unmap_page(as, undo);
+                }
+                regs->eax = (uint32)-1;
+                break;
+            }
             
             // If fd >= 0 and flags indicates it's POSIX mmap, handle via fd-based mmap
             if (fd >= 0 && !(flags & 0x100)) {  // Assume bit 0x100 indicates legacy path-based
@@ -4025,30 +4099,53 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                     regs->eax = (uint32)-1; 
                     break; 
                 }
+
+                native_process_t* cur_proc = native_get_current_process();
+                address_space_t* as = NULL;
+                if (cur_proc && cur_proc->address_space) {
+                    as = cur_proc->address_space;
+                } else {
+                    /* Fallback: if this syscall is coming from a ring3 user task,
+                     * use the current VMM address space (if any). This may be
+                     * the kernel AS during some flows, but using it ensures the
+                     * syscall has a valid address_space to map into. */
+                    extern address_space_t* vmm_current_as;
+                    if (vmm_current_as) {
+                        as = vmm_current_as;
+                    }
+                }
+
+                if (!as) {
+                    printf("%c[MMAP] FAILED: no current process address space\n", 255, 165, 0);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
                 
-                // Allocate memory for the file and read the file contents into it.
                 uint32 aligned_len = (length + 4096u - 1u) & ~(4096u - 1u);
-                uint8* buf = (uint8*)malloc(aligned_len);
-                if (!buf) {
-                    printf("%c[MMAP] FAILED: out of memory for %u bytes\n", 255, 165, 0, aligned_len);
+                uint32 target_addr = addr;
+                if (target_addr == 0) {
+                    target_addr = (g_next_fd_mmap_va + 4095u) & ~4095u;
+                    g_next_fd_mmap_va = target_addr + aligned_len;
+                    if (g_next_fd_mmap_va >= USER_SHARED_END) {
+                        printf("%c[MMAP] FAILED: out of user mmap space\n", 255, 165, 0);
+                        regs->eax = (uint32)-1;
+                        break;
+                    }
+                } else if (target_addr < USER_SHARED_BASE || target_addr >= USER_SHARED_END) {
+                    printf("%c[MMAP] FAILED: target address 0x%x outside user mmap range\n", 255, 165, 0, target_addr);
                     regs->eax = (uint32)-1;
                     break;
                 }
 
-                /* Zero the buffer so any partial-page tail is defined */
-                memset(buf, 0, aligned_len);
-
                 /* Validate the FD and locate its kernel FD entry */
                 if (fd < 0 || fd >= USER_FD_MAX || !g_user_fds[fd].used) {
                     printf("%c[MMAP] FAILED: bad fd %d\n", 255, 165, 0, fd);
-                    free(buf);
                     regs->eax = (uint32)-1;
                     break;
                 }
                 user_fd_t* ufd = &g_user_fds[fd];
                 if (ufd->kind != USER_FD_KIND_FILE || ufd->is_dir) {
                     printf("%c[MMAP] FAILED: fd %d not a regular file\n", 255, 165, 0, fd);
-                    free(buf);
                     regs->eax = (uint32)-1;
                     break;
                 }
@@ -4060,39 +4157,62 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                     if (vfs_get_file_size(ufd->drive, ufd->path, &tmp_size) == 0) file_size = tmp_size;
                 }
 
-                /* Read file into buffer in chunks. Use EYNFS fast path when available. */
-                uint32 to_read_total = (file_size > 0) ? ((file_size < length) ? file_size : length) : length;
-                uint32 off = 0;
-                while (off < to_read_total) {
-                    int chunk = (int)(to_read_total - off);
-                    if (chunk > 4096) chunk = 4096;
-                    int n = -1;
-                    if (ufd->eynfs_first_block != 0) {
-                        n = eynfs_read_file_fast(ufd->drive,
-                                                  ufd->eynfs_first_block,
-                                                  (uint32)file_size,
-                                                  buf + off,
-                                                  (size_t)chunk,
-                                                  (size_t)off,
-                                                  &ufd->cur_block,
-                                                  &ufd->cur_block_off);
-                    } else {
-                        n = vfs_read_file_at(ufd->drive, ufd->path, buf + off, chunk, off);
+                /* Map each page into the caller's user address space. */
+                uint32 mapped = 0;
+                uint32 pte_flags = PTE_USER;
+                if (prot & 0x2) pte_flags |= PTE_RW;
+
+                for (uint32 va = target_addr; va < target_addr + aligned_len; va += PAGE_SIZE) {
+                    uint32 frame = frame_alloc();
+                    if (frame == 0) {
+                        printf("%c[MMAP] FAILED: out of physical memory\n", 255, 165, 0);
+                        goto _mmap_fd_fail;
                     }
-                    if (n < 0) {
-                        printf("%c[MMAP] FAILED: read error fd=%d off=%u\n", 255, 165, 0, fd, off);
-                        free(buf);
-                        regs->eax = (uint32)-1;
-                        goto _mmap_fd_done;
+
+                    memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+
+                    uint32 file_off = va - target_addr;
+                    if (file_off < file_size) {
+                        uint32 to_copy = file_size - file_off;
+                        if (to_copy > PAGE_SIZE) to_copy = PAGE_SIZE;
+                        int got = -1;
+                        if (ufd->eynfs_first_block != 0) {
+                            got = eynfs_read_file_fast(ufd->drive,
+                                                       ufd->eynfs_first_block,
+                                                       (uint32)file_size,
+                                                       (void*)(KERNEL_BASE + frame),
+                                                       (size_t)to_copy,
+                                                       (size_t)file_off,
+                                                       &ufd->cur_block,
+                                                       &ufd->cur_block_off);
+                        } else {
+                            got = vfs_read_file_at(ufd->drive, ufd->path, (void*)(KERNEL_BASE + frame), (int)to_copy, file_off);
+                        }
+                        if (got < 0 || (uint32)got != to_copy) {
+                            printf("%c[MMAP] FAILED: read error fd=%d off=%u\n", 255, 165, 0, fd, file_off);
+                            frame_free(frame);
+                            goto _mmap_fd_fail;
+                        }
                     }
-                    if (n == 0) break; /* EOF */
-                    off += (uint32)n;
+
+                    if (vmm_map_page(as, va, frame, pte_flags) != 0) {
+                        printf("%c[MMAP] FAILED: map_page va=0x%x\n", 255, 165, 0, va);
+                        frame_free(frame);
+                        goto _mmap_fd_fail;
+                    }
+                    mapped += PAGE_SIZE;
                 }
 
-                printf("%c[MMAP] fd=%d based mmap: allocated %u bytes at %p (read %u)\n", 255, 0, 0, fd, aligned_len, buf, off);
+                printf("%c[MMAP] fd=%d based mmap: mapped %u bytes at 0x%x (file %u)\n", 255, 0, 0, fd, aligned_len, target_addr, file_size);
 
-                regs->eax = (uint32)(uintptr_t)buf;
-                _mmap_fd_done: ;
+                regs->eax = target_addr;
+                break;
+
+                _mmap_fd_fail:
+                for (uint32 undo = target_addr; undo < target_addr + mapped; undo += PAGE_SIZE) {
+                    vmm_unmap_page(as, undo);
+                }
+                regs->eax = (uint32)-1;
                 break;
             }
             

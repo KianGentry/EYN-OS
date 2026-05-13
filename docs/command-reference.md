@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-05-05 01:04:40
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-05-13 16:35:37
 
-**Total Commands:** 102
+**Total Commands:** 107
 
 ## Table of Contents
 
@@ -1132,6 +1132,22 @@ extract /archive.tar.gz /out
 
 ---
 
+### eynfetch
+
+**Binary:** `testdir/binaries/eynfetch`
+
+**Metadata Source:** `EYN-packages/packages/eynfetch/eynfetch_uelf.c`
+
+**Description:**
+Display system information with ASCII art logo.
+
+**Example:**
+```bash
+eynfetch
+```
+
+---
+
 ### fdisk
 
 **Binary:** `testdir/binaries/fdisk`
@@ -1331,11 +1347,27 @@ jsonparse --pretty /config/settings.json
 **Metadata Source:** `EYN-packages/packages/ldso/ldso_uelf.c`
 
 **Description:**
-Minimal ELF dynamic loader for EYN-OS. It is used automatically by `run` for ELF binaries that declare an interpreter (`PT_INTERP`).
+Minimal ELF dynamic loader for EYN-OS.
 
 **Example:**
 ```bash
 ldso <program> [args...]
+```
+
+---
+
+### ldso_debug
+
+**Binary:** `testdir/binaries/ldso_debug`
+
+**Metadata Source:** `(metadata not found)`
+
+**Description:**
+Run the ldso_debug command.
+
+**Example:**
+```bash
+ldso_debug
 ```
 
 ---
@@ -1400,6 +1432,22 @@ Run a command pipeline from userspace command launcher.
 **Example:**
 ```bash
 pipe files 'search test -a'
+```
+
+---
+
+### ptyspawn
+
+**Binary:** `testdir/binaries/ptyspawn`
+
+**Metadata Source:** `EYN-packages/packages/ptyspawn/ptyspawn_uelf.c`
+
+**Description:**
+Spawn a child process on a PTY slave and relay its output.
+
+**Example:**
+```bash
+ptyspawn /binaries/help
 ```
 
 ---
@@ -1660,6 +1708,38 @@ xeyes
 
 ---
 
+### xeyes_local
+
+**Binary:** `testdir/binaries/xeyes_local`
+
+**Metadata Source:** `(metadata not found)`
+
+**Description:**
+Run the xeyes_local command.
+
+**Example:**
+```bash
+xeyes_local
+```
+
+---
+
+### zsnes_1_51
+
+**Binary:** `testdir/binaries/zsnes_1_51`
+
+**Metadata Source:** `(metadata not found)`
+
+**Description:**
+Run the zsnes_1_51 command.
+
+**Example:**
+```bash
+zsnes_1_51
+```
+
+---
+
 ## Command Statistics
 
 | Category | Count |
@@ -1670,5 +1750,5 @@ xeyes
 | Memory Commands | 7 |
 | GUI/Window Commands | 12 |
 | Development Commands | 10 |
-| Utility Commands | 42 |
+| Utility Commands | 47 |
 
