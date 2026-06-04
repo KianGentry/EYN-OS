@@ -110,6 +110,7 @@ enum {
     EYN_SYSCALL_TTY_SET_WINSIZE = 147,
     EYN_SYSCALL_TTY_GET_WINSIZE = 148,
     EYN_SYSCALL_PTY_OPEN = 149,
+    EYN_SYSCALL_GET_SYSINFO = 152,
 };
 
 #define EYN_TTY_MODE_RAW 0x0001
@@ -118,6 +119,12 @@ typedef struct {
     uint16_t rows;
     uint16_t cols;
 } eyn_tty_winsize_t;
+
+typedef struct {
+    char os_version[64];      /* e.g., "EYN-OS Release 15" */
+    char kernel_version[32];  /* e.g., "v1.0" */
+    char shell[64];           /* shell executable name */
+} eyn_sysinfo_t;
 
 typedef struct {
     const char* path;
@@ -239,6 +246,17 @@ static inline int eyn_sys_spawn_ex(const eyn_spawn_ex_req_t* req) {
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_SPAWN_EX), "b"(req)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_get_sysinfo(eyn_sysinfo_t* info) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_GET_SYSINFO), "b"(info)
         : "memory"
     );
     return ret;

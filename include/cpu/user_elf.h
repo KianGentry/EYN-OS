@@ -56,4 +56,12 @@ void user_task_get_current_mapping_state(uint32* base, uint32* pages, uint32* st
 void user_task_set_current_mapping_state(uint32 base, uint32 pages, uint32 stack_page);
 void user_task_clear_current_mapping_state(void);
 
+// Queue a signal for a UELF task by PID. Returns 0 on success, -1 on error.
+int user_task_queue_signal(int pid, int sig);
+// Install a handler for the calling UELF task. Returns 0 on success.
+int user_task_set_handler_current(int sig, uintptr handler);
+// Restore the saved signal frame for the calling UELF task. Returns 0 on success.
+int user_task_sigreturn_current(regs_t* regs);
+// Queue a signal to the currently running UELF task. Returns 0 on success.
+int user_task_signal_current(int sig);
 #endif

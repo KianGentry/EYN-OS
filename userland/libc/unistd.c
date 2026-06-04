@@ -65,6 +65,20 @@ int waitpid(int pid, int* status, int options) {
                             options);
 }
 
+int kill(int pid, int sig) {
+    return eyn_syscall3_iii(EYN_SYSCALL_KILL, pid, sig, 0);
+}
+
+int sigreturn(void) {
+    return eyn_syscall0(EYN_SYSCALL_SIGRETURN);
+}
+
+/* Install a signal handler for the calling process. */
+sighandler_t signal(int sig, sighandler_t handler) {
+    (void)eyn_syscall3_pii(EYN_SYSCALL_SIGNAL, sig, handler, 0);
+    return (sighandler_t)0;
+}
+
 int writefile(const char* path, const void* buf, size_t len) {
     if (!path || !buf) return -1;
     if (len > 0x7fffffffU) len = 0x7fffffffU;

@@ -14,6 +14,7 @@
 #include <context.h>
 #include <misc/sched.h>
 #include <watchdog.h>
+#include <mm/user_access.h>
 
 // Defined in src/boot/kernel.asm; this is the top of the kernel stack.
 extern uint32 stack_space;
@@ -28,6 +29,7 @@ static segdom_t g_user_segdom;
 static volatile int g_user_task_pending_pid = 0;
 static volatile int g_user_task_running_pid = 0;
 static uint32 g_user_task_runtime_generation;
+
 
 static int user_elf_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -273,10 +275,23 @@ typedef struct {
     uint32 mlfq_slice_left;
     user_task_runtime_t runtime;
     user_task_image_t* image;
+    // Signal delivery state
+    uint32_t sig_pending;
+    uint32_t sig_mask;
+    uintptr_t sig_handler[32];
+    regs_t sig_saved_frame;
+    uint8_t sig_saved_present;
+
     int has_syscall_frame;
     uint32 syscall_frame_generation;
     regs_t last_syscall_frame;
 } user_task_slot_t;
+
+#if 0
+// prototype placeholder moved below (keep for historical reference)
+#endif
+
+static void user_task_handle_pending(user_task_slot_t* slot);
 
 #define USER_TASK_MAX 16
 
@@ -1366,6 +1381,8 @@ int user_task_try_preempt_from_irq(void* frame) {
         current->state = USER_TASK_STATE_RUNNABLE;
     }
 
+    // Deliver any pending signals for the target before switching.
+    user_task_handle_pending(target);
     user_task_regs_to_irq_frame((user_task_irq_frame32_t*)frame, &target->last_syscall_frame);
     user_task_apply_stdio_state(target);
     target->state = USER_TASK_STATE_RUNNING;
@@ -1435,6 +1452,8 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
         current->state = USER_TASK_STATE_RUNNABLE;
     }
 
+    // Deliver any pending signals for the target before switching.
+    user_task_handle_pending(target);
     *regs = target->last_syscall_frame;
     user_task_apply_stdio_state(target);
     target->state = USER_TASK_STATE_RUNNING;
@@ -1602,6 +1621,136 @@ void user_task_capture_syscall_frame(const regs_t* regs) {
     slot->syscall_frame_generation = g_user_task_runtime_generation;
 }
 
+static int user_task_signal_is_terminating(int sig) {
+    // Linux-like defaults for common user signals in this first cut.
+    return (sig == 2  ||  // SIGINT
+            sig == 3  ||  // SIGQUIT
+            sig == 6  ||  // SIGABRT
+            sig == 9  ||  // SIGKILL (uncatchable)
+            sig == 11 ||  // SIGSEGV
+            sig == 13 ||  // SIGPIPE
+            sig == 14 ||  // SIGALRM
+            sig == 15);   // SIGTERM
+}
+
+static void user_task_terminate_slot(user_task_slot_t* slot, int sig) {
+    if (!slot) return;
+    if (slot->state == USER_TASK_STATE_ZOMBIE) return;
+
+    if (slot->pid == (int)g_user_task_running_pid) {
+        user_task_notify_exit(-sig);
+        return;
+    }
+
+    user_task_runq_remove(slot);
+    slot->state = USER_TASK_STATE_ZOMBIE;
+    slot->status = -sig;
+    user_task_wake_waiters_for_pid(slot->pid);
+    user_task_request_schedule();
+}
+
+// Deliver any pending signals for a slot by modifying its saved resume frame.
+// If a handler is installed for the signal, arrange to invoke it in user
+// context and store the prior frame in sig_saved_frame so `sigreturn`
+// can restore it.
+static void user_task_handle_pending(user_task_slot_t* slot) {
+    if (!slot) return;
+    uint32_t pending = slot->sig_pending & ~slot->sig_mask;
+    if (!pending) return;
+
+    int sig = -1;
+    for (int i = 1; i < 32; ++i) {
+        if (pending & (1u << i)) { sig = i; break; }
+    }
+    if (sig < 0) return;
+
+    slot->sig_pending &= ~(1u << sig);
+
+    // SIGKILL is uncatchable.
+    if (sig == 9) {
+        user_task_terminate_slot(slot, sig);
+        return;
+    }
+
+    // Handler present?
+    if (slot->sig_handler[sig]) {
+        regs_t newregs = slot->last_syscall_frame;
+        uint32_t useresp = newregs.esp;
+        useresp = (useresp - 4) & ~3u;
+        int sigval = sig;
+        if (copyout((void*)(uintptr)useresp, &sigval, sizeof(sigval)) == 0) {
+            newregs.esp = useresp;
+            newregs.eip = (uint32)slot->sig_handler[sig];
+            slot->sig_saved_frame = slot->last_syscall_frame;
+            slot->sig_saved_present = 1;
+            slot->last_syscall_frame = newregs;
+            slot->has_syscall_frame = 1;
+        } else {
+            // If we can't copy to user stack, fall back to default action below.
+            ;
+        }
+        return;
+    }
+
+    // Apply default disposition when no handler is installed.
+    if (user_task_signal_is_terminating(sig)) {
+        user_task_terminate_slot(slot, sig);
+    }
+}
+
+// Queue a signal for a UELF task by PID. Returns 0 on success, -1 on error.
+int user_task_queue_signal(int pid, int sig) {
+    if (pid <= 0 || sig <= 0 || sig >= 32) return -1;
+    user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
+    if (!slot) return -1;
+
+    // Default terminating signals should affect every process immediately,
+    // even if it is blocked and never reaches a resume hook.
+    if (slot->sig_handler[sig] == 0 && user_task_signal_is_terminating(sig)) {
+        user_task_terminate_slot(slot, sig);
+        return 0;
+    }
+
+    slot->sig_pending |= (1u << sig);
+    // If target is currently running, interrupt usermode to make kernel
+    // deliver the signal soon.
+    if (slot->pid == (int)g_user_task_running_pid) {
+        g_user_interrupt = 1;
+    }
+    // If task isn't running but is runnable, request schedule so delivery
+    // happens before it next resumes.
+    if (slot->state == USER_TASK_STATE_RUNNABLE) user_task_request_schedule();
+    return 0;
+}
+
+int user_task_set_handler_current(int sig, uintptr handler) {
+    if (sig <= 0 || sig >= 32) return -1;
+    if (sig == 9) return -1; // SIGKILL cannot be caught.
+    int pid = (int)g_user_task_running_pid;
+    if (pid <= 0) return -1;
+    user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
+    if (!slot) return -1;
+    slot->sig_handler[sig] = handler;
+    return 0;
+}
+
+int user_task_sigreturn_current(regs_t* regs) {
+    int pid = (int)g_user_task_running_pid;
+    if (pid <= 0) return -1;
+    user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
+    if (!slot) return -1;
+    if (!slot->sig_saved_present) return -1;
+    if (regs) *regs = slot->sig_saved_frame;
+    slot->sig_saved_present = 0;
+    return 0;
+}
+
+int user_task_signal_current(int sig) {
+    int pid = (int)g_user_task_running_pid;
+    if (pid <= 0) return -1;
+    return user_task_queue_signal(pid, sig);
+}
+
 void user_task_notify_exit(int status) {
     int pid = (int)g_user_task_running_pid;
     if (pid > 0) {
@@ -1616,6 +1765,8 @@ void user_task_notify_exit(int status) {
     g_user_task_active_slot = NULL;
     g_user_task_running_pid = 0;
     g_user_task_pending_pid = 0;
+    g_user_task_active = 0;
+    g_user_task_term = -1;
     user_task_request_schedule();
 }
 

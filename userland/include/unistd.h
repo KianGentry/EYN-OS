@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <sys/types.h>  /* mode_t, off_t */
+#include <signal.h>
 
 typedef long ssize_t;
 
@@ -30,6 +31,10 @@ int fd_set_nonblock(int fd, int enabled);
 #define WNOHANG 1
 int spawn(const char* path, const char* const* argv, int argc);
 int waitpid(int pid, int* status, int options);
+
+/* Signal primitives */
+int kill(int pid, int sig);
+int sigreturn(void);
 
 // Create/overwrite a file with given contents.
 int writefile(const char* path, const void* buf, size_t len);

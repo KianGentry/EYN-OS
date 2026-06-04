@@ -7,6 +7,7 @@
 #include <watchdog.h>
 #include <misc/sched.h>
 #include <cpu/user_elf.h>
+#include <terminals.h>
 
 extern void poll_keyboard_for_ctrl_c();
 
@@ -203,19 +204,34 @@ static void irq_dispatch_core(int irq_number, int send_eoi, void* frame_ptr) {
         }
 
         if (g_user_interrupt) {
-            if (interrupted_user_mode) {
-                g_user_interrupt = 0;
-                user_task_notify_exit(-130);
-                g_user_task_active = 0;
-                g_user_task_term = -1;
-                g_user_task_ui_dirty = 0;
-                g_abort_to_shell = 1;
-                printf("^C\n");
-                if (send_eoi) {
-                    pic_send_eoi(irq_number);
-                }
-                return;
+            // Deliver SIGINT to the active ring3 task even if it is currently
+            // inside a long-running syscall in kernel mode.
+            (void)user_task_signal_current(2);
+
+            // Mirror ^C into the spawning terminal so feedback is visible even
+            // when shell redirect/capture state is active.
+            if (g_user_task_term >= 0) {
+                vterm_write_char(g_user_task_term, '^');
+                vterm_write_char(g_user_task_term, 'C');
+                vterm_write_char(g_user_task_term, '\n');
+                g_user_task_ui_dirty = 1;
             }
+            printf("^C\n");
+
+            if (interrupted_user_mode) {
+                // We were about to return directly to user mode. Terminate the
+                // running task now so scheduler/UI state is consistent before
+                // we unwind through the abort-to-shell path.
+                if (g_user_task_active) {
+                    user_task_notify_exit(-2);
+                }
+                g_user_interrupt = 0;
+                g_abort_to_shell = 1;
+            }
+            if (send_eoi) {
+                pic_send_eoi(irq_number);
+            }
+            return;
         }
 
         // Throttle renders (PIT is 50Hz). Keep repainting while a user task is active

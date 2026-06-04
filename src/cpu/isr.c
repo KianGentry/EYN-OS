@@ -39,6 +39,8 @@
 extern background_process_t g_background_processes[MAX_BACKGROUND_PROCESSES];
 
 extern multiboot_info_t *g_mbi;
+extern const char* g_os_version;
+extern const char* g_kernel_version;
 
 // Global error tracking
 static volatile int system_error_count = 0;
@@ -605,6 +607,9 @@ uint32 get_last_error_eip() {
 #define SYSCALL_SPAWN_EX 150
 #define SYSCALL_FD_GET_STDIO 151
 
+/* System information syscalls */
+#define SYSCALL_GET_SYSINFO 152
+
 #define TTY_MODE_RAW 0x0001
 
 /*
@@ -702,6 +707,9 @@ uint32 get_last_error_eip() {
 #define SYSCALL_FD_SET_NONBLOCK 130
 #define SYSCALL_SPAWN 131
 #define SYSCALL_WAITPID 132
+#define SYSCALL_KILL 200
+#define SYSCALL_SIGRETURN 201
+#define SYSCALL_SIGNAL 202
 #define SYSCALL_INSTALLER_PREPARE_DRIVE 133
 #define SYSCALL_INSTALLER_FORMAT_EYNFS_PARTITION 134
 #define SYSCALL_INSTALLER_WRITE_SECTOR 135
@@ -6636,6 +6644,28 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             regs->eax = 0;
             break;
         }
+        case SYSCALL_KILL: {
+            // args: (int pid, int sig)
+            int pid = (int)arg1;
+            int sig = (int)arg2;
+            if (user_task_queue_signal(pid, sig) == 0) {
+                regs->eax = 0;
+            } else {
+                regs->eax = (uint32)-1;
+            }
+            break;
+        }
+        case SYSCALL_SIGNAL: {
+            // args: (int sig, void* handler)
+            int sig = (int)arg1;
+            void* handler = (void*)(uintptr)arg2;
+            if (user_task_set_handler_current(sig, (uintptr)handler) == 0) {
+                regs->eax = 0;
+            } else {
+                regs->eax = (uint32)-1;
+            }
+            break;
+        }
         case SYSCALL_GETKEY: {
             if (!syscall_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             regs->eax = (uint32)kb_getchar_nonblocking();
@@ -6829,6 +6859,71 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             }
 
             regs->eax = (uint32)count;
+            break;
+        }
+
+        case SYSCALL_GET_SYSINFO: {
+            /*
+             * SYSCALL_GET_SYSINFO (152): Get system information
+             * args: (eyn_sysinfo_t* info)
+             * returns: 0 on success, -1 on failure
+             *
+             * Retrieves OS version, kernel version, and shell name.
+             */
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            typedef struct {
+                char os_version[64];
+                char kernel_version[32];
+                char shell[64];
+            } sysinfo_u32_t;
+
+            sysinfo_u32_t* user_info = (sysinfo_u32_t*)arg1;
+            if (!user_info) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            sysinfo_u32_t info;
+            if (!g_os_version || !g_kernel_version) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            /* Copy OS version */
+            strncpy((char*)info.os_version, g_os_version, sizeof(info.os_version) - 1);
+            info.os_version[sizeof(info.os_version) - 1] = '\0';
+
+            /* Copy kernel version */
+            strncpy((char*)info.kernel_version, g_kernel_version, sizeof(info.kernel_version) - 1);
+            info.kernel_version[sizeof(info.kernel_version) - 1] = '\0';
+
+            /* Try to get shell from environment or use default */
+            const char* shell_env = NULL;
+            /* TODO: Get from environment; for now use hardcoded default */
+            const char* default_shell = "eynsh";
+            strncpy((char*)info.shell, default_shell, sizeof(info.shell) - 1);
+            info.shell[sizeof(info.shell) - 1] = '\0';
+
+            /* Copy result back to user space */
+            if (copyout(user_info, &info, sizeof(info)) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            regs->eax = 0;
+            break;
+        }
+
+        case SYSCALL_SIGRETURN: {
+            if (user_task_sigreturn_current(regs) == 0) {
+                regs->eax = 0;
+            } else {
+                regs->eax = (uint32)-1;
+            }
             break;
         }
 

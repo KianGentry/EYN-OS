@@ -35,6 +35,10 @@
 void* fat32_disk_img = 0;
 multiboot_info_t *g_mbi = 0;
 
+/* OS and kernel version information */
+const char* g_os_version = "EYN-OS Release 15";
+const char* g_kernel_version = "v1.0";
+
 static inline void* kernel_u32_to_ptr(uint32 address) {
     return (void*)(uintptr)address;
 }
