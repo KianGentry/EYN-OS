@@ -1084,17 +1084,18 @@ void start_tiling_manager() {
                             me.y >= sub_top2 && me.y < sub_top2 + sub_h2) {
                             int rel_y = me.y - sub_top2 - 2;
                             if (need_scroll2) {
-                                /* Click on scroll-up arrow */
+                                /* Click on scroll-up arrow (reversed): move view down */
                                 if (rel_y < item_h2) {
-                                    if (g_programs_scroll > 0) g_programs_scroll--;
+                                    int max_scroll2 = g_program_count - max_vis2;
+                                    if (max_scroll2 < 0) max_scroll2 = 0;
+                                    if (g_programs_scroll < max_scroll2) g_programs_scroll++;
                                     g_force_full_redraw = 1;
                                     goto after_mouse_handling;
                                 }
                                 rel_y -= item_h2;
-                                /* Click on scroll-down arrow (after items) */
+                                /* Click on scroll-down arrow (after items, reversed): move view up */
                                 if (rel_y >= max_vis2 * item_h2) {
-                                    int max_scroll2 = g_program_count - max_vis2;
-                                    if (g_programs_scroll < max_scroll2) g_programs_scroll++;
+                                    if (g_programs_scroll > 0) g_programs_scroll--;
                                     g_force_full_redraw = 1;
                                     goto after_mouse_handling;
                                 }
@@ -1699,8 +1700,16 @@ void start_tiling_manager() {
                 int sub_w_sc = 160;
                 int taskbar_h_sc = vga_text_cell_h() + 6;
                 if (me.x >= sub_x_sc && me.x < sub_x_sc + sub_w_sc && me.y >= taskbar_h_sc) {
-                    g_programs_scroll -= me.wheel_delta;
+                    int item_h_sc = vga_text_cell_h() + 6;
+                    int avail_h_sc = screen_h - taskbar_h_sc;
+                    int max_vis_sc = (avail_h_sc - 4) / item_h_sc;
+                    if (max_vis_sc < 1) max_vis_sc = 1;
+                    if (max_vis_sc > g_program_count) max_vis_sc = g_program_count;
+                    int max_scroll_sc = g_program_count - max_vis_sc;
+                    if (max_scroll_sc < 0) max_scroll_sc = 0;
+                    g_programs_scroll += me.wheel_delta;
                     if (g_programs_scroll < 0) g_programs_scroll = 0;
+                    if (g_programs_scroll > max_scroll_sc) g_programs_scroll = max_scroll_sc;
                     g_force_full_redraw = 1;
                 }
             }
@@ -1925,7 +1934,16 @@ after_mouse_handling:
             if (base_nav == 0x1001) { /* Up */
                 if (g_programs_active && g_programs_hover >= 0) {
                     if (g_programs_hover > 0) g_programs_hover--;
-                    else if (g_programs_scroll > 0) g_programs_scroll--;
+                    else {
+                        int item_h_nav = vga_text_cell_h() + 6;
+                        int avail_h_nav = screen_h - (vga_text_cell_h() + 6);
+                        int max_vis_nav = (avail_h_nav - 4) / item_h_nav;
+                        if (max_vis_nav < 1) max_vis_nav = 1;
+                        if (max_vis_nav > g_program_count) max_vis_nav = g_program_count;
+                        int max_scroll_nav = g_program_count - max_vis_nav;
+                        if (max_scroll_nav < 0) max_scroll_nav = 0;
+                        if (g_programs_scroll < max_scroll_nav) g_programs_scroll++;
+                    }
                 } else {
                     if (g_start_hover <= 0) g_start_hover = 5;
                     else g_start_hover--;
@@ -1942,7 +1960,7 @@ after_mouse_handling:
                     else {
                         int max_scroll_nav = g_program_count - max_vis_nav;
                         if (max_scroll_nav < 0) max_scroll_nav = 0;
-                        if (g_programs_scroll < max_scroll_nav) g_programs_scroll++;
+                        if (g_programs_scroll > 0) g_programs_scroll--;
                     }
                 } else {
                     if (g_start_hover >= 5) g_start_hover = 0;

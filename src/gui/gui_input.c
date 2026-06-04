@@ -1121,8 +1121,15 @@ int tile_pump_input_once(void) {
             if (g_programs_active && g_programs_hover >= 0) {
                 if (g_programs_hover > 0) {
                     g_programs_hover--;
-                } else if (g_programs_scroll > 0) {
-                    g_programs_scroll--;
+                } else {
+                    int item_h_nav = vga_text_cell_h() + 6;
+                    int avail_h_nav = screen_h - (vga_text_cell_h() + 6);
+                    int max_vis_nav = (avail_h_nav - 4) / item_h_nav;
+                    if (max_vis_nav < 1) max_vis_nav = 1;
+                    if (max_vis_nav > g_program_count) max_vis_nav = g_program_count;
+                    int max_scroll_nav = g_program_count - max_vis_nav;
+                    if (max_scroll_nav < 0) max_scroll_nav = 0;
+                    if (g_programs_scroll < max_scroll_nav) g_programs_scroll++;
                 }
             } else {
                 if (g_start_hover <= 0) g_start_hover = 5;
@@ -1141,9 +1148,7 @@ int tile_pump_input_once(void) {
                 if (g_programs_hover < max_vis_nav - 1) {
                     g_programs_hover++;
                 } else {
-                    int max_scroll_nav = g_program_count - max_vis_nav;
-                    if (max_scroll_nav < 0) max_scroll_nav = 0;
-                    if (g_programs_scroll < max_scroll_nav) g_programs_scroll++;
+                    if (g_programs_scroll > 0) g_programs_scroll--;
                 }
             } else {
                 if (g_start_hover >= 5) g_start_hover = 0;
