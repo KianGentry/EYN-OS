@@ -222,4 +222,14 @@ extern int vga_default_r, vga_default_g, vga_default_b;
 void printf(const char* format, ...);
 int snprintf(char *str, size_t size, const char *format, ...);
 
+// Console cursor and movement helpers (framebuffer-friendly)
+// Move the console cursor one character cell left/right/up/down.
+void vga_console_move_left(void);
+void vga_console_move_right(void);
+void vga_console_move_up(void);
+void vga_console_move_down(void);
+// Erase and draw the software cursor (used by input routines).
+void vga_console_erase_cursor(void);
+void vga_console_draw_cursor(void);
+
 #endif // VGA_H

@@ -155,6 +155,24 @@ string readStr() {
                 continue;
             }
             
+                        // Arrow keys: handle cursor movement in framebuffer mode
+                        if (scancode == 75) { // Left
+                                vga_console_move_left();
+                                continue;
+                        }
+                        if (scancode == 77) { // Right
+                                vga_console_move_right();
+                                continue;
+                        }
+                        if (scancode == 72) { // Up
+                                vga_console_move_up();
+                                continue;
+                        }
+                        if (scancode == 80) { // Down
+                                vga_console_move_down();
+                                continue;
+                        }
+
             // Check for Ctrl+C
                         if(ctrl_pressed && scancode == 46) {  // 'c' key
                                 g_user_interrupt = 1;

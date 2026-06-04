@@ -49,8 +49,9 @@ static int paging_enabled = 0;
  *   page-table frame above the alias limit causes a kernel-mode #PF.
  *
  * The alias is extended at vmm_init time to span all detected RAM. The default
- *   here (16 MB) is only ever used if vmm_init has not yet run, which should
- *   never happen in normal operation.
+ *   here (64 MB) is sized to handle large-BSS user programs like chibicc
+ *   (32+ MB heap) and doom without triggering kernel-mode page faults when
+ *   allocating page tables for those programs.
  *
  * Breakage if too small: kernel panics with PAGE FAULT (kernel) targeting
  *   KERNEL_BASE + first_unaliased_frame when a large-BSS user program (e.g.
@@ -58,7 +59,7 @@ static int paging_enabled = 0;
  * Breakage if too large: no functional issue; wastes a few early_alloc page
  *   tables at boot (4 KB per extra 4 MB of covered RAM).
  */
-static uint32 g_kernel_phys_alias_bytes = 16u * 1024u * 1024u;
+static uint32 g_kernel_phys_alias_bytes = 64u * 1024u * 1024u;
 
 /*
  * ABI-INVARIANT: Core paging structures use 32-bit physical/virtual fields.
@@ -1799,8 +1800,10 @@ void vmm_enable_paging(void) {
 paging_enabled_after_jump:
     
     paging_enabled = 1;
+    vmm_kernel_as.pd = (page_directory_t*)vmm_kphys_to_ptr(vmm_kernel_as.pd_phys);
 }
 
 void vmm_mark_paging_enabled(void) {
     paging_enabled = 1;
+    vmm_kernel_as.pd = (page_directory_t*)vmm_kphys_to_ptr(vmm_kernel_as.pd_phys);
 }

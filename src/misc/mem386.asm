@@ -1,4 +1,4 @@
-; 80386-safe memcpy/memset implementations for the freestanding kernel.
+; 80386-safe memcpy/memset
 ; - No CPUID/RDTSC/CMOV/etc.
 ; - Uses REP MOVSD/MOVSB and REP STOSD/STOSB only.
 ; - cdecl ABI: arguments on stack, return in EAX.

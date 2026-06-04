@@ -1,4 +1,4 @@
-; amd64 SysV memcpy/memset/bzero for freestanding kernel builds.
+; amd64 SysV memcpy/memset/bzero
 
 BITS 64
 

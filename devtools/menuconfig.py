@@ -33,6 +33,8 @@ class ConfigState:
     sched_mlfq_q2_ms: int = 50
     sched_mlfq_boost_ms: int = 1000
     selected_apps: Set[str] = None  # type: ignore[assignment]
+    gui_enabled: bool = True
+    tty_enabled: bool = True
 
 
 def bool_to_str(value: bool) -> str:
@@ -132,6 +134,9 @@ def load_state(config_path: Path, apps: List[str]) -> ConfigState:
         requested = {item.strip() for item in selected.split(",") if item.strip()}
         state.selected_apps = {app for app in apps if app in requested}
 
+    state.gui_enabled = str_to_bool(values.get("CONFIG_GUI_ENABLED", "1"), True)
+    state.tty_enabled = str_to_bool(values.get("CONFIG_TTY_ENABLED", "1"), True)
+
     if "installer" in apps:
         state.selected_apps.add("installer")
 
@@ -159,10 +164,11 @@ def save_state(config_path: Path, state: ConfigState, apps: List[str]) -> None:
         f"CONFIG_SCHED_MLFQ_Q1_MS={state.sched_mlfq_q1_ms}",
         f"CONFIG_SCHED_MLFQ_Q2_MS={state.sched_mlfq_q2_ms}",
         f"CONFIG_SCHED_MLFQ_BOOST_MS={state.sched_mlfq_boost_ms}",
+        f"CONFIG_GUI_ENABLED={bool_to_str(state.gui_enabled)}",
+        f"CONFIG_TTY_ENABLED={bool_to_str(state.tty_enabled)}",
         f"CONFIG_INSTALLER_APPS={app_list}",
         "",
     ]
-
     config_path.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -437,6 +443,62 @@ def clamp_int(value: int, min_value: int, max_value: int) -> int:
     return value
 
 
+def run_build_flags_menu(stdscr: curses.window, state: ConfigState) -> None:
+    index = 0
+    items = [
+        "Enable graphical subsystem (GUI)",
+        "Enable text mode shell (TTY)",
+        "< Back >",
+    ]
+
+    while True:
+        if not ensure_min_size(stdscr):
+            continue
+
+        stdscr.clear()
+        stdscr.attrset(ATTR_NORMAL)
+        draw_header(stdscr, "Build Flags")
+
+        values = [
+            "*" if state.gui_enabled else " ",
+            "*" if state.tty_enabled else " ",
+            "",
+        ]
+
+        for row, item in enumerate(items):
+            y = 4 + row
+            marker = ">" if row == index else " "
+            if row < 2:
+                line = f" {marker} [{values[row]}] {item}"
+            else:
+                line = f" {marker} {item}"
+            stdscr.attrset(ATTR_SELECTED if row == index else ATTR_NORMAL)
+            safe_addnstr(stdscr, y, 2, line, max(1, stdscr.getmaxyx()[1] - 4))
+            stdscr.attrset(ATTR_NORMAL)
+
+        draw_footer(stdscr, "Space/Enter toggles. At least one of GUI or TTY must be enabled.")
+        stdscr.refresh()
+
+        key = stdscr.getch()
+        if key in (ord("q"), ord("Q")):
+            return
+        if key in (curses.KEY_UP, ord("k")):
+            index = (index - 1) % len(items)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            index = (index + 1) % len(items)
+        elif key in (ord("\n"), ord(" ")):
+            if index == 0:
+                state.gui_enabled = not state.gui_enabled
+                if not state.gui_enabled and not state.tty_enabled:
+                    state.gui_enabled = True
+            elif index == 1:
+                state.tty_enabled = not state.tty_enabled
+                if not state.gui_enabled and not state.tty_enabled:
+                    state.tty_enabled = True
+            elif index == 2:
+                return
+
+
 def run_scheduler_menu(stdscr: curses.window, state: ConfigState) -> None:
     index = 0
     items = [
@@ -448,7 +510,6 @@ def run_scheduler_menu(stdscr: curses.window, state: ConfigState) -> None:
         "Boost interval (ms)",
         "< Back >",
     ]
-
     while True:
         if not ensure_min_size(stdscr):
             continue
@@ -542,6 +603,7 @@ def run_main_menu(stdscr: curses.window, config_path: Path, state: ConfigState, 
 
     items = [
         "General setup --->",
+        "Build Flags --->",
         "Scheduler (MLFQ) --->",
         "Preinstalled applications --->",
         "Save configuration",
@@ -568,8 +630,10 @@ def run_main_menu(stdscr: curses.window, config_path: Path, state: ConfigState, 
 
         summary = (
             f"ARCH={state.arch}  prune={bool_to_str(state.ramdisk_prune)}  "
-            f"full={bool_to_str(state.ramdisk_full)}  mlfq={bool_to_str(state.sched_mlfq)} "
-            f"irqpreempt={bool_to_str(state.sched_mlfq_irq_preempt)} "
+            f"full={bool_to_str(state.ramdisk_full)}  "
+            f"gui={bool_to_str(state.gui_enabled)}  tty={bool_to_str(state.tty_enabled)}  "
+            f"mlfq={bool_to_str(state.sched_mlfq)}  "
+            f"irqpreempt={bool_to_str(state.sched_mlfq_irq_preempt)}  "
             f"apps={len(state.selected_apps)}/{len(apps)}"
         )
         draw_footer(stdscr, summary)
@@ -590,13 +654,15 @@ def run_main_menu(stdscr: curses.window, config_path: Path, state: ConfigState, 
             if index == 0:
                 run_general_menu(stdscr, state)
             elif index == 1:
-                run_scheduler_menu(stdscr, state)
+                run_build_flags_menu(stdscr, state)
             elif index == 2:
-                run_apps_menu(stdscr, state, apps)
+                run_scheduler_menu(stdscr, state)
             elif index == 3:
+                run_apps_menu(stdscr, state, apps)
+            elif index == 4:
                 save_state(config_path, state, apps)
                 message = f"Saved configuration to {config_path}"
-            elif index == 4:
+            elif index == 5:
                 return 0
 
 

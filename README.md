@@ -57,11 +57,32 @@ The codebase is organized by domain (CPU, drivers, misc, utilities, network) wit
 Build from a Linux host with standard toolchain components (GCC, NASM, GRUB):
 
 ```bash
-make menuconfig # configure architecture and installer payload options
-make build      # build ISO and disk images
+make menuconfig # configure architecture, installer payload, and build modes (GUI/TTY)
+make build      # build ISO and disk images (default: GUI+TTY dual mode)
 make run        # build and run in QEMU
+
+# Or build specific modes:
+make iso-gui    # full ISO with GUI and text mode
+make iso-tty    # lightweight TTY-only ISO (no graphics)
 make qemu-gdb   # launch with GDB support (halted at startup, attach to :1234)
 ```
+
+### TTY-Only Mode
+
+For lightweight builds or headless debugging, use the **TTY-only mode**:
+
+```bash
+make iso-tty    # Build text-only ISO (~2-3 MB, no graphics)
+```
+
+This disables the graphical subsystem and excludes GUI-related packages, producing a smaller ISO suitable for:
+- Minimal resource environments
+- Headless/remote development
+- Serial console debugging
+
+See [TTY-Only Mode Documentation](docs/general/tty-mode.md) for details.
+
+### Inside EYN-OS
 
 Inside EYN-OS, try these commands:
 ```bash

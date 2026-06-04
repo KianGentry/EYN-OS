@@ -260,7 +260,7 @@ int tile_notify_dismiss_all(void) {
  * Cached list of program names from /binaries.
  * Scanned once on first open; refreshed on each start-menu toggle.
  */
-#define PROGRAMS_MAX 128
+#define PROGRAMS_MAX 256
 static char  g_program_names[PROGRAMS_MAX][PROG_NAME_MAX];
 static int   g_program_count = 0;
 static int   g_programs_scanned = 0;

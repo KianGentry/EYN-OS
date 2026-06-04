@@ -1,4 +1,5 @@
 #include <vga.h>
+#include <vga_text.h>
 #include <multiboot.h>
 #include <eynfs.h>
 #include <util.h>
@@ -27,6 +28,85 @@ int width, height;
 int vga_default_r = 255, vga_default_g = 255, vga_default_b = 255; // Default to white
 // When non-zero, drawText operates in a minimal glyph-draw mode used by drawCharAt.
 static int g_drawCharAt_mode = 0;
+// Software cursor control for framebuffer-backed console
+static int g_console_cursor_visible = 1;
+static const int g_console_cursor_w = 1; // pixels
+
+// Forward declarations for static helpers defined later in this file.
+static uint8 vga_font_line_h_or_builtin(int handle);
+static uint8 vga_font_advance_or_builtin(int handle, int charnum);
+static int vga_get_system_font_handle_raw(void);
+
+// Erase software cursor (if framebuffer-backed console active)
+void vga_console_erase_cursor(void) {
+	if (!g_console_cursor_visible || !g_mbi || !g_mbi->framebuffer_addr) return;
+	int font_handle = vga_get_system_font_handle_raw();
+	int line_h = (int)vga_font_line_h_or_builtin(font_handle);
+	drawRect(width, height, g_console_cursor_w, line_h, 0, 0, 0);
+}
+
+// Draw software cursor at current position
+void vga_console_draw_cursor(void) {
+	if (!g_console_cursor_visible || !g_mbi || !g_mbi->framebuffer_addr) return;
+	int font_handle = vga_get_system_font_handle_raw();
+	int line_h = (int)vga_font_line_h_or_builtin(font_handle);
+	drawRect(width, height, g_console_cursor_w, line_h, vga_default_r, vga_default_g, vga_default_b);
+}
+
+// Move cursor helpers
+void vga_console_move_left(void) {
+	if (g_mbi && g_mbi->framebuffer_addr) {
+		vga_console_erase_cursor();
+		int font_handle = vga_get_system_font_handle_raw();
+		int adv = (int)vga_font_advance_or_builtin(font_handle, 'W');
+		if (adv <= 0) adv = 8;
+		if (width >= adv) width -= adv; else width = 0;
+		vga_console_draw_cursor();
+	} else {
+		vga_text_putchar('\b');
+	}
+}
+
+void vga_console_move_right(void) {
+	if (g_mbi && g_mbi->framebuffer_addr) {
+		vga_console_erase_cursor();
+		int font_handle = vga_get_system_font_handle_raw();
+		int adv = (int)vga_font_advance_or_builtin(font_handle, 'W');
+		if (adv <= 0) adv = 8;
+		int fbw = g_mbi ? (int)g_mbi->framebuffer_width : 640;
+		if (width + adv < fbw) width += adv;
+		vga_console_draw_cursor();
+	} else {
+		// No direct right-move for VGA text; emulate by printing a space then backspacing
+		vga_text_putchar(' ');
+		vga_text_putchar('\b');
+	}
+}
+
+void vga_console_move_up(void) {
+	if (g_mbi && g_mbi->framebuffer_addr) {
+		vga_console_erase_cursor();
+		int font_handle = vga_get_system_font_handle_raw();
+		int line_h = (int)vga_font_line_h_or_builtin(font_handle);
+		if (height - line_h >= 0) height -= line_h; else height = 0;
+		vga_console_draw_cursor();
+	} else {
+		// Not supported in legacy VGA text
+	}
+}
+
+void vga_console_move_down(void) {
+	if (g_mbi && g_mbi->framebuffer_addr) {
+		vga_console_erase_cursor();
+		int font_handle = vga_get_system_font_handle_raw();
+		int line_h = (int)vga_font_line_h_or_builtin(font_handle);
+		int fbh = g_mbi ? (int)g_mbi->framebuffer_height : 480;
+		if (height + line_h < fbh) height += line_h;
+		vga_console_draw_cursor();
+	} else {
+		// Not supported in legacy VGA text
+	}
+}
 
 /*
  * ABI-INVARIANT: Bochs/QEMU VBE register interface (ports 0x01CE/0x01CF).
@@ -1569,6 +1649,12 @@ void drawText(int charnum, int r, int g, int b)
 		}
 		return;
 	}
+
+	// Erase software cursor before making changes (framebuffer console)
+	if (g_console_cursor_visible && g_mbi && g_mbi->framebuffer_addr) {
+		int cursor_h = (int)vga_font_line_h_or_builtin(font_handle);
+		drawRect(width, height, g_console_cursor_w, cursor_h, 0, 0, 0);
+	}
 	
 	// If shell output is being redirected (or forced capture), capture characters into the redirect buffer
 	if (shell_redirect_active || g_shell_capture_mode) {
@@ -1638,6 +1724,12 @@ void drawText(int charnum, int r, int g, int b)
 
 	if (height > (int)(g_mbi->framebuffer_height - line_h)) {
 		vga_console_scroll_one_line(line_h);
+	}
+
+	// Draw software cursor after text operations (framebuffer console)
+	if (g_console_cursor_visible && g_mbi && g_mbi->framebuffer_addr) {
+		int cursor_h = (int)vga_font_line_h_or_builtin(font_handle);
+		drawRect(width, height, g_console_cursor_w, cursor_h, vga_default_r, vga_default_g, vga_default_b);
 	}
 }
 
@@ -1954,12 +2046,37 @@ void printf(const char* format, ...)
 		int temp_pos = vga_format_to_buffer(temp, (int)sizeof(temp), format, ap);
 		for (int i = 0; i < temp_pos; ++i) {
 			unsigned char ch = (unsigned char)temp[i];
-			// Route through drawText so newline/scrolling uses the active font height.
+#if CONFIG_TTY_ENABLED
+			// In TTY mode, prefer the framebuffer/text-rendering console if a
+			// framebuffer is available (this is the same backend used for early
+			// boot messages). Fall back to the legacy VGA text driver when no
+			// framebuffer is present.
+			if (g_boot_text_mode) {
+				if (g_mbi && g_mbi->framebuffer_addr) {
+					if (ch == (unsigned char)'\n') {
+						drawText(10, r, g, b);
+					} else {
+						drawText((int)ch, r, g, b);
+					}
+				} else {
+					vga_text_putchar((char)ch);
+				}
+			} else {
+				// Graphics mode: render via the framebuffer text path
+				if (ch == (unsigned char)'\n') {
+					drawText(10, r, g, b);
+				} else {
+					drawText((int)ch, r, g, b);
+				}
+			}
+#else
+			// If TTY isn't enabled at build time, always use the graphics path
 			if (ch == (unsigned char)'\n') {
 				drawText(10, r, g, b);
 			} else {
 				drawText((int)ch, r, g, b);
 			}
+#endif
 		}
 	}
 

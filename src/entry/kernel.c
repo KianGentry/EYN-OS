@@ -4,6 +4,7 @@
 #include <util.h>
 #include <shell.h>
 #include <vga.h>
+#include <vga_text.h>
 #include <multiboot.h>
 #include <fat32.h>
 #include <system.h>
@@ -309,9 +310,32 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     ui_prefs_load_apply(0);
     printf("Done.\n");
 
-    int boot_text_mode = boot_cfg_requests_text_mode(0) || boot_escape_requested();
+    int boot_text_mode = 0;
+
+#if !CONFIG_GUI_ENABLED && !CONFIG_TTY_ENABLED
+    printf("Fatal: both GUI and TTY are disabled in this build.\n");
+    arch_halt_forever();
+#elif !CONFIG_GUI_ENABLED
+    // TTY-only build: force text mode.
+    boot_text_mode = 1;
+#elif !CONFIG_TTY_ENABLED
+    // GUI-only build: force GUI mode.
+    boot_text_mode = 0;
+#else
+    // When both are enabled, allow boot configuration or ESC to request text mode.
+    boot_text_mode = boot_cfg_requests_text_mode(0) || boot_escape_requested();
+#endif
+
     g_boot_text_mode = boot_text_mode;
     if (boot_text_mode) {
+#if CONFIG_TTY_ENABLED
+        // If a framebuffer was provided by the bootloader, prefer using the
+        // framebuffer-backed console (drawText). Only initialize the legacy
+        // VGA text driver when no framebuffer is present.
+        if (!(g_mbi && g_mbi->framebuffer_addr)) {
+            vga_text_init();
+        }
+#endif
         printf("Boot mode: text CLI\n");
     }
 
@@ -377,12 +401,22 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
         clearScreen();
         launch_shell(0);
     } else {
+#if CONFIG_GUI_ENABLED
         // Launch interactive UI path.
         printf("Starting Tiling Manager...");
         start_tiling_manager();
-
-        // If tiling manager exits (e.g., user closes it), fall back to classic shell
+#if CONFIG_TTY_ENABLED
+        // If the tiling manager exits, fall back to the classic shell only when TTY is available.
         launch_shell(0);
+#else
+        printf("Warning: GUI exited; TTY is disabled in this build.\n");
+        arch_halt_forever();
+#endif
+#else
+        // GUI is disabled, so the only valid path is the shell.
+        printf("Warning: GUI is disabled; starting shell.\n");
+        launch_shell(0);
+#endif
     }
     
     return 0;

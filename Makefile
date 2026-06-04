@@ -5,6 +5,16 @@ ASSEMBLER = nasm
 CONFIG_FILE ?= .eynosconfig
 -include $(CONFIG_FILE)
 
+# Build mode configuration (TTY/GUI)
+CONFIG_GUI_ENABLED ?= 1
+CONFIG_TTY_ENABLED ?= 1
+
+# List of packages to exclude in TTY-only mode (no GUI)
+TTY_EXCLUDES := xeyes draw rect fontpreview gui_demo win_test kwin_test tiling \
+                settings theme title setfont setbg clearbg view_backend_bmp \
+                view_backend_builtin view_backend_rei view_backend_reis \
+                view_backend_reiv tetris snake breakout doom zsnes_1_51
+
 # Target architecture selection for portability work.
 ARCH ?= i386
 SUPPORTED_ARCHES := i386 amd64
@@ -42,6 +52,8 @@ KERNEL_CFLAGS = $(ARCH_KERNEL_CFLAGS_$(ARCH)) -c -ffreestanding -fno-builtin -fn
 		 -DCONFIG_SCHED_MLFQ_Q2_MS=$(CONFIG_SCHED_MLFQ_Q2_MS) \
 		 -DCONFIG_SCHED_MLFQ_BOOST_MS=$(CONFIG_SCHED_MLFQ_BOOST_MS) \
 		 -DCONFIG_ATA_LBA48_SMOKE=$(CONFIG_ATA_LBA48_SMOKE) \
+		 -DCONFIG_GUI_ENABLED=$(CONFIG_GUI_ENABLED) \
+		 -DCONFIG_TTY_ENABLED=$(CONFIG_TTY_ENABLED) \
 		 -fdata-sections -ffunction-sections \
 		 -I include/ -I include/cpu -I include/drivers -I include/misc -I include/graphics -I include/network -I include/utilities -I include/utilities/shell \
 		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \
@@ -113,7 +125,7 @@ QEMU_DISPLAY ?= gtk,grab-on-hover=on
 QEMU_ENV ?= GDK_BACKEND=x11
 EMULATOR_FLAGS = -kernel
 
-OBJS = $(OBJDIR)/kasm.o $(OBJDIR)/kc.o $(OBJDIR)/gdt.o $(OBJDIR)/gdt_asm.o $(OBJDIR)/idt.o $(OBJDIR)/isr.o $(OBJDIR)/isr_stubs.o $(OBJDIR)/syscall.o $(OBJDIR)/fpu.o $(OBJDIR)/kb.o $(OBJDIR)/string.o $(OBJDIR)/system.o $(OBJDIR)/arch.o $(OBJDIR)/util.o $(OBJDIR)/mem386.o $(OBJDIR)/slab.o $(OBJDIR)/shell.o $(OBJDIR)/shell_args.o $(OBJDIR)/math.o $(OBJDIR)/vga.o $(OBJDIR)/serial.o $(OBJDIR)/fat32.o $(OBJDIR)/ata.o $(OBJDIR)/eynfs.o $(OBJDIR)/rei.o $(OBJDIR)/reiv.o $(OBJDIR)/tui.o $(OBJDIR)/run_command.o $(OBJDIR)/history.o $(OBJDIR)/alias.o $(OBJDIR)/predictive_memory.o $(OBJDIR)/zero_copy.o $(OBJDIR)/vmm.o $(OBJDIR)/paging_compat.o $(OBJDIR)/user_access.o $(OBJDIR)/pipeline.o $(OBJDIR)/kernel_api.o $(OBJDIR)/native_exec.o $(OBJDIR)/user_elf.o $(OBJDIR)/sched.o $(OBJDIR)/irq.o $(OBJDIR)/irq_stubs.o $(OBJDIR)/mouse.o $(OBJDIR)/vfs.o $(OBJDIR)/panic.o $(OBJDIR)/watchdog.o $(OBJDIR)/capabilities.o $(OBJDIR)/segdom.o $(OBJDIR)/crashlog.o $(OBJDIR)/context.o $(OBJDIR)/fs_txn.o $(OBJDIR)/linux_syscalls.o
+OBJS = $(OBJDIR)/kasm.o $(OBJDIR)/kc.o $(OBJDIR)/gdt.o $(OBJDIR)/gdt_asm.o $(OBJDIR)/idt.o $(OBJDIR)/isr.o $(OBJDIR)/isr_stubs.o $(OBJDIR)/syscall.o $(OBJDIR)/fpu.o $(OBJDIR)/kb.o $(OBJDIR)/string.o $(OBJDIR)/system.o $(OBJDIR)/arch.o $(OBJDIR)/util.o $(OBJDIR)/mem386.o $(OBJDIR)/slab.o $(OBJDIR)/shell.o $(OBJDIR)/shell_args.o $(OBJDIR)/math.o $(OBJDIR)/vga.o $(OBJDIR)/vga_text.o $(OBJDIR)/serial.o $(OBJDIR)/fat32.o $(OBJDIR)/ata.o $(OBJDIR)/eynfs.o $(OBJDIR)/rei.o $(OBJDIR)/reiv.o $(OBJDIR)/tui.o $(OBJDIR)/run_command.o $(OBJDIR)/history.o $(OBJDIR)/alias.o $(OBJDIR)/predictive_memory.o $(OBJDIR)/zero_copy.o $(OBJDIR)/vmm.o $(OBJDIR)/paging_compat.o $(OBJDIR)/user_access.o $(OBJDIR)/pipeline.o $(OBJDIR)/kernel_api.o $(OBJDIR)/native_exec.o $(OBJDIR)/user_elf.o $(OBJDIR)/sched.o $(OBJDIR)/irq.o $(OBJDIR)/irq_stubs.o $(OBJDIR)/mouse.o $(OBJDIR)/vfs.o $(OBJDIR)/panic.o $(OBJDIR)/watchdog.o $(OBJDIR)/capabilities.o $(OBJDIR)/segdom.o $(OBJDIR)/crashlog.o $(OBJDIR)/context.o $(OBJDIR)/fs_txn.o $(OBJDIR)/linux_syscalls.o
 
 OBJS += $(OBJDIR)/tiling_manager.o $(OBJDIR)/ui_prefs.o
 OBJS += $(OBJDIR)/terminals.o
@@ -243,6 +255,8 @@ $(OBJDIR)/math.o:src/utilities/basic/math.c
 
 $(OBJDIR)/vga.o:src/drivers/vga.c
 	$(COMPILER) $(CFLAGS) src/drivers/vga.c -o $(OBJDIR)/vga.o
+$(OBJDIR)/vga_text.o:src/drivers/vga_text.c
+	$(COMPILER) $(CFLAGS) src/drivers/vga_text.c -o $(OBJDIR)/vga_text.o
 $(OBJDIR)/mouse.o:src/drivers/mouse.c
 	$(COMPILER) $(CFLAGS) src/drivers/mouse.c -o $(OBJDIR)/mouse.o
 
@@ -377,6 +391,16 @@ build: all installer_ramdisk eynfsimg docs
 	fi
 	bash devtools/build_iso.sh "$(GRUB_MKRESCUE)"
 
+# TTY-only ISO build target
+iso-tty: clean
+	CONFIG_GUI_ENABLED=0 CONFIG_TTY_ENABLED=1 $(MAKE) build
+	mv EYNOS.iso eyn-os-tty.iso
+
+# GUI+TTY ISO build target
+iso-gui: clean
+	CONFIG_GUI_ENABLED=1 CONFIG_TTY_ENABLED=1 $(MAKE) build
+	mv EYNOS.iso eyn-os-gui.iso
+
 .PHONY: installer_userland installer_ramdisk
 menuconfig:
 	python3 devtools/menuconfig.py $(CONFIG_FILE)
@@ -421,7 +445,9 @@ sharedlibs:
 	bash devtools/build_x11_compat.sh
 
 userland: sharedlibs
-	$(MAKE) -C EYN-packages userland OUT_DIR=../testdir/binaries
+	$(MAKE) -C EYN-packages userland OUT_DIR=../testdir/binaries \
+		CONFIG_GUI_ENABLED=$(CONFIG_GUI_ENABLED) \
+		TTY_EXCLUDES="$(TTY_EXCLUDES)"
 
 # Legacy non-partitioned disk image (for testing/compatibility)
 eynfsimg-legacy:
