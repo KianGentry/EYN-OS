@@ -93,6 +93,7 @@ ARCH_IDT_SRC_i386 = src/cpu/idt.c
 ARCH_IDT_SRC_amd64 = src/cpu/idt_amd64_stub.c
 ARCH_FPU_SRC_i386 = src/cpu/fpu.c
 ARCH_FPU_SRC_amd64 = src/cpu/fpu_amd64.c
+ARCH_CPUID_SRC_i386 = src/cpu/cpuid.c
 ARCH_CPU_ARCH_SRC_i386 = src/cpu/arch.c
 ARCH_CPU_ARCH_SRC_amd64 = src/cpu/arch_amd64.c
 ARCH_ISR_STUB_SRC_i386 = src/cpu/isr.asm
@@ -125,12 +126,13 @@ QEMU_DISPLAY ?= gtk,grab-on-hover=on
 QEMU_ENV ?= GDK_BACKEND=x11
 EMULATOR_FLAGS = -kernel
 
-OBJS = $(OBJDIR)/kasm.o $(OBJDIR)/kc.o $(OBJDIR)/gdt.o $(OBJDIR)/gdt_asm.o $(OBJDIR)/idt.o $(OBJDIR)/isr.o $(OBJDIR)/isr_stubs.o $(OBJDIR)/syscall.o $(OBJDIR)/fpu.o $(OBJDIR)/kb.o $(OBJDIR)/string.o $(OBJDIR)/system.o $(OBJDIR)/arch.o $(OBJDIR)/util.o $(OBJDIR)/mem386.o $(OBJDIR)/slab.o $(OBJDIR)/shell.o $(OBJDIR)/shell_args.o $(OBJDIR)/math.o $(OBJDIR)/vga.o $(OBJDIR)/vga_text.o $(OBJDIR)/serial.o $(OBJDIR)/fat32.o $(OBJDIR)/ata.o $(OBJDIR)/eynfs.o $(OBJDIR)/rei.o $(OBJDIR)/reiv.o $(OBJDIR)/tui.o $(OBJDIR)/run_command.o $(OBJDIR)/history.o $(OBJDIR)/alias.o $(OBJDIR)/predictive_memory.o $(OBJDIR)/zero_copy.o $(OBJDIR)/vmm.o $(OBJDIR)/paging_compat.o $(OBJDIR)/user_access.o $(OBJDIR)/pipeline.o $(OBJDIR)/kernel_api.o $(OBJDIR)/native_exec.o $(OBJDIR)/user_elf.o $(OBJDIR)/sched.o $(OBJDIR)/irq.o $(OBJDIR)/irq_stubs.o $(OBJDIR)/mouse.o $(OBJDIR)/vfs.o $(OBJDIR)/panic.o $(OBJDIR)/watchdog.o $(OBJDIR)/capabilities.o $(OBJDIR)/segdom.o $(OBJDIR)/crashlog.o $(OBJDIR)/context.o $(OBJDIR)/fs_txn.o $(OBJDIR)/linux_syscalls.o
+OBJS = $(OBJDIR)/kasm.o $(OBJDIR)/kc.o $(OBJDIR)/gdt.o $(OBJDIR)/gdt_asm.o $(OBJDIR)/idt.o $(OBJDIR)/isr.o $(OBJDIR)/isr_stubs.o $(OBJDIR)/syscall.o $(OBJDIR)/fpu.o $(OBJDIR)/cpuid.o $(OBJDIR)/kb.o $(OBJDIR)/string.o $(OBJDIR)/system.o $(OBJDIR)/arch.o $(OBJDIR)/util.o $(OBJDIR)/mem386.o $(OBJDIR)/slab.o $(OBJDIR)/shell.o $(OBJDIR)/shell_args.o $(OBJDIR)/math.o $(OBJDIR)/vga.o $(OBJDIR)/vga_text.o $(OBJDIR)/serial.o $(OBJDIR)/fat32.o $(OBJDIR)/ata.o $(OBJDIR)/ahci.o $(OBJDIR)/eynfs.o $(OBJDIR)/rei.o $(OBJDIR)/reiv.o $(OBJDIR)/tui.o $(OBJDIR)/run_command.o $(OBJDIR)/history.o $(OBJDIR)/alias.o $(OBJDIR)/predictive_memory.o $(OBJDIR)/zero_copy.o $(OBJDIR)/vmm.o $(OBJDIR)/paging_compat.o $(OBJDIR)/user_access.o $(OBJDIR)/pipeline.o $(OBJDIR)/kernel_api.o $(OBJDIR)/native_exec.o $(OBJDIR)/user_elf.o $(OBJDIR)/sched.o $(OBJDIR)/irq.o $(OBJDIR)/irq_stubs.o $(OBJDIR)/mouse.o $(OBJDIR)/vfs.o $(OBJDIR)/panic.o $(OBJDIR)/watchdog.o $(OBJDIR)/capabilities.o $(OBJDIR)/segdom.o $(OBJDIR)/crashlog.o $(OBJDIR)/context.o $(OBJDIR)/fs_txn.o $(OBJDIR)/linux_syscalls.o
 
 OBJS += $(OBJDIR)/tiling_manager.o $(OBJDIR)/ui_prefs.o
 OBJS += $(OBJDIR)/terminals.o
 OBJS += $(OBJDIR)/partition.o
 OBJS += $(OBJDIR)/pci.o
+OBJS += $(OBJDIR)/e100.o
 OBJS += $(OBJDIR)/e1000.o
 OBJS += $(OBJDIR)/netstack.o
 OBJS += $(OBJDIR)/shell_script.o
@@ -210,6 +212,9 @@ $(OBJDIR)/idt.o:$(ARCH_IDT_SRC_$(ARCH))
 $(OBJDIR)/fpu.o:$(ARCH_FPU_SRC_$(ARCH))
 	$(COMPILER) $(CFLAGS) $(ARCH_FPU_SRC_$(ARCH)) -o $(OBJDIR)/fpu.o
 
+$(OBJDIR)/cpuid.o:src/cpu/cpuid.c
+	$(COMPILER) $(CFLAGS) src/cpu/cpuid.c -o $(OBJDIR)/cpuid.o
+
 $(OBJDIR)/gdt.o:$(ARCH_GDT_SRC_$(ARCH))
 	$(COMPILER) $(CFLAGS) $(ARCH_GDT_SRC_$(ARCH)) -o $(OBJDIR)/gdt.o
 
@@ -266,6 +271,9 @@ $(OBJDIR)/serial.o:src/drivers/serial.c
 $(OBJDIR)/pci.o:src/drivers/pci.c
 	$(COMPILER) $(CFLAGS) src/drivers/pci.c -o $(OBJDIR)/pci.o
 
+$(OBJDIR)/e100.o:src/drivers/e100.c
+	$(COMPILER) $(CFLAGS) src/drivers/e100.c -o $(OBJDIR)/e100.o
+
 $(OBJDIR)/e1000.o:src/drivers/e1000.c
 	$(COMPILER) $(CFLAGS) src/drivers/e1000.c -o $(OBJDIR)/e1000.o
 
@@ -300,6 +308,9 @@ $(OBJDIR)/fat32.o:src/drivers/fat32.c
 
 $(OBJDIR)/ata.o:src/drivers/ata.c
 	$(COMPILER) $(CFLAGS) src/drivers/ata.c -o $(OBJDIR)/ata.o
+
+$(OBJDIR)/ahci.o:src/drivers/ahci.c
+	$(COMPILER) $(CFLAGS) src/drivers/ahci.c -o $(OBJDIR)/ahci.o
 
 $(OBJDIR)/eynfs.o:src/drivers/eynfs.c
 	$(COMPILER) $(CFLAGS) src/drivers/eynfs.c -o $(OBJDIR)/eynfs.o

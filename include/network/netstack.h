@@ -13,6 +13,7 @@
 //
 // Intentionally small and polling-based. The NIC driver supplies raw frame TX/RX.
 
+int net_init_default(void);
 int net_init_e1000_default(void);
 
 // Generic init: allow binding netstack to any netdev.

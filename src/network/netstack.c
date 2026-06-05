@@ -1,5 +1,6 @@
 #include <network/netstack.h>
 
+#include <drivers/e100.h>
 #include <drivers/e1000.h>
 #include <string.h>
 #include <vga.h>
@@ -837,7 +838,7 @@ static int dns_skip_name(const uint8* msg, uint32 len, uint32* io_off)
 int net_dns_resolve(const char* name, uint8 out_ip[4], int timeout_spins)
 {
     if (!name || !out_ip) return -1;
-    if (net_init_e1000_default() != 0) return -2;
+    if (net_init_default() != 0) return -2;
 
     uint8 dns_ip[4];
     if (dns_get_server_ip(dns_ip) != 0) return -3;
@@ -1117,6 +1118,21 @@ int net_init_e1000_default(void)
     return net_init(&e1000_dev);
 }
 
+int net_init_default(void)
+{
+    static netdev e100_dev;
+
+    e100_dev.send_frame = e100_send_frame;
+    e100_dev.rx_poll_frame = e100_rx_poll_frame;
+    e100_dev.get_mac = e100_get_mac;
+
+    if (e100_init() == 0) {
+        return net_init(&e100_dev);
+    }
+
+    return net_init_e1000_default();
+}
+
 int net_init(const netdev* dev)
 {
     if (g_net.inited) return 0;
@@ -1168,7 +1184,7 @@ net_tcp_stats net_tcp_get_stats(void)
 int net_tcp_listen(uint16 local_port)
 {
     if (local_port == 0) return -1;
-    if (net_init_e1000_default() != 0) return -2;
+    if (net_init_default() != 0) return -2;
 
     g_net.tcp.listening = 1;
     g_net.tcp.listen_port = local_port;
@@ -1535,7 +1551,7 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
 {
     if (!local_ip) return -1;
     if (!g_net.inited || !g_net.dev) {
-        if (net_init_e1000_default() != 0) return -2;
+        if (net_init_default() != 0) return -2;
     }
 
     net_timer_run();
@@ -1839,7 +1855,7 @@ int net_icmp_ping(const uint8 local_ip[4], const uint8 dst_ip[4], int count, int
     if (count <= 0) count = 4;
     if (timeout_spins <= 0) timeout_spins = 8000000;
 
-    if (net_init_e1000_default() != 0) return -2;
+    if (net_init_default() != 0) return -2;
 
     // Stable ID so we can match replies.
     const uint16 id = 0xE100;
@@ -2042,7 +2058,7 @@ static int arp_send_reply_silent(const uint8 target_mac[6],
 int net_arp_test_send(const uint8 sender_ip[4], const uint8 target_ip[4], int rx_spins)
 {
     if (!sender_ip || !target_ip) return -1;
-    if (net_init_e1000_default() != 0) return -2;
+    if (net_init_default() != 0) return -2;
 
     int rc = arp_send_request_silent(sender_ip, target_ip);
     if (rc != 0) return rc;
@@ -2136,7 +2152,7 @@ int net_tcp_send(const uint8 local_ip[4], uint16 local_port,
     if (!local_ip || !dst_ip) return -1;
     if (payload_len != 0u && !payload) return -1;
     if (dst_port == 0) return -2;
-    if (net_init_e1000_default() != 0) return -3;
+    if (net_init_default() != 0) return -3;
 
     if (payload_len > NET_TCP_MAX_PAYLOAD) return -4;
 
@@ -2200,7 +2216,7 @@ int net_tcp_connect(const uint8 local_ip[4], uint16 local_port,
 {
     if (!local_ip || !dst_ip) return -1;
     if (dst_port == 0) return -2;
-    if (net_init_e1000_default() != 0) return -3;
+    if (net_init_default() != 0) return -3;
 
     if (local_port == 0) {
         local_port = (uint16)(40000u + (net_get_ticks() % 20000u));
@@ -2277,7 +2293,7 @@ int net_udp_send(const uint8 src_ip[4], uint16 src_port,
     if (payload_len > 1400u) return -2;
     if (src_port == 0 || dst_port == 0) return -3;
 
-    if (net_init_e1000_default() != 0) return -4;
+    if (net_init_default() != 0) return -4;
 
     uint8 dst_mac[6];
     uint8 next_hop_ip[4];
@@ -2349,7 +2365,7 @@ int net_udp_listen(const uint8 local_ip[4], uint16 local_port, int max_packets, 
     if (max_packets < 0) max_packets = 1;
     if (spin_limit < 0) spin_limit = 12000000;
 
-    if (net_init_e1000_default() != 0) return -3;
+    if (net_init_default() != 0) return -3;
 
     int printed = 0;
 
@@ -2450,7 +2466,7 @@ int net_udp_echo(const uint8 local_ip[4], uint16 local_port, int max_packets, in
     if (max_packets < 0) max_packets = 1;
     if (spin_limit < 0) spin_limit = 12000000;
 
-    if (net_init_e1000_default() != 0) return -3;
+    if (net_init_default() != 0) return -3;
 
     int printed = 0;
 

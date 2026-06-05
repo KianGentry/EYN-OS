@@ -25,8 +25,10 @@
 #include <partition.h>
 #include <gdt.h>
 #include <ata.h>
+#include <ahci.h>
 #include <ui_prefs.h>
 #include <cpu/fpu.h>
+#include <cpu/cpuid.h>
 #include <arch.h>
 #include <capabilities.h>
 #include <crashlog.h>
@@ -39,7 +41,8 @@ multiboot_info_t *g_mbi = 0;
 const char* g_os_version = "EYN-OS Release 16";
 #if defined(EYNOS_ARCH_AMD64)
 const char* g_kernel_version = "EYN/amd64";
-#else
+#endif
+#if defined(EYNOS_ARCH_I386)
 const char* g_kernel_version = "EYN/i386";
 #endif
 
@@ -247,6 +250,7 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
 
     // Enable x87 FPU early so ring3 programs can use float/double.
     fpu_init();
+    cpu_features_log();
     clearScreen();
     
     printf(g_os_version);
@@ -278,6 +282,10 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
     printf("Starting ATA driver...");
     // Initialize ATA drives immediately
     ata_init_drives();
+    printf("Done.\n");
+
+    printf("Starting AHCI probe...");
+    ahci_probe_controllers();
     printf("Done.\n");
 
     // Initialize partition system and auto-mount partitions
@@ -381,7 +389,7 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
 
     printf("Starting network stack...");
     {
-        int net_rc = net_init_e1000_default();
+        int net_rc = net_init_default();
         if (net_rc == 0) {
             printf("Done.\n");
         } else {
