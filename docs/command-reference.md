@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-06-05 00:38:13
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-06-05 01:13:57
 
-**Total Commands:** 107
+**Total Commands:** 106
 
 ## Table of Contents
 
@@ -854,22 +854,6 @@ Inspect and clear crashlog records.
 **Example:**
 ```bash
 crashlog dump
-```
-
----
-
-### error
-
-**Binary:** `testdir/binaries/error`
-
-**Metadata Source:** `EYN-packages/packages/error/error_uelf.c`
-
-**Description:**
-Display command error status.
-
-**Example:**
-```bash
-error details
 ```
 
 ---
@@ -1749,6 +1733,6 @@ zsnes_1_51
 | Network Commands | 6 |
 | Memory Commands | 7 |
 | GUI/Window Commands | 12 |
-| Development Commands | 10 |
+| Development Commands | 9 |
 | Utility Commands | 47 |
 

@@ -6904,7 +6904,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             /* Try to get shell from environment or use default */
             const char* shell_env = NULL;
             /* TODO: Get from environment; for now use hardcoded default */
-            const char* default_shell = "eynsh";
+            const char* default_shell = "kernel";
             strncpy((char*)info.shell, default_shell, sizeof(info.shell) - 1);
             info.shell[sizeof(info.shell) - 1] = '\0';
 

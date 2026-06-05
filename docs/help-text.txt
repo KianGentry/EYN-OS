@@ -70,7 +70,6 @@ Development Commands:
 --------------------
   assertfail      - Trigger an assertion failure (ASSERT).
   crashlog        - Inspect and clear crashlog records.
-  error           - Display command error status.
   hexdump         - Hex dump file bytes.
   log             - Enable or disable shell logging.
   panic           - Trigger a kernel panic for diagnostics.

@@ -122,7 +122,7 @@ typedef struct {
 
 typedef struct {
     char os_version[64];      /* e.g., "EYN-OS Release 15" */
-    char kernel_version[32];  /* e.g., "v1.0" */
+    char kernel_version[32];  /* e.g., "EYN/amd64" */
     char shell[64];           /* shell executable name */
 } eyn_sysinfo_t;
 
