@@ -5,6 +5,7 @@
 #include <mm/vmm.h>
 #include <string.h>
 #include <vga.h>
+#include <irq.h>
 #include <context.h>
 #include <misc/sched.h>
 
@@ -21,7 +22,15 @@
 #define E100_SCB_CU_START    0x0010u
 #define E100_SCB_RU_START    0x0001u
 #define E100_SCB_RU_ABORT    0x0004u
+#define E100_SCB_CU_ABORT    0x0020u
 
+#define E100_SCB_STAT_FR     0x4000u
+#define E100_SCB_STAT_CNA    0x2000u
+#define E100_SCB_STAT_RNR    0x1000u
+#define E100_SCB_STAT_MASK   0xFC00u
+
+#define E100_CB_CMD_IASETUP  0x0001u
+#define E100_CB_CMD_CONFIG   0x0002u
 #define E100_CB_CMD_XMIT     0x0004u
 #define E100_CB_FLAG_S       0x4000u
 #define E100_CB_FLAG_EL      0x8000u
@@ -56,6 +65,20 @@ typedef struct __attribute__((packed)) e100_rfd {
     uint8 data[E100_RX_BUF_SIZE];
 } e100_rfd;
 
+typedef struct __attribute__((packed)) e100_cfg_cb {
+    uint16 status;
+    uint16 command;
+    uint32 link;
+    uint8 bytes[22];
+} e100_cfg_cb;
+
+typedef struct __attribute__((packed)) e100_ias_cb {
+    uint16 status;
+    uint16 command;
+    uint32 link;
+    uint8 mac[6];
+} e100_ias_cb;
+
 typedef struct e100_state {
     int probed;
     int initialized;
@@ -67,6 +90,8 @@ typedef struct e100_state {
     uint16 device_id;
     uint16 io_base;
     uint8 irq_line;
+    volatile uint8 rx_irq_pending;
+    uint8 irq_enabled;
 
     uint8 mac[6];
 
@@ -75,6 +100,12 @@ typedef struct e100_state {
 
     uint32 rx_rfd_phys;
     e100_rfd* rx_rfd;
+
+    uint32 cfg_cb_phys;
+    e100_cfg_cb* cfg_cb;
+
+    uint32 ias_cb_phys;
+    e100_ias_cb* ias_cb;
 } e100_state;
 
 static e100_state g_e100;
@@ -119,6 +150,14 @@ static int e100_issue_scb_cmd(uint16 cmd)
     if (e100_wait_scb_idle(100000u) != 0) return -1;
     outw((uint16)(g_e100.io_base + E100_CSR_SCB_CMD), cmd);
     return e100_wait_scb_idle(100000u);
+}
+
+static void e100_ack_status(uint16 status)
+{
+    uint16 ack = (uint16)(status & E100_SCB_STAT_MASK);
+    if (!ack) return;
+    if (e100_wait_scb_idle(100000u) != 0) return;
+    outw((uint16)(g_e100.io_base + E100_CSR_SCB_CMD), ack);
 }
 
 static void e100_eeprom_set(uint8 v)
@@ -327,12 +366,117 @@ static int e100_alloc_dma(void)
         memset(g_e100.rx_rfd, 0, PAGE_SIZE);
     }
 
+    if (!g_e100.cfg_cb) {
+        g_e100.cfg_cb_phys = frame_alloc_contiguous(1u);
+        if (g_e100.cfg_cb_phys == 0u) return -4;
+        g_e100.cfg_cb = (e100_cfg_cb*)e100_kva_from_phys(g_e100.cfg_cb_phys);
+        memset(g_e100.cfg_cb, 0, PAGE_SIZE);
+    }
+
+    if (!g_e100.ias_cb) {
+        g_e100.ias_cb_phys = frame_alloc_contiguous(1u);
+        if (g_e100.ias_cb_phys == 0u) return -5;
+        g_e100.ias_cb = (e100_ias_cb*)e100_kva_from_phys(g_e100.ias_cb_phys);
+        memset(g_e100.ias_cb, 0, PAGE_SIZE);
+    }
+
     return 0;
+}
+
+static int e100_cu_exec(uint32 cb_phys, volatile void* cb_base)
+{
+    if (!cb_base) return -1;
+
+    volatile uint16* cb_status = (volatile uint16*)cb_base;
+
+    if (e100_issue_scb_cmd(E100_SCB_CU_ABORT) != 0) {
+        // Some parts can return non-idle if CU is already idle; proceed anyway.
+    }
+
+    outl((uint16)(g_e100.io_base + E100_CSR_GEN_PTR), cb_phys);
+    if (e100_issue_scb_cmd(E100_SCB_CU_START) != 0) return -2;
+
+    for (uint32 spin = 0; spin < 500000u; spin++) {
+        if ((spin & 0x3FFu) == 0u) e100_ctx_account(SCHED_COST_FS);
+        if (*cb_status & E100_CB_STATUS_C) {
+            return ((*cb_status & E100_CB_STATUS_OK) != 0u) ? 0 : -3;
+        }
+    }
+
+    return -4;
+}
+
+static int e100_program_config_cb(void)
+{
+    if (!g_e100.cfg_cb) return -1;
+
+    static const uint8 cfg_bytes[22] = {
+        0x16, 0x88, 0x00, 0x00, 0x00, 0x00, 0x32, 0x03,
+        0x01, 0x00, 0x2E, 0x00, 0x60, 0x00, 0xF2, 0x48,
+        0x00, 0x40, 0xF2, 0x80, 0x3F, 0x05
+    };
+
+    g_e100.cfg_cb->status = 0u;
+    g_e100.cfg_cb->command = (uint16)(E100_CB_CMD_CONFIG | E100_CB_FLAG_EL | E100_CB_FLAG_S);
+    g_e100.cfg_cb->link = 0xFFFFFFFFu;
+    memcpy(g_e100.cfg_cb->bytes, cfg_bytes, sizeof(cfg_bytes));
+
+    return e100_cu_exec(g_e100.cfg_cb_phys, g_e100.cfg_cb);
+}
+
+static int e100_program_ia_cb(void)
+{
+    if (!g_e100.ias_cb) return -1;
+
+    g_e100.ias_cb->status = 0u;
+    g_e100.ias_cb->command = (uint16)(E100_CB_CMD_IASETUP | E100_CB_FLAG_EL | E100_CB_FLAG_S);
+    g_e100.ias_cb->link = 0xFFFFFFFFu;
+    memcpy(g_e100.ias_cb->mac, g_e100.mac, 6u);
+
+    return e100_cu_exec(g_e100.ias_cb_phys, g_e100.ias_cb);
+}
+
+static void e100_irq_handler(void)
+{
+    uint16 status = inw((uint16)(g_e100.io_base + E100_CSR_SCB_STATUS));
+
+    if (status & (E100_SCB_STAT_FR | E100_SCB_STAT_RNR)) {
+        g_e100.rx_irq_pending = 1u;
+    }
+
+    e100_ack_status(status);
+    if (g_e100.irq_line <= 15u) {
+        pic_send_eoi((int)g_e100.irq_line);
+    }
+}
+
+int e100_irq_enable_rx(void)
+{
+    if (!e100_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) return -1;
+    if (!g_e100.probed) return -2;
+    if (g_e100.irq_line == 0xFFu || g_e100.irq_line > 15u) return -3;
+
+    register_interrupt_handler((int)g_e100.irq_line, e100_irq_handler);
+    g_e100.rx_irq_pending = 0u;
+    g_e100.irq_enabled = 1u;
+    return 0;
+}
+
+int e100_irq_rx_pending(void)
+{
+    return g_e100.rx_irq_pending ? 1 : 0;
+}
+
+void e100_irq_clear_rx_pending(void)
+{
+    g_e100.rx_irq_pending = 0u;
 }
 
 static int e100_prepare_rx_once(void)
 {
     if (!g_e100.rx_rfd) return -1;
+
+    e100_ack_status(inw((uint16)(g_e100.io_base + E100_CSR_SCB_STATUS)));
 
     g_e100.rx_rfd->status = 0u;
     g_e100.rx_rfd->command = (uint16)(E100_CB_FLAG_EL | E100_CB_FLAG_S);
@@ -359,7 +503,10 @@ int e100_init(void)
 
     if (e100_probe(NULL) != 0) return -2;
     if (e100_alloc_dma() != 0) return -3;
-    if (e100_prepare_rx_once() != 0) return -4;
+    if (e100_program_config_cb() != 0) return -4;
+    if (e100_program_ia_cb() != 0) return -5;
+    if (e100_prepare_rx_once() != 0) return -6;
+    (void)e100_irq_enable_rx();
 
     g_e100.initialized = 1;
     return 0;
@@ -389,17 +536,12 @@ int e100_send_frame(const void* frame, uint32 len)
     g_e100.tx_cb->tbd_num = 0u;
     memcpy(g_e100.tx_cb->data, frame, len);
 
-    outl((uint16)(g_e100.io_base + E100_CSR_GEN_PTR), g_e100.tx_cb_phys);
-    if (e100_issue_scb_cmd(E100_SCB_CU_START) != 0) return -5;
-
-    for (uint32 spin = 0; spin < 500000u; spin++) {
-        if ((spin & 0x3FFu) == 0u) e100_ctx_account(SCHED_COST_FS);
-        if (g_e100.tx_cb->status & E100_CB_STATUS_C) {
-            return (g_e100.tx_cb->status & E100_CB_STATUS_OK) ? 0 : -6;
-        }
+    {
+        int rc = e100_cu_exec(g_e100.tx_cb_phys, g_e100.tx_cb);
+        if (rc != 0) return -5;
     }
 
-    return -7;
+    return 0;
 }
 
 int e100_rx_poll_frame(uint8* out_buf, uint32 out_buf_cap, uint32* out_len, int spin_limit)
@@ -409,6 +551,10 @@ int e100_rx_poll_frame(uint8* out_buf, uint32 out_buf_cap, uint32* out_len, int 
     if (e100_init() != 0) return -3;
     if (!g_e100.rx_rfd) return -4;
     if (spin_limit <= 0) spin_limit = 20000;
+
+    if (g_e100.irq_enabled && !g_e100.rx_irq_pending && spin_limit > 1024) {
+        spin_limit = 1024;
+    }
 
     for (int spin = 0; spin < spin_limit; spin++) {
         if ((spin & 0x1FF) == 0) e100_ctx_account(SCHED_COST_FS);
@@ -420,6 +566,7 @@ int e100_rx_poll_frame(uint8* out_buf, uint32 out_buf_cap, uint32* out_len, int 
             memcpy(out_buf, g_e100.rx_rfd->data, copy_len);
             *out_len = frame_len;
 
+            g_e100.rx_irq_pending = 0u;
             (void)e100_prepare_rx_once();
             return 1;
         }

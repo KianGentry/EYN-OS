@@ -21,4 +21,9 @@ int e100_get_mac(uint8 out_mac[6]);
 int e100_send_frame(const void* frame, uint32 len);
 int e100_rx_poll_frame(uint8* out_buf, uint32 out_buf_cap, uint32* out_len, int spin_limit);
 
+// Interrupt-assisted RX helpers.
+int e100_irq_enable_rx(void);
+int e100_irq_rx_pending(void);
+void e100_irq_clear_rx_pending(void);
+
 #endif
