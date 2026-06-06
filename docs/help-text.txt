@@ -119,7 +119,7 @@ Utility Commands:
   ssh             - SSH client with password auth and interactive shell relay.
   tetris          - Play classic falling-block puzzle game.
   tiling          - Launch the tiling manager.
-  toybox-i486     - Run the toybox-i486 command.
+  toybox          - Run the toybox command.
   view_backend_bmp - Run the view_backend_bmp command.
   view_backend_builtin - Open an REI, BMP image, REIV video, REIS audio, or WAV audio viewer.
   view_backend_rei - Run the view_backend_rei command.

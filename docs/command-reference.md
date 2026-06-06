@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-06-06 06:25:34
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-06-06 08:24:20
 
 **Total Commands:** 107
 
@@ -1596,18 +1596,18 @@ tiling
 
 ---
 
-### toybox-i486
+### toybox
 
-**Binary:** `testdir/binaries/toybox-i486`
+**Binary:** `testdir/binaries/toybox.uelf`
 
 **Metadata Source:** `(metadata not found)`
 
 **Description:**
-Run the toybox-i486 command.
+Run the toybox command.
 
 **Example:**
 ```bash
-toybox-i486
+toybox
 ```
 
 ---
