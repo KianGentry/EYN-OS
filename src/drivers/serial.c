@@ -1,6 +1,7 @@
 #include <serial.h>
 #include <system.h>
 #include <vga.h>
+#include <vga_text.h>
 #include <string.h>
 #include <context.h>
 #include <misc/sched.h>
@@ -151,6 +152,13 @@ int serial_write(uint16 port, const char* data, int length) {
             break;
         }
     }
+
+#if CONFIG_DEBUG_SERIAL_TO_VGA
+    /* Mirror to VGA text mode so serial output appears on screen too. */
+    for (int i = 0; i < length; ++i) {
+        vga_text_putchar(data[i]);
+    }
+#endif
     
     return written;
 }
@@ -188,6 +196,11 @@ int serial_write_char(uint16 port, char c) {
     
     // Send character
     outportb(SERIAL_DATA_PORT(port), c);
+
+#if CONFIG_DEBUG_SERIAL_TO_VGA
+    /* Also mirror this character to VGA text mode */
+    vga_text_putchar(c);
+#endif
     
     return 0;
 }

@@ -22,6 +22,7 @@ ATTR_FOOTER = curses.A_NORMAL
 @dataclass
 class ConfigState:
     arch: str = DEFAULT_ARCH
+    debug_serial_to_vga: bool = False
     ramdisk_prune: bool = True
     ramdisk_full: bool = False
     ramdisk_include_fonts: bool = False
@@ -136,6 +137,7 @@ def load_state(config_path: Path, apps: List[str]) -> ConfigState:
 
     state.gui_enabled = str_to_bool(values.get("CONFIG_GUI_ENABLED", "1"), True)
     state.tty_enabled = str_to_bool(values.get("CONFIG_TTY_ENABLED", "1"), True)
+    state.debug_serial_to_vga = str_to_bool(values.get("CONFIG_DEBUG_SERIAL_TO_VGA", "0"), False)
 
     if "installer" in apps:
         state.selected_apps.add("installer")
@@ -166,6 +168,7 @@ def save_state(config_path: Path, state: ConfigState, apps: List[str]) -> None:
         f"CONFIG_SCHED_MLFQ_BOOST_MS={state.sched_mlfq_boost_ms}",
         f"CONFIG_GUI_ENABLED={bool_to_str(state.gui_enabled)}",
         f"CONFIG_TTY_ENABLED={bool_to_str(state.tty_enabled)}",
+        f"CONFIG_DEBUG_SERIAL_TO_VGA={bool_to_str(state.debug_serial_to_vga)}",
         f"CONFIG_INSTALLER_APPS={app_list}",
         "",
     ]
@@ -448,6 +451,7 @@ def run_build_flags_menu(stdscr: curses.window, state: ConfigState) -> None:
     items = [
         "Enable graphical subsystem (GUI)",
         "Enable text mode shell (TTY)",
+        "Mirror serial output to VGA",
         "< Back >",
     ]
 
@@ -462,13 +466,15 @@ def run_build_flags_menu(stdscr: curses.window, state: ConfigState) -> None:
         values = [
             "*" if state.gui_enabled else " ",
             "*" if state.tty_enabled else " ",
+            "*" if state.debug_serial_to_vga else " ",
             "",
         ]
 
         for row, item in enumerate(items):
             y = 4 + row
             marker = ">" if row == index else " "
-            if row < 2:
+            # Show checkboxes for the first three build flags entries
+            if row < 3:
                 line = f" {marker} [{values[row]}] {item}"
             else:
                 line = f" {marker} {item}"
@@ -496,6 +502,8 @@ def run_build_flags_menu(stdscr: curses.window, state: ConfigState) -> None:
                 if not state.gui_enabled and not state.tty_enabled:
                     state.tty_enabled = True
             elif index == 2:
+                state.debug_serial_to_vga = not state.debug_serial_to_vga
+            elif index == 3:
                 return
 
 

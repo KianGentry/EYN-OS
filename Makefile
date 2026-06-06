@@ -8,6 +8,7 @@ CONFIG_FILE ?= .eynosconfig
 # Build mode configuration (TTY/GUI)
 CONFIG_GUI_ENABLED ?= 1
 CONFIG_TTY_ENABLED ?= 1
+CONFIG_DEBUG_SERIAL_TO_VGA ?= 0
 
 # List of packages to exclude in TTY-only mode (no GUI)
 TTY_EXCLUDES := xeyes draw rect fontpreview gui_demo win_test kwin_test tiling \
@@ -54,6 +55,7 @@ KERNEL_CFLAGS = $(ARCH_KERNEL_CFLAGS_$(ARCH)) -c -ffreestanding -fno-builtin -fn
 		 -DCONFIG_ATA_LBA48_SMOKE=$(CONFIG_ATA_LBA48_SMOKE) \
 		 -DCONFIG_GUI_ENABLED=$(CONFIG_GUI_ENABLED) \
 		 -DCONFIG_TTY_ENABLED=$(CONFIG_TTY_ENABLED) \
+	         -DCONFIG_DEBUG_SERIAL_TO_VGA=$(CONFIG_DEBUG_SERIAL_TO_VGA) \
 		 -fdata-sections -ffunction-sections \
 		 -I include/ -I include/cpu -I include/drivers -I include/misc -I include/graphics -I include/network -I include/utilities -I include/utilities/shell \
 		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \

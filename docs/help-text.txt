@@ -39,7 +39,7 @@ Network Commands:
   netcfg          - Network configuration command.
   netstat         - Show network status.
   pciscan         - Scan PCI devices.
-  ping            - Send ICMP echo requests.
+  ping            - Send ICMP echo requests (IPv4 or hostname).
 
 Memory Commands:
 ---------------

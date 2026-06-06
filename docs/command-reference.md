@@ -1,6 +1,6 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-06-05 23:44:48
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-06-06 00:53:05
 
 **Total Commands:** 106
 
@@ -507,11 +507,11 @@ pciscan net
 **Metadata Source:** `EYN-packages/packages/ping/ping_uelf.c`
 
 **Description:**
-Send ICMP echo requests.
+Send ICMP echo requests (IPv4 or hostname).
 
 **Example:**
 ```bash
-ping 10.0.2.2
+ping g.co
 ```
 
 ---
