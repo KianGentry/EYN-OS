@@ -11,7 +11,8 @@ int user_elf_run(uint8 drive, const char* abspath);
 
 // Run a ring3 ELF32 program with argv. argv strings are copied onto the user stack.
 // argc may be 0; argv may be NULL.
-int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv);
+// envp may be NULL. On success this does not return (enters user mode).
+int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv, const char* const* envp);
 
 // Spawn/wait API used by syscall layer and shell pipeline runtime.
 // USER_TASK_WAIT_NOHANG requests non-blocking wait semantics.

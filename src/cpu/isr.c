@@ -5,6 +5,8 @@
 #include <shell.h>
 #include <util.h>
 #include <string.h>
+#include <stdint.h>
+#include <stddef.h>
 #include <kb.h>
 #include <panic.h>
 #include <watchdog.h>
@@ -117,6 +119,7 @@ extern void isr_install()
     set_syscall_gate(0x80, (uintptr)syscall_entry);
 
     set_idt(); // Load with ASM
+        /* TODO: Add handlers for fork/vfork/exec/select/poll here. */
 }
 
 // Generic ISR handler that captures context and attempts recovery
@@ -509,6 +512,7 @@ uint32 get_last_error_eip() {
 #define SYSCALL_SETFONT_PATH 94
 #define SYSCALL_CHDIR 95
 #define SYSCALL_RUN 96
+#define SYSCALL_EXECVE 97
 #define SYSCALL_MMAP 98
 #define SYSCALL_MUNMAP 99
 #define SYSCALL_MSYNC 100
@@ -5012,6 +5016,95 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                                                  (int)req.stderr_fd,
                                                  req.inherit_mode ? 1 : 0);
             regs->eax = (pid > 0) ? (uint32)pid : (uint32)-1;
+            break;
+        }
+
+        case SYSCALL_EXECVE: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+
+            typedef struct {
+                uint32 path;
+                uint32 argv;
+                int32 argc;
+                uint32 envp;
+            } syscall_exec_req_u32_t;
+
+            const syscall_exec_req_u32_t* user_req = (const syscall_exec_req_u32_t*)arg1;
+            if (!user_req) { regs->eax = (uint32)-1; break; }
+
+            syscall_exec_req_u32_t req;
+            if (copyin(&req, user_req, sizeof(req)) != 0) { regs->eax = (uint32)-1; break; }
+            if (!req.path || req.argc < 0) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), (const char*)(uintptr)req.path) != 0) { regs->eax = (uint32)-1; break; }
+
+            const int max_args = 16;
+            const int max_arg_len = 64;
+            char arg_buf[16][64];
+            const char* kargv[16];
+            int kargc = 0;
+
+            int argc = req.argc;
+            if (argc > max_args) argc = max_args;
+            const char* const* user_argv = (const char* const*)(uintptr)req.argv;
+            for (int i = 0; i < argc; ++i) {
+                const char* user_arg_ptr = NULL;
+                if (copyin(&user_arg_ptr, user_argv + i, sizeof(user_arg_ptr)) != 0) {
+                    regs->eax = (uint32)-1;
+                    return regs->eax;
+                }
+                if (!user_arg_ptr) continue;
+                if (copyin_cstr(arg_buf[kargc], (size_t)max_arg_len, user_arg_ptr) != 0) {
+                    regs->eax = (uint32)-1;
+                    return regs->eax;
+                }
+                kargv[kargc] = arg_buf[kargc];
+                kargc++;
+            }
+
+            /* Copy envp if present (NULL-terminated) */
+            const int max_env = 32;
+            const int max_env_len = 128;
+            char env_buf[32][128];
+            const char* kenvp[32];
+            int kenvc = 0;
+            if (req.envp) {
+                const char* const* user_env = (const char* const*)(uintptr)req.envp;
+                for (int i = 0; i < max_env; ++i) {
+                    const char* user_env_ptr = NULL;
+                    if (copyin(&user_env_ptr, user_env + i, sizeof(user_env_ptr)) != 0) {
+                        regs->eax = (uint32)-1;
+                        return regs->eax;
+                    }
+                    if (!user_env_ptr) break;
+                    if (copyin_cstr(env_buf[kenvc], (size_t)max_env_len, user_env_ptr) != 0) {
+                        regs->eax = (uint32)-1;
+                        return regs->eax;
+                    }
+                    kenvp[kenvc] = env_buf[kenvc];
+                    kenvc++;
+                }
+                /* Null-terminate kernel envp array if any */
+                if (kenvc < max_env) kenvp[kenvc] = NULL;
+            } else {
+                kenvc = 0;
+            }
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                const char* t = vterm_get_cwd(g_user_task_term);
+                if (t && t[0] == '/') cwd = t;
+            }
+
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            /* Call into the UELF loader to replace the current image. On success
+             * user_elf_run_argv will enter user mode and not return. On failure
+             * it will return a negative value and we propagate -1 to userland. */
+            int rc = user_elf_run_argv(g_current_drive, abspath, kargc, kargv, (kenvc > 0) ? kenvp : NULL);
+            regs->eax = (rc == 0) ? 0u : (uint32)-1;
             break;
         }
         case SYSCALL_WAITPID: {

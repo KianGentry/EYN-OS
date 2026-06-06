@@ -69,6 +69,11 @@ int getcwd(char* buf, size_t size);
 // Returns 0 on success, -1 on error.
 int chdir(const char* path);
 
+/* Exec wrappers: execv/execve. execve ignores envp for now (envp not supported yet).
+ * Returns -1 on error; on success does not return. */
+int execv(const char* path, char* const argv[]);
+int execve(const char* path, char* const argv[], char* const envp[]);
+
 /*
  * ABI-INVARIANT: SEEK_* values match POSIX and SYSCALL_LSEEK whence (110).
  */

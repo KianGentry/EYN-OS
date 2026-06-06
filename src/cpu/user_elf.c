@@ -158,7 +158,8 @@ static inline uint32 user_elf_ptr_to_u32(const void* pointer) {
 static uint32 user_stack_build_argv(uint32 user_stack_top,
                                    uint32 user_stack_floor,
                                    const char* prog_abspath,
-                                   int argc, const char* const* argv) {
+                                   int argc, const char* const* argv,
+                                   const char* const* envp) {
     // Build a SysV-like initial stack:
     //   argc
     //   argv[0..argc-1]
@@ -181,9 +182,15 @@ static uint32 user_stack_build_argv(uint32 user_stack_top,
 
     uint32 sp = user_stack_top;
     uint32 argv_ptrs[USER_ELF_MAX_ARGC];
+    uint32 env_ptrs[USER_ELF_MAX_ARGC];
     uint32 total_bytes = 0;
+    int envc = 0;
 
-    // Copy strings top-down.
+    if (envp) {
+        for (int i = 0; i < USER_ELF_MAX_ARGC && envp[i]; ++i) envc++;
+    }
+
+    // Copy strings top-down (argv then envp).
     for (int i = local_argc - 1; i >= 0; i--) {
         const char* s = local_argv[i];
         uint32 len = 0;
@@ -199,6 +206,22 @@ static uint32 user_stack_build_argv(uint32 user_stack_top,
         argv_ptrs[i] = sp;
     }
 
+    // Copy env strings after argv strings.
+    if (envp) {
+        for (int i = envc - 1; i >= 0; --i) {
+            const char* s = envp[i];
+            uint32 len = 0;
+            while (s[len]) len++;
+            len += 1;
+            total_bytes += len;
+            if (total_bytes > USER_ELF_MAX_ARG_BYTES) return 0;
+            sp -= len;
+            if (sp < user_stack_floor) return 0;
+            memcpy(user_elf_user_ptr(sp), s, len);
+            env_ptrs[i] = sp;
+        }
+    }
+
     // Align for pointer pushes.
     sp = align_down(sp, 4);
 
@@ -212,6 +235,18 @@ static uint32 user_stack_build_argv(uint32 user_stack_top,
         sp -= 4;
         if (sp < user_stack_floor) return 0;
         *(uint32*)user_elf_user_ptr(sp) = argv_ptrs[i];
+    }
+
+    // Push envp pointers (if any) and NULL terminator
+    if (envp) {
+        sp -= 4;
+        if (sp < user_stack_floor) return 0;
+        *(uint32*)user_elf_user_ptr(sp) = 0; // env NULL
+        for (int i = envc - 1; i >= 0; --i) {
+            sp -= 4;
+            if (sp < user_stack_floor) return 0;
+            *(uint32*)user_elf_user_ptr(sp) = env_ptrs[i];
+        }
     }
 
     // Push argc.
@@ -257,6 +292,7 @@ typedef enum {
 typedef struct {
     int used;
     int pid;
+    int parent_pid;
     int status;
     user_task_state_t state;
     int wait_target_pid;
@@ -272,6 +308,7 @@ typedef struct {
     int stderr_fd;
     int runq_next;
     int origin_vterm;  // Track which vterm spawned this task (for I/O routing)
+    
     uint32 mlfq_slice_left;
     user_task_runtime_t runtime;
     user_task_image_t* image;
@@ -298,7 +335,7 @@ static void user_task_handle_pending(user_task_slot_t* slot);
 static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static user_task_slot_t* g_user_task_active_slot = NULL;
 
-int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
+int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv, const char* const* envp) {
     if (!abspath || !abspath[0]) return -1;
 
     if (!user_elf_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
@@ -388,7 +425,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
             if (argv && argv[i]) interp_argv[interp_argc++] = argv[i];
         }
         free(file);
-        return user_elf_run_argv(drive, interp_path, interp_argc - 1, interp_argv);
+        return user_elf_run_argv(drive, interp_path, interp_argc - 1, interp_argv, NULL);
     }
 
     // Compute a single contiguous mapping range that covers all PT_LOAD segments.
@@ -620,7 +657,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     free(file);
 
     // Build initial user stack with argv.
-    uint32 user_esp = user_stack_build_argv(user_stack_top, user_stack_page, abspath, argc, argv);
+    uint32 user_esp = user_stack_build_argv(user_stack_top, user_stack_page, abspath, argc, argv, envp);
     if (user_esp == 0) {
         printf("%cError: argv too large.\n", 255, 0, 0);
         user_task_cleanup_mappings();
@@ -703,7 +740,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 }
 
 int user_elf_run(uint8 drive, const char* abspath) {
-    return user_elf_run_argv(drive, abspath, 0, NULL);
+    return user_elf_run_argv(drive, abspath, 0, NULL, NULL);
 }
 
 static int g_user_task_next_pid = 1;
@@ -970,7 +1007,8 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
     int rc = user_elf_run_argv(slot->image->drive,
                                slot->image->path,
                                slot->image->argc,
-                               slot->image->argv);
+                               slot->image->argv,
+                               NULL);
 
     // Returning here means load failed before entering ring3.
     g_user_task_active_slot = NULL;
@@ -1475,6 +1513,7 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     memset(slot, 0, sizeof(*slot));
     slot->used = 1;
     slot->pid = g_user_task_next_pid++;
+    slot->parent_pid = (int)g_user_task_running_pid;
     slot->image = image;
     slot->state = USER_TASK_STATE_RUNNABLE;
     slot->wait_target_pid = 0;
@@ -1532,6 +1571,7 @@ int user_task_spawn_argv_stdio(uint8 drive,
     memset(slot, 0, sizeof(*slot));
     slot->used = 1;
     slot->pid = g_user_task_next_pid++;
+    slot->parent_pid = (int)g_user_task_running_pid;
     slot->image = image;
     slot->state = USER_TASK_STATE_RUNNABLE;
     slot->wait_target_pid = 0;
@@ -1646,6 +1686,20 @@ static void user_task_terminate_slot(user_task_slot_t* slot, int sig) {
     slot->state = USER_TASK_STATE_ZOMBIE;
     slot->status = -sig;
     user_task_wake_waiters_for_pid(slot->pid);
+    /* Deliver SIGCHLD to parent if present */
+    if (slot->parent_pid > 0) {
+        user_task_slot_t* parent = user_task_find_slot_by_pid(slot->parent_pid);
+        if (parent) {
+            parent->sig_pending |= (1u << 17); /* SIGCHLD */
+            /* Wake parent if blocked */
+            if (parent->state == USER_TASK_STATE_BLOCKED) {
+                if (parent->pid == (int)g_user_task_running_pid) parent->state = USER_TASK_STATE_RUNNING;
+                else parent->state = USER_TASK_STATE_RUNNABLE;
+                user_task_runq_enqueue(parent);
+            }
+            user_task_request_schedule();
+        }
+    }
     user_task_request_schedule();
 }
 

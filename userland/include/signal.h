@@ -11,6 +11,8 @@
 #define SIGPIPE 13
 #define SIGALRM 14
 #define SIGTERM 15
+/* Child status changed (POSIX) */
+#define SIGCHLD 17
 
 typedef void (*sighandler_t)(int);
 

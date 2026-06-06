@@ -277,6 +277,11 @@ enum {
     // Install a signal handler: args (int sig, void* handler)
     EYN_SYSCALL_SIGNAL = 202,
 
+    /* New POSIX-oriented syscall numbers — EXECVE maps to kernel SYSCALL_EXECVE (97) */
+    EYN_SYSCALL_EXECVE = 97,
+    EYN_SYSCALL_FORK = 211,
+    EYN_SYSCALL_VFORK = 212,
+
     // Installer disk management syscalls
     EYN_SYSCALL_INSTALLER_PREPARE_DRIVE = 133,
     EYN_SYSCALL_INSTALLER_FORMAT_EYNFS_PARTITION = 134,
