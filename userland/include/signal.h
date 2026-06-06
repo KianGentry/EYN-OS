@@ -14,7 +14,24 @@
 
 typedef void (*sighandler_t)(int);
 
-// Install a signal handler for the calling process. Returns 0 on success.
+/* Basic sigset_t for mask operations */
+typedef unsigned long sigset_t;
+
+/* Minimal sigaction structure */
+struct sigaction {
+	void (*sa_handler)(int);
+	sigset_t sa_mask;
+	int sa_flags;
+};
+
+/* Install a simple handler (BSD-style) - provided by libc. */
 sighandler_t signal(int sig, sighandler_t handler);
+
+/* POSIX-style sigaction: minimal implementation mapping to kernel signal syscall. */
+int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact);
+
+/* sigset operations */
+int sigemptyset(sigset_t *set);
+int sigaddset(sigset_t *set, int signo);
 
 #endif
