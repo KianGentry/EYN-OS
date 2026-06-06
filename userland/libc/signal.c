@@ -1,5 +1,6 @@
 #include <signal.h>
 #include <eynos_syscall.h>
+#include <stdint.h>
 
 int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
     if (act) {

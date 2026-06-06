@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-06-06 03:20:47
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-06-06 06:25:34
 
-**Total Commands:** 106
+**Total Commands:** 107
 
 ## Table of Contents
 
@@ -1596,6 +1596,22 @@ tiling
 
 ---
 
+### toybox-i486
+
+**Binary:** `testdir/binaries/toybox-i486`
+
+**Metadata Source:** `(metadata not found)`
+
+**Description:**
+Run the toybox-i486 command.
+
+**Example:**
+```bash
+toybox-i486
+```
+
+---
+
 ### view_backend_bmp
 
 **Binary:** `testdir/binaries/view_backend_bmp`
@@ -1734,5 +1750,5 @@ zsnes_1_51
 | Memory Commands | 7 |
 | GUI/Window Commands | 12 |
 | Development Commands | 9 |
-| Utility Commands | 47 |
+| Utility Commands | 48 |
 

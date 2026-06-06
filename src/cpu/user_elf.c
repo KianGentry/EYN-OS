@@ -225,37 +225,45 @@ static uint32 user_stack_build_argv(uint32 user_stack_top,
     // Align for pointer pushes.
     sp = align_down(sp, 4);
 
-    // Push argv NULL terminator.
-    sp -= 4;
-    if (sp < user_stack_floor) return 0;
-    *(uint32*)user_elf_user_ptr(sp) = 0;
+        /* Linux SysV i386 ABI initial stack layout (reading upward from ESP):
+         *   argc
+         *   argv[0] .. argv[argc-1]  NULL
+         *   envp[0] .. envp[envc-1]  NULL
+         *   AT_NULL pair (two zero dwords) to terminate auxiliary vector
+         *   [string data above]
+         *
+         * Build downward, push in reverse reading order:
+         *   AT_NULL pair, envp NULL + ptrs, argv NULL + ptrs, argc.
+         */
 
-    // Push argv pointers.
-    for (int i = local_argc - 1; i >= 0; i--) {
-        sp -= 4;
-        if (sp < user_stack_floor) return 0;
-        *(uint32*)user_elf_user_ptr(sp) = argv_ptrs[i];
-    }
+        /* AT_NULL auxiliary vector terminator (type=0, val=0). */
+        sp -= 4; if (sp < user_stack_floor) return 0;
+        *(uint32*)user_elf_user_ptr(sp) = 0; /* auxv value */
+        sp -= 4; if (sp < user_stack_floor) return 0;
+        *(uint32*)user_elf_user_ptr(sp) = 0; /* auxv type = AT_NULL */
 
-    // Push envp pointers (if any) and NULL terminator
-    if (envp) {
-        sp -= 4;
-        if (sp < user_stack_floor) return 0;
-        *(uint32*)user_elf_user_ptr(sp) = 0; // env NULL
+        /* envp NULL terminator then envp pointers (highest index first). */
+        sp -= 4; if (sp < user_stack_floor) return 0;
+        *(uint32*)user_elf_user_ptr(sp) = 0;
         for (int i = envc - 1; i >= 0; --i) {
-            sp -= 4;
-            if (sp < user_stack_floor) return 0;
+            sp -= 4; if (sp < user_stack_floor) return 0;
             *(uint32*)user_elf_user_ptr(sp) = env_ptrs[i];
         }
+
+        /* argv NULL terminator then argv pointers (highest index first). */
+        sp -= 4; if (sp < user_stack_floor) return 0;
+        *(uint32*)user_elf_user_ptr(sp) = 0;
+        for (int i = local_argc - 1; i >= 0; i--) {
+            sp -= 4; if (sp < user_stack_floor) return 0;
+            *(uint32*)user_elf_user_ptr(sp) = argv_ptrs[i];
+        }
+
+        /* argc. */
+        sp -= 4; if (sp < user_stack_floor) return 0;
+        *(uint32*)user_elf_user_ptr(sp) = (uint32)local_argc;
+
+        return sp;
     }
-
-    // Push argc.
-    sp -= 4;
-    if (sp < user_stack_floor) return 0;
-    *(uint32*)user_elf_user_ptr(sp) = (uint32)local_argc;
-
-    return sp;
-}
 
 /* Task management structures and state (moved before user_elf_run_argv for use in prepopulation) */
 typedef struct {

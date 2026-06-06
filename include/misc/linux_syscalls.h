@@ -11,15 +11,46 @@
 #define __NR_open         5
 #define __NR_close        6
 #define __NR_lseek        19
+#define __NR_getuid       24
+#define __NR_getgid       47
+#define __NR_geteuid      49
+#define __NR_getegid      50
+#define __NR_getppid      64
+#define __NR_nanosleep    162
+#define __NR_rt_sigaction 174
+#define __NR_rt_sigprocmask 175
+#define __NR_sigaltstack  186
 #define __NR_time         13
 #define __NR_brk          45
 #define __NR_getpid       20
+#define __NR_gettid       224
+#define __NR_futex        240
 #define __NR_uname        122
 #define __NR_fstat        108
 #define __NR_gettimeofday 78
 #define __NR_clock_gettime 265
 #define __NR_set_thread_area 243
+#define __NR_set_tid_address 258
+#define __NR_clock_getres 266
+#define __NR_clock_nanosleep 267
+#define __NR_tgkill       270
 #define __NR_exit_group   252
+
+// Epoll syscalls (i386 numbers)
+#define __NR_epoll_create 211
+#define __NR_epoll_ctl    212
+#define __NR_epoll_wait   213
+
+// epoll_ctl operations
+#define EPOLL_CTL_ADD 1
+#define EPOLL_CTL_DEL 2
+#define EPOLL_CTL_MOD 3
+
+// epoll_wait event masks
+#define EPOLLIN  0x001
+#define EPOLLOUT 0x004
+#define EPOLLERR 0x008
+#define EPOLLHUP 0x010
 
 // Memory-related syscalls (i386 numbers)
 #define __NR_mmap         90
@@ -48,5 +79,8 @@
 // Dispatcher entry point. regs is array: [eax, ecx, edx, ebx, esp, ebp, esi, edi]
 // Returns syscall return value to store in eax.
 int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]);
+
+// Initialize standard file descriptors (stdin, stdout, stderr) for a Linux process
+void linux_init_stdio(native_process_t* proc);
 
 #endif

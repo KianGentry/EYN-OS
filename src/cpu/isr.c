@@ -36,7 +36,12 @@
 #include <misc/native_exec.h>
 #include <drivers/mouse.h>
 #include <cpu/user_elf.h>
+#include <cpu/gdt.h>
+#include <cpu/segdom.h>
 #include <partition.h>
+
+// Forward declarations for Linux syscall dispatch
+extern int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]);
 
 extern background_process_t g_background_processes[MAX_BACKGROUND_PROCESSES];
 
@@ -50,6 +55,35 @@ static volatile int last_error_code = 0;
 static volatile uint32 last_error_eip = 0;
 
 static uint32 g_next_fd_mmap_va = USER_SHARED_BASE;
+
+typedef struct linux_user_desc_t {
+    uint32 entry_number;
+    uint32 base_addr;
+    uint32 limit;
+    uint32 flags;
+} linux_user_desc_t;
+
+static seg_desc_t g_linux_compat_ldt[SEGDOM_LDT_ENTRIES];
+
+static seg_desc_t linux_make_data_desc(uint32 base, uint32 limit_bytes) {
+    if (limit_bytes == 0) limit_bytes = 1;
+    uint32 limit = limit_bytes - 1;
+    uint8 gran = 0x40; /* byte granularity */
+    if (limit_bytes > 0xFFFFFu) {
+        limit = (limit_bytes - 1) >> 12;
+        gran = 0xCF;   /* 4K granularity */
+    }
+
+    seg_desc_t d;
+    d.limit_low = (uint16)(limit & 0xFFFFu);
+    d.base_low = (uint16)(base & 0xFFFFu);
+    d.base_mid = (uint8)((base >> 16) & 0xFFu);
+    d.access = 0xF2; /* present, ring3 data rw */
+    d.gran = (uint8)((limit >> 16) & 0x0Fu);
+    d.gran |= (gran & 0xF0u);
+    d.base_high = (uint8)((base >> 24) & 0xFFu);
+    return d;
+}
 
 // Error severity levels
 #define ERROR_FATAL 0
@@ -3620,6 +3654,45 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             break;
         }
         case SYSCALL_NET_TCP_CLOSE: {
+            /*
+             * Linux i386 compat: modify_ldt is syscall 123.
+             * Detect libc TLS setup shape and emulate enough for %gs selector 0x7.
+             */
+            if ((arg1 == 0u || arg1 == 1u || arg1 == 0x11u) && arg2 != 0u && arg3 > 0u && arg3 <= 128u) {
+                uint32 func = (uint32)arg1;
+                void* user_ptr = (void*)arg2;
+                uint32 bytecount = (uint32)arg3;
+
+                if (func == 0u) {
+                    uint8 zero[128];
+                    memset(zero, 0, sizeof(zero));
+                    if (bytecount > sizeof(zero)) bytecount = sizeof(zero);
+                    if (copyout(user_ptr, zero, (size_t)bytecount) != 0) { regs->eax = (uint32)-1; break; }
+                    regs->eax = (uint32)bytecount;
+                    break;
+                }
+
+                if ((func == 1u || func == 0x11u) && bytecount >= 16u) {
+                    linux_user_desc_t ud;
+                    if (copyin(&ud, user_ptr, sizeof(ud)) != 0) { regs->eax = (uint32)-1; break; }
+
+                    /* Ensure selector 0x7 (LDT index 0, RPL3) is a valid data segment. */
+                    memset(g_linux_compat_ldt, 0, sizeof(g_linux_compat_ldt));
+                    g_linux_compat_ldt[0] = linux_make_data_desc(ud.base_addr, ud.limit ? ud.limit : 0xFFFFFu);
+                    gdt_set_ldt_descriptor((uint32)(uintptr)&g_linux_compat_ldt[0], (uint32)(sizeof(g_linux_compat_ldt) - 1u));
+                    {
+                        uint16 sel = GDT_LDT_SEL;
+                        __asm__ __volatile__("lldt %0" : : "r"(sel));
+                    }
+
+                    regs->eax = 0;
+                    break;
+                }
+
+                regs->eax = (uint32)-1;
+                break;
+            }
+
             if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             regs->eax = (uint32)net_tcp_close();
             break;
@@ -7020,8 +7093,169 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             break;
         }
 
+        /* Linux i386 compat: set_thread_area (243).
+         * Minimal implementation: accept the call and return a valid selector.
+         * Do NOT install a new LDT; rely on the user LDT that's already set up
+         * by segdom_init during UELF loading. This prevents clobbering existing
+         * user selectors (0x0B CS, 0x13 DS).
+         * Return entry_number=2 to indicate selector 0x13 (DS from LDT[2]).
+         */
+        case 243: {
+            linux_user_desc_t ud;
+            linux_user_desc_t* user_desc = (linux_user_desc_t*)arg1;
+            if (!user_desc) {
+                regs->eax = (uint32)-22; /* EINVAL */
+                break;
+            }
+            if (copyin(&ud, user_desc, sizeof(ud)) != 0) {
+                regs->eax = (uint32)-14; /* EFAULT */
+                break;
+            }
+
+            /* Linux allows -1 for "allocate me an entry". We always use GDT entry 7. */
+            if (ud.entry_number == 0xFFFFFFFFu || ud.entry_number == GDT_TLS_ENTRY) {
+                ud.entry_number = GDT_TLS_ENTRY;
+            } else {
+                /* Only support our single TLS slot */
+                regs->eax = (uint32)-22; /* EINVAL */
+                break;
+            }
+
+            /* Populate the TLS GDT descriptor with the user-supplied base/limit. */
+            uint32 tls_limit = ud.limit ? ud.limit : 0xFFFFF;
+            gdt_set_tls_descriptor(ud.base_addr, tls_limit);
+
+            /* Write back the assigned entry_number so caller can compute gs selector. */
+            if (copyout(user_desc, &ud, sizeof(ud)) != 0) {
+                regs->eax = (uint32)-14; /* EFAULT */
+                break;
+            }
+
+            regs->eax = 0;
+            break;
+        }
+
+        /* Linux i386 compat: set_tid_address (258).
+         * Return current pid/tid; if caller supplied a pointer, store it.
+         */
+        case 258: {
+            uint32* user_tidptr = (uint32*)arg1;
+            uint32 tid = 1;
+            if (user_tidptr) {
+                if (copyout(user_tidptr, &tid, sizeof(tid)) != 0) {
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+            }
+            regs->eax = tid;
+            break;
+        }
+
+        /* Linux i386 compat: exit_group (252) */
+        case 252: {
+            user_task_notify_exit((int)arg1);
+            syscall_reset_user_guis();
+            g_user_task_active = 0;
+            g_user_task_term = -1;
+            g_user_interrupt = 0;
+            g_abort_to_shell = 1;
+            if (!g_user_fd_inherit_mode) {
+                syscall_reset_user_fds();
+            }
+            syscall_reset_user_streams();
+            if (!g_user_fd_inherit_mode) {
+                syscall_reset_user_stdio_fds();
+            }
+            regs->eax = 0;
+            break;
+        }
+
+        /* Linux i386: 32-bit UID/GID getters (199-202).
+         * getuid32/getgid32/geteuid32/getegid32 — return a fixed UID/GID of 0 (root).
+         * Programs use these during startup for permission checks; returning 0 is safe.
+         * NOTE: 200=SYSCALL_KILL, 201=SYSCALL_SIGRETURN, 202=SYSCALL_SIGNAL already exist;
+         * only 199 (getuid32) needs a new case here. */
+        case 199: /* getuid32  */
+            regs->eax = 0;
+            break;
+
+        /* Linux i386: rt_sigaction (174) — register signal handler.
+         * args: signum, *act, *oldact, sigsetsize
+         * Stub: zero out oldact if provided and return success.
+         * Real signal delivery is not implemented; most programs just need this
+         * to succeed during startup (SIG_DFL / SIG_IGN registrations). */
+        case 174: {
+            uint32* oldact = (uint32*)arg2;
+            if (oldact) {
+                /* struct sigaction on i386 is ≥16 bytes; zero the handler + mask */
+                uint32 zero = 0;
+                for (int i = 0; i < 4; i++)
+                    copyout(oldact + i, &zero, sizeof(zero));
+            }
+            regs->eax = 0;
+            break;
+        }
+
+        /* Linux i386: rt_sigprocmask (175) — change signal mask.
+         * args: how, *set, *oldset, sigsetsize
+         * Stub: zero out oldset if provided and return success. */
+        case 175: {
+            uint32* oldset = (uint32*)arg2;
+            if (oldset) {
+                uint32 zero = 0;
+                /* sigset_t is 8 bytes on i386 */
+                copyout(oldset,     &zero, sizeof(zero));
+                copyout(oldset + 1, &zero, sizeof(zero));
+            }
+            regs->eax = 0;
+            break;
+        }
+
+        /* Linux i386: epoll_create (211) */
+        case 211: {
+            native_process_t* cur_proc = native_get_current_process();
+            if (!cur_proc) { regs->eax = (uint32)-1; break; }
+            uint32 regs_arr[8] = { 211, arg2, arg3, arg1, 0, 0, 0, 0 };
+            int ret = linux_syscall_dispatch(cur_proc, regs_arr);
+            regs->eax = (uint32)ret;
+            break;
+        }
+
+        /* Linux i386: epoll_ctl (212) */
+        case 212: {
+            native_process_t* cur_proc = native_get_current_process();
+            if (!cur_proc) { regs->eax = (uint32)-1; break; }
+            uint32 regs_arr[8] = { 212, arg2, arg3, arg1, 0, 0, arg4, arg5 };
+            int ret = linux_syscall_dispatch(cur_proc, regs_arr);
+            regs->eax = (uint32)ret;
+            break;
+        }
+
+        /* Linux i386: epoll_wait (213) */
+        case 213: {
+            native_process_t* cur_proc = native_get_current_process();
+            if (!cur_proc) { regs->eax = (uint32)-1; break; }
+            uint32 regs_arr[8] = { 213, arg2, arg3, arg1, 0, 0, arg4, arg5 };
+            int ret = linux_syscall_dispatch(cur_proc, regs_arr);
+            regs->eax = (uint32)ret;
+            break;
+        }
+
         default: {
-            printf("%c[SYSCALL] Unknown syscall: %d\n", 255, 0, 0, syscall_num);
+            /* Try to route low-numbered syscalls (1-300) to Linux i386 compat layer */
+            if (syscall_num > 0 && syscall_num < 300) {
+                native_process_t* cur_proc = native_get_current_process();
+                if (cur_proc) {
+                    printf("[ROUTING] Low-numbered syscall %d routed to Linux dispatcher\n", syscall_num);
+                    /* Build register array for linux_syscall_dispatch: [eax, ecx, edx, ebx, esp, ebp, esi, edi] */
+                    uint32 regs_arr[8] = { syscall_num, arg2, arg3, arg1, 0, 0, arg4, arg5 };
+                    int ret = linux_syscall_dispatch(cur_proc, regs_arr);
+                    regs->eax = (uint32)ret;
+                    break;
+                }
+            }
+            
+            printf("[SYSCALL] Unknown syscall: %d\n", syscall_num);
             regs->eax = (uint32)-1;
             break;
         }

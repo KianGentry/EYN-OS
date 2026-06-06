@@ -8,6 +8,7 @@
 #include <context.h>
 #include <misc/sched.h>
 #include <mm/vmm.h>
+#include <mm/user_access.h>
 
 // Very small per-process FD table for now
 #define LINUX_MAX_FD 32
@@ -54,6 +55,36 @@ typedef struct {
     uint32 size; // known size if file
 } linux_fd;
 
+// Epoll event entry: tracks a file descriptor and its registered events
+typedef struct {
+    int fd;           // file descriptor being monitored
+    uint32 events;    // event mask (EPOLLIN, EPOLLOUT, etc.)
+    uint64 data;      // opaque user data (64-bit for compat)
+} epoll_event_entry_t;
+
+// Epoll instance: created by epoll_create, tracks multiple FDs
+#define MAX_EPOLL_EVENTS 32
+typedef struct {
+    int in_use;
+    epoll_event_entry_t events[MAX_EPOLL_EVENTS];
+    int event_count;
+} epoll_instance_t;
+
+#define MAX_EPOLL_INSTANCES 8
+
+static int epoll_alloc(epoll_instance_t* tbl) {
+    for (int i = 0; i < MAX_EPOLL_INSTANCES; i++) {
+        if (!tbl[i].in_use) { tbl[i].in_use = 1; tbl[i].event_count = 0; return 100 + i; } // use 100+ for epoll FDs
+    }
+    return -1;
+}
+
+static epoll_instance_t* epoll_get(epoll_instance_t* tbl, int epfd) {
+    int idx = epfd - 100;
+    if (idx < 0 || idx >= MAX_EPOLL_INSTANCES || !tbl[idx].in_use) return NULL;
+    return &tbl[idx];
+}
+
 static int linux_user_range_in_segment(uint32 start, uint32 size, uint32 seg_base, uint32 seg_size) {
     uint64 begin = (uint64)start;
     uint64 end = begin + (uint64)size;
@@ -88,10 +119,22 @@ static const void* linux_translate_user_const_ptr(native_process_t* proc, uint32
 static linux_fd* get_fd_table(native_process_t* p) {
     if (!p->linux_fd_table) {
         if (!linux_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
-        p->linux_fd_table = (void*)malloc(sizeof(linux_fd) * LINUX_MAX_FD);
-        if (p->linux_fd_table) memset(p->linux_fd_table, 0, sizeof(linux_fd) * LINUX_MAX_FD);
+        // Allocate space for both FD table and epoll instances together
+        uint32 total_size = (sizeof(linux_fd) * LINUX_MAX_FD) + (sizeof(epoll_instance_t) * MAX_EPOLL_INSTANCES);
+        p->linux_fd_table = (void*)malloc(total_size);
+        if (p->linux_fd_table) memset(p->linux_fd_table, 0, total_size);
     }
     return (linux_fd*)p->linux_fd_table;
+}
+
+static epoll_instance_t* get_epoll_table(native_process_t* p) {
+    if (!p) return NULL;
+    // Ensure FD table is allocated (which also allocates epoll space)
+    if (!p->linux_fd_table) {
+        if (!get_fd_table(p)) return NULL;
+    }
+    // Epoll instances are stored right after the FD table
+    return (epoll_instance_t*)((char*)p->linux_fd_table + (sizeof(linux_fd) * LINUX_MAX_FD));
 }
 
 static int fd_alloc(linux_fd* tbl) {
@@ -100,19 +143,38 @@ static int fd_alloc(linux_fd* tbl) {
 }
 
 static int sys_write(native_process_t* proc, uint32 fd, const void* buf, uint32 count) {
+    // DEBUG: Check if write is being called
+    printf("[DEBUG] sys_write called: fd=%d, buf=%p, count=%d\n", fd, buf, count);
+    
     if (fd == 1 || fd == 2) {
         if (!linux_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return -1;
-        // stdout/stderr -> console
-        // Print as a string (truncate non-printables and stop at count)
-        char out[256];
-        uint32 n = (count < 255) ? count : 255;
-        for (uint32 i = 0, j = 0; i < n && j < 255; i++) {
-            unsigned char ch = ((const unsigned char*)buf)[i];
-            if (ch == '\n' || (ch >= 32 && ch <= 126)) out[j++] = (char)ch;
-            else {}
-            out[j] = 0;
+        
+        printf("[DEBUG] Writing to stdout/stderr\n");
+        
+        // Copy buffer from user space first (max 256 bytes)
+        char kernel_buf[256];
+        uint32 to_read = (count < 256) ? count : 256;
+        
+        // Safely read from user memory
+        if (copyin(kernel_buf, buf, to_read) != 0) {
+            printf("[DEBUG] copyin failed\n");
+            return -14; // EFAULT - bad address
         }
-        printf("%s", out);
+        
+        printf("[DEBUG] Read %d bytes from user space\n", to_read);
+        
+        // Write to console, filtering printables only
+        for (uint32 i = 0; i < to_read; i++) {
+            unsigned char ch = (unsigned char)kernel_buf[i];
+            // Only output newlines and printable ASCII - using a simple mechanism
+            if (ch == '\n') {
+                printf("\n");
+            } else if (ch >= 32 && ch <= 126) {
+                printf("%c", ch);
+            }
+        }
+        
+        printf("[DEBUG] Write complete, returning %d\n", count);
         return (int)count;
     }
     linux_fd* tbl = get_fd_table(proc);
@@ -286,6 +348,31 @@ static int sys_getpid(native_process_t* proc) {
     return (int)proc->pid;
 }
 
+static int sys_getppid(native_process_t* proc) {
+    (void)proc;
+    return 1;
+}
+
+static int sys_getuid(native_process_t* proc) {
+    (void)proc;
+    return 0;
+}
+
+static int sys_getgid(native_process_t* proc) {
+    (void)proc;
+    return 0;
+}
+
+static int sys_gettid(native_process_t* proc) {
+    return sys_getpid(proc);
+}
+
+static int sys_set_tid_address(native_process_t* proc, uint32* tidptr) {
+    int tid = sys_gettid(proc);
+    if (tidptr) *tidptr = (uint32)tid;
+    return tid;
+}
+
 static int sys_time(native_process_t* proc, uint32* tloc) {
     (void)proc;
     uint32 now = 1730500000u; // fixed epoch-like value (~2024-11), OK for hello
@@ -310,6 +397,89 @@ static int sys_clock_gettime(native_process_t* proc, int clk_id, void* ts) {
     uint32* p = (uint32*)ts;
     p[0] = 1730500000u; // seconds
     p[1] = 0;           // nsec
+    return 0;
+}
+
+static int sys_clock_getres(native_process_t* proc, int clk_id, void* ts) {
+    (void)proc; (void)clk_id;
+    if (!ts) return -1;
+    // struct timespec { long tv_sec; long tv_nsec; }
+    uint32* p = (uint32*)ts;
+    p[0] = 0;        // sec
+    p[1] = 1000000u; // 1ms nominal resolution
+    return 0;
+}
+
+static int sys_nanosleep(native_process_t* proc, const void* req, void* rem) {
+    (void)proc;
+    if (!req) return -1;
+    if (rem) {
+        uint32* r = (uint32*)rem;
+        r[0] = 0;
+        r[1] = 0;
+    }
+    return 0;
+}
+
+static int sys_clock_nanosleep(native_process_t* proc, int clk_id, int flags, const void* req, void* rem) {
+    (void)clk_id;
+    (void)flags;
+    return sys_nanosleep(proc, req, rem);
+}
+
+static int sys_rt_sigaction(native_process_t* proc, int signum, const void* act, void* oldact, uint32 sigsetsize) {
+    (void)proc;
+    (void)signum;
+    (void)act;
+    (void)sigsetsize;
+    if (oldact) memset(oldact, 0, 16);
+    return 0;
+}
+
+static int sys_rt_sigprocmask(native_process_t* proc, int how, const void* set, void* oldset, uint32 sigsetsize) {
+    (void)proc;
+    (void)how;
+    (void)set;
+    (void)sigsetsize;
+    if (oldset) memset(oldset, 0, sizeof(uint32));
+    return 0;
+}
+
+static int sys_sigaltstack(native_process_t* proc, const void* ss, void* old_ss) {
+    (void)proc;
+    (void)ss;
+    if (old_ss) memset(old_ss, 0, 12);
+    return 0;
+}
+
+static int sys_futex(native_process_t* proc,
+                     int32* uaddr,
+                     int op,
+                     int val,
+                     const void* timeout,
+                     int32* uaddr2,
+                     int val3) {
+    (void)proc;
+    (void)uaddr;
+    (void)timeout;
+    (void)uaddr2;
+    (void)val3;
+    // Single-thread-friendly futex shim: report success without blocking.
+    switch (op & 0x7f) {
+        case 0: // FUTEX_WAIT
+            return 0;
+        case 1: // FUTEX_WAKE
+            return (val > 0) ? 1 : 0;
+        default:
+            return 0;
+    }
+}
+
+static int sys_tgkill(native_process_t* proc, int tgid, int tid, int sig) {
+    (void)proc;
+    (void)tgid;
+    (void)tid;
+    (void)sig;
     return 0;
 }
 
@@ -656,14 +826,158 @@ static int sys_net_close(native_process_t* proc, int socket_id) {
     return net_udp_close(socket_id);
 }
 
+// ============ Epoll syscalls (211-213) ============
+
+static int sys_epoll_create(native_process_t* proc, int size) {
+    (void)size; // size is ignored in modern Linux
+    if (!proc) return -1;
+    if (!linux_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
+    
+    epoll_instance_t* tbl = get_epoll_table(proc);
+    if (!tbl) return -1;
+    
+    int epfd = epoll_alloc(tbl);
+    return epfd;
+}
+
+static int sys_epoll_ctl(native_process_t* proc, int epfd, int op, int fd, const void* kevent) {
+    if (!proc) return -1;
+    
+    epoll_instance_t* tbl = get_epoll_table(proc);
+    if (!tbl) return -1;
+    
+    epoll_instance_t* ep = epoll_get(tbl, epfd);
+    if (!ep) return -1; // -EBADF
+    
+    // Parse the epoll_event structure from user memory
+    // struct epoll_event { uint32 events; uint64 data; }
+    if (!kevent) return -1;
+    
+    const uint32* events_ptr = (const uint32*)kevent;
+    const uint64* data_ptr = (const uint64*)((const uint32*)kevent + 1);
+    uint32 events = *events_ptr;
+    uint64 data = *data_ptr;
+    
+    switch (op) {
+        case EPOLL_CTL_ADD: {
+            // Add a new FD to watch
+            if (ep->event_count >= MAX_EPOLL_EVENTS) return -1; // -ENOMEM
+            ep->events[ep->event_count].fd = fd;
+            ep->events[ep->event_count].events = events;
+            ep->events[ep->event_count].data = data;
+            ep->event_count++;
+            return 0;
+        }
+        case EPOLL_CTL_DEL: {
+            // Remove FD from watch
+            for (int i = 0; i < ep->event_count; i++) {
+                if (ep->events[i].fd == fd) {
+                    // Swap with last and decrement
+                    ep->events[i] = ep->events[ep->event_count - 1];
+                    ep->event_count--;
+                    return 0;
+                }
+            }
+            return -1; // -ENOENT
+        }
+        case EPOLL_CTL_MOD: {
+            // Modify events for existing FD
+            for (int i = 0; i < ep->event_count; i++) {
+                if (ep->events[i].fd == fd) {
+                    ep->events[i].events = events;
+                    ep->events[i].data = data;
+                    return 0;
+                }
+            }
+            return -1; // -ENOENT
+        }
+        default:
+            return -1; // -EINVAL
+    }
+}
+
+static int sys_epoll_wait(native_process_t* proc, int epfd, void* kevents, int maxevents, int timeout) {
+    if (!proc || !kevents || maxevents <= 0) return -1;
+    
+    epoll_instance_t* tbl = get_epoll_table(proc);
+    if (!tbl) return -1;
+    
+    epoll_instance_t* ep = epoll_get(tbl, epfd);
+    if (!ep) return -1; // -EBADF
+    
+    // Minimal implementation: return all registered events ready immediately
+    // For a full implementation, would need actual I/O readiness checks
+    // This works for programs that just want to wait with a timeout
+    
+    int ret_count = 0;
+    int out_count = (ep->event_count < maxevents) ? ep->event_count : maxevents;
+    
+    // Copy events to user buffer: struct epoll_event { uint32 events; uint64 data; }
+    // Each entry is 12 bytes (4 + 8)
+    uint8_t* out_buf = (uint8_t*)kevents;
+    for (int i = 0; i < out_count; i++) {
+        uint32* events_ptr = (uint32*)(out_buf + i * 12);
+        uint64* data_ptr = (uint64*)(out_buf + i * 12 + 4);
+        *events_ptr = ep->events[i].events;
+        *data_ptr = ep->events[i].data;
+        ret_count++;
+    }
+    
+    // Handle timeout: if positive, we could sleep; if 0, return immediately; if -1, block forever
+    // For now, always return immediately with available events
+    (void)timeout;
+    
+    return ret_count;
+}
+
+// Initialize standard file descriptors (stdin, stdout, stderr) for a Linux process
+void linux_init_stdio(native_process_t* proc) {
+    if (!proc) return;
+    
+    printf("[LINUX_INIT_STDIO] Initializing standard FDs for process %p\n", proc);
+    
+    // Get the FD table (this will allocate if needed)
+    linux_fd* tbl = get_fd_table(proc);
+    if (!tbl) {
+        printf("[LINUX_INIT_STDIO] Failed to get FD table\n");
+        return;
+    }
+    
+    printf("[LINUX_INIT_STDIO] Setting up FDs 0, 1, 2\n");
+    
+    // Mark stdin (0), stdout (1), stderr (2) as in use
+    tbl[0].in_use = 1;
+    tbl[0].flags = 0; // Read-only
+    tbl[0].pos = 0;
+    tbl[0].size = 0;
+    safe_strcpy(tbl[0].path, "stdin", sizeof(tbl[0].path));
+    
+    tbl[1].in_use = 1;
+    tbl[1].flags = 1; // Write
+    tbl[1].pos = 0;
+    tbl[1].size = 0;
+    safe_strcpy(tbl[1].path, "stdout", sizeof(tbl[1].path));
+    
+    tbl[2].in_use = 1;
+    tbl[2].flags = 1; // Write
+    tbl[2].pos = 0;
+    tbl[2].size = 0;
+    safe_strcpy(tbl[2].path, "stderr", sizeof(tbl[2].path));
+    
+    printf("[LINUX_INIT_STDIO] Standard FDs initialized\n");
+}
+
 int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
     uint32 eax = regs[0];
     uint32 ebx = regs[3];
     uint32 ecx = regs[1];
     uint32 edx = regs[2];
 
+    printf("[LINUX_DISPATCH] syscall=%d, ebx=%p, ecx=%p, edx=%u, proc=%p\n", eax, ebx, ecx, edx, proc);
+
     switch (eax) {
         case __NR_write: {
+            printf("[LINUX_DISPATCH] write syscall: fd=%d, buf=%p, count=%d\n", ebx, ecx, edx);
             const void* kbuf = linux_translate_user_const_ptr(proc, ecx, edx);
             int ret = sys_write(proc, ebx, kbuf, edx);
             regs[0] = ret;
@@ -709,6 +1023,28 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             regs[0] = ret;
             return ret;
         }
+        case __NR_getppid: {
+            int ret = sys_getppid(proc);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_getuid:
+        case __NR_geteuid: {
+            int ret = sys_getuid(proc);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_getgid:
+        case __NR_getegid: {
+            int ret = sys_getgid(proc);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_gettid: {
+            int ret = sys_gettid(proc);
+            regs[0] = ret;
+            return ret;
+        }
         case __NR_time: {
             uint32* kptr = (uint32*)linux_translate_user_ptr(proc, ebx, (uint32)sizeof(uint32));
             int ret = sys_time(proc, kptr);
@@ -728,8 +1064,68 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             regs[0] = ret;
             return ret;
         }
+        case __NR_clock_getres: {
+            void* kts = linux_translate_user_ptr(proc, ecx, (uint32)(2u * sizeof(uint32)));
+            int ret = sys_clock_getres(proc, (int)ebx, kts);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_nanosleep: {
+            const void* kreq = linux_translate_user_const_ptr(proc, ebx, (uint32)(2u * sizeof(uint32)));
+            void* krem = linux_translate_user_ptr(proc, ecx, (uint32)(2u * sizeof(uint32)));
+            int ret = sys_nanosleep(proc, kreq, krem);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_clock_nanosleep: {
+            const void* kreq = linux_translate_user_const_ptr(proc, regs[6], (uint32)(2u * sizeof(uint32)));
+            void* krem = linux_translate_user_ptr(proc, regs[7], (uint32)(2u * sizeof(uint32)));
+            int ret = sys_clock_nanosleep(proc, (int)ebx, (int)ecx, kreq, krem);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_rt_sigaction: {
+            const void* kact = linux_translate_user_const_ptr(proc, ecx, 16u);
+            void* kold = linux_translate_user_ptr(proc, edx, 16u);
+            int ret = sys_rt_sigaction(proc, (int)ebx, kact, kold, regs[6]);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_rt_sigprocmask: {
+            const void* kset = linux_translate_user_const_ptr(proc, ecx, sizeof(uint32));
+            void* kold = linux_translate_user_ptr(proc, edx, sizeof(uint32));
+            int ret = sys_rt_sigprocmask(proc, (int)ebx, kset, kold, regs[6]);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_sigaltstack: {
+            const void* kss = linux_translate_user_const_ptr(proc, ebx, 12u);
+            void* kold = linux_translate_user_ptr(proc, ecx, 12u);
+            int ret = sys_sigaltstack(proc, kss, kold);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_futex: {
+            int32* kuaddr = (int32*)linux_translate_user_ptr(proc, ebx, sizeof(int32));
+            const void* ktimeout = linux_translate_user_const_ptr(proc, regs[6], (uint32)(2u * sizeof(uint32)));
+            int32* kuaddr2 = (int32*)linux_translate_user_ptr(proc, regs[7], sizeof(int32));
+            int ret = sys_futex(proc, kuaddr, (int)ecx, (int)edx, ktimeout, kuaddr2, (int)regs[5]);
+            regs[0] = ret;
+            return ret;
+        }
         case __NR_lseek: {
             int ret = sys_lseek(proc, ebx, (int32)ecx, (int)edx);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_set_tid_address: {
+            uint32* ktid = (uint32*)linux_translate_user_ptr(proc, ebx, sizeof(uint32));
+            int ret = sys_set_tid_address(proc, ktid);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_tgkill: {
+            int ret = sys_tgkill(proc, (int)ebx, (int)ecx, (int)edx);
             regs[0] = ret;
             return ret;
         }
@@ -815,6 +1211,28 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
         case __NR_net_close: {
             // ebx = socket_id
             int ret = sys_net_close(proc, (int)ebx);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_epoll_create: {
+            // ebx = size (ignored)
+            int ret = sys_epoll_create(proc, (int)ebx);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_epoll_ctl: {
+            // ebx = epfd, ecx = op, edx = fd, esi = events pointer
+            uint32 esi = regs[6];
+            const void* kevents = linux_translate_user_const_ptr(proc, esi, (uint32)(4u + 8u)); // epoll_event size
+            int ret = sys_epoll_ctl(proc, (int)ebx, (int)ecx, (int)edx, kevents);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_epoll_wait: {
+            // ebx = epfd, ecx = events pointer, edx = maxevents, esi = timeout
+            uint32 esi = regs[6];
+            void* kevents = linux_translate_user_ptr(proc, ecx, edx * 12u); // each epoll_event is 12 bytes
+            int ret = sys_epoll_wait(proc, (int)ebx, kevents, (int)edx, (int)esi);
             regs[0] = ret;
             return ret;
         }

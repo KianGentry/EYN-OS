@@ -50,6 +50,9 @@ obj_libc_stat="$tmp_root/user_libc_stat.o"
 obj_libc_ctype="$tmp_root/user_libc_ctype.o"
 obj_libc_libgen="$tmp_root/user_libc_libgen.o"
 obj_libc_notify="$tmp_root/user_libc_notify.o"
+obj_libc_signal="$tmp_root/user_libc_signal.o"
+obj_libc_termios="$tmp_root/user_libc_termios.o"
+obj_libc_posix_spawn="$tmp_root/user_libc_posix_spawn.o"
 obj_pkgmeta="$tmp_root/user_pkgmeta.o"
 lib_archive="$tmp_root/libeync.a"
 
@@ -106,6 +109,9 @@ fi
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/ctype.c" -o "$obj_libc_ctype"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/libgen.c" -o "$obj_libc_libgen"
 "$CC" "${CFLAGS[@]}" -c "$libc_dir/notify.c" -o "$obj_libc_notify"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/signal.c" -o "$obj_libc_signal"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/termios.c" -o "$obj_libc_termios"
+"$CC" "${CFLAGS[@]}" -c "$libc_dir/posix_spawn.c" -o "$obj_libc_posix_spawn"
 
 pkgmeta_src="$tmp_root/user_pkgmeta.c"
 cat > "$pkgmeta_src" <<'PKGMETA_EOF'
@@ -129,7 +135,7 @@ PKGMETA_EOF
   -o "$obj_pkgmeta"
 
 rm -f "$lib_archive"
-ar rcs "$lib_archive" "$obj_libc_x11" "$obj_libc_setjmp" "$obj_libc_stat" "$obj_libc_ctype" "$obj_libc_libgen" "$obj_libc_notify" "$obj_libc_exec" "$obj_libc_unistd" "$obj_libc_string" "$obj_libc_stdio" "$obj_libc_fcntl" "$obj_libc_dirent" "$obj_libc_gui" "$obj_libc_time" "$obj_libc_stdlib" "$obj_libc_errno"
+ar rcs "$lib_archive" "$obj_libc_x11" "$obj_libc_setjmp" "$obj_libc_stat" "$obj_libc_ctype" "$obj_libc_libgen" "$obj_libc_notify" "$obj_libc_exec" "$obj_libc_unistd" "$obj_libc_string" "$obj_libc_stdio" "$obj_libc_fcntl" "$obj_libc_dirent" "$obj_libc_gui" "$obj_libc_time" "$obj_libc_stdlib" "$obj_libc_errno" "$obj_libc_signal" "$obj_libc_termios" "$obj_libc_posix_spawn"
 
 "$CC" "${CFLAGS[@]}" -c "$src" -o "$obj_app"
 

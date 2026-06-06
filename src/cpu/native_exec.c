@@ -141,6 +141,7 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
        switch) intended to allow simple statically-linked ELF32 binaries to
        run under the current native execution model. */
     if (size >= 16 && (uint8_t)buf[0] == ELFMAG0 && (uint8_t)buf[1] == ELFMAG1 && (uint8_t)buf[2] == ELFMAG2 && (uint8_t)buf[3] == ELFMAG3) {
+        printf("[NATIVE_EXEC] Detected ELF32 file, checking for i386...\n");
         // Candidate ELF file
         if ((uint8_t)buf[EI_CLASS] == ELFCLASS32 && (uint8_t)buf[5] == ELFDATA2LSB) {
             // Parse header bounds-safely
@@ -148,6 +149,7 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
                 Elf32_Ehdr* eh = (Elf32_Ehdr*)buf;
                 // Check machine
                 if (eh->e_machine == EM_386) {
+                    printf("[NATIVE_EXEC] Loading i386 ELF binary: %s (entry=%p)\n", filename, eh->e_entry);
                     uint32_t min_vaddr = 0xffffffffu;
                     uint32_t max_vaddr = 0;
                     int load_count = 0;
@@ -286,6 +288,9 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
                         process->eip = process->entry_point;
                         process->active = 1;
                         safe_strcpy(process->name, filename, sizeof(process->name));
+                        
+                        // Initialize standard file descriptors for Linux programs
+                        linux_init_stdio(process);
 
                         free(buf);
                         return EXEC_SUCCESS;
