@@ -1,7 +1,105 @@
 #include <unistd.h>
 #include <eynos_syscall.h>
 
+#include <errno.h>
+#include <setjmp.h>
 #include <stdint.h>
+
+typedef struct {
+    int active;
+    int child_active;
+    int child_stdin_fd;
+    int child_stdout_fd;
+    int child_stderr_fd;
+    int child_inherit_mode;
+    int synthetic_wait_active;
+    int synthetic_status;
+    pid_t synthetic_pid;
+    pid_t resume_pid;
+    jmp_buf parent_env;
+} eyn_vfork_compat_t;
+
+static eyn_vfork_compat_t g_vfork_compat;
+static pid_t g_vfork_next_synthetic_pid = 0x70000000;
+static int g_shadow_stdin_fd = 0;
+static int g_shadow_stdout_fd = 1;
+static int g_shadow_stderr_fd = 2;
+static int g_shadow_inherit_mode = 1;
+
+static int eyn_vfork_child_active(void) {
+    return g_vfork_compat.active && g_vfork_compat.child_active;
+}
+
+int __eyn_vfork_exec_transition(const char* path, char* const argv[], char* const envp[]) {
+    (void)envp;
+
+    if (!eyn_vfork_child_active()) return -2;
+    if (!path) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int argc = 0;
+    if (argv) {
+        while (argv[argc]) argc++;
+    }
+
+    eyn_spawn_ex_req_t req;
+    req.path = path;
+    req.argv = (const char* const*)argv;
+    req.argc = argc;
+    req.stdin_fd = g_vfork_compat.child_stdin_fd;
+    req.stdout_fd = g_vfork_compat.child_stdout_fd;
+    req.stderr_fd = g_vfork_compat.child_stderr_fd;
+    req.inherit_mode = g_vfork_compat.child_inherit_mode;
+
+    int pid = eyn_syscall3_pii(EYN_SYSCALL_SPAWN_EX, &req, 0, 0);
+    if (pid < 0) {
+        if (errno == 0) errno = ENOENT;
+        return -1;
+    }
+
+    g_vfork_compat.resume_pid = pid;
+    g_vfork_compat.child_active = 0;
+    longjmp(g_vfork_compat.parent_env, 1);
+}
+
+void __eyn_vfork_child_exit(int code) {
+    if (!eyn_vfork_child_active()) return;
+
+    if (g_vfork_next_synthetic_pid <= 0) g_vfork_next_synthetic_pid = 0x70000000;
+    g_vfork_compat.synthetic_pid = g_vfork_next_synthetic_pid++;
+    g_vfork_compat.synthetic_status = code;
+    g_vfork_compat.synthetic_wait_active = 1;
+    g_vfork_compat.resume_pid = g_vfork_compat.synthetic_pid;
+    g_vfork_compat.child_active = 0;
+    longjmp(g_vfork_compat.parent_env, 1);
+}
+
+pid_t vfork(void) {
+    if (g_vfork_compat.active) {
+        errno = EAGAIN;
+        return -1;
+    }
+
+    g_vfork_compat.active = 1;
+    g_vfork_compat.child_active = 1;
+    g_vfork_compat.child_stdin_fd = g_shadow_stdin_fd;
+    g_vfork_compat.child_stdout_fd = g_shadow_stdout_fd;
+    g_vfork_compat.child_stderr_fd = g_shadow_stderr_fd;
+    g_vfork_compat.child_inherit_mode = g_shadow_inherit_mode;
+
+    if (setjmp(g_vfork_compat.parent_env) == 0) {
+        return 0;
+    }
+
+    g_vfork_compat.active = 0;
+    return g_vfork_compat.resume_pid;
+}
+
+pid_t fork(void) {
+    return vfork();
+}
 
 ssize_t write(int fd, const void* buf, size_t len) {
     if (!buf) return -1;
@@ -16,14 +114,42 @@ ssize_t read(int fd, void* buf, size_t len) {
 }
 
 int close(int fd) {
+    if (eyn_vfork_child_active()) {
+        if (fd <= 2) {
+            errno = ENOSYS;
+            return -1;
+        }
+        g_vfork_compat.child_inherit_mode = 0;
+        return 0;
+    }
     return eyn_syscall1(EYN_SYSCALL_CLOSE, fd);
 }
 
 int dup(int oldfd) {
+    if (eyn_vfork_child_active()) {
+        errno = ENOSYS;
+        return -1;
+    }
     return eyn_syscall1(EYN_SYSCALL_DUP, oldfd);
 }
 
 int dup2(int oldfd, int newfd) {
+    if (eyn_vfork_child_active()) {
+        if (newfd == 0) {
+            g_vfork_compat.child_stdin_fd = oldfd;
+            return 0;
+        }
+        if (newfd == 1) {
+            g_vfork_compat.child_stdout_fd = oldfd;
+            return 1;
+        }
+        if (newfd == 2) {
+            g_vfork_compat.child_stderr_fd = oldfd;
+            return 2;
+        }
+        errno = ENOSYS;
+        return -1;
+    }
     return eyn_syscall3_iii(EYN_SYSCALL_DUP2, oldfd, newfd, 0);
 }
 
@@ -39,10 +165,25 @@ int mkfifo(const char* path, mode_t mode) {
 }
 
 int fd_set_inherit(int enabled) {
+    if (eyn_vfork_child_active()) {
+        int prev = g_vfork_compat.child_inherit_mode;
+        g_vfork_compat.child_inherit_mode = enabled ? 1 : 0;
+        return prev;
+    }
+    g_shadow_inherit_mode = enabled ? 1 : 0;
     return eyn_syscall1(EYN_SYSCALL_FD_SET_INHERIT, enabled ? 1 : 0);
 }
 
 int fd_set_stdio(int stdin_fd, int stdout_fd, int stderr_fd) {
+    if (eyn_vfork_child_active()) {
+        g_vfork_compat.child_stdin_fd = stdin_fd;
+        g_vfork_compat.child_stdout_fd = stdout_fd;
+        g_vfork_compat.child_stderr_fd = stderr_fd;
+        return 0;
+    }
+    g_shadow_stdin_fd = stdin_fd;
+    g_shadow_stdout_fd = stdout_fd;
+    g_shadow_stderr_fd = stderr_fd;
     return eyn_syscall3_iii(EYN_SYSCALL_FD_SET_STDIO, stdin_fd, stdout_fd, stderr_fd);
 }
 
@@ -59,10 +200,19 @@ int spawn(const char* path, const char* const* argv, int argc) {
 }
 
 int waitpid(int pid, int* status, int options) {
+    if (g_vfork_compat.synthetic_wait_active && (pid == -1 || pid == g_vfork_compat.synthetic_pid)) {
+        if (status) *status = g_vfork_compat.synthetic_status;
+        g_vfork_compat.synthetic_wait_active = 0;
+        return g_vfork_compat.synthetic_pid;
+    }
     return eyn_syscall3_iii(EYN_SYSCALL_WAITPID,
                             pid,
                             (int)(uintptr_t)status,
                             options);
+}
+
+int wait(int* status) {
+    return waitpid(-1, status, 0);
 }
 
 int kill(int pid, int sig) {
@@ -103,11 +253,17 @@ int rmdir(const char* path) {
 
 #ifdef __chibicc__
 void _exit(int code) {
+    if (eyn_vfork_child_active()) {
+        __eyn_vfork_child_exit(code);
+    }
     (void)eyn_syscall1(EYN_SYSCALL_EXIT, code);
     for (;;) {}
 }
 #else
 __attribute__((noreturn)) void _exit(int code) {
+    if (eyn_vfork_child_active()) {
+        __eyn_vfork_child_exit(code);
+    }
     (void)eyn_syscall1(EYN_SYSCALL_EXIT, code);
     for (;;) {
         __asm__ __volatile__("hlt");

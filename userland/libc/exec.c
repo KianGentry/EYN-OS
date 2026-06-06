@@ -12,12 +12,20 @@ typedef struct {
     const char* const* envp;
 } syscall_exec_req_t;
 
+int __eyn_vfork_exec_transition(const char* path, char* const argv[], char* const envp[]);
+
 int execv(const char* path, char* const argv[]) {
     return execve(path, argv, NULL);
 }
 
 int execve(const char* path, char* const argv[], char* const envp[]) {
-    if (!path) return -1;
+    if (!path) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int compat_rc = __eyn_vfork_exec_transition(path, argv, envp);
+    if (compat_rc != -2) return compat_rc;
 
     syscall_exec_req_t req;
     memset(&req, 0, sizeof(req));

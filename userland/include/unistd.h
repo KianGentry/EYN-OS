@@ -28,8 +28,13 @@ int fd_set_inherit(int enabled);
 int fd_set_stdio(int stdin_fd, int stdout_fd, int stderr_fd);
 int fd_set_nonblock(int fd, int enabled);
 
+/* Restricted NOMMU-style compat layer: child may only exec or _exit. */
+pid_t vfork(void);
+pid_t fork(void);
+
 #define WNOHANG 1
 int spawn(const char* path, const char* const* argv, int argc);
+int wait(int* status);
 int waitpid(int pid, int* status, int options);
 
 /* Signal primitives */
