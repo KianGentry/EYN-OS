@@ -75,7 +75,7 @@ int sigreturn(void) {
 
 /* Install a signal handler for the calling process. */
 sighandler_t signal(int sig, sighandler_t handler) {
-    (void)eyn_syscall3_pii(EYN_SYSCALL_SIGNAL, sig, handler, 0);
+    (void)eyn_syscall3_iii(EYN_SYSCALL_SIGNAL, sig, (int)(uintptr_t)handler, 0);
     return (sighandler_t)0;
 }
 
