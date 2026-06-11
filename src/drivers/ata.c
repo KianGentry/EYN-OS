@@ -7,6 +7,7 @@
 #include <misc/sched.h>
 #include <cpu/arch.h>
 #include <drivers/pci.h>
+#include <fs/vfs.h>
 
 // Define NULL if not available
 #ifndef NULL
@@ -1121,6 +1122,9 @@ int ata_identify(uint8 drive, uint16* identify_data) {
 }
 
 int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
+    if (drive == VFS_DRIVE_RAM) {
+        return vfs_ramdisk_read_sector(lba, buf);
+    }
     if (drive >= 8 || !detected_drives[drive].present) {
         return -1;
     }
@@ -1277,6 +1281,9 @@ int ata_read_sector(uint8 drive, uint32 lba, uint8* buf) {
 }
 
 int ata_write_sector(uint8 drive, uint32 lba, const uint8* buf) {
+    if (drive == VFS_DRIVE_RAM) {
+        return vfs_ramdisk_write_sector(lba, buf);
+    }
     if (drive >= 8 || !detected_drives[drive].present) {
         return -1;
     }

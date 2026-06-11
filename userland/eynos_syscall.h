@@ -111,6 +111,10 @@ enum {
     EYN_SYSCALL_TTY_GET_WINSIZE = 148,
     EYN_SYSCALL_PTY_OPEN = 149,
     EYN_SYSCALL_GET_SYSINFO = 152,
+    EYN_SYSCALL_SYSTEMCFG_SET_INSTALL_DRIVE = 153,
+    EYN_SYSCALL_SYSTEMCFG_SET_DRIVE_LABEL = 154,
+    EYN_SYSCALL_SYSTEMCFG_GET_DRIVE_LABEL = 155,
+    EYN_SYSCALL_SYSTEMCFG_GET_INSTALL_DRIVE = 156,
 };
 
 #define EYN_TTY_MODE_RAW 0x0001
@@ -257,6 +261,50 @@ static inline int eyn_sys_get_sysinfo(eyn_sysinfo_t* info) {
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_GET_SYSINFO), "b"(info)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_systemcfg_set_install_drive(uint32_t logical_drive) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_SYSTEMCFG_SET_INSTALL_DRIVE), "b"((int)logical_drive)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_systemcfg_get_install_drive(void) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_SYSTEMCFG_GET_INSTALL_DRIVE)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_systemcfg_set_drive_label(uint32_t logical_drive, const char* label) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_SYSTEMCFG_SET_DRIVE_LABEL), "b"((int)logical_drive), "c"(label)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_systemcfg_get_drive_label(uint32_t logical_drive, char* out, int out_cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_SYSTEMCFG_GET_DRIVE_LABEL), "b"((int)logical_drive), "c"(out), "d"(out_cap)
         : "memory"
     );
     return ret;

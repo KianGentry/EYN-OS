@@ -27,6 +27,7 @@
 #include <ata.h>
 #include <ahci.h>
 #include <ui_prefs.h>
+#include <system_config.h>
 #include <cpu/fpu.h>
 #include <cpu/cpuid.h>
 #include <arch.h>
@@ -319,6 +320,9 @@ int kmain(uint32 magic, multiboot_info_t *mbi)
 
     // Initialize crash log after VFS is available.
     crashlog_init(0);
+
+    // Load persisted system-level disk settings (install drive, labels).
+    (void)system_config_load(0);
 
     // Load and apply persisted UI preferences (theme + font) if present.
     // Safe to do here: VFS is usable after vdrive_init()+mount.

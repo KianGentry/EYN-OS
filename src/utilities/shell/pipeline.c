@@ -838,13 +838,16 @@ static int pipeline_try_spawn_user_program(command_t* cmd, const char* extra_arg
 
     char target[128];
     vfs_stat_t st;
+    uint8 exec_drive = shell_get_binary_lookup_drive();
+    const char* base = shell_get_binary_lookup_base();
+    if (!base || !base[0]) base = "/binaries";
 
-    int n = snprintf(target, sizeof(target), "/binaries/%s", cmd->name);
+    int n = snprintf(target, sizeof(target), "%s/%s", base, cmd->name);
     if (n <= 0 || n >= (int)sizeof(target)) return 0;
-    if (vfs_stat(g_current_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) {
-        n = snprintf(target, sizeof(target), "/binaries/%s.uelf", cmd->name);
+    if (vfs_stat(exec_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) {
+        n = snprintf(target, sizeof(target), "%s/%s.uelf", base, cmd->name);
         if (n <= 0 || n >= (int)sizeof(target)) return 0;
-        if (vfs_stat(g_current_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) return 0;
+        if (vfs_stat(exec_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) return 0;
     }
 
     const char* argv[32];
@@ -856,7 +859,7 @@ static int pipeline_try_spawn_user_program(command_t* cmd, const char* extra_arg
         argv[argc++] = extra_arg;
     }
 
-    int pid = user_task_spawn_argv(g_current_drive, target, argc, argv);
+    int pid = user_task_spawn_argv(exec_drive, target, argc, argv);
     if (pid <= 0) return 0;
     (void)user_task_waitpid(pid, NULL, 0);
     return 1;

@@ -130,7 +130,7 @@ EMULATOR_FLAGS = -kernel
 
 OBJS = $(OBJDIR)/kasm.o $(OBJDIR)/kc.o $(OBJDIR)/gdt.o $(OBJDIR)/gdt_asm.o $(OBJDIR)/idt.o $(OBJDIR)/isr.o $(OBJDIR)/isr_stubs.o $(OBJDIR)/syscall.o $(OBJDIR)/fpu.o $(OBJDIR)/cpuid.o $(OBJDIR)/kb.o $(OBJDIR)/string.o $(OBJDIR)/system.o $(OBJDIR)/arch.o $(OBJDIR)/util.o $(OBJDIR)/mem386.o $(OBJDIR)/slab.o $(OBJDIR)/shell.o $(OBJDIR)/shell_args.o $(OBJDIR)/math.o $(OBJDIR)/vga.o $(OBJDIR)/vga_text.o $(OBJDIR)/serial.o $(OBJDIR)/fat32.o $(OBJDIR)/ata.o $(OBJDIR)/ahci.o $(OBJDIR)/eynfs.o $(OBJDIR)/rei.o $(OBJDIR)/reiv.o $(OBJDIR)/tui.o $(OBJDIR)/run_command.o $(OBJDIR)/history.o $(OBJDIR)/alias.o $(OBJDIR)/predictive_memory.o $(OBJDIR)/zero_copy.o $(OBJDIR)/vmm.o $(OBJDIR)/paging_compat.o $(OBJDIR)/user_access.o $(OBJDIR)/pipeline.o $(OBJDIR)/kernel_api.o $(OBJDIR)/native_exec.o $(OBJDIR)/user_elf.o $(OBJDIR)/sched.o $(OBJDIR)/irq.o $(OBJDIR)/irq_stubs.o $(OBJDIR)/mouse.o $(OBJDIR)/vfs.o $(OBJDIR)/panic.o $(OBJDIR)/watchdog.o $(OBJDIR)/capabilities.o $(OBJDIR)/segdom.o $(OBJDIR)/crashlog.o $(OBJDIR)/context.o $(OBJDIR)/fs_txn.o $(OBJDIR)/linux_syscalls.o
 
-OBJS += $(OBJDIR)/tiling_manager.o $(OBJDIR)/ui_prefs.o
+OBJS += $(OBJDIR)/tiling_manager.o $(OBJDIR)/ui_prefs.o $(OBJDIR)/system_config.o
 OBJS += $(OBJDIR)/terminals.o
 OBJS += $(OBJDIR)/partition.o
 OBJS += $(OBJDIR)/pci.o
@@ -358,6 +358,9 @@ $(OBJDIR)/terminals.o:src/utilities/tui/terminals.c
 
 $(OBJDIR)/ui_prefs.o:src/utilities/tui/ui_prefs.c
 	$(COMPILER) $(CFLAGS) src/utilities/tui/ui_prefs.c -o $(OBJDIR)/ui_prefs.o
+
+$(OBJDIR)/system_config.o:src/utilities/system_config.c
+	$(COMPILER) $(CFLAGS) src/utilities/system_config.c -o $(OBJDIR)/system_config.o
 
 $(OBJDIR)/vfs.o:src/fs/vfs.c
 	$(COMPILER) $(CFLAGS) src/fs/vfs.c -o $(OBJDIR)/vfs.o

@@ -38,6 +38,7 @@
 #include <cpu/user_elf.h>
 #include <cpu/gdt.h>
 #include <cpu/segdom.h>
+#include <system_config.h>
 #include <partition.h>
 
 // Forward declarations for Linux syscall dispatch
@@ -647,6 +648,10 @@ uint32 get_last_error_eip() {
 
 /* System information syscalls */
 #define SYSCALL_GET_SYSINFO 152
+#define SYSCALL_SYSTEMCFG_SET_INSTALL_DRIVE 153
+#define SYSCALL_SYSTEMCFG_SET_DRIVE_LABEL 154
+#define SYSCALL_SYSTEMCFG_GET_DRIVE_LABEL 155
+#define SYSCALL_SYSTEMCFG_GET_INSTALL_DRIVE 156
 
 #define TTY_MODE_RAW 0x0001
 
@@ -2825,7 +2830,12 @@ static int syscall_write_file_from_fd(user_fd_t* ufd, const void* user_src, int 
 
     int written = vfs_write_file(ufd->drive, ufd->path, kbuf, (uint32)len);
     free(kbuf);
-    if (written < 0) return -1;
+    if (written < 0) {
+        if (written == -28) {
+            printf("%cRAM disk is full. Move files to a hard drive or delete files on RAM:.\n", 255, 80, 80);
+        }
+        return -1;
+    }
 
     ufd->offset = (uint32)written;
     ufd->size = (uint32)written;
@@ -3240,6 +3250,11 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             uint8 logical = (uint8)arg1;
             regs->eax = (uint32)syscall_installer_prepare_drive(logical);
+            if ((int)regs->eax == 0) {
+                if (system_config_set_install_drive_logical(logical) == 0) {
+                    (void)system_config_save();
+                }
+            }
             break;
         }
         case SYSCALL_INSTALLER_FORMAT_EYNFS_PARTITION: {
@@ -3293,28 +3308,88 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             regs->eax = 0;
             break;
         }
+        case SYSCALL_SYSTEMCFG_SET_INSTALL_DRIVE: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint8 logical = (uint8)arg1;
+            if (system_config_set_install_drive_logical(logical) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (system_config_save() == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_SYSTEMCFG_SET_DRIVE_LABEL: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint8 logical = (uint8)arg1;
+            const char* user_label = (const char*)arg2;
+            char label[SYS_CFG_LABEL_MAX + 1];
+            if (!user_label) { regs->eax = (uint32)-1; break; }
+            if (copyin_cstr(label, sizeof(label), user_label) != 0) { regs->eax = (uint32)-1; break; }
+            if (!ata_logical_drive_present(logical)) { regs->eax = (uint32)-1; break; }
+            if (system_config_set_drive_label(logical, label) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (system_config_save() == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_SYSTEMCFG_GET_DRIVE_LABEL: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint8 logical = (uint8)arg1;
+            char* user_out = (char*)arg2;
+            int out_cap = (int)arg3;
+            char label[SYS_CFG_LABEL_MAX + 1];
+            int n;
+            if (!user_out || out_cap <= 0) { regs->eax = (uint32)-1; break; }
+            if (system_config_get_drive_label(logical, label, sizeof(label)) != 0) {
+                if (copyout(user_out, "\0", 1) != 0) { regs->eax = (uint32)-1; break; }
+                regs->eax = 0;
+                break;
+            }
+            n = (int)strlen(label);
+            if (n >= out_cap) n = out_cap - 1;
+            if (n < 0) n = 0;
+            if (copyout(user_out, label, (size_t)n) != 0) { regs->eax = (uint32)-1; break; }
+            if (copyout(user_out + n, "\0", 1) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)n;
+            break;
+        }
+        case SYSCALL_SYSTEMCFG_GET_INSTALL_DRIVE: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)system_config_get_install_drive_logical();
+            break;
+        }
         case SYSCALL_DRIVE_SET_LOGICAL: {
             if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             uint8 logical = (uint8)arg1;
-            uint8 physical = ata_logical_to_physical(logical);
-            if (physical == 0xFFu) { regs->eax = (uint32)-1; break; }
-            g_current_drive = physical;
+            uint8 ata_count = ata_get_num_logical_drives();
+            if (logical == ata_count) {
+                g_current_drive = VFS_DRIVE_RAM;
+            } else {
+                uint8 physical = ata_logical_to_physical(logical);
+                if (physical == 0xFFu) { regs->eax = (uint32)-1; break; }
+                g_current_drive = physical;
+            }
             regs->eax = (uint32)logical;
             break;
         }
         case SYSCALL_DRIVE_GET_LOGICAL: {
             if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
-            regs->eax = (uint32)ata_physical_to_logical(g_current_drive);
+            if (g_current_drive == VFS_DRIVE_RAM) {
+                regs->eax = (uint32)ata_get_num_logical_drives();
+            } else {
+                regs->eax = (uint32)ata_physical_to_logical(g_current_drive);
+            }
             break;
         }
         case SYSCALL_DRIVE_GET_COUNT: {
             if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
-            regs->eax = (uint32)ata_get_num_logical_drives();
+            regs->eax = (uint32)(ata_get_num_logical_drives() + 1u);
             break;
         }
         case SYSCALL_DRIVE_IS_PRESENT: {
             if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
-            regs->eax = ata_logical_drive_present((uint8)arg1) ? 1u : 0u;
+            uint8 logical = (uint8)arg1;
+            uint8 ata_count = ata_get_num_logical_drives();
+            if (logical == ata_count) {
+                regs->eax = 1u;
+            } else {
+                regs->eax = ata_logical_drive_present(logical) ? 1u : 0u;
+            }
             break;
         }
         case SYSCALL_INIT_SERVICES: {

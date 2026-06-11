@@ -34,6 +34,8 @@ shell_cmd_handler_t find_command(const char* name);
 // Drive context helpers used by shell GUIs and filesystem code
 uint8 get_current_physical_drive(void);
 uint8 get_current_logical_drive(void);
+uint8 shell_get_binary_lookup_drive(void);
+const char* shell_get_binary_lookup_base(void);
 
 // Global history instance
 extern command_history_t g_command_history;

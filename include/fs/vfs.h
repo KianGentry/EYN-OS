@@ -78,4 +78,9 @@ int vfs_rmdir(uint8 drive, const char* path);
 // Remove a file at path. Returns 0 on success, <0 on error.
 int vfs_unlink(uint8 drive, const char* path);
 
+// RAM disk raw sector bridge used by low-level storage paths when drive == VFS_DRIVE_RAM.
+int vfs_ramdisk_read_sector(uint32 lba, uint8 out[512]);
+int vfs_ramdisk_write_sector(uint32 lba, const uint8 in[512]);
+int vfs_ramdisk_total_sectors(uint32* out_total);
+
 #endif // VFS_H

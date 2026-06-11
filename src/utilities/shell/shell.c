@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <utilities/shell/shell_script.h>
 #include <ata.h>
+#include <system_config.h>
 #define COMMAND_HASH_SIZE 256
 
 extern uint8 g_current_drive;
@@ -134,6 +135,14 @@ uint8_t get_current_physical_drive(void) {
 // get current logical drive number
 uint8_t get_current_logical_drive(void) {
     return ata_physical_to_logical(g_current_drive);
+}
+
+uint8 shell_get_binary_lookup_drive(void) {
+    return system_config_get_install_drive_physical();
+}
+
+const char* shell_get_binary_lookup_base(void) {
+    return system_config_get_install_bin_path();
 }
 
 // Add a global variable for the current directory path (for now, always root)
@@ -314,13 +323,17 @@ static int try_run_unknown_as_uelf(const shell_args_t* args) {
         return 0;
     }
 
-    // Prefer /binaries first (like /bin). This avoids surprising "current directory" shadowing
-    // and makes command resolution deterministic.
-    // Note: keep path resolution simple; /binaries is always absolute.
-    snprintf(abspath, sizeof(abspath), "/binaries/%s", target_plain);
-    if (try_run_uelf_at_path(g_current_drive, abspath, argc, argv)) return 1;
-    snprintf(abspath, sizeof(abspath), "/binaries/%s", target_uelf);
-    if (try_run_uelf_at_path(g_current_drive, abspath, argc, argv)) return 1;
+    // Unknown command lookup always resolves from persisted install location.
+    {
+        uint8 exec_drive = shell_get_binary_lookup_drive();
+        const char* base = shell_get_binary_lookup_base();
+        if (!base || !base[0]) base = "/binaries";
+
+        snprintf(abspath, sizeof(abspath), "%s/%s", base, target_plain);
+        if (try_run_uelf_at_path(exec_drive, abspath, argc, argv)) return 1;
+        snprintf(abspath, sizeof(abspath), "%s/%s", base, target_uelf);
+        if (try_run_uelf_at_path(exec_drive, abspath, argc, argv)) return 1;
+    }
 
     // Binaries-only policy: no current-directory or recursive fallback for unknown commands.
     return 0;
@@ -426,9 +439,9 @@ void handle_shell_command(string input) {
 
     // Command not found
     if (unknown_args.argc > 0 && unknown_args.argv[0])
-        printf("%cCommand not found in /binaries: %s\n", 255, 0, 0, unknown_args.argv[0]);
+        printf("%cCommand not found in %s: %s\n", 255, 0, 0, shell_get_binary_lookup_base(), unknown_args.argv[0]);
     else
-        printf("%cCommand not found in /binaries\n", 255, 0, 0);
+        printf("%cCommand not found in %s\n", 255, 0, 0, shell_get_binary_lookup_base());
 cleanup:
     if (ctx_pushed) {
         command_context_pop();
@@ -475,8 +488,13 @@ void launch_shell(int n) {
     }
 
     if (!g_boot_text_mode && disk_has_installer && !g_boot_package_update_check_done) {
+        uint8 exec_drive = shell_get_binary_lookup_drive();
+        const char* base = shell_get_binary_lookup_base();
+        char install_path[128];
+        if (!base || !base[0]) base = "/binaries";
+        snprintf(install_path, sizeof(install_path), "%s/install", base);
         vfs_stat_t install_st;
-        if (vfs_stat(g_current_drive, "/binaries/install", &install_st) == 0
+        if (vfs_stat(exec_drive, install_path, &install_st) == 0
             && install_st.type == VFS_NODE_FILE) {
             const char* check_argv[3];
             check_argv[0] = "--check-updates";
@@ -484,7 +502,7 @@ void launch_shell(int n) {
             check_argv[2] = "--quiet";
             g_boot_package_update_check_done = 1;
             /* Spawn asynchronously to prevent UI blocking during update check */
-            (void)user_task_spawn_argv(g_current_drive, "/binaries/install", 3, check_argv);
+            (void)user_task_spawn_argv(exec_drive, install_path, 3, check_argv);
         }
     }
     
@@ -511,7 +529,9 @@ void launch_shell(int n) {
         } else {
             uint8 logical_drive = ata_physical_to_logical(g_current_drive);
             if (logical_drive == 0xFF) logical_drive = 0;  // fallback to 0 if mapping fails
-            printf("%c%d:%s", 200, 200, 200, logical_drive, shell_current_path); // white for drive:path
+            const char* label = system_config_get_drive_label_ptr(logical_drive);
+            if (label && label[0]) printf("%c%s:%s", 200, 200, 200, label, shell_current_path);
+            else printf("%c%d:%s", 200, 200, 200, logical_drive, shell_current_path); // white for drive:path
         }
         printf("%c! ", 255, 255, 0); // yellow for !
         string ch = readStr_with_history(&g_command_history);
@@ -614,6 +634,8 @@ void launch_shell(int n) {
                 int res = write_output_to_file(shell_redirect_buf, strlen(shell_redirect_buf), filename, g_current_drive);
                 if (res == 0)
                     printf("%cOutput redirected to '%s' successfully.\n", 0, 255, 0, filename);
+                else if (res == -28)
+                    printf("%cRAM disk is full. Move files to a hard drive or delete files on RAM:.\n", 255, 80, 80);
                 else
                     printf("%cFailed to write file '%s' (error code: %d).\n", 255, 0, 0, filename, res);
                 stop_shell_redirect();

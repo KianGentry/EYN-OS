@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-06-06 08:24:20
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-06-11 01:30:08
 
-**Total Commands:** 107
+**Total Commands:** 110
 
 ## Table of Contents
 
@@ -1068,6 +1068,38 @@ download https://example.com/index.html
 
 ---
 
+### drivelabel
+
+**Binary:** `testdir/binaries/drivelabel`
+
+**Metadata Source:** `EYN-packages/packages/drivelabel/drivelabel_uelf.c`
+
+**Description:**
+Set or list logical drive labels.
+
+**Example:**
+```bash
+drivelabel list
+```
+
+---
+
+### drives
+
+**Binary:** `testdir/binaries/drives`
+
+**Metadata Source:** `EYN-packages/packages/drives/drives_uelf.c`
+
+**Description:**
+List logical drives and partitions.
+
+**Example:**
+```bash
+drives
+```
+
+---
+
 ### echo
 
 **Binary:** `testdir/binaries/echo`
@@ -1468,6 +1500,22 @@ search hello -a
 
 ---
 
+### setinstalldrive
+
+**Binary:** `testdir/binaries/setinstalldrive`
+
+**Metadata Source:** `EYN-packages/packages/setinstalldrive/setinstalldrive_uelf.c`
+
+**Description:**
+Set install binary lookup drive.
+
+**Example:**
+```bash
+setinstalldrive 0
+```
+
+---
+
 ### settings
 
 **Binary:** `testdir/binaries/settings`
@@ -1750,5 +1798,5 @@ zsnes_1_51
 | Memory Commands | 7 |
 | GUI/Window Commands | 12 |
 | Development Commands | 9 |
-| Utility Commands | 48 |
+| Utility Commands | 51 |
 

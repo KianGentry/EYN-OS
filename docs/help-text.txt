@@ -86,6 +86,8 @@ Utility Commands:
   cat             - Print a file to stdout.
   diskmgr         - Manage logical drives from userland.
   download        - Download a file over HTTP/1.1 or HTTPS/TLS (GET only) with DNS support.
+  drivelabel      - Set or list logical drive labels.
+  drives          - List logical drives and partitions.
   echo            - Print arguments to stdout.
   edit            - Graphical text editor.
   extract         - Extract a TAR or TAR.GZ archive into a directory.
@@ -111,6 +113,7 @@ Utility Commands:
   ptyspawn        - Spawn a child process on a PTY slave and relay its output.
   random          - Generate random numbers.
   search          - Search for text in filenames and file contents.
+  setinstalldrive - Set install binary lookup drive.
   settings        - Open system settings (video + customization).
   sha256          - Compute SHA-256 digests for files or strings.
   snake           - Classic snake game with keyboard controls.

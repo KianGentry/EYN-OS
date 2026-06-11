@@ -19,7 +19,7 @@
 extern multiboot_info_t *g_mbi;
 
 typedef struct {
-    const uint8* base;
+    uint8* base;
     uint32 sectors;
     uint32 part_start_lba;
     eynfs_superblock_t sb;
@@ -119,6 +119,13 @@ static int vfs_ramdisk_read_sector_raw(const vfs_ramdisk_ctx_t* rd, uint32 lba, 
     return 0;
 }
 
+static int vfs_ramdisk_write_sector_raw(vfs_ramdisk_ctx_t* rd, uint32 lba, const uint8 in[512]) {
+    if (!rd || !rd->base || !in) return -1;
+    if (lba >= rd->sectors) return -1;
+    memcpy(rd->base + (lba * 512u), in, 512u);
+    return 0;
+}
+
 static int vfs_ramdisk_find_partition_start(const vfs_ramdisk_ctx_t* rd, uint32* out_start) {
     if (!rd || !out_start) return -1;
 
@@ -179,7 +186,7 @@ static int vfs_ramdisk_load(vfs_ramdisk_ctx_t* rd) {
      * reads use identity addresses, module bytes above 4MB can alias user
      * mappings and return corrupted data (observed at RAM:/binaries/stats).
      */
-    rd->base = (const uint8*)((uintptr)KERNEL_BASE + (uintptr)mod->mod_start);
+    rd->base = (uint8*)((uintptr)KERNEL_BASE + (uintptr)mod->mod_start);
     uint32 bytes = (uint32)(mod->mod_end - mod->mod_start);
     rd->sectors = bytes / 512u;
     if (!rd->base || rd->sectors == 0) {
@@ -278,6 +285,28 @@ static int vfs_ramdisk_load(vfs_ramdisk_ctx_t* rd) {
 static int vfs_ramdisk_available(void) {
     vfs_ramdisk_ctx_t rd;
     return (vfs_ramdisk_load(&rd) == 0) ? 1 : 0;
+}
+
+int vfs_ramdisk_read_sector(uint32 lba, uint8 out[512]) {
+    vfs_ramdisk_ctx_t rd;
+    if (!out) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    return vfs_ramdisk_read_sector_raw(&rd, lba, out);
+}
+
+int vfs_ramdisk_write_sector(uint32 lba, const uint8 in[512]) {
+    vfs_ramdisk_ctx_t rd;
+    if (!in) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    return vfs_ramdisk_write_sector_raw(&rd, lba, in);
+}
+
+int vfs_ramdisk_total_sectors(uint32* out_total) {
+    vfs_ramdisk_ctx_t rd;
+    if (!out_total) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    *out_total = rd.sectors;
+    return 0;
 }
 
 static uint32 vfs_ramdisk_fs_block_to_lba(const vfs_ramdisk_ctx_t* rd, uint32 fs_block) {
@@ -955,7 +984,6 @@ static void vfs_split_path(const char* abspath, char* parent_out, size_t parent_
 int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) {
     if (!path || !buf) return -1;
     if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
-    if (drive == VFS_DRIVE_RAM) return -1;
     // EYNFS fast-path
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -968,7 +996,9 @@ int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) 
             if (eynfs_traverse_path(drive, &sb, path, &ent, &pb, &idx) != 0) return -4;
         }
         int written = eynfs_write_file(drive, &sb, &ent, (void*)buf, size, pb, idx);
-        return (written >= 0) ? written : -5;
+        if (written >= 0) return written;
+        if (drive == VFS_DRIVE_RAM) return -28;
+        return -5;
     }
     // FAT32 write
     uint32 part_lba = fat32_get_partition_lba_start(drive);
@@ -1094,7 +1124,6 @@ int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) 
 int vfs_mkdir(uint8 drive, const char* path) {
     if (!path || path[0] != '/') return -1;
     if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
-    if (drive == VFS_DRIVE_RAM) return -1;
     // EYNFS
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -1102,7 +1131,10 @@ int vfs_mkdir(uint8 drive, const char* path) {
         char parent[256], base[128]; vfs_split_path(path, parent, sizeof(parent), base, sizeof(base));
         eynfs_dir_entry_t p;
         if (eynfs_traverse_path(drive, &sb, parent, &p, NULL, NULL) != 0 || p.type != EYNFS_TYPE_DIR) return -2;
-        return (eynfs_create_entry(drive, &sb, p.first_block, base, EYNFS_TYPE_DIR) == 0) ? 0 : -3;
+        int rc = eynfs_create_entry(drive, &sb, p.first_block, base, EYNFS_TYPE_DIR);
+        if (rc == 0) return 0;
+        if (drive == VFS_DRIVE_RAM) return -28;
+        return -3;
     }
     // FAT32
     uint32 part_lba = fat32_get_partition_lba_start(drive);
@@ -1178,7 +1210,6 @@ int vfs_mkdir(uint8 drive, const char* path) {
 int vfs_rmdir(uint8 drive, const char* path) {
     if (!path || strcmp(path, "/") == 0) return -1;
     if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
-    if (drive == VFS_DRIVE_RAM) return -1;
     // EYNFS
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -1273,7 +1304,6 @@ int vfs_rmdir(uint8 drive, const char* path) {
 int vfs_unlink(uint8 drive, const char* path) {
     if (!path || path[0] != '/') return -1;
     if (!vfs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
-    if (drive == VFS_DRIVE_RAM) return -1;
     // EYNFS
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
@@ -1578,6 +1608,9 @@ int fatfix_repair_path(uint8_t disk, const char* dirpath) {
 int write_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
     if (!fs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
     int written = vfs_write_file(disk, filename, buf, (uint32)len);
+    if (written < 0) {
+        return written;
+    }
     if (written != len) {
         printf("Failed to write file data: expected %d, got %d\n", len, written);
         return -1;
