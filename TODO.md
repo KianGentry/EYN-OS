@@ -41,6 +41,16 @@
 - [ ] Support multiple NICs cleanly
 - [ ] Improve offloads, VLAN handling, and descriptor flexibility
 
+## Optimisations
+- [ ] Replace ATA PIO-heavy hot paths with DMA-first transfers and reduce busy-wait polling
+- [ ] Add block cache and read-ahead/write-back strategy to reduce storage I/O latency
+- [ ] Rework network RX/TX toward interrupt-first handling with budgeted drain instead of command-loop polling
+- [ ] Replace per-byte pipe/PTY copy loops with bulk ring-buffer transfers
+- [ ] Reduce allocator scan/coalesce overhead in hot paths (slab-first and less global merge churn)
+- [ ] Add true append/offset write paths to avoid full read-concatenate-rewrite file appends
+- [ ] Improve scheduler wait paths toward event/wait-queue driven wakeups with less syscall-side polling
+- [ ] Replace linear capability-registry lookups with O(1)-ish indexed or hashed lookup
+
 ## Developer tooling
 - [ ] Add more assembler features and syntax coverage
 - [ ] Improve chibicc diagnostics and optimization quality

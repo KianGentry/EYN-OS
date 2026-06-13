@@ -1,7 +1,6 @@
 *.img
 /.github/
 !/.github/
-/.github/*
 !/.github/workflows/
 !/.github/workflows/*.yml
 !/.github/workflows/*.yaml
@@ -18,3 +17,4 @@ eynfs_format
 .eynosconfig
 tmp*
 /testdir/programs/doom1.wad
+.github/workflows/
