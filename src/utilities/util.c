@@ -741,9 +741,21 @@ static void merge_free_blocks() {
                 return;
             }
             
-            if (!block->used && !next_block->used) {
-                block->size += next_block->size;
+            uint32 merged_size = 0;
+            rust_heap_coalesce_result_t coalesce_res = rust_heap_plan_coalesce(
+                block->used,
+                next_block->used,
+                block->size,
+                next_block->size,
+                &merged_size);
+
+            if (coalesce_res == RUST_HEAP_COALESCE_MERGE) {
+                block->size = merged_size;
                 block->next = next_block->next;
+            } else if (coalesce_res == RUST_HEAP_COALESCE_OVERFLOW) {
+                printf("%c[MEMORY] Coalesce overflow at offset 0x%X\n", 255, 0, 0, current);
+                memory_errors++;
+                return;
             } else {
                 break;
             }

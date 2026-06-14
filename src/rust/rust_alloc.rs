@@ -62,6 +62,14 @@ pub enum RustHeapMathResult {
     NoSplit = 3,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub enum RustHeapCoalesceResult {
+    Skip = 0,
+    Merge = 1,
+    Overflow = 2,
+}
+
 unsafe extern "C" {
     fn malloc(nbytes: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
@@ -356,4 +364,31 @@ pub unsafe extern "C" fn rust_heap_plan_split(
         *out_new_block_size = new_block_size;
     }
     RustHeapMathResult::Ok
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_heap_plan_coalesce(
+    block_used: u32,
+    next_used: u32,
+    block_size: u32,
+    next_size: u32,
+    out_merged_size: *mut u32,
+) -> RustHeapCoalesceResult {
+    if out_merged_size.is_null() {
+        return RustHeapCoalesceResult::Overflow;
+    }
+
+    if block_used != 0 || next_used != 0 {
+        return RustHeapCoalesceResult::Skip;
+    }
+
+    let merged = match block_size.checked_add(next_size) {
+        Some(v) => v,
+        None => return RustHeapCoalesceResult::Overflow,
+    };
+
+    unsafe {
+        *out_merged_size = merged;
+    }
+    RustHeapCoalesceResult::Merge
 }

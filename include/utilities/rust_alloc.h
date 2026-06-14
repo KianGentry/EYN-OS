@@ -33,6 +33,12 @@ typedef enum {
 	RUST_HEAP_MATH_NO_SPLIT = 3
 } rust_heap_math_result_t;
 
+typedef enum {
+	RUST_HEAP_COALESCE_SKIP = 0,
+	RUST_HEAP_COALESCE_MERGE = 1,
+	RUST_HEAP_COALESCE_OVERFLOW = 2
+} rust_heap_coalesce_result_t;
+
 zero_copy_buffer_t* rust_zero_copy_buffer_create(uint32_t size);
 void rust_zero_copy_buffer_destroy(zero_copy_buffer_t* buffer);
 int rust_zero_copy_buffer_read(const zero_copy_buffer_t* buffer, void* data, uint32_t offset, uint32_t size);
@@ -60,6 +66,13 @@ rust_heap_math_result_t rust_heap_plan_split(
 	uint32_t min_block_size,
 	uint32_t* out_new_block_offset,
 	uint32_t* out_new_block_size);
+
+rust_heap_coalesce_result_t rust_heap_plan_coalesce(
+	uint32_t block_used,
+	uint32_t next_used,
+	uint32_t block_size,
+	uint32_t next_size,
+	uint32_t* out_merged_size);
 
 #ifdef __cplusplus
 }
