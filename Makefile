@@ -39,6 +39,7 @@ CONFIG_SCHED_MLFQ_Q1_MS ?= 25
 CONFIG_SCHED_MLFQ_Q2_MS ?= 50
 CONFIG_SCHED_MLFQ_BOOST_MS ?= 1000
 CONFIG_ATA_LBA48_SMOKE ?= 0
+CONFIG_RUST_ALLOCATOR ?= 0
 
 ARCH_KERNEL_CFLAGS_i386 = -m32 -march=i386 -mtune=i386 -DEYNOS_ARCH_I386=1
 ARCH_KERNEL_CFLAGS_amd64 = -m64 -march=x86-64 -mtune=generic -mno-red-zone -DEYNOS_ARCH_AMD64=1
@@ -53,6 +54,7 @@ KERNEL_CFLAGS = $(ARCH_KERNEL_CFLAGS_$(ARCH)) -c -ffreestanding -fno-builtin -fn
 		 -DCONFIG_SCHED_MLFQ_Q2_MS=$(CONFIG_SCHED_MLFQ_Q2_MS) \
 		 -DCONFIG_SCHED_MLFQ_BOOST_MS=$(CONFIG_SCHED_MLFQ_BOOST_MS) \
 		 -DCONFIG_ATA_LBA48_SMOKE=$(CONFIG_ATA_LBA48_SMOKE) \
+		 -DCONFIG_RUST_ALLOCATOR=$(CONFIG_RUST_ALLOCATOR) \
 		 -DCONFIG_GUI_ENABLED=$(CONFIG_GUI_ENABLED) \
 		 -DCONFIG_TTY_ENABLED=$(CONFIG_TTY_ENABLED) \
 	         -DCONFIG_DEBUG_SERIAL_TO_VGA=$(CONFIG_DEBUG_SERIAL_TO_VGA) \
@@ -117,6 +119,11 @@ ARCH_EMULATOR_i386 = qemu-system-i386
 ARCH_EMULATOR_amd64 = qemu-system-x86_64
 EMULATOR = $(ARCH_EMULATOR_$(ARCH))
 
+RUSTC ?= rustc
+RUSTFLAGS_KERNEL_i386 = --target i686-unknown-linux-gnu
+RUSTFLAGS_KERNEL_amd64 = --target x86_64-unknown-linux-gnu
+RUSTFLAGS_KERNEL_COMMON = --crate-type lib --emit=obj -C panic=abort -C opt-level=s -C relocation-model=static
+
 # QEMU display backend.
 QEMU_DISPLAY ?= gtk,grab-on-hover=on
 
@@ -141,6 +148,10 @@ OBJS += $(OBJDIR)/shell_script.o
 OBJS += $(OBJDIR)/ac97.o
 OBJS += $(OBJDIR)/reis.o
 OBJS += $(OBJDIR)/otf_font.o
+
+ifeq ($(CONFIG_RUST_ALLOCATOR),1)
+OBJS += $(OBJDIR)/rust_alloc.o
+endif
 
 ifeq ($(ARCH),i386)
 OBJS += $(OBJDIR)/vbe_bios.o
@@ -247,6 +258,11 @@ $(OBJDIR)/arch.o:$(ARCH_CPU_ARCH_SRC_$(ARCH))
 
 $(OBJDIR)/util.o:src/utilities/util.c
 	$(COMPILER) $(CFLAGS) src/utilities/util.c -o $(OBJDIR)/util.o
+
+ifeq ($(CONFIG_RUST_ALLOCATOR),1)
+$(OBJDIR)/rust_alloc.o:src/rust/rust_alloc.rs
+	$(RUSTC) $(RUSTFLAGS_KERNEL_$(ARCH)) $(RUSTFLAGS_KERNEL_COMMON) src/rust/rust_alloc.rs -o $(OBJDIR)/rust_alloc.o
+endif
 
 $(OBJDIR)/slab.o:src/mm/slab.c
 	$(COMPILER) $(CFLAGS) src/mm/slab.c -o $(OBJDIR)/slab.o

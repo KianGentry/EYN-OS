@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <rust_alloc.h>
 
 // Global zero-copy state
 static zero_copy_file_t* g_zero_copy_files = NULL;  // Dynamic array
@@ -583,6 +584,9 @@ int zero_copy_vmsplice(int fd, const void* buf, size_t count, uint8_t flags) {
 
 zero_copy_buffer_t* create_zero_copy_buffer(uint32_t size) {
     if (!zero_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
+#if CONFIG_RUST_ALLOCATOR
+    return rust_zero_copy_buffer_create(size);
+#else
     zero_copy_buffer_t* b = (zero_copy_buffer_t*)malloc(sizeof(zero_copy_buffer_t));
     if (!b) return NULL;
     memset(b, 0, sizeof(*b));
@@ -599,29 +603,42 @@ zero_copy_buffer_t* create_zero_copy_buffer(uint32_t size) {
     b->block_start = 0;
     b->dirty = 0;
     return b;
+#endif
 }
 
 void destroy_zero_copy_buffer(zero_copy_buffer_t* buffer) {
+#if CONFIG_RUST_ALLOCATOR
+    rust_zero_copy_buffer_destroy(buffer);
+#else
     if (!buffer) return;
     if (buffer->buffer) free(buffer->buffer);
     free(buffer);
+#endif
 }
 
 int zero_copy_buffer_read(zero_copy_buffer_t* buffer, void* data, uint32_t offset, uint32_t size) {
+#if CONFIG_RUST_ALLOCATOR
+    return rust_zero_copy_buffer_read(buffer, data, offset, size);
+#else
     if (!buffer || !buffer->buffer || !data) return -1;
     if (offset > buffer->size) return -1;
     if (size > buffer->size - offset) return -1;
     memcpy(data, (uint8_t*)buffer->buffer + offset, size);
     return 0;
+#endif
 }
 
 int zero_copy_buffer_write(zero_copy_buffer_t* buffer, const void* data, uint32_t offset, uint32_t size) {
+#if CONFIG_RUST_ALLOCATOR
+    return rust_zero_copy_buffer_write(buffer, data, offset, size);
+#else
     if (!buffer || !buffer->buffer || (!data && size)) return -1;
     if (offset > buffer->size) return -1;
     if (size > buffer->size - offset) return -1;
     if (size) memcpy((uint8_t*)buffer->buffer + offset, data, size);
     buffer->dirty = 1;
     return 0;
+#endif
 }
 
 int eynfs_zero_copy_read(uint8_t drive, const eynfs_dir_entry_t* entry,
