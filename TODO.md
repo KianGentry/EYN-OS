@@ -51,6 +51,15 @@
 - [ ] Improve scheduler wait paths toward event/wait-queue driven wakeups with less syscall-side polling
 - [ ] Replace linear capability-registry lookups with O(1)-ish indexed or hashed lookup
 
+## Rust migration plan
+- [ ] Introduce no_std Rust staticlib support in the freestanding i386 kernel build and document C/Rust FFI boundaries
+- [ ] Migrate allocator and mapped-buffer safety paths first (legacy heap/slab glue, zero-copy mapping lifecycle)
+- [ ] Move EYNFS cache and metadata-heavy safety logic to Rust while preserving on-disk format compatibility
+- [ ] Migrate Linux-compat syscall marshalling and user-pointer validation shims to Rust for safer ABI handling
+- [ ] Rework network protocol parsing/state machines (ARP/IPv4/UDP/TCP/DNS) in Rust with strict bounds checks
+- [ ] Keep early boot, IDT/ISR entry glue, and lowest-level scheduler/MMIO paths in C/ASM for now
+- [ ] Add interop tests for C<->Rust ABI, struct layout, pointer ownership, and panic/abort behavior
+
 ## Developer tooling
 - [ ] Add more assembler features and syntax coverage
 - [ ] Improve chibicc diagnostics and optimization quality
