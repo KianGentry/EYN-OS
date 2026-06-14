@@ -694,12 +694,22 @@ static uint32 find_free_block(uint32 size) {
 
 static void split_block(uint32 block_offset, uint32 needed_size) {
     block_header_t* block = (block_header_t*)(heap_start + block_offset);
-    if (block->size < needed_size + BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE) {
+    uint32 new_block_offset = 0;
+    uint32 new_block_size = 0;
+    rust_heap_math_result_t split_res = rust_heap_plan_split(
+        block_offset,
+        block->size,
+        needed_size,
+        BLOCK_HEADER_SIZE,
+        MIN_BLOCK_SIZE,
+        &new_block_offset,
+        &new_block_size);
+    if (split_res != RUST_HEAP_MATH_OK) {
         return; // Don't split if the remainder would be too small
     }
-    uint32 new_block_offset = block_offset + needed_size;
+
     block_header_t* new_block = (block_header_t*)(heap_start + new_block_offset);
-    new_block->size = block->size - needed_size;
+    new_block->size = new_block_size;
     new_block->used = 0;
     new_block->next = block->next;
     new_block->magic = MAGIC_NUMBER;
@@ -763,8 +773,23 @@ static void* heap_malloc(size_t nbytes) {
         printf("%c[MEMORY] Request too large: %d bytes (heap: %d KB, max: %d bytes)\n", 255, 0, 0, nbytes, heap_size / 1024, max_allocation);
         return NULL;
     }
-    
-    uint32 total_size = ((nbytes + BLOCK_HEADER_SIZE + 3) / 4) * 4; // 4-byte alignment
+
+    if (nbytes > 0xFFFFFFFFu) {
+        printf("%c[MEMORY] Allocation size overflow: %d\n", 255, 0, 0, nbytes);
+        return NULL;
+    }
+
+    uint32 total_size = 0;
+    rust_heap_math_result_t total_res = rust_heap_compute_total_size(
+        (uint32)nbytes,
+        BLOCK_HEADER_SIZE,
+        4,
+        &total_size);
+    if (total_res != RUST_HEAP_MATH_OK) {
+        printf("%c[MEMORY] Allocation size computation failed for %d bytes\n", 255, 0, 0, nbytes);
+        memory_errors++;
+        return NULL;
+    }
     
     // Safety check: ensure heap_start is valid
     if (!heap_start || heap_start == (uint8*)0) {

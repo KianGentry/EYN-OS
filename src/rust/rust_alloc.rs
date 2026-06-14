@@ -53,6 +53,15 @@ pub enum RustHeapValidationResult {
     BlockSizeInvalid = 7,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub enum RustHeapMathResult {
+    Ok = 0,
+    InvalidArg = 1,
+    Overflow = 2,
+    NoSplit = 3,
+}
+
 unsafe extern "C" {
     fn malloc(nbytes: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
@@ -264,4 +273,87 @@ pub unsafe extern "C" fn rust_validate_heap_block(
     }
 
     RustHeapValidationResult::Ok
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_heap_compute_total_size(
+    nbytes: u32,
+    block_header_size: u32,
+    align: u32,
+    out_total_size: *mut u32,
+) -> RustHeapMathResult {
+    if out_total_size.is_null() || align == 0 {
+        return RustHeapMathResult::InvalidArg;
+    }
+
+    let sum = match nbytes.checked_add(block_header_size) {
+        Some(v) => v,
+        None => return RustHeapMathResult::Overflow,
+    };
+
+    let aligned = if (align & (align - 1)) == 0 {
+        let add = align - 1;
+        let tmp = match sum.checked_add(add) {
+            Some(v) => v,
+            None => return RustHeapMathResult::Overflow,
+        };
+        tmp & !add
+    } else {
+        let rem = sum % align;
+        if rem == 0 {
+            sum
+        } else {
+            match sum.checked_add(align - rem) {
+                Some(v) => v,
+                None => return RustHeapMathResult::Overflow,
+            }
+        }
+    };
+
+    unsafe {
+        *out_total_size = aligned;
+    }
+    RustHeapMathResult::Ok
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_heap_plan_split(
+    block_offset: u32,
+    block_size: u32,
+    needed_size: u32,
+    block_header_size: u32,
+    min_block_size: u32,
+    out_new_block_offset: *mut u32,
+    out_new_block_size: *mut u32,
+) -> RustHeapMathResult {
+    if out_new_block_offset.is_null() || out_new_block_size.is_null() {
+        return RustHeapMathResult::InvalidArg;
+    }
+
+    let threshold = match needed_size
+        .checked_add(block_header_size)
+        .and_then(|v| v.checked_add(min_block_size))
+    {
+        Some(v) => v,
+        None => return RustHeapMathResult::Overflow,
+    };
+
+    if block_size < threshold {
+        return RustHeapMathResult::NoSplit;
+    }
+
+    let new_block_offset = match block_offset.checked_add(needed_size) {
+        Some(v) => v,
+        None => return RustHeapMathResult::Overflow,
+    };
+    let new_block_size = match block_size.checked_sub(needed_size) {
+        Some(v) => v,
+        None => return RustHeapMathResult::Overflow,
+    };
+
+    unsafe {
+        *out_new_block_offset = new_block_offset;
+        *out_new_block_size = new_block_size;
+    }
+    RustHeapMathResult::Ok
 }
