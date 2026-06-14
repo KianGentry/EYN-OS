@@ -12,6 +12,7 @@
 #include <cpu/gdt.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <rust_alloc.h>
 #include <mm/slab.h>
 #include <utilities/shell/pipeline.h>
 #include <cpu/user_elf.h>
@@ -465,52 +466,48 @@ static uint32 calculate_checksum(uint8* data, uint32 size) {
 
 // Enhanced block validation with better error reporting
 static int validate_block(block_header_t* block, uint32 offset) {
-    if (!block) {
-        printf("%c[MEMORY] Null block pointer at offset 0x%X\n", 255, 0, 0, offset);
-        memory_errors++;
-        return 0;
-    }
+    rust_heap_validation_result_t vr = rust_validate_heap_block(
+        (const rust_heap_block_header_t*)block,
+        offset,
+        heap_start,
+        heap_size,
+        HEAP_SIZE_MIN,
+        BLOCK_HEADER_SIZE);
 
-    // Validate heap_start/heap_size before touching any block fields.
-    uintptr heap_begin = (uintptr)heap_start;
-    if (!heap_begin || heap_begin < 0x100000 || heap_size < HEAP_SIZE_MIN) {
-        printf("%c[MEMORY] Heap base corrupt (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
-        memory_errors++;
-        return 0;
-    }
-    uintptr heap_end = heap_begin + heap_size;
-    if (heap_end <= heap_begin) {
-        printf("%c[MEMORY] Heap bounds overflow (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
-        memory_errors++;
-        return 0;
-    }
+    if (vr != RUST_HEAP_VALIDATION_OK) {
+        uintptr heap_begin = (uintptr)heap_start;
+        uintptr heap_end = heap_begin + heap_size;
+        uintptr block_addr = (uintptr)block;
 
-    // Ensure the block pointer itself is within the heap before dereferencing.
-    uintptr block_addr = (uintptr)block;
-    if (block_addr < heap_begin || block_addr + sizeof(block_header_t) > heap_end) {
-        printf("%c[MEMORY] Block pointer out of heap (block=0x%X heap=[0x%X..0x%X))\n", 255, 0, 0, block_addr, heap_begin, heap_end);
-        memory_errors++;
-        return 0;
-    }
+        switch (vr) {
+            case RUST_HEAP_VALIDATION_OK:
+                break;
+            case RUST_HEAP_VALIDATION_NULL_BLOCK:
+                printf("%c[MEMORY] Null block pointer at offset 0x%X\n", 255, 0, 0, offset);
+                break;
+            case RUST_HEAP_VALIDATION_BAD_HEAP_BASE:
+                printf("%c[MEMORY] Heap base corrupt (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
+                break;
+            case RUST_HEAP_VALIDATION_HEAP_OVERFLOW:
+                printf("%c[MEMORY] Heap bounds overflow (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
+                break;
+            case RUST_HEAP_VALIDATION_BLOCK_OUTSIDE_HEAP:
+                printf("%c[MEMORY] Block pointer out of heap (block=0x%X heap=[0x%X..0x%X))\n", 255, 0, 0, block_addr, heap_begin, heap_end);
+                break;
+            case RUST_HEAP_VALIDATION_OFFSET_MISMATCH:
+                printf("%c[MEMORY] Block pointer mismatch (offset=0x%X block=0x%X expected=0x%X)\n", 255, 0, 0, offset, block_addr, heap_begin + offset);
+                break;
+            case RUST_HEAP_VALIDATION_BLOCK_RANGE_INVALID:
+                printf("%c[MEMORY] Block out of bounds at offset 0x%X (size: %d, heap: %d)\n", 255, 0, 0, offset, block ? block->size : 0, heap_size);
+                break;
+            case RUST_HEAP_VALIDATION_BLOCK_SIZE_INVALID:
+                printf("%c[MEMORY] Invalid block size at offset 0x%X: %d (min: %d, max: %d)\n", 255, 0, 0, offset, block ? block->size : 0, BLOCK_HEADER_SIZE, heap_size);
+                break;
+            default:
+                printf("%c[MEMORY] Unknown heap validation error at offset 0x%X\n", 255, 0, 0, offset);
+                break;
+        }
 
-    // Sanity: offset should match the pointer.
-    if (block_addr != heap_begin + offset) {
-        printf("%c[MEMORY] Block pointer mismatch (offset=0x%X block=0x%X expected=0x%X)\n", 255, 0, 0, offset, block_addr, heap_begin + offset);
-        memory_errors++;
-        return 0;
-    }
-    
-    // Check if block is within heap bounds first
-    // (safe now that block pointer is validated)
-    if (offset >= heap_size || offset + BLOCK_HEADER_SIZE > heap_size || offset + block->size > heap_size) {
-        printf("%c[MEMORY] Block out of bounds at offset 0x%X (size: %d, heap: %d)\n", 255, 0, 0, offset, block->size, heap_size);
-        memory_errors++;
-        return 0;
-    }
-    
-    // Check for reasonable block size
-    if (block->size < BLOCK_HEADER_SIZE || block->size > heap_size || block->size == 0) {
-        printf("%c[MEMORY] Invalid block size at offset 0x%X: %d (min: %d, max: %d)\n", 255, 0, 0, offset, block->size, BLOCK_HEADER_SIZE, heap_size);
         memory_errors++;
         return 0;
     }

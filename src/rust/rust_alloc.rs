@@ -32,6 +32,27 @@ pub struct ZeroCopyBuffer {
     pub dirty: u8,
 }
 
+#[repr(C)]
+pub struct RustHeapBlockHeader {
+    pub size: u32,
+    pub used: u32,
+    pub next: u32,
+    pub magic: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub enum RustHeapValidationResult {
+    Ok = 0,
+    NullBlock = 1,
+    BadHeapBase = 2,
+    HeapOverflow = 3,
+    BlockOutsideHeap = 4,
+    OffsetMismatch = 5,
+    BlockRangeInvalid = 6,
+    BlockSizeInvalid = 7,
+}
+
 unsafe extern "C" {
     fn malloc(nbytes: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
@@ -180,4 +201,67 @@ pub unsafe extern "C" fn rust_zero_copy_buffer_write(
     }
     buf.dirty = 1;
     0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_validate_heap_block(
+    block: *const RustHeapBlockHeader,
+    offset: u32,
+    heap_start: *const u8,
+    heap_size: u32,
+    heap_size_min: u32,
+    block_header_size: u32,
+) -> RustHeapValidationResult {
+    if block.is_null() {
+        return RustHeapValidationResult::NullBlock;
+    }
+
+    let heap_begin = heap_start as usize;
+    if heap_begin == 0 || heap_begin < 0x100000usize || heap_size < heap_size_min {
+        return RustHeapValidationResult::BadHeapBase;
+    }
+
+    let heap_end = match heap_begin.checked_add(heap_size as usize) {
+        Some(v) if v > heap_begin => v,
+        _ => return RustHeapValidationResult::HeapOverflow,
+    };
+
+    let block_addr = block as usize;
+    let header_end = match block_addr.checked_add(core::mem::size_of::<RustHeapBlockHeader>()) {
+        Some(v) => v,
+        None => return RustHeapValidationResult::BlockOutsideHeap,
+    };
+
+    if block_addr < heap_begin || header_end > heap_end {
+        return RustHeapValidationResult::BlockOutsideHeap;
+    }
+
+    let expected_addr = match heap_begin.checked_add(offset as usize) {
+        Some(v) => v,
+        None => return RustHeapValidationResult::OffsetMismatch,
+    };
+    if block_addr != expected_addr {
+        return RustHeapValidationResult::OffsetMismatch;
+    }
+
+    let block_ref = unsafe { &*block };
+
+    let off_plus_hdr = match offset.checked_add(block_header_size) {
+        Some(v) => v,
+        None => return RustHeapValidationResult::BlockRangeInvalid,
+    };
+    let off_plus_size = match offset.checked_add(block_ref.size) {
+        Some(v) => v,
+        None => return RustHeapValidationResult::BlockRangeInvalid,
+    };
+
+    if offset >= heap_size || off_plus_hdr > heap_size || off_plus_size > heap_size {
+        return RustHeapValidationResult::BlockRangeInvalid;
+    }
+
+    if block_ref.size < block_header_size || block_ref.size > heap_size || block_ref.size == 0 {
+        return RustHeapValidationResult::BlockSizeInvalid;
+    }
+
+    RustHeapValidationResult::Ok
 }
