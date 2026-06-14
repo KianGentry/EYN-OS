@@ -1,6 +1,7 @@
 #![no_std]
 
 use core::ffi::c_void;
+use core::convert::TryFrom;
 use core::num::NonZeroU32;
 use core::ptr;
 use core::ptr::NonNull;
@@ -68,6 +69,16 @@ pub enum RustHeapCoalesceResult {
     Skip = 0,
     Merge = 1,
     Overflow = 2,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub enum RustHeapPtrResult {
+    Ok = 0,
+    InvalidArg = 1,
+    Underflow = 2,
+    OutOfRange = 3,
+    Overflow = 4,
 }
 
 unsafe extern "C" {
@@ -391,4 +402,64 @@ pub unsafe extern "C" fn rust_heap_plan_coalesce(
         *out_merged_size = merged;
     }
     RustHeapCoalesceResult::Merge
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_heap_compute_max_allocation(
+    heap_size: u32,
+    numerator: u32,
+    denominator: u32,
+    out_max_allocation: *mut u32,
+) -> RustHeapMathResult {
+    if out_max_allocation.is_null() || denominator == 0 {
+        return RustHeapMathResult::InvalidArg;
+    }
+
+    let scaled = match heap_size.checked_mul(numerator) {
+        Some(v) => v,
+        None => return RustHeapMathResult::Overflow,
+    };
+
+    unsafe {
+        *out_max_allocation = scaled / denominator;
+    }
+    RustHeapMathResult::Ok
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_heap_compute_block_offset(
+    ptr_addr: usize,
+    heap_start_addr: usize,
+    block_header_size: u32,
+    heap_size: u32,
+    out_block_offset: *mut u32,
+) -> RustHeapPtrResult {
+    if out_block_offset.is_null() || ptr_addr == 0 || heap_start_addr == 0 {
+        return RustHeapPtrResult::InvalidArg;
+    }
+
+    let rel = match ptr_addr.checked_sub(heap_start_addr) {
+        Some(v) => v,
+        None => return RustHeapPtrResult::Underflow,
+    };
+
+    let hdr = block_header_size as usize;
+    if rel < hdr {
+        return RustHeapPtrResult::Underflow;
+    }
+
+    let block_off_usize = rel - hdr;
+    let block_off_u32 = match u32::try_from(block_off_usize) {
+        Ok(v) => v,
+        Err(_) => return RustHeapPtrResult::Overflow,
+    };
+
+    if block_off_u32 >= heap_size {
+        return RustHeapPtrResult::OutOfRange;
+    }
+
+    unsafe {
+        *out_block_offset = block_off_u32;
+    }
+    RustHeapPtrResult::Ok
 }

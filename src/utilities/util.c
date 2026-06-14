@@ -780,7 +780,17 @@ static void* heap_malloc(size_t nbytes) {
     }
     
     // Increased limit for larger files like .rei images, assembler, and zero-copy operations
-    uint32 max_allocation = heap_size * 9 / 10; // 90% of heap allowed for single allocation
+    uint32 max_allocation = 0;
+    rust_heap_math_result_t max_res = rust_heap_compute_max_allocation(
+        heap_size,
+        9,
+        10,
+        &max_allocation);
+    if (max_res != RUST_HEAP_MATH_OK) {
+        printf("%c[MEMORY] Failed to compute max allocation threshold\n", 255, 0, 0);
+        memory_errors++;
+        return NULL;
+    }
     if (nbytes > max_allocation) {
         printf("%c[MEMORY] Request too large: %d bytes (heap: %d KB, max: %d bytes)\n", 255, 0, 0, nbytes, heap_size / 1024, max_allocation);
         return NULL;
@@ -838,19 +848,21 @@ static void heap_free(void* ptr) {
     // Check for stack overflow
     check_stack_overflow();
     
-    uint8* data_ptr = (uint8*)ptr;
-    
     // Safety check: ensure heap_start is valid
     if (!heap_start || heap_start == (uint8*)0) {
         printf("%c[MEMORY] Critical: heap_start is corrupted (0x%X)\n", 255, 0, 0, (uint32)(uintptr)heap_start);
         memory_errors++;
         return;
     }
-    
-    uint32 block_offset = data_ptr - heap_start - BLOCK_HEADER_SIZE;
-    
-    // Validate pointer bounds
-    if (block_offset >= heap_size) {
+
+    uint32 block_offset = 0;
+    rust_heap_ptr_result_t ptr_res = rust_heap_compute_block_offset(
+        (uintptr)ptr,
+        (uintptr)heap_start,
+        BLOCK_HEADER_SIZE,
+        heap_size,
+        &block_offset);
+    if (ptr_res != RUST_HEAP_PTR_OK) {
         printf("%c[MEMORY] Invalid pointer: 0x%X (heap_start: 0x%X, offset: %d)\n", 255, 0, 0, (uint32)(uintptr)ptr, (uint32)(uintptr)heap_start, block_offset);
         memory_errors++;
         return;
@@ -927,11 +939,14 @@ void* realloc(void* ptr, size_t new_size) {
     // Check for stack overflow
     check_stack_overflow();
     
-    uint8* data_ptr = (uint8*)ptr;
-    uint32 block_offset = data_ptr - heap_start - BLOCK_HEADER_SIZE;
-    
-    // Validate pointer bounds
-    if (block_offset >= heap_size) {
+    uint32 block_offset = 0;
+    rust_heap_ptr_result_t ptr_res = rust_heap_compute_block_offset(
+        (uintptr)ptr,
+        (uintptr)heap_start,
+        BLOCK_HEADER_SIZE,
+        heap_size,
+        &block_offset);
+    if (ptr_res != RUST_HEAP_PTR_OK) {
         printf("%c[MEMORY] Invalid pointer in realloc: 0x%X\n", 255, 0, 0, (uint32)(uintptr)ptr);
         memory_errors++;
         return NULL;
