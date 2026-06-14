@@ -466,6 +466,7 @@ static uint32 calculate_checksum(uint8* data, uint32 size) {
 
 // Enhanced block validation with better error reporting
 static int validate_block(block_header_t* block, uint32 offset) {
+#if CONFIG_RUST_ALLOCATOR
     rust_heap_validation_result_t vr = rust_validate_heap_block(
         (const rust_heap_block_header_t*)block,
         offset,
@@ -511,6 +512,57 @@ static int validate_block(block_header_t* block, uint32 offset) {
         memory_errors++;
         return 0;
     }
+#else
+    if (!block) {
+        printf("%c[MEMORY] Null block pointer at offset 0x%X\n", 255, 0, 0, offset);
+        memory_errors++;
+        return 0;
+    }
+
+    // Validate heap_start/heap_size before touching any block fields.
+    uintptr heap_begin = (uintptr)heap_start;
+    if (!heap_begin || heap_begin < 0x100000 || heap_size < HEAP_SIZE_MIN) {
+        printf("%c[MEMORY] Heap base corrupt (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
+        memory_errors++;
+        return 0;
+    }
+    uintptr heap_end = heap_begin + heap_size;
+    if (heap_end <= heap_begin) {
+        printf("%c[MEMORY] Heap bounds overflow (heap_start=0x%X heap_size=%d)\n", 255, 0, 0, heap_begin, heap_size);
+        memory_errors++;
+        return 0;
+    }
+
+    // Ensure the block pointer itself is within the heap before dereferencing.
+    uintptr block_addr = (uintptr)block;
+    if (block_addr < heap_begin || block_addr + sizeof(block_header_t) > heap_end) {
+        printf("%c[MEMORY] Block pointer out of heap (block=0x%X heap=[0x%X..0x%X))\n", 255, 0, 0, block_addr, heap_begin, heap_end);
+        memory_errors++;
+        return 0;
+    }
+
+    // Sanity: offset should match the pointer.
+    if (block_addr != heap_begin + offset) {
+        printf("%c[MEMORY] Block pointer mismatch (offset=0x%X block=0x%X expected=0x%X)\n", 255, 0, 0, offset, block_addr, heap_begin + offset);
+        memory_errors++;
+        return 0;
+    }
+    
+    // Check if block is within heap bounds first
+    // (safe now that block pointer is validated)
+    if (offset >= heap_size || offset + BLOCK_HEADER_SIZE > heap_size || offset + block->size > heap_size) {
+        printf("%c[MEMORY] Block out of bounds at offset 0x%X (size: %d, heap: %d)\n", 255, 0, 0, offset, block->size, heap_size);
+        memory_errors++;
+        return 0;
+    }
+    
+    // Check for reasonable block size
+    if (block->size < BLOCK_HEADER_SIZE || block->size > heap_size || block->size == 0) {
+        printf("%c[MEMORY] Invalid block size at offset 0x%X: %d (min: %d, max: %d)\n", 255, 0, 0, offset, block->size, BLOCK_HEADER_SIZE, heap_size);
+        memory_errors++;
+        return 0;
+    }
+#endif
     
     // Temporarily disable magic number checking to eliminate false positives
     // This will be re-enabled once we have better corruption detection
@@ -676,6 +728,7 @@ static uint32 find_free_block(uint32 size) {
         }
         
         if (!block->used) {
+#if CONFIG_RUST_ALLOCATOR
             rust_heap_best_fit_result_t fit_res = rust_heap_best_fit_update(
                 block->size,
                 best_size,
@@ -684,6 +737,12 @@ static uint32 find_free_block(uint32 size) {
                 best_size = block->size;
                 best_fit = current;
             }
+#else
+            if (block->size >= size && block->size < best_size) {
+                best_size = block->size;
+                best_fit = current;
+            }
+#endif
         }
         current = block->next;
     }
@@ -697,6 +756,7 @@ static uint32 find_free_block(uint32 size) {
 
 static void split_block(uint32 block_offset, uint32 needed_size) {
     block_header_t* block = (block_header_t*)(heap_start + block_offset);
+#if CONFIG_RUST_ALLOCATOR
     uint32 new_block_offset = 0;
     uint32 new_block_size = 0;
     rust_heap_math_result_t split_res = rust_heap_plan_split(
@@ -710,6 +770,13 @@ static void split_block(uint32 block_offset, uint32 needed_size) {
     if (split_res != RUST_HEAP_MATH_OK) {
         return; // Don't split if the remainder would be too small
     }
+#else
+    if (block->size < needed_size + BLOCK_HEADER_SIZE + MIN_BLOCK_SIZE) {
+        return; // Don't split if the remainder would be too small
+    }
+    uint32 new_block_offset = block_offset + needed_size;
+    uint32 new_block_size = block->size - needed_size;
+#endif
 
     block_header_t* new_block = (block_header_t*)(heap_start + new_block_offset);
     new_block->size = new_block_size;
@@ -745,6 +812,7 @@ static void merge_free_blocks() {
             }
             
             uint32 merged_size = 0;
+#if CONFIG_RUST_ALLOCATOR
             rust_heap_coalesce_result_t coalesce_res = rust_heap_plan_coalesce(
                 block->used,
                 next_block->used,
@@ -762,6 +830,14 @@ static void merge_free_blocks() {
             } else {
                 break;
             }
+#else
+            if (!block->used && !next_block->used) {
+                block->size += next_block->size;
+                block->next = next_block->next;
+            } else {
+                break;
+            }
+#endif
         }
         current = block->next;
     }
@@ -784,6 +860,7 @@ static void* heap_malloc(size_t nbytes) {
     
     // Increased limit for larger files like .rei images, assembler, and zero-copy operations
     uint32 max_allocation = 0;
+#if CONFIG_RUST_ALLOCATOR
     rust_heap_math_result_t max_res = rust_heap_compute_max_allocation(
         heap_size,
         9,
@@ -794,6 +871,9 @@ static void* heap_malloc(size_t nbytes) {
         memory_errors++;
         return NULL;
     }
+#else
+    max_allocation = heap_size * 9 / 10; // 90% of heap allowed for single allocation
+#endif
     if (nbytes > max_allocation) {
         printf("%c[MEMORY] Request too large: %d bytes (heap: %d KB, max: %d bytes)\n", 255, 0, 0, nbytes, heap_size / 1024, max_allocation);
         return NULL;
@@ -805,6 +885,7 @@ static void* heap_malloc(size_t nbytes) {
     }
 
     uint32 total_size = 0;
+#if CONFIG_RUST_ALLOCATOR
     rust_heap_math_result_t total_res = rust_heap_compute_total_size(
         (uint32)nbytes,
         BLOCK_HEADER_SIZE,
@@ -815,6 +896,9 @@ static void* heap_malloc(size_t nbytes) {
         memory_errors++;
         return NULL;
     }
+#else
+    total_size = ((uint32)nbytes + BLOCK_HEADER_SIZE + 3u) & ~3u; // 4-byte alignment
+#endif
     
     // Safety check: ensure heap_start is valid
     if (!heap_start || heap_start == (uint8*)0) {
@@ -859,6 +943,7 @@ static void heap_free(void* ptr) {
     }
 
     uint32 block_offset = 0;
+#if CONFIG_RUST_ALLOCATOR
     rust_heap_ptr_result_t ptr_res = rust_heap_compute_block_offset(
         (uintptr)ptr,
         (uintptr)heap_start,
@@ -870,6 +955,15 @@ static void heap_free(void* ptr) {
         memory_errors++;
         return;
     }
+#else
+    uint8* data_ptr = (uint8*)ptr;
+    block_offset = (uint32)(data_ptr - heap_start - BLOCK_HEADER_SIZE);
+    if (block_offset >= heap_size) {
+        printf("%c[MEMORY] Invalid pointer: 0x%X (heap_start: 0x%X, offset: %d)\n", 255, 0, 0, (uint32)(uintptr)ptr, (uint32)(uintptr)heap_start, block_offset);
+        memory_errors++;
+        return;
+    }
+#endif
     
     block_header_t* block = (block_header_t*)(heap_start + block_offset);
     
@@ -943,6 +1037,7 @@ void* realloc(void* ptr, size_t new_size) {
     check_stack_overflow();
     
     uint32 block_offset = 0;
+#if CONFIG_RUST_ALLOCATOR
     rust_heap_ptr_result_t ptr_res = rust_heap_compute_block_offset(
         (uintptr)ptr,
         (uintptr)heap_start,
@@ -954,6 +1049,15 @@ void* realloc(void* ptr, size_t new_size) {
         memory_errors++;
         return NULL;
     }
+#else
+    uint8* data_ptr = (uint8*)ptr;
+    block_offset = (uint32)(data_ptr - heap_start - BLOCK_HEADER_SIZE);
+    if (block_offset >= heap_size) {
+        printf("%c[MEMORY] Invalid pointer in realloc: 0x%X\n", 255, 0, 0, (uint32)(uintptr)ptr);
+        memory_errors++;
+        return NULL;
+    }
+#endif
     
     block_header_t* block = (block_header_t*)(heap_start + block_offset);
     
@@ -964,6 +1068,7 @@ void* realloc(void* ptr, size_t new_size) {
     
     uint32 copy_size = 0;
     uint32 do_realloc = 0;
+#if CONFIG_RUST_ALLOCATOR
     rust_heap_math_result_t realloc_res = rust_heap_realloc_copy_size(
         block->size,
         BLOCK_HEADER_SIZE,
@@ -975,6 +1080,11 @@ void* realloc(void* ptr, size_t new_size) {
         memory_errors++;
         return NULL;
     }
+#else
+    uint32 current_size = block->size - BLOCK_HEADER_SIZE;
+    copy_size = (current_size < (uint32)new_size) ? current_size : (uint32)new_size;
+    do_realloc = ((uint32)new_size > current_size) ? 1u : 0u;
+#endif
 
     if (!do_realloc) {
         return ptr; // No need to reallocate

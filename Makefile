@@ -190,6 +190,17 @@ preflight-arch:
 docs: all
 	python3 devtools/generate_command_docs.py src/
 
+.PHONY: test-rust-allocator
+test-rust-allocator:
+	@echo "[test-rust-allocator] Build util.c with Rust allocator OFF"
+	$(MAKE) obj/i386/util.o ARCH=i386 CONFIG_RUST_ALLOCATOR=0
+	@echo "[test-rust-allocator] Build rust_alloc.o with Rust allocator ON"
+	$(MAKE) obj/i386/rust_alloc.o ARCH=i386 CONFIG_RUST_ALLOCATOR=1
+	@echo "[test-rust-allocator] Build util.c and zero_copy.c with Rust allocator ON"
+	$(MAKE) obj/i386/util.o obj/i386/zero_copy.o ARCH=i386 CONFIG_RUST_ALLOCATOR=1
+	@echo "[test-rust-allocator] Build full kernel with Rust allocator ON"
+	$(MAKE) all ARCH=i386 CONFIG_RUST_ALLOCATOR=1
+
 $(OBJDIR)/kasm.o:$(ARCH_BOOT_SRC_$(ARCH))
 	mkdir $(OBJDIR)/ -p
 	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/kasm.o $(ARCH_BOOT_SRC_$(ARCH))
