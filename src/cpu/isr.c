@@ -652,6 +652,7 @@ uint32 get_last_error_eip() {
 #define SYSCALL_SYSTEMCFG_SET_DRIVE_LABEL 154
 #define SYSCALL_SYSTEMCFG_GET_DRIVE_LABEL 155
 #define SYSCALL_SYSTEMCFG_GET_INSTALL_DRIVE 156
+#define SYSCALL_NET_DHCP_REQUEST 157
 
 #define TTY_MODE_RAW 0x0001
 
@@ -3679,6 +3680,14 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             if (rc != 0) { regs->eax = (uint32)rc; break; }
             if (copyout(user_out, ip, 4) != 0) { regs->eax = (uint32)-1; break; }
             regs->eax = 0;
+            break;
+        }
+        case SYSCALL_NET_DHCP_REQUEST: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int timeout_spins = (int)arg1;
+            int arp_spins = (int)arg2;
+            int persist_cfg = (int)arg3;
+            regs->eax = (uint32)net_dhcp_request(timeout_spins, arp_spins, persist_cfg);
             break;
         }
         case SYSCALL_NET_TCP_CONNECT: {

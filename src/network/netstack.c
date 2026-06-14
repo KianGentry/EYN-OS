@@ -205,6 +205,24 @@ typedef struct net_timer_slot {
  * Security-critical: Yes (limits protocol expectations).
  */
 #define NET_DNS_PORT 53u
+#define NET_DHCP_CLIENT_PORT 68u
+#define NET_DHCP_SERVER_PORT 67u
+#define NET_DHCP_MAGIC_COOKIE 0x63825363u
+
+#define DHCP_OPT_PAD 0u
+#define DHCP_OPT_SUBNET_MASK 1u
+#define DHCP_OPT_ROUTER 3u
+#define DHCP_OPT_DNS 6u
+#define DHCP_OPT_REQUESTED_IP 50u
+#define DHCP_OPT_MSG_TYPE 53u
+#define DHCP_OPT_SERVER_ID 54u
+#define DHCP_OPT_PARAM_REQ_LIST 55u
+#define DHCP_OPT_END 255u
+
+#define DHCP_MSG_DISCOVER 1u
+#define DHCP_MSG_OFFER 2u
+#define DHCP_MSG_REQUEST 3u
+#define DHCP_MSG_ACK 5u
 
 typedef struct udp_socket {
     uint8 bound;
@@ -679,6 +697,11 @@ static int ipv4_is_zero(const uint8 ip[4])
     return ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0;
 }
 
+static int ipv4_is_broadcast(const uint8 ip[4])
+{
+    return ip[0] == 255 && ip[1] == 255 && ip[2] == 255 && ip[3] == 255;
+}
+
 static int ipv4_is_same_subnet(const uint8 a[4], const uint8 b[4], const uint8 mask[4])
 {
     uint32 au = ipv4_to_u32(a);
@@ -936,6 +959,225 @@ int net_dns_resolve(const char* name, uint8 out_ip[4], int timeout_spins)
 
     net_udp_close(socket_id);
     return -12;
+}
+
+int net_dhcp_request(int timeout_spins, int arp_spins, int persist_cfg)
+{
+    (void)persist_cfg;
+    if (net_init_default() != 0) return -1;
+
+    uint8 mac[6];
+    if (net_get_mac(mac) != 0) return -2;
+
+    int socket_id = net_udp_bind((uint16)NET_DHCP_CLIENT_PORT);
+    if (socket_id < 0) return -3;
+
+    uint8 zero_ip[4] = {0, 0, 0, 0};
+    uint8 bcast_ip[4] = {255, 255, 255, 255};
+    uint8 req[548];
+    memset(req, 0, sizeof(req));
+
+    uint32 xid = net_get_ticks() ^ 0x45594E4Fu;
+    req[0] = 1;  // BOOTREQUEST
+    req[1] = 1;  // Ethernet
+    req[2] = 6;  // MAC len
+    req[3] = 0;
+    req[4] = (uint8)((xid >> 24) & 0xFFu);
+    req[5] = (uint8)((xid >> 16) & 0xFFu);
+    req[6] = (uint8)((xid >> 8) & 0xFFu);
+    req[7] = (uint8)(xid & 0xFFu);
+    req[10] = 0x80; // broadcast flag
+    req[11] = 0x00;
+    for (int i = 0; i < 6; i++) req[28 + i] = mac[i];
+
+    req[236] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 24) & 0xFFu);
+    req[237] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 16) & 0xFFu);
+    req[238] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 8) & 0xFFu);
+    req[239] = (uint8)(NET_DHCP_MAGIC_COOKIE & 0xFFu);
+
+    uint32 off = 240u;
+    req[off++] = DHCP_OPT_MSG_TYPE;
+    req[off++] = 1;
+    req[off++] = DHCP_MSG_DISCOVER;
+    req[off++] = DHCP_OPT_PARAM_REQ_LIST;
+    req[off++] = 3;
+    req[off++] = DHCP_OPT_SUBNET_MASK;
+    req[off++] = DHCP_OPT_ROUTER;
+    req[off++] = DHCP_OPT_DNS;
+    req[off++] = DHCP_OPT_END;
+
+    if (net_udp_send_socket(socket_id, zero_ip, bcast_ip, (uint16)NET_DHCP_SERVER_PORT,
+                            req, off, arp_spins) != 0) {
+        net_udp_close(socket_id);
+        return -4;
+    }
+
+    if (timeout_spins <= 0) timeout_spins = 3000000;
+
+    uint8 offered_ip[4] = {0, 0, 0, 0};
+    uint8 server_id[4] = {0, 0, 0, 0};
+    uint8 netmask[4] = {255, 255, 255, 0};
+    uint8 gateway[4] = {0, 0, 0, 0};
+    uint8 dns[4] = {0, 0, 0, 0};
+    int have_offer = 0;
+
+    for (int spin = 0; spin < timeout_spins; spin++) {
+        if ((spin & 0x1FFF) == 0) watchdog_kick("net-dhcp-offer");
+        (void)net_poll(zero_ip, 32);
+
+        net_udp_rx_packet pkt;
+        if (net_udp_recv_socket(socket_id, &pkt) <= 0) continue;
+        if (pkt.payload_len < 240u) continue;
+
+        const uint8* rx = pkt.payload;
+        uint32 rx_xid = ((uint32)rx[4] << 24) | ((uint32)rx[5] << 16) | ((uint32)rx[6] << 8) | (uint32)rx[7];
+        if (rx[0] != 2 || rx_xid != xid) continue;
+
+        uint32 cookie = ((uint32)rx[236] << 24) | ((uint32)rx[237] << 16) | ((uint32)rx[238] << 8) | (uint32)rx[239];
+        if (cookie != NET_DHCP_MAGIC_COOKIE) continue;
+
+        uint8 msg_type = 0;
+        uint32 roff = 240u;
+        while (roff < pkt.payload_len) {
+            uint8 opt = rx[roff++];
+            if (opt == DHCP_OPT_END) break;
+            if (opt == DHCP_OPT_PAD) continue;
+            if (roff >= pkt.payload_len) break;
+            uint8 opt_len = rx[roff++];
+            if (roff + (uint32)opt_len > pkt.payload_len) break;
+
+            if (opt == DHCP_OPT_MSG_TYPE && opt_len == 1u) {
+                msg_type = rx[roff];
+            } else if (opt == DHCP_OPT_SUBNET_MASK && opt_len == 4u) {
+                for (int i = 0; i < 4; i++) netmask[i] = rx[roff + (uint32)i];
+            } else if (opt == DHCP_OPT_ROUTER && opt_len >= 4u) {
+                for (int i = 0; i < 4; i++) gateway[i] = rx[roff + (uint32)i];
+            } else if (opt == DHCP_OPT_DNS && opt_len >= 4u) {
+                for (int i = 0; i < 4; i++) dns[i] = rx[roff + (uint32)i];
+            } else if (opt == DHCP_OPT_SERVER_ID && opt_len == 4u) {
+                for (int i = 0; i < 4; i++) server_id[i] = rx[roff + (uint32)i];
+            }
+
+            roff += (uint32)opt_len;
+        }
+
+        if (msg_type != DHCP_MSG_OFFER) continue;
+        for (int i = 0; i < 4; i++) offered_ip[i] = rx[16 + (uint32)i];
+        have_offer = 1;
+        break;
+    }
+
+    if (!have_offer) {
+        net_udp_close(socket_id);
+        return -5;
+    }
+
+    memset(req, 0, sizeof(req));
+    req[0] = 1;
+    req[1] = 1;
+    req[2] = 6;
+    req[3] = 0;
+    req[4] = (uint8)((xid >> 24) & 0xFFu);
+    req[5] = (uint8)((xid >> 16) & 0xFFu);
+    req[6] = (uint8)((xid >> 8) & 0xFFu);
+    req[7] = (uint8)(xid & 0xFFu);
+    req[10] = 0x80;
+    req[11] = 0x00;
+    for (int i = 0; i < 6; i++) req[28 + i] = mac[i];
+
+    req[236] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 24) & 0xFFu);
+    req[237] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 16) & 0xFFu);
+    req[238] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 8) & 0xFFu);
+    req[239] = (uint8)(NET_DHCP_MAGIC_COOKIE & 0xFFu);
+
+    off = 240u;
+    req[off++] = DHCP_OPT_MSG_TYPE;
+    req[off++] = 1;
+    req[off++] = DHCP_MSG_REQUEST;
+    req[off++] = DHCP_OPT_REQUESTED_IP;
+    req[off++] = 4;
+    for (int i = 0; i < 4; i++) req[off++] = offered_ip[i];
+    if (!ipv4_is_zero(server_id)) {
+        req[off++] = DHCP_OPT_SERVER_ID;
+        req[off++] = 4;
+        for (int i = 0; i < 4; i++) req[off++] = server_id[i];
+    }
+    req[off++] = DHCP_OPT_PARAM_REQ_LIST;
+    req[off++] = 3;
+    req[off++] = DHCP_OPT_SUBNET_MASK;
+    req[off++] = DHCP_OPT_ROUTER;
+    req[off++] = DHCP_OPT_DNS;
+    req[off++] = DHCP_OPT_END;
+
+    if (net_udp_send_socket(socket_id, zero_ip, bcast_ip, (uint16)NET_DHCP_SERVER_PORT,
+                            req, off, arp_spins) != 0) {
+        net_udp_close(socket_id);
+        return -6;
+    }
+
+    int got_ack = 0;
+    for (int spin = 0; spin < timeout_spins; spin++) {
+        if ((spin & 0x1FFF) == 0) watchdog_kick("net-dhcp-ack");
+        (void)net_poll(zero_ip, 32);
+
+        net_udp_rx_packet pkt;
+        if (net_udp_recv_socket(socket_id, &pkt) <= 0) continue;
+        if (pkt.payload_len < 240u) continue;
+
+        const uint8* rx = pkt.payload;
+        uint32 rx_xid = ((uint32)rx[4] << 24) | ((uint32)rx[5] << 16) | ((uint32)rx[6] << 8) | (uint32)rx[7];
+        if (rx[0] != 2 || rx_xid != xid) continue;
+
+        uint32 cookie = ((uint32)rx[236] << 24) | ((uint32)rx[237] << 16) | ((uint32)rx[238] << 8) | (uint32)rx[239];
+        if (cookie != NET_DHCP_MAGIC_COOKIE) continue;
+
+        uint8 msg_type = 0;
+        uint32 roff = 240u;
+        while (roff < pkt.payload_len) {
+            uint8 opt = rx[roff++];
+            if (opt == DHCP_OPT_END) break;
+            if (opt == DHCP_OPT_PAD) continue;
+            if (roff >= pkt.payload_len) break;
+            uint8 opt_len = rx[roff++];
+            if (roff + (uint32)opt_len > pkt.payload_len) break;
+
+            if (opt == DHCP_OPT_MSG_TYPE && opt_len == 1u) {
+                msg_type = rx[roff];
+            } else if (opt == DHCP_OPT_SUBNET_MASK && opt_len == 4u) {
+                for (int i = 0; i < 4; i++) netmask[i] = rx[roff + (uint32)i];
+            } else if (opt == DHCP_OPT_ROUTER && opt_len >= 4u) {
+                for (int i = 0; i < 4; i++) gateway[i] = rx[roff + (uint32)i];
+            } else if (opt == DHCP_OPT_DNS && opt_len >= 4u) {
+                for (int i = 0; i < 4; i++) dns[i] = rx[roff + (uint32)i];
+            }
+
+            roff += (uint32)opt_len;
+        }
+
+        if (msg_type != DHCP_MSG_ACK) continue;
+
+        net_config cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        for (int i = 0; i < 4; i++) {
+            cfg.local_ip[i] = rx[16 + (uint32)i];
+            cfg.gateway_ip[i] = gateway[i];
+            cfg.netmask[i] = netmask[i];
+            cfg.dns_ip[i] = dns[i];
+        }
+        if (ipv4_is_zero(cfg.dns_ip) && !ipv4_is_zero(cfg.gateway_ip)) {
+            for (int i = 0; i < 4; i++) cfg.dns_ip[i] = cfg.gateway_ip[i];
+        }
+
+        if (net_config_set(&cfg) != 0) {
+            net_udp_close(socket_id);
+            return -7;
+        }
+        got_ack = 1;
+        break;
+    }
+
+    net_udp_close(socket_id);
+    return got_ack ? 0 : -8;
 }
 
 static void udp_rxq_clear(void)
@@ -1606,12 +1848,15 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
             net_log("[NETSTACK] Dropping IPv4 fragment\n");
             continue;
         }
-        if (!ipv4_eq(ip->dst, local_ip)) continue;
+        int dst_is_local = ipv4_eq(ip->dst, local_ip);
+        int dst_is_broadcast = ipv4_is_broadcast(ip->dst);
+        if (!dst_is_local && !dst_is_broadcast) continue;
 
         // Opportunistically learn IP->MAC mapping from IPv4 frames.
         arp_cache_update(ip->src, eh->src);
 
         if (ip->proto == 1) {
+            if (!dst_is_local) continue;
             // ICMP echo support for debugging (ping).
             if (len < (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(icmp_echo_hdr)) continue;
 
@@ -1658,6 +1903,7 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
 
         // TCP handling (minimal client state machine).
         if (ip->proto == 6) {
+            if (!dst_is_local) continue;
             if (len < (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(tcp_hdr)) continue;
 
             tcp_hdr* tcp = (tcp_hdr*)(frame + sizeof(eth_hdr) + ip_hdr_len);
@@ -2296,10 +2542,15 @@ int net_udp_send(const uint8 src_ip[4], uint16 src_port,
     if (net_init_default() != 0) return -4;
 
     uint8 dst_mac[6];
-    uint8 next_hop_ip[4];
-    ipv4_choose_next_hop(src_ip, dst_ip, next_hop_ip);
-    int rc = arp_resolve(src_ip, next_hop_ip, dst_mac, arp_spins);
-    if (rc != 0) return rc;
+    int rc = 0;
+    if (ipv4_is_broadcast(dst_ip)) {
+        for (int i = 0; i < 6; i++) dst_mac[i] = 0xFFu;
+    } else {
+        uint8 next_hop_ip[4];
+        ipv4_choose_next_hop(src_ip, dst_ip, next_hop_ip);
+        rc = arp_resolve(src_ip, next_hop_ip, dst_mac, arp_spins);
+        if (rc != 0) return rc;
+    }
 
     uint8 frame[1600];
     uint32 off = 0;

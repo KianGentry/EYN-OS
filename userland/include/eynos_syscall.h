@@ -142,6 +142,7 @@ enum {
     EYN_SYSCALL_SETBG_PATH = 92,
     EYN_SYSCALL_CLEARBG_FOCUSED = 93,
     EYN_SYSCALL_SETFONT_PATH = 94,
+    EYN_SYSCALL_NET_DHCP_REQUEST = 157,
 
     EYN_SYSCALL_CHDIR = 95,
     EYN_SYSCALL_RUN = 96,
@@ -776,6 +777,11 @@ static inline int eyn_sys_net_ping(const uint8_t dst_ip[4], const uint8_t local_
 // Resolve hostname to IPv4 using kernel DNS resolver.
 static inline int eyn_sys_net_dns_resolve(const char* name, uint8_t out_ip[4]) {
     return eyn_syscall3_ppi(EYN_SYSCALL_NET_DNS_RESOLVE, name, out_ip, 0);
+}
+
+// Request IPv4 configuration via DHCP.
+static inline int eyn_sys_net_dhcp_request(int timeout_spins, int arp_spins, int persist_cfg) {
+    return eyn_syscall3_iii(EYN_SYSCALL_NET_DHCP_REQUEST, timeout_spins, arp_spins, persist_cfg);
 }
 
 // Establish a TCP connection to dst_ip:dst_port (local_port=0 for ephemeral).

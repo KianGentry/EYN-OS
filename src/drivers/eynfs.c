@@ -1693,6 +1693,48 @@ int open(const char* path, int mode) {
     return eynfs_open(path, mode);
 }
 
+static int eynfs_write_file_at(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *entry,
+                              const void *buf, size_t size, uint32_t offset,
+                              uint32_t parent_block, uint32_t entry_index) {
+    if (!entry || entry->type != EYNFS_TYPE_FILE) return -1;
+    if (!buf && size > 0) return -1;
+
+    if (size == 0) return 0;
+
+    uint32_t old_size = entry->size;
+    uint32_t size_u32 = (uint32_t)size;
+    uint32_t end = offset + size_u32;
+    if (end < offset) return -1;
+
+    uint32_t new_size = (end > old_size) ? end : old_size;
+    if (offset == 0 && new_size == size_u32) {
+        int rc = eynfs_write_file(drive, sb, entry, buf, size, parent_block, entry_index);
+        return (rc < 0) ? -1 : (int)size;
+    }
+
+    uint8_t* merged = (uint8_t*)malloc(new_size);
+    if (!merged) return -1;
+
+    if (old_size > 0) {
+        int existing_read = eynfs_read_file(drive, sb, entry, merged, old_size, 0);
+        if (existing_read != (int)old_size) {
+            free(merged);
+            return -1;
+        }
+    }
+
+    if (new_size > old_size) {
+        memset(merged + old_size, 0, new_size - old_size);
+    }
+
+    memcpy(merged + offset, buf, size);
+
+    int rc = eynfs_write_file(drive, sb, entry, merged, new_size, parent_block, entry_index);
+    free(merged);
+    if (rc < 0) return -1;
+    return (int)size;
+}
+
 // Close a file descriptor
 int close(int fd) {
     if (fd < 0 || fd >= EYNFS_MAX_OPEN_FILES || !eynfs_files[fd].used)
@@ -1753,53 +1795,21 @@ int write(int fd, const void* buf, int size) {
     eynfs_file_t* f = &eynfs_files[fd];
     if (f->mode != 1 && f->mode != 2)
         return -1;
+    if (size < 0)
+        return -1;
+    if (size == 0)
+        return 0;
     
     // Can't write to directories
     if (f->entry.type == EYNFS_TYPE_DIR) return -1;
-    
-    // For append mode, we need to read existing data first
-    if (f->mode == 2 && f->offset > 0) {
-        // Read existing data
-        uint8_t* existing_data = (uint8_t*)malloc(f->entry.size);
-        if (!existing_data) return -1;
-        
-        int existing_read = eynfs_read_file(f->drive, &f->sb, &f->entry, existing_data, f->entry.size, 0);
-        if (existing_read < 0) {
-            free(existing_data);
-            return -1;
-        }
-        
-        // Combine existing data with new data
-        uint8_t* combined_data = (uint8_t*)malloc(existing_read + size);
-        if (!combined_data) {
-            free(existing_data);
-            return -1;
-        }
-        
-        memcpy(combined_data, existing_data, existing_read);
-        memcpy(combined_data + existing_read, buf, size);
-        
-        // Write combined data
-        int n = eynfs_write_file(f->drive, &f->sb, &f->entry, combined_data, existing_read + size, 
-                                f->parent_block, f->entry_index);
-        
-        free(existing_data);
-        free(combined_data);
-        
-        if (n > 0) {
-            f->offset = n;
-            f->entry.size = n;
-        }
-        return n;
-    } else {
-        // Regular write (overwrite or new file)
-        int n = eynfs_write_file(f->drive, &f->sb, &f->entry, buf, size, f->parent_block, f->entry_index);
-        if (n > 0) {
-            f->offset = n;
-            f->entry.size = n;
-        }
-        return n;
+
+    uint32_t write_off = (f->mode == 2) ? f->entry.size : f->offset;
+    int n = eynfs_write_file_at(f->drive, &f->sb, &f->entry, buf, (size_t)size,
+                                write_off, f->parent_block, f->entry_index);
+    if (n > 0) {
+        f->offset = write_off + (uint32_t)n;
     }
+    return n;
 } 
 
 // Performance monitoring functions

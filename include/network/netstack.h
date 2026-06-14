@@ -42,6 +42,12 @@ typedef struct net_config {
 // Returns 0 on success, <0 on error.
 int net_dns_resolve(const char* name, uint8 out_ip[4], int timeout_spins);
 
+// Acquire IPv4 configuration via DHCP (DISCOVER/OFFER/REQUEST/ACK).
+// timeout_spins <= 0 and arp_spins <= 0 use internal defaults.
+// persist_cfg is reserved for future behavior and currently ignored.
+// Returns 0 on success, <0 on error/timeout.
+int net_dhcp_request(int timeout_spins, int arp_spins, int persist_cfg);
+
 // --- Netstack timer facility ---
 // Uses system tick counter for lightweight scheduling.
 typedef void (*net_timer_cb)(void* ctx);
