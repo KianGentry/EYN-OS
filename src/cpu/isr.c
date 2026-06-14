@@ -1172,6 +1172,42 @@ static int user_pipe_set_spool(int pipe_id, int enabled) {
     return 0;
 }
 
+static int user_pipe_copyout_bytes(const uint8* src, uint32 src_cap, uint32* src_pos,
+                                   uint32* src_used, void* user_dst, int maxlen) {
+    int copied = 0;
+    while (copied < maxlen && *src_used > 0) {
+        uint32 contiguous = src_cap - *src_pos;
+        if (contiguous > *src_used) contiguous = *src_used;
+        int chunk = maxlen - copied;
+        if ((uint32)chunk > contiguous) chunk = (int)contiguous;
+        if (chunk <= 0) break;
+        if (copyout((uint8*)user_dst + copied, src + *src_pos, (size_t)chunk) != 0) return -1;
+        *src_pos = (*src_pos + (uint32)chunk) % src_cap;
+        *src_used -= (uint32)chunk;
+        copied += chunk;
+    }
+    return copied;
+}
+
+static int user_pipe_copyin_bytes(uint8* dst, uint32 dst_cap, uint32* dst_pos,
+                                  uint32* dst_used, const void* user_src, int len) {
+    int copied = 0;
+    while (copied < len) {
+        uint32 free_space = dst_cap - *dst_used;
+        if (free_space == 0) break;
+        uint32 contiguous = dst_cap - *dst_pos;
+        if (contiguous > free_space) contiguous = free_space;
+        int chunk = len - copied;
+        if ((uint32)chunk > contiguous) chunk = (int)contiguous;
+        if (chunk <= 0) break;
+        if (copyin(dst + *dst_pos, (const uint8*)user_src + copied, (size_t)chunk) != 0) return -1;
+        *dst_pos = (*dst_pos + (uint32)chunk) % dst_cap;
+        *dst_used += (uint32)chunk;
+        copied += chunk;
+    }
+    return copied;
+}
+
 static int user_pipe_read(int pipe_id, void* user_dst, int maxlen, int nonblock) {
     if (pipe_id < 0 || pipe_id >= USER_PIPE_MAX || maxlen < 0 || !user_dst) return -1;
     user_pipe_t* p = &g_user_pipes[pipe_id];
@@ -1192,23 +1228,15 @@ static int user_pipe_read(int pipe_id, void* user_dst, int maxlen, int nonblock)
         __asm__ __volatile__("hlt");
     }
 
-    int n = 0;
-    while (n < maxlen && p->bytes_used > 0) {
-        uint8 b = p->buffer[p->read_pos];
-        if (copyout((uint8*)user_dst + n, &b, 1) != 0) return -1;
-        p->read_pos = (p->read_pos + 1u) % USER_PIPE_BUFFER_BYTES;
-        p->bytes_used--;
-        n++;
-    }
+    int n = user_pipe_copyout_bytes(p->buffer, USER_PIPE_BUFFER_BYTES, &p->read_pos,
+                                    &p->bytes_used, user_dst, maxlen);
+    if (n < 0) return -1;
+    if (n >= maxlen || p->spool_bytes == 0) return n;
 
-    while (n < maxlen && p->spool_bytes > 0) {
-        uint8 b = p->spool_buf[p->spool_read_pos];
-        if (copyout((uint8*)user_dst + n, &b, 1) != 0) return -1;
-        p->spool_read_pos = (p->spool_read_pos + 1u) % p->spool_cap;
-        p->spool_bytes--;
-        n++;
-    }
-    return n;
+    int n2 = user_pipe_copyout_bytes(p->spool_buf, p->spool_cap, &p->spool_read_pos,
+                                     &p->spool_bytes, (uint8*)user_dst + n, maxlen - n);
+    if (n2 < 0) return -1;
+    return n + n2;
 }
 
 static int user_pipe_write(int pipe_id, const void* user_src, int len, int nonblock) {
@@ -1239,21 +1267,23 @@ static int user_pipe_write(int pipe_id, const void* user_src, int len, int nonbl
             __asm__ __volatile__("hlt");
         }
 
-        uint8 b = 0;
-        if (copyin(&b, (const uint8*)user_src + n, 1) != 0) return -1;
         if (p->bytes_used < USER_PIPE_BUFFER_BYTES) {
-            p->buffer[p->write_pos] = b;
-            p->write_pos = (p->write_pos + 1u) % USER_PIPE_BUFFER_BYTES;
-            p->bytes_used++;
-        } else if (p->spool_enabled && p->spool_buf && p->spool_bytes < p->spool_cap) {
-            p->spool_buf[p->spool_write_pos] = b;
-            p->spool_write_pos = (p->spool_write_pos + 1u) % p->spool_cap;
-            p->spool_bytes++;
-        } else {
-            if (nonblock) return (n > 0) ? n : -1;
+            int wrote = user_pipe_copyin_bytes(p->buffer, USER_PIPE_BUFFER_BYTES, &p->write_pos,
+                                               &p->bytes_used, (const uint8*)user_src + n, len - n);
+            if (wrote < 0) return -1;
+            n += wrote;
             continue;
         }
-        n++;
+
+        if (p->spool_enabled && p->spool_buf && p->spool_bytes < p->spool_cap) {
+            int wrote = user_pipe_copyin_bytes(p->spool_buf, p->spool_cap, &p->spool_write_pos,
+                                               &p->spool_bytes, (const uint8*)user_src + n, len - n);
+            if (wrote < 0) return -1;
+            n += wrote;
+            continue;
+        }
+
+        if (nonblock) return (n > 0) ? n : -1;
     }
     return n;
 }
@@ -1312,15 +1342,8 @@ static int user_pty_read(int pty_id, int end, void* user_dst, int maxlen, int no
         peer_refs = (end == USER_PTY_END_MASTER) ? p->slave_refs : p->master_refs;
     }
 
-    int n = 0;
-    while (n < maxlen && *src_used > 0) {
-        uint8 b = src_buf[*src_read];
-        if (copyout((uint8*)user_dst + n, &b, 1) != 0) return -1;
-        *src_read = (*src_read + 1u) % USER_PTY_BUFFER_BYTES;
-        (*src_used)--;
-        n++;
-    }
-    return n;
+    return user_pipe_copyout_bytes(src_buf, USER_PTY_BUFFER_BYTES, src_read, src_used,
+                                   user_dst, maxlen);
 }
 
 static int user_pty_write(int pty_id, int end, const void* user_src, int len, int nonblock) {
@@ -1362,12 +1385,10 @@ static int user_pty_write(int pty_id, int end, const void* user_src, int len, in
             peer_refs = (end == USER_PTY_END_MASTER) ? p->slave_refs : p->master_refs;
         }
 
-        uint8 b = 0;
-        if (copyin(&b, (const uint8*)user_src + n, 1) != 0) return -1;
-        dst_buf[*dst_write] = b;
-        *dst_write = (*dst_write + 1u) % USER_PTY_BUFFER_BYTES;
-        (*dst_used)++;
-        n++;
+        int wrote = user_pipe_copyin_bytes(dst_buf, USER_PTY_BUFFER_BYTES, dst_write, dst_used,
+                                           (const uint8*)user_src + n, len - n);
+        if (wrote < 0) return -1;
+        n += wrote;
     }
     return n;
 }

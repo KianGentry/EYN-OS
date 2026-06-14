@@ -34,7 +34,7 @@
 - [ ] Add safer default policies for network, file, and device access
 
 ## Networking
-- [ ] Add DHCP client support
+- [x] Add DHCP client support
 - [ ] Add IPv4 fragmentation and reassembly
 - [ ] Add more complete TCP behavior and concurrency
 - [ ] Add interrupt-driven packet reception
