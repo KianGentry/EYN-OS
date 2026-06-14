@@ -675,9 +675,12 @@ static uint32 find_free_block(uint32 size) {
             return NO_BLOCK;
         }
         
-        if (!block->used && block->size >= size) {
-            // Use best-fit allocation to reduce fragmentation
-            if (block->size < best_size) {
+        if (!block->used) {
+            rust_heap_best_fit_result_t fit_res = rust_heap_best_fit_update(
+                block->size,
+                best_size,
+                size);
+            if (fit_res == RUST_HEAP_BEST_FIT_UPDATE) {
                 best_size = block->size;
                 best_fit = current;
             }
@@ -959,13 +962,26 @@ void* realloc(void* ptr, size_t new_size) {
         return NULL;
     }
     
-    uint32 current_size = block->size - BLOCK_HEADER_SIZE;
-    if (new_size <= current_size) {
+    uint32 copy_size = 0;
+    uint32 do_realloc = 0;
+    rust_heap_math_result_t realloc_res = rust_heap_realloc_copy_size(
+        block->size,
+        BLOCK_HEADER_SIZE,
+        (uint32)new_size,
+        &copy_size,
+        &do_realloc);
+    if (realloc_res != RUST_HEAP_MATH_OK) {
+        printf("%c[MEMORY] Realloc size computation failed\n", 255, 0, 0);
+        memory_errors++;
+        return NULL;
+    }
+
+    if (!do_realloc) {
         return ptr; // No need to reallocate
     }
     void* new_ptr = malloc(new_size);
     if (!new_ptr) return NULL;
-    memcpy((char*)new_ptr, (char*)ptr, current_size);
+    memcpy((char*)new_ptr, (char*)ptr, copy_size);
     free(ptr);
     return new_ptr;
 }

@@ -463,3 +463,56 @@ pub unsafe extern "C" fn rust_heap_compute_block_offset(
     }
     RustHeapPtrResult::Ok
 }
+
+#[repr(C)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+pub enum RustHeapBestFitResult {
+    Skip = 0,
+    Update = 1,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_heap_best_fit_update(
+    block_size: u32,
+    current_best_size: u32,
+    requested_size: u32,
+) -> RustHeapBestFitResult {
+    if block_size < requested_size {
+        return RustHeapBestFitResult::Skip;
+    }
+    if block_size < current_best_size {
+        return RustHeapBestFitResult::Update;
+    }
+    RustHeapBestFitResult::Skip
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_heap_realloc_copy_size(
+    block_size: u32,
+    block_header_size: u32,
+    new_size: u32,
+    out_copy_size: *mut u32,
+    out_do_realloc: *mut u32,
+) -> RustHeapMathResult {
+    if out_copy_size.is_null() || out_do_realloc.is_null() {
+        return RustHeapMathResult::InvalidArg;
+    }
+
+    let current_size = match block_size.checked_sub(block_header_size) {
+        Some(v) => v,
+        None => return RustHeapMathResult::Overflow,
+    };
+
+    let do_realloc = if new_size <= current_size { 0 } else { 1 };
+    let copy_size = if current_size < new_size {
+        current_size
+    } else {
+        new_size
+    };
+
+    unsafe {
+        *out_copy_size = copy_size;
+        *out_do_realloc = do_realloc;
+    }
+    RustHeapMathResult::Ok
+}

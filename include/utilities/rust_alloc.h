@@ -95,6 +95,23 @@ rust_heap_ptr_result_t rust_heap_compute_block_offset(
 	uint32_t heap_size,
 	uint32_t* out_block_offset);
 
+typedef enum {
+	RUST_HEAP_BEST_FIT_SKIP = 0,
+	RUST_HEAP_BEST_FIT_UPDATE = 1
+} rust_heap_best_fit_result_t;
+
+rust_heap_best_fit_result_t rust_heap_best_fit_update(
+	uint32_t block_size,
+	uint32_t current_best_size,
+	uint32_t requested_size);
+
+rust_heap_math_result_t rust_heap_realloc_copy_size(
+	uint32_t block_size,
+	uint32_t block_header_size,
+	uint32_t new_size,
+	uint32_t* out_copy_size,
+	uint32_t* out_do_realloc);
+
 #ifdef __cplusplus
 }
 #endif
