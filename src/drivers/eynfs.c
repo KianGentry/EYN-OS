@@ -12,6 +12,7 @@
 #include <misc/sched.h>
 #include <fs/fs_txn.h>
 #include <mm/vmm.h>
+#include <rust_eynfs.h>
 
 #define EYNFS_BLOCK_SIZE 512 // For now, fixed block size
 
@@ -158,6 +159,69 @@ static int eynfs_block_cache_validate_or_disable(const char* where) {
     uint32 cache_ptr = (uint32)g_block_cache;
     uint32 data_ptr = (uint32)g_block_cache_data;
 
+#if CONFIG_RUST_EYNFS
+    rust_eynfs_cache_validation_result_t vr = rust_eynfs_validate_block_cache(
+        (const rust_eynfs_cache_entry_t*)g_block_cache,
+        g_block_cache_data,
+        g_block_cache_capacity,
+        (uintptr)KERNEL_BASE,
+        (uintptr)physmap_end,
+        EYNFS_BLOCK_SIZE);
+
+    if (vr != RUST_EYNFS_CACHE_VALID) {
+        if (!g_block_cache_corruption_reported) {
+            eynfs_serial_write_cstr("[EYNFS] cache corruption at ");
+            eynfs_serial_write_cstr(where ? where : "?");
+            eynfs_serial_write_cstr(": ");
+        }
+        switch (vr) {
+            case RUST_EYNFS_CACHE_BAD_TABLE_PTR:
+                if (!g_block_cache_corruption_reported) {
+                    eynfs_serial_write_cstr("g_block_cache=");
+                    eynfs_serial_write_hex32(cache_ptr);
+                    eynfs_serial_write_cstr(" physmap_end=");
+                    eynfs_serial_write_hex32(physmap_end);
+                    eynfs_serial_write_cstr("\n");
+                }
+                eynfs_block_cache_disable_permanently("corrupt g_block_cache");
+                return 0;
+            case RUST_EYNFS_CACHE_BAD_DATA_PTR:
+                if (!g_block_cache_corruption_reported) {
+                    eynfs_serial_write_cstr("g_block_cache_data=");
+                    eynfs_serial_write_hex32(data_ptr);
+                    eynfs_serial_write_cstr(" physmap_end=");
+                    eynfs_serial_write_hex32(physmap_end);
+                    eynfs_serial_write_cstr("\n");
+                }
+                eynfs_block_cache_disable_permanently("corrupt g_block_cache_data");
+                return 0;
+            case RUST_EYNFS_CACHE_BAD_CAPACITY:
+                if (!g_block_cache_corruption_reported) {
+                    eynfs_serial_write_cstr("g_block_cache_capacity=");
+                    eynfs_serial_write_u32((uint32)g_block_cache_capacity);
+                    eynfs_serial_write_cstr("\n");
+                }
+                eynfs_block_cache_disable_permanently("corrupt g_block_cache_capacity");
+                return 0;
+            case RUST_EYNFS_CACHE_BAD_ENTRY_PTR:
+                if (!g_block_cache_corruption_reported) {
+                    eynfs_serial_write_cstr("cache entry data pointer mismatch\n");
+                }
+                eynfs_block_cache_disable_permanently("corrupt cache entry data pointer");
+                return 0;
+            case RUST_EYNFS_CACHE_BAD_PHYSMAP:
+            default:
+                if (!g_block_cache_corruption_reported) {
+                    eynfs_serial_write_cstr("invalid physmap window\n");
+                }
+                eynfs_block_cache_disable_permanently("invalid cache physmap bounds");
+                return 0;
+        }
+    }
+
+    return 1;
+#else
+
     if (cache_ptr < KERNEL_BASE || cache_ptr >= physmap_end) {
         if (!g_block_cache_corruption_reported) {
             eynfs_serial_write_cstr("[EYNFS] cache corruption at ");
@@ -218,6 +282,7 @@ static int eynfs_block_cache_validate_or_disable(const char* where) {
     }
 
     return 1;
+#endif
 }
 
 static int eynfs_block_cache_alloc_if_needed(void) {
@@ -252,6 +317,27 @@ static int eynfs_block_cache_alloc_if_needed(void) {
 static int eynfs_block_cache_choose_victim_index(uint32_t* out_index, int* out_need_writeback) {
     if (!out_index || !out_need_writeback) return 0;
     if (!eynfs_block_cache_is_enabled()) return 0;
+
+#if CONFIG_RUST_EYNFS
+    rust_eynfs_victim_result_t vr = rust_eynfs_choose_victim_index(
+        (const rust_eynfs_cache_entry_t*)g_block_cache,
+        g_block_cache_capacity,
+        out_index);
+    switch (vr) {
+        case RUST_EYNFS_VICTIM_FOUND_INVALID:
+            *out_need_writeback = 0;
+            return 1;
+        case RUST_EYNFS_VICTIM_FOUND_CLEAN:
+            *out_need_writeback = 0;
+            return 1;
+        case RUST_EYNFS_VICTIM_FOUND_DIRTY:
+            *out_need_writeback = 1;
+            return 1;
+        case RUST_EYNFS_VICTIM_NONE:
+        default:
+            return 0;
+    }
+#else
 
     // Prefer an invalid slot. Otherwise choose clean LRU. Only evict dirty LRU
     // when no clean slot exists.
@@ -299,6 +385,7 @@ static int eynfs_block_cache_choose_victim_index(uint32_t* out_index, int* out_n
     }
 
     return 0;
+#endif
 }
 
 // Performance optimization: Free block tracking

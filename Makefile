@@ -40,6 +40,7 @@ CONFIG_SCHED_MLFQ_Q2_MS ?= 50
 CONFIG_SCHED_MLFQ_BOOST_MS ?= 1000
 CONFIG_ATA_LBA48_SMOKE ?= 0
 CONFIG_RUST_ALLOCATOR ?= 0
+CONFIG_RUST_EYNFS ?= 0
 
 ARCH_KERNEL_CFLAGS_i386 = -m32 -march=i386 -mtune=i386 -DEYNOS_ARCH_I386=1
 ARCH_KERNEL_CFLAGS_amd64 = -m64 -march=x86-64 -mtune=generic -mno-red-zone -DEYNOS_ARCH_AMD64=1
@@ -55,6 +56,7 @@ KERNEL_CFLAGS = $(ARCH_KERNEL_CFLAGS_$(ARCH)) -c -ffreestanding -fno-builtin -fn
 		 -DCONFIG_SCHED_MLFQ_BOOST_MS=$(CONFIG_SCHED_MLFQ_BOOST_MS) \
 		 -DCONFIG_ATA_LBA48_SMOKE=$(CONFIG_ATA_LBA48_SMOKE) \
 		 -DCONFIG_RUST_ALLOCATOR=$(CONFIG_RUST_ALLOCATOR) \
+		 -DCONFIG_RUST_EYNFS=$(CONFIG_RUST_EYNFS) \
 		 -DCONFIG_GUI_ENABLED=$(CONFIG_GUI_ENABLED) \
 		 -DCONFIG_TTY_ENABLED=$(CONFIG_TTY_ENABLED) \
 	         -DCONFIG_DEBUG_SERIAL_TO_VGA=$(CONFIG_DEBUG_SERIAL_TO_VGA) \
@@ -153,6 +155,10 @@ ifeq ($(CONFIG_RUST_ALLOCATOR),1)
 OBJS += $(OBJDIR)/rust_alloc.o
 endif
 
+ifeq ($(CONFIG_RUST_EYNFS),1)
+OBJS += $(OBJDIR)/rust_eynfs.o
+endif
+
 ifeq ($(ARCH),i386)
 OBJS += $(OBJDIR)/vbe_bios.o
 endif
@@ -200,6 +206,17 @@ test-rust-allocator:
 	$(MAKE) obj/i386/util.o obj/i386/zero_copy.o ARCH=i386 CONFIG_RUST_ALLOCATOR=1
 	@echo "[test-rust-allocator] Build full kernel with Rust allocator ON"
 	$(MAKE) all ARCH=i386 CONFIG_RUST_ALLOCATOR=1
+
+.PHONY: test-rust-eynfs
+test-rust-eynfs:
+	@echo "[test-rust-eynfs] Build eynfs.c with Rust EYNFS OFF"
+	$(MAKE) obj/i386/eynfs.o ARCH=i386 CONFIG_RUST_EYNFS=0
+	@echo "[test-rust-eynfs] Build rust_eynfs.o with Rust EYNFS ON"
+	$(MAKE) obj/i386/rust_eynfs.o ARCH=i386 CONFIG_RUST_EYNFS=1
+	@echo "[test-rust-eynfs] Build eynfs.c with Rust EYNFS ON"
+	$(MAKE) obj/i386/eynfs.o ARCH=i386 CONFIG_RUST_EYNFS=1
+	@echo "[test-rust-eynfs] Build full kernel with Rust EYNFS ON"
+	$(MAKE) all ARCH=i386 CONFIG_RUST_EYNFS=1
 
 $(OBJDIR)/kasm.o:$(ARCH_BOOT_SRC_$(ARCH))
 	mkdir $(OBJDIR)/ -p
@@ -273,6 +290,11 @@ $(OBJDIR)/util.o:src/utilities/util.c
 ifeq ($(CONFIG_RUST_ALLOCATOR),1)
 $(OBJDIR)/rust_alloc.o:src/rust/rust_alloc.rs
 	$(RUSTC) $(RUSTFLAGS_KERNEL_$(ARCH)) $(RUSTFLAGS_KERNEL_COMMON) src/rust/rust_alloc.rs -o $(OBJDIR)/rust_alloc.o
+endif
+
+ifeq ($(CONFIG_RUST_EYNFS),1)
+$(OBJDIR)/rust_eynfs.o:src/rust/rust_eynfs.rs
+	$(RUSTC) $(RUSTFLAGS_KERNEL_$(ARCH)) $(RUSTFLAGS_KERNEL_COMMON) src/rust/rust_eynfs.rs -o $(OBJDIR)/rust_eynfs.o
 endif
 
 $(OBJDIR)/slab.o:src/mm/slab.c
