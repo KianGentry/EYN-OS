@@ -21,6 +21,7 @@
 #define ENOMEM      12
 #define EBADF        9
 #define ECHILD      10
+#define ENOENT       2
 #define ENOSYS      38
 #define EFAULT      14
 
@@ -30,6 +31,55 @@
 #define LINUX_CLONE_SIGNAL_MASK 0x000000FFu
 
 extern uint8 g_current_drive;
+
+#define LINUX_MAX_CHILD_TRACK 64
+typedef struct {
+    uint8 used;
+    uint32 parent_pid;
+    uint32 child_pid;
+} linux_child_link_t;
+
+static linux_child_link_t g_linux_child_links[LINUX_MAX_CHILD_TRACK];
+
+static int linux_child_register(uint32 parent_pid, uint32 child_pid) {
+    if (parent_pid == 0 || child_pid == 0) return -1;
+    for (int i = 0; i < LINUX_MAX_CHILD_TRACK; ++i) {
+        if (!g_linux_child_links[i].used) {
+            g_linux_child_links[i].used = 1;
+            g_linux_child_links[i].parent_pid = parent_pid;
+            g_linux_child_links[i].child_pid = child_pid;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int linux_child_find_slot(uint32 parent_pid, int pid_filter) {
+    for (int i = 0; i < LINUX_MAX_CHILD_TRACK; ++i) {
+        if (!g_linux_child_links[i].used) continue;
+        if (g_linux_child_links[i].parent_pid != parent_pid) continue;
+        if (pid_filter > 0 && g_linux_child_links[i].child_pid != (uint32)pid_filter) continue;
+        return i;
+    }
+    return -1;
+}
+
+static int linux_child_find_reapable_slot(uint32 parent_pid, int pid_filter) {
+    for (int i = 0; i < LINUX_MAX_CHILD_TRACK; ++i) {
+        if (!g_linux_child_links[i].used) continue;
+        if (g_linux_child_links[i].parent_pid != parent_pid) continue;
+        if (pid_filter > 0 && g_linux_child_links[i].child_pid != (uint32)pid_filter) continue;
+        if (!native_process_is_active(g_linux_child_links[i].child_pid)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void linux_child_drop_slot(int slot) {
+    if (slot < 0 || slot >= LINUX_MAX_CHILD_TRACK) return;
+    memset(&g_linux_child_links[slot], 0, sizeof(g_linux_child_links[slot]));
+}
 
 /*
  * ABI-INVARIANT: Linux-compat user pointers are 32-bit guest virtual addrs.
@@ -315,43 +365,104 @@ static int sys_lseek(native_process_t* proc, uint32 fd, int32 offset, int whence
 }
 
 static int sys_wait4(native_process_t* proc, int pid, int* kstatus, int options, void* krusage) {
-    (void)proc;
     (void)krusage;
 
-    if (pid <= 0) return -EINVAL;
+    if (!proc || proc->pid == 0) return -ECHILD;
+    if (pid == 0 || pid < -1) return -EINVAL;
 
     int flags = 0;
     if (options & LINUX_WNOHANG) flags |= USER_TASK_WAIT_NOHANG;
 
-    int status = 0;
-    int waited = user_task_waitpid(pid, &status, flags);
-    if (waited < 0) return -ECHILD;
+    uint32 parent_pid = proc->pid;
 
-    if (waited > 0 && kstatus) {
-        *kstatus = status;
-    }
-    return waited;
-}
-
-static int linux_spawn_user_task(const char* path, int argc, const char* const* argv) {
-    if (!path || !path[0]) return -EINVAL;
-
-    const char* cwd = "/";
-    if (g_user_task_active) {
-        const char* t = vterm_get_cwd(g_user_task_term);
-        if (t && t[0] == '/') cwd = t;
+    int slot = linux_child_find_reapable_slot(parent_pid, pid);
+    if (slot >= 0) {
+        int waited_pid = (int)g_linux_child_links[slot].child_pid;
+        linux_child_drop_slot(slot);
+        if (kstatus) *kstatus = 0;
+        return waited_pid;
     }
 
-    char abspath[128];
-    resolve_path(path, cwd, abspath, sizeof(abspath));
+    int active_slot = linux_child_find_slot(parent_pid, pid);
+    if (active_slot < 0) return -ECHILD;
 
-    int pid = user_task_spawn_argv(g_current_drive, abspath, argc, argv);
-    if (pid <= 0) return -EAGAIN;
-    return pid;
+    if (flags & USER_TASK_WAIT_NOHANG) {
+        return 0;
+    }
+
+    uint32 wait_pid = g_linux_child_links[active_slot].child_pid;
+    while (native_process_is_active(wait_pid)) {
+        sched_on_timeslice_end();
+        __asm__ __volatile__("sti");
+        __asm__ __volatile__("hlt");
+    }
+
+    slot = linux_child_find_slot(parent_pid, (int)wait_pid);
+    if (slot >= 0) linux_child_drop_slot(slot);
+    if (kstatus) *kstatus = 0;
+    return (int)wait_pid;
 }
 
-static int linux_spawn_argv_from_user(native_process_t* proc, uint32 path_ptr, uint32 argv_ptr) {
-    (void)proc;
+static int linux_spawn_native_child(native_process_t* proc) {
+    if (!proc || !proc->name[0]) return -EINVAL;
+    uint32 child_pid = 0;
+    exec_result_t rc = native_spawn(proc->name, &child_pid);
+    if (rc != EXEC_SUCCESS || child_pid == 0) return -EAGAIN;
+    if (linux_child_register(proc->pid, child_pid) != 0) return -EAGAIN;
+    return (int)child_pid;
+}
+
+static void linux_release_process_image(native_process_t* process) {
+    if (!process) return;
+
+    if (process->data_start) {
+        int data_is_offset_in_code = 0;
+        if (process->code_start && process->data_start >= process->code_start &&
+            process->data_start < process->code_start + process->code_size) {
+            data_is_offset_in_code = 1;
+        }
+        if (!data_is_offset_in_code) {
+            free((void*)process->data_start);
+        }
+        process->data_start = 0;
+    }
+
+    if (process->stack_start) {
+        free((void*)process->stack_start);
+        process->stack_start = 0;
+    }
+
+    if (process->segment_count) {
+        int code_is_segment = 0;
+        for (int s = 0; s < process->segment_count; s++) {
+            if (process->segments[s].mem) {
+                if ((uint32)process->segments[s].mem == process->code_start) code_is_segment = 1;
+                free(process->segments[s].mem);
+                process->segments[s].mem = NULL;
+            }
+        }
+        process->segment_count = 0;
+        if (process->code_start && !code_is_segment) {
+            free((void*)process->code_start);
+        }
+        process->code_start = 0;
+    } else {
+        if (process->code_start) {
+            free((void*)process->code_start);
+            process->code_start = 0;
+        }
+    }
+
+    if (process->address_space) {
+        destroy_address_space(process->address_space);
+        process->address_space = NULL;
+    }
+}
+
+static int linux_execve_replace_from_user(native_process_t* proc, uint32 path_ptr, uint32 argv_ptr) {
+    (void)argv_ptr;
+
+    if (!proc) return -EINVAL;
 
     if (!path_ptr) return -EFAULT;
 
@@ -360,29 +471,37 @@ static int linux_spawn_argv_from_user(native_process_t* proc, uint32 path_ptr, u
         return -EFAULT;
     }
 
-    const int max_args = 16;
-    const int max_arg_len = 64;
-    char arg_buf[16][64];
-    const char* kargv[16];
-    int kargc = 0;
+    const char* cwd = "/";
+    if (g_user_task_active) {
+        const char* t = vterm_get_cwd(g_user_task_term);
+        if (t && t[0] == '/') cwd = t;
+    }
+    char abspath[128];
+    resolve_path(path_buf, cwd, abspath, sizeof(abspath));
 
-    if (argv_ptr) {
-        for (int i = 0; i < max_args; ++i) {
-            const char* user_arg = NULL;
-            const void* user_slot = (const void*)(uintptr)(argv_ptr + (uint32)(i * (int)sizeof(uint32)));
-            if (copyin(&user_arg, user_slot, sizeof(user_arg)) != 0) {
-                return -EFAULT;
-            }
-            if (!user_arg) break;
-            if (linux_copyin_cstr(arg_buf[kargc], (uint32)max_arg_len, user_arg) != 0) {
-                return -EFAULT;
-            }
-            kargv[kargc] = arg_buf[kargc];
-            kargc++;
-        }
+    native_process_t image;
+    exec_result_t load_rc = native_load_program(abspath, &image);
+    if (load_rc != EXEC_SUCCESS) return -ENOENT;
+
+    uint32 keep_pid = proc->pid;
+    uint8 keep_owned = proc->owned;
+    void* keep_fd_table = proc->linux_fd_table;
+
+    linux_release_process_image(proc);
+
+    if (image.linux_fd_table && image.linux_fd_table != keep_fd_table) {
+        free(image.linux_fd_table);
+        image.linux_fd_table = NULL;
     }
 
-    return linux_spawn_user_task(path_buf, kargc, (kargc > 0) ? kargv : NULL);
+    *proc = image;
+    proc->pid = keep_pid;
+    proc->owned = keep_owned;
+    proc->linux_fd_table = keep_fd_table;
+    proc->linux_compat_mode = 1;
+    proc->linux_execve_pending = 1;
+    proc->active = 1;
+    return 0;
 }
 
 // Lightweight stubs for common libc expectations
@@ -1079,7 +1198,7 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
         }
         case __NR_fork:
         case __NR_vfork: {
-            int ret = linux_spawn_user_task(proc ? proc->name : NULL, 0, NULL);
+            int ret = linux_spawn_native_child(proc);
             regs[0] = (uint32)ret;
             return ret;
         }
@@ -1089,20 +1208,12 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
                 regs[0] = (uint32)-ENOSYS;
                 return -ENOSYS;
             }
-            int ret = linux_spawn_user_task(proc ? proc->name : NULL, 0, NULL);
+            int ret = linux_spawn_native_child(proc);
             regs[0] = (uint32)ret;
             return ret;
         }
         case __NR_execve: {
-            int ret = linux_spawn_argv_from_user(proc, ebx, ecx);
-            if (ret >= 0 && proc) {
-                /* Best-effort exec semantics for native compat path:
-                 * launch requested image and terminate current process.
-                 */
-                proc->active = 0;
-                regs[0] = 0;
-                return 0;
-            }
+            int ret = linux_execve_replace_from_user(proc, ebx, ecx);
             regs[0] = (uint32)ret;
             return ret;
         }

@@ -600,6 +600,18 @@ exec_result_t native_run_process(native_process_t* process) {
                         // Linux-style syscall dispatch for Linux-compat processes only.
                         int dispatched = linux_syscall_dispatch(process, regs);
                         if (dispatched != -38) { // -ENOSYS means unknown; otherwise handled
+                            if (process->linux_execve_pending) {
+                                process->linux_execve_pending = 0;
+                                code_ptr = (uint8_t*)process->code_start;
+                                pc = 0;
+                                if (process->entry_point >= process->code_start &&
+                                    process->entry_point < process->code_start + process->code_size) {
+                                    pc = process->entry_point - process->code_start;
+                                }
+                                memset(regs, 0, sizeof(regs));
+                                regs[4] = process->esp;
+                                continue;
+                            }
                             pc += 2;
                             continue;
                         }
@@ -1226,6 +1238,16 @@ int native_get_process_count(void) {
         if (g_processes[i].active) count++;
     }
     return count;
+}
+
+int native_process_is_active(uint32 pid) {
+    if (pid == 0) return 0;
+    for (int i = 0; i < MAX_NATIVE_PROCESSES; i++) {
+        if (g_processes[i].pid == pid) {
+            return g_processes[i].active ? 1 : 0;
+        }
+    }
+    return 0;
 }
 
 // round-robin: return next active process index or -1
