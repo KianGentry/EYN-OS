@@ -10,6 +10,8 @@
 #include <mm/vmm.h>
 #include <mm/user_access.h>
 #include <cpu/user_elf.h>
+#include <fs_commands.h>
+#include <terminals.h>
 
 // Very small per-process FD table for now
 #define LINUX_MAX_FD 32
@@ -20,8 +22,14 @@
 #define EBADF        9
 #define ECHILD      10
 #define ENOSYS      38
+#define EFAULT      14
+
+#define EAGAIN      11
 
 #define LINUX_WNOHANG 0x1
+#define LINUX_CLONE_SIGNAL_MASK 0x000000FFu
+
+extern uint8 g_current_drive;
 
 /*
  * ABI-INVARIANT: Linux-compat user pointers are 32-bit guest virtual addrs.
@@ -50,6 +58,18 @@ static int linux_ctx_allow(uint32 caps, uint32 cost) {
         if (sched_det_is_enabled()) ctx->det_seq++;
     }
     return 1;
+}
+
+static int linux_copyin_cstr(char* out, uint32 out_size, const char* user_ptr) {
+    if (!out || out_size == 0 || !user_ptr) return -1;
+    for (uint32 i = 0; i < out_size; ++i) {
+        char ch = '\0';
+        if (copyin(&ch, (const void*)(user_ptr + i), sizeof(ch)) != 0) return -1;
+        out[i] = ch;
+        if (ch == '\0') return 0;
+    }
+    out[out_size - 1u] = '\0';
+    return 0;
 }
 
 typedef struct {
@@ -311,6 +331,58 @@ static int sys_wait4(native_process_t* proc, int pid, int* kstatus, int options,
         *kstatus = status;
     }
     return waited;
+}
+
+static int linux_spawn_user_task(const char* path, int argc, const char* const* argv) {
+    if (!path || !path[0]) return -EINVAL;
+
+    const char* cwd = "/";
+    if (g_user_task_active) {
+        const char* t = vterm_get_cwd(g_user_task_term);
+        if (t && t[0] == '/') cwd = t;
+    }
+
+    char abspath[128];
+    resolve_path(path, cwd, abspath, sizeof(abspath));
+
+    int pid = user_task_spawn_argv(g_current_drive, abspath, argc, argv);
+    if (pid <= 0) return -EAGAIN;
+    return pid;
+}
+
+static int linux_spawn_argv_from_user(native_process_t* proc, uint32 path_ptr, uint32 argv_ptr) {
+    (void)proc;
+
+    if (!path_ptr) return -EFAULT;
+
+    char path_buf[128];
+    if (linux_copyin_cstr(path_buf, sizeof(path_buf), (const char*)(uintptr)path_ptr) != 0) {
+        return -EFAULT;
+    }
+
+    const int max_args = 16;
+    const int max_arg_len = 64;
+    char arg_buf[16][64];
+    const char* kargv[16];
+    int kargc = 0;
+
+    if (argv_ptr) {
+        for (int i = 0; i < max_args; ++i) {
+            const char* user_arg = NULL;
+            const void* user_slot = (const void*)(uintptr)(argv_ptr + (uint32)(i * (int)sizeof(uint32)));
+            if (copyin(&user_arg, user_slot, sizeof(user_arg)) != 0) {
+                return -EFAULT;
+            }
+            if (!user_arg) break;
+            if (linux_copyin_cstr(arg_buf[kargc], (uint32)max_arg_len, user_arg) != 0) {
+                return -EFAULT;
+            }
+            kargv[kargc] = arg_buf[kargc];
+            kargc++;
+        }
+    }
+
+    return linux_spawn_user_task(path_buf, kargc, (kargc > 0) ? kargv : NULL);
 }
 
 // Lightweight stubs for common libc expectations
@@ -1006,16 +1078,34 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             return ret;
         }
         case __NR_fork:
-        case __NR_clone:
-        case __NR_vfork:
-            regs[0] = (uint32)-ENOSYS;
-            return -ENOSYS;
-        case __NR_execve:
-            /* NOTE: native emulator path lacks true image replacement semantics.
-             * Keep explicit ENOSYS for now instead of partial/incorrect exec.
-             */
-            regs[0] = (uint32)-ENOSYS;
-            return -ENOSYS;
+        case __NR_vfork: {
+            int ret = linux_spawn_user_task(proc ? proc->name : NULL, 0, NULL);
+            regs[0] = (uint32)ret;
+            return ret;
+        }
+        case __NR_clone: {
+            uint32 flags = ebx;
+            if ((flags & ~LINUX_CLONE_SIGNAL_MASK) != 0u) {
+                regs[0] = (uint32)-ENOSYS;
+                return -ENOSYS;
+            }
+            int ret = linux_spawn_user_task(proc ? proc->name : NULL, 0, NULL);
+            regs[0] = (uint32)ret;
+            return ret;
+        }
+        case __NR_execve: {
+            int ret = linux_spawn_argv_from_user(proc, ebx, ecx);
+            if (ret >= 0 && proc) {
+                /* Best-effort exec semantics for native compat path:
+                 * launch requested image and terminate current process.
+                 */
+                proc->active = 0;
+                regs[0] = 0;
+                return 0;
+            }
+            regs[0] = (uint32)ret;
+            return ret;
+        }
         case __NR_fstat: {
             void* kbuf = linux_translate_user_ptr(proc, ecx, (uint32)sizeof(uint64));
             int ret = sys_fstat(proc, ebx, kbuf);

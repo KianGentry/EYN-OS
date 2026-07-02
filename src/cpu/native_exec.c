@@ -565,7 +565,7 @@ exec_result_t native_run_process(native_process_t* process) {
     uint32_t __max_steps = process->code_size * 16 + 1024;
     if (__max_steps < 2048) __max_steps = 2048;
     uint32_t __steps = 0;
-    while (pc < process->code_size && __steps++ < __max_steps) { // Limit to prevent infinite loops
+    while (process->active && pc < process->code_size && __steps++ < __max_steps) { // Limit to prevent infinite loops
         uint8_t opcode = code_ptr[pc];
         if (native_verbose) {
             /* Lightweight trace for initial steps to help debug why programs exit immediately */
