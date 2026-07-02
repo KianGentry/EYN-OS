@@ -156,7 +156,7 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
                     char interpreter_path[256];
                     interpreter_path[0] = '\0';
 
-                    if (eh->e_type == ET_DYN && eh->e_phoff + (uint32_t)eh->e_phnum * (uint32_t)eh->e_phentsize <= size) {
+                    if (eh->e_phoff + (uint32_t)eh->e_phnum * (uint32_t)eh->e_phentsize <= size) {
                         Elf32_Phdr* ph = (Elf32_Phdr*)(buf + eh->e_phoff);
                         for (int i = 0; i < eh->e_phnum; i++) {
                             if (ph->p_type == PT_INTERP && ph->p_offset + ph->p_filesz <= size) {
@@ -168,6 +168,12 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
                             }
                             ph = (Elf32_Phdr*)((char*)ph + eh->e_phentsize);
                         }
+                    }
+
+                    if (interpreter_path[0] != '\0') {
+                        printf("[NATIVE_EXEC] PT_INTERP detected (%s); use run/user_elf path for dynamic ELF execution\n", interpreter_path);
+                        free(buf);
+                        return EXEC_ERROR_INVALID_FORMAT;
                     }
 
                     if (eh->e_phoff + (uint32_t)eh->e_phnum * (uint32_t)eh->e_phentsize <= size) {
@@ -279,9 +285,7 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
                         }
 
                         process->entry_point = entry_addr;
-                        if (interpreter_path[0] != '\0') {
-                            safe_strcpy(process->interpreter, interpreter_path, sizeof(process->interpreter));
-                        }
+                        process->linux_compat_mode = 1;
 
                         prepare_linux_user_stack(process, filename);
                         if (!process->esp) process->esp = process->stack_start + process->stack_size - 4;
@@ -592,11 +596,13 @@ exec_result_t native_run_process(native_process_t* process) {
                 // int syscall executed
                 
                 if (imm == 0x80) {
-                    // Linux-style syscall dispatch first
-                    int dispatched = linux_syscall_dispatch(process, regs);
-                    if (dispatched != -38) { // -ENOSYS means unknown; otherwise handled
-                        pc += 2;
-                        continue;
+                    if (process->linux_compat_mode) {
+                        // Linux-style syscall dispatch for Linux-compat processes only.
+                        int dispatched = linux_syscall_dispatch(process, regs);
+                        if (dispatched != -38) { // -ENOSYS means unknown; otherwise handled
+                            pc += 2;
+                            continue;
+                        }
                     }
                     if (native_verbose) printf("[native_exec:syscall-legacy] eax=%d ebx=%d ecx=%d edx=%d esp=%d\n", regs[0], regs[3], regs[1], regs[2], regs[4]);
 

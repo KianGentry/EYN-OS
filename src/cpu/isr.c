@@ -2161,8 +2161,10 @@ static inline int user_gui_active(const user_gui_t* e) {
 }
 
 void syscall_reset_user_guis(void) {
+    watchdog_kick("user-task-guis");
     // Close/free any created GUI tiles
     for (int i = 1; i < USER_GUI_MAX; ++i) {
+        if ((i & 0x7u) == 0u) watchdog_kick("user-task-guis");
         if (g_user_guis[i].used) {
             user_gui_free_entry(&g_user_guis[i]);
         }
@@ -2171,6 +2173,7 @@ void syscall_reset_user_guis(void) {
     // Reset handle 0 "attached" GUI state too.
     // Important: unregister the GUI client so the tile returns to normal vterm rendering.
     if (g_user_guis[0].used) {
+        watchdog_kick("user-task-guis");
         int tile_idx0 = g_user_guis[0].tile_idx;
         if (tile_is_tiling_active() && tile_idx0 >= 0) {
             tile_unregister_gui_client(tile_idx0);
@@ -2198,10 +2201,12 @@ void syscall_reset_user_guis(void) {
     }
     // Restore the current tile title if the user task changed it.
     if (g_user_self_title) {
+        watchdog_kick("user-task-guis");
         free(g_user_self_title);
         g_user_self_title = NULL;
     }
     if (tile_is_tiling_active() && g_user_self_tile_idx >= 0) {
+        watchdog_kick("user-task-guis");
         tile_set_title_status(g_user_self_tile_idx, "EYN-OS Shell", NULL, NULL);
         tile_invalidate_decorations(g_user_self_tile_idx);
     }
@@ -3158,6 +3163,8 @@ static uint32 syscall_dispatch_core(regs_t* regs,
     if (g_user_task_active) {
         user_task_capture_syscall_frame(regs);
     }
+
+    native_process_t* linux_proc = native_get_current_process();
 
     switch (syscall_num) {
         case SYSCALL_EYNFS_STREAM_BEGIN: {
@@ -7128,7 +7135,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 offset += chunk;
                 count++;
             }
-
+            
             regs->eax = (uint32)count;
             break;
         }
@@ -7208,6 +7215,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
         case 243: {
             linux_user_desc_t ud;
             linux_user_desc_t* user_desc = (linux_user_desc_t*)arg1;
+            if (linux_proc && !linux_proc->linux_compat_mode) { regs->eax = (uint32)-1; break; }
             if (!user_desc) {
                 regs->eax = (uint32)-22; /* EINVAL */
                 break;
@@ -7318,30 +7326,27 @@ static uint32 syscall_dispatch_core(regs_t* regs,
 
         /* Linux i386: epoll_create (211) */
         case 211: {
-            native_process_t* cur_proc = native_get_current_process();
-            if (!cur_proc) { regs->eax = (uint32)-1; break; }
+            if (!linux_proc || !linux_proc->linux_compat_mode) { regs->eax = (uint32)-1; break; }
             uint32 regs_arr[8] = { 211, arg2, arg3, arg1, 0, 0, 0, 0 };
-            int ret = linux_syscall_dispatch(cur_proc, regs_arr);
+            int ret = linux_syscall_dispatch(linux_proc, regs_arr);
             regs->eax = (uint32)ret;
             break;
         }
 
         /* Linux i386: epoll_ctl (212) */
         case 212: {
-            native_process_t* cur_proc = native_get_current_process();
-            if (!cur_proc) { regs->eax = (uint32)-1; break; }
+            if (!linux_proc || !linux_proc->linux_compat_mode) { regs->eax = (uint32)-1; break; }
             uint32 regs_arr[8] = { 212, arg2, arg3, arg1, 0, 0, arg4, arg5 };
-            int ret = linux_syscall_dispatch(cur_proc, regs_arr);
+            int ret = linux_syscall_dispatch(linux_proc, regs_arr);
             regs->eax = (uint32)ret;
             break;
         }
 
         /* Linux i386: epoll_wait (213) */
         case 213: {
-            native_process_t* cur_proc = native_get_current_process();
-            if (!cur_proc) { regs->eax = (uint32)-1; break; }
+            if (!linux_proc || !linux_proc->linux_compat_mode) { regs->eax = (uint32)-1; break; }
             uint32 regs_arr[8] = { 213, arg2, arg3, arg1, 0, 0, arg4, arg5 };
-            int ret = linux_syscall_dispatch(cur_proc, regs_arr);
+            int ret = linux_syscall_dispatch(linux_proc, regs_arr);
             regs->eax = (uint32)ret;
             break;
         }
@@ -7349,12 +7354,11 @@ static uint32 syscall_dispatch_core(regs_t* regs,
         default: {
             /* Try to route low-numbered syscalls (1-300) to Linux i386 compat layer */
             if (syscall_num > 0 && syscall_num < 300) {
-                native_process_t* cur_proc = native_get_current_process();
-                if (cur_proc) {
+                if (linux_proc && linux_proc->linux_compat_mode) {
                     printf("[ROUTING] Low-numbered syscall %d routed to Linux dispatcher\n", syscall_num);
                     /* Build register array for linux_syscall_dispatch: [eax, ecx, edx, ebx, esp, ebp, esi, edi] */
                     uint32 regs_arr[8] = { syscall_num, arg2, arg3, arg1, 0, 0, arg4, arg5 };
-                    int ret = linux_syscall_dispatch(cur_proc, regs_arr);
+                    int ret = linux_syscall_dispatch(linux_proc, regs_arr);
                     regs->eax = (uint32)ret;
                     break;
                 }

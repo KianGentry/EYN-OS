@@ -6,10 +6,13 @@
 
 // Minimal Linux i386 syscall numbers we will support first
 #define __NR_exit         1
+#define __NR_fork         2
 #define __NR_read         3
 #define __NR_write        4
 #define __NR_open         5
 #define __NR_close        6
+#define __NR_waitpid      7
+#define __NR_execve       11
 #define __NR_lseek        19
 #define __NR_getuid       24
 #define __NR_getgid       47
@@ -20,6 +23,8 @@
 #define __NR_rt_sigaction 174
 #define __NR_rt_sigprocmask 175
 #define __NR_sigaltstack  186
+#define __NR_wait4        114
+#define __NR_clone        120
 #define __NR_time         13
 #define __NR_brk          45
 #define __NR_getpid       20
@@ -27,6 +32,7 @@
 #define __NR_futex        240
 #define __NR_uname        122
 #define __NR_fstat        108
+#define __NR_vfork        190
 #define __NR_gettimeofday 78
 #define __NR_clock_gettime 265
 #define __NR_set_thread_area 243

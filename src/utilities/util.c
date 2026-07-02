@@ -16,6 +16,7 @@
 #include <mm/slab.h>
 #include <utilities/shell/pipeline.h>
 #include <cpu/user_elf.h>
+#include <watchdog.h>
 
 volatile int g_user_interrupt = 0;
 volatile int g_user_task_active = 0;
@@ -56,6 +57,7 @@ void user_task_cleanup_mappings(void) {
 
     if (base && pages) {
         for (uint32 i = 0; i < pages; ++i) {
+            if ((i & 0x1Fu) == 0u) watchdog_kick("user-task-cleanup");
             (void)vmm_unmap_page(&vmm_kernel_as, base + i * PAGE_SIZE);
         }
     }
@@ -63,11 +65,14 @@ void user_task_cleanup_mappings(void) {
     // Unmap user stack pages. The VMM can grow the stack on-demand, so we use
     // the current stack_bottom as the lower bound when it looks valid.
     if (stack_bottom >= USER_STACK_BASE && stack_bottom < USER_STACK_TOP) {
+        uint32 kick_ctr = 0;
         for (uint32 va = stack_bottom; va < USER_STACK_TOP; va += PAGE_SIZE) {
+            if ((kick_ctr++ & 0x1Fu) == 0u) watchdog_kick("user-task-cleanup");
             (void)vmm_unmap_page(&vmm_kernel_as, va);
         }
     } else if (stack_page) {
         // Back-compat: older callers only tracked a single stack page.
+        watchdog_kick("user-task-cleanup");
         (void)vmm_unmap_page(&vmm_kernel_as, stack_page);
     }
 
@@ -95,6 +100,7 @@ void user_task_cleanup_mappings(void) {
 
 void user_task_abort_continue(void) {
     // Best-effort cleanup and clear state before re-entering the UI.
+    watchdog_kick("user-task-abort");
     command_context_clear();
     // If a UELF task exited or crashed while a redirect was active (e.g. the
     // tiling-manager terminal wraps commands in start/stop_shell_redirect and
@@ -115,6 +121,8 @@ void user_task_abort_continue(void) {
     g_user_task_colour_state = 0;
     g_user_task_icon_state = 0;
 
+    watchdog_kick("user-task-abort");
+
     // Scheduler-first continuation: run queued spawned tasks before UI fallback.
     if (user_task_continue_or_schedule()) {
         // If a queued task is launched this path does not normally return;
@@ -123,9 +131,11 @@ void user_task_abort_continue(void) {
 
     // Continue any pipeline stage that was armed before this user task exited.
     // This path is reached via non-local abort return from SYSCALL_EXIT.
+    watchdog_kick("user-task-abort");
     (void)pipeline_resume_pending();
 
     // Prefer the graphical tiling-manager shell when it's been initialized.
+    watchdog_kick("user-task-abort");
     if (tile_is_tiling_active()) {
         start_tiling_manager();
     } else {

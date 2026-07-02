@@ -9,6 +9,7 @@
 #include <misc/sched.h>
 #include <mm/vmm.h>
 #include <mm/user_access.h>
+#include <cpu/user_elf.h>
 
 // Very small per-process FD table for now
 #define LINUX_MAX_FD 32
@@ -17,6 +18,10 @@
 #define EINVAL      22
 #define ENOMEM      12
 #define EBADF        9
+#define ECHILD      10
+#define ENOSYS      38
+
+#define LINUX_WNOHANG 0x1
 
 /*
  * ABI-INVARIANT: Linux-compat user pointers are 32-bit guest virtual addrs.
@@ -143,26 +148,18 @@ static int fd_alloc(linux_fd* tbl) {
 }
 
 static int sys_write(native_process_t* proc, uint32 fd, const void* buf, uint32 count) {
-    // DEBUG: Check if write is being called
-    printf("[DEBUG] sys_write called: fd=%d, buf=%p, count=%d\n", fd, buf, count);
-    
     if (fd == 1 || fd == 2) {
         if (!linux_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) return -1;
-        
-        printf("[DEBUG] Writing to stdout/stderr\n");
-        
+
         // Copy buffer from user space first (max 256 bytes)
         char kernel_buf[256];
         uint32 to_read = (count < 256) ? count : 256;
         
         // Safely read from user memory
         if (copyin(kernel_buf, buf, to_read) != 0) {
-            printf("[DEBUG] copyin failed\n");
             return -14; // EFAULT - bad address
         }
-        
-        printf("[DEBUG] Read %d bytes from user space\n", to_read);
-        
+
         // Write to console, filtering printables only
         for (uint32 i = 0; i < to_read; i++) {
             unsigned char ch = (unsigned char)kernel_buf[i];
@@ -173,8 +170,7 @@ static int sys_write(native_process_t* proc, uint32 fd, const void* buf, uint32 
                 printf("%c", ch);
             }
         }
-        
-        printf("[DEBUG] Write complete, returning %d\n", count);
+
         return (int)count;
     }
     linux_fd* tbl = get_fd_table(proc);
@@ -296,6 +292,25 @@ static int sys_lseek(native_process_t* proc, uint32 fd, int32 offset, int whence
     if ((uint64_t)np > (uint64_t)0x7fffffff) np = 0x7fffffff;
     tbl[fd].pos = (uint32)np;
     return (int)tbl[fd].pos;
+}
+
+static int sys_wait4(native_process_t* proc, int pid, int* kstatus, int options, void* krusage) {
+    (void)proc;
+    (void)krusage;
+
+    if (pid <= 0) return -EINVAL;
+
+    int flags = 0;
+    if (options & LINUX_WNOHANG) flags |= USER_TASK_WAIT_NOHANG;
+
+    int status = 0;
+    int waited = user_task_waitpid(pid, &status, flags);
+    if (waited < 0) return -ECHILD;
+
+    if (waited > 0 && kstatus) {
+        *kstatus = status;
+    }
+    return waited;
 }
 
 // Lightweight stubs for common libc expectations
@@ -933,18 +948,13 @@ static int sys_epoll_wait(native_process_t* proc, int epfd, void* kevents, int m
 // Initialize standard file descriptors (stdin, stdout, stderr) for a Linux process
 void linux_init_stdio(native_process_t* proc) {
     if (!proc) return;
-    
-    printf("[LINUX_INIT_STDIO] Initializing standard FDs for process %p\n", proc);
-    
+
     // Get the FD table (this will allocate if needed)
     linux_fd* tbl = get_fd_table(proc);
     if (!tbl) {
-        printf("[LINUX_INIT_STDIO] Failed to get FD table\n");
         return;
     }
-    
-    printf("[LINUX_INIT_STDIO] Setting up FDs 0, 1, 2\n");
-    
+
     // Mark stdin (0), stdout (1), stderr (2) as in use
     tbl[0].in_use = 1;
     tbl[0].flags = 0; // Read-only
@@ -963,8 +973,6 @@ void linux_init_stdio(native_process_t* proc) {
     tbl[2].pos = 0;
     tbl[2].size = 0;
     safe_strcpy(tbl[2].path, "stderr", sizeof(tbl[2].path));
-    
-    printf("[LINUX_INIT_STDIO] Standard FDs initialized\n");
 }
 
 int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
@@ -973,11 +981,8 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
     uint32 ecx = regs[1];
     uint32 edx = regs[2];
 
-    printf("[LINUX_DISPATCH] syscall=%d, ebx=%p, ecx=%p, edx=%u, proc=%p\n", eax, ebx, ecx, edx, proc);
-
     switch (eax) {
         case __NR_write: {
-            printf("[LINUX_DISPATCH] write syscall: fd=%d, buf=%p, count=%d\n", ebx, ecx, edx);
             const void* kbuf = linux_translate_user_const_ptr(proc, ecx, edx);
             int ret = sys_write(proc, ebx, kbuf, edx);
             regs[0] = ret;
@@ -1000,9 +1005,33 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             regs[0] = ret;
             return ret;
         }
+        case __NR_fork:
+        case __NR_clone:
+        case __NR_vfork:
+            regs[0] = (uint32)-ENOSYS;
+            return -ENOSYS;
+        case __NR_execve:
+            /* NOTE: native emulator path lacks true image replacement semantics.
+             * Keep explicit ENOSYS for now instead of partial/incorrect exec.
+             */
+            regs[0] = (uint32)-ENOSYS;
+            return -ENOSYS;
         case __NR_fstat: {
             void* kbuf = linux_translate_user_ptr(proc, ecx, (uint32)sizeof(uint64));
             int ret = sys_fstat(proc, ebx, kbuf);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_waitpid: {
+            int* kstatus = (int*)linux_translate_user_ptr(proc, ecx, (uint32)sizeof(int));
+            int ret = sys_wait4(proc, (int)ebx, kstatus, (int)edx, NULL);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_wait4: {
+            int* kstatus = (int*)linux_translate_user_ptr(proc, ecx, (uint32)sizeof(int));
+            void* krusage = linux_translate_user_ptr(proc, regs[6], 1u);
+            int ret = sys_wait4(proc, (int)ebx, kstatus, (int)edx, krusage);
             regs[0] = ret;
             return ret;
         }

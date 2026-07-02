@@ -34,6 +34,8 @@ typedef struct {
     uint32 brk_end;             // simple brk end pointer for malloc
     address_space_t* address_space;  // optional VMM address space for mmap/dynamic linking
     uint32 tls_base;            // TLS base address (set by set_thread_area syscall)
+    uint8 linux_compat_mode;    // Non-zero: route syscalls using Linux i386 ABI
+    uint8 _pad1[3];
     char interpreter[256];      // PT_INTERP path for ET_DYN executables (dynamic linker)
 
     // Per-segment mapping for ELF PT_LOAD segments

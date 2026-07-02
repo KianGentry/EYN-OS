@@ -138,6 +138,46 @@ typedef struct {
 static inline uint32 align_down(uint32 v, uint32 a) { return v & ~(a - 1); }
 static inline uint32 align_up(uint32 v, uint32 a) { return (v + a - 1) & ~(a - 1); }
 
+static void user_elf_resolve_interp_path(char* out,
+                                         uint32 out_size,
+                                         const char* prog_abspath,
+                                         const char* interp_path) {
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (!interp_path || !interp_path[0]) return;
+
+    if (interp_path[0] == '/') {
+        safe_strcpy(out, interp_path, out_size);
+        return;
+    }
+
+    if (!prog_abspath || prog_abspath[0] != '/') {
+        safe_strcpy(out, interp_path, out_size);
+        return;
+    }
+
+    const char* slash = strrchr(prog_abspath, '/');
+    uint32 prefix_len = 1;
+    if (slash) {
+        uintptr diff = (uintptr)(slash - prog_abspath);
+        if (diff < 0xFFFFFFFFu) {
+            prefix_len = (uint32)diff + 1u;
+        }
+    }
+    if (prefix_len >= out_size) prefix_len = out_size - 1u;
+    memcpy(out, prog_abspath, prefix_len);
+    out[prefix_len] = '\0';
+
+    const char* rel = interp_path;
+    if (rel[0] == '.' && rel[1] == '/') rel += 2;
+
+    uint32 idx = (uint32)strlen(out);
+    while (*rel && idx + 1u < out_size) {
+        out[idx++] = *rel++;
+    }
+    out[idx] = '\0';
+}
+
 static inline void* user_elf_user_ptr(uint32 address) {
     return (void*)(uintptr)address;
 }
@@ -426,6 +466,8 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     }
 
     if (interp_path[0]) {
+        char interp_abspath[256];
+        user_elf_resolve_interp_path(interp_abspath, sizeof(interp_abspath), abspath, interp_path);
         const char* interp_argv[USER_ELF_MAX_ARGC];
         int interp_argc = 0;
         interp_argv[interp_argc++] = abspath;
@@ -433,7 +475,11 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
             if (argv && argv[i]) interp_argv[interp_argc++] = argv[i];
         }
         free(file);
-        return user_elf_run_argv(drive, interp_path, interp_argc - 1, interp_argv, NULL);
+        return user_elf_run_argv(drive,
+                                 interp_abspath[0] ? interp_abspath : interp_path,
+                                 interp_argc - 1,
+                                 interp_argv,
+                                 NULL);
     }
 
     // Compute a single contiguous mapping range that covers all PT_LOAD segments.
@@ -828,7 +874,9 @@ static void user_task_runq_remove(user_task_slot_t* slot) {
         user_task_runq_t* q = &g_user_task_runq[level];
         int prev = -1;
         int cur = q->head;
+        uint32 scan_ctr = 0;
         while (cur >= 0) {
+            if ((scan_ctr++ & 0x1Fu) == 0u) watchdog_kick("user-task-runq");
             int next = g_user_tasks[cur].runq_next;
             if (cur == idx) {
                 if (prev >= 0) {
@@ -1012,6 +1060,7 @@ static int user_task_launch_slot(user_task_slot_t* slot) {
     g_user_task_term = slot->origin_vterm;
     user_task_apply_stdio_state(slot);
 
+    watchdog_kick("user-task-launch");
     int rc = user_elf_run_argv(slot->image->drive,
                                slot->image->path,
                                slot->image->argc,
@@ -1157,7 +1206,9 @@ int user_task_current_is_blocked(void) {
 
 void user_task_wake_waiters_for_pid(int pid) {
     int current_pid = (int)g_user_task_running_pid;
+    uint32 scan_ctr = 0;
     for (int i = 0; i < USER_TASK_MAX; ++i) {
+        if ((scan_ctr++ & 0x1Fu) == 0u) watchdog_kick("user-task-wake");
         user_task_slot_t* slot = &g_user_tasks[i];
         if (!slot->used || slot->state != USER_TASK_STATE_BLOCKED) continue;
         if (slot->block_reason != USER_TASK_BLOCK_WAITPID) continue;
@@ -1623,6 +1674,7 @@ int user_task_continue_or_schedule(void) {
         user_task_mlfq_boost_if_due();
 
         for (;;) {
+            watchdog_kick("user-task-sched");
             user_task_slot_t* slot = user_task_runq_pop_highest();
             if (!slot) break;
             if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) continue;
@@ -1637,6 +1689,7 @@ int user_task_continue_or_schedule(void) {
 
     // Prefer runnable queued tasks over UI fallback.
     for (int i = 0; i < USER_TASK_MAX; ++i) {
+        if ((i & 0x1Fu) == 0u) watchdog_kick("user-task-sched");
         user_task_slot_t* slot = &g_user_tasks[i];
         if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) continue;
         (void)user_task_launch_slot(slot);
@@ -1685,6 +1738,8 @@ static void user_task_terminate_slot(user_task_slot_t* slot, int sig) {
     if (!slot) return;
     if (slot->state == USER_TASK_STATE_ZOMBIE) return;
 
+    watchdog_kick("user-task-term");
+
     if (slot->pid == (int)g_user_task_running_pid) {
         user_task_notify_exit(-sig);
         return;
@@ -1693,6 +1748,7 @@ static void user_task_terminate_slot(user_task_slot_t* slot, int sig) {
     user_task_runq_remove(slot);
     slot->state = USER_TASK_STATE_ZOMBIE;
     slot->status = -sig;
+    watchdog_kick("user-task-term");
     user_task_wake_waiters_for_pid(slot->pid);
     /* Deliver SIGCHLD to parent if present */
     if (slot->parent_pid > 0) {
@@ -1814,6 +1870,7 @@ int user_task_signal_current(int sig) {
 }
 
 void user_task_notify_exit(int status) {
+    watchdog_kick("user-task-exit");
     int pid = (int)g_user_task_running_pid;
     if (pid > 0) {
         user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
@@ -1822,6 +1879,7 @@ void user_task_notify_exit(int status) {
             slot->state = USER_TASK_STATE_ZOMBIE;
             slot->status = status;
         }
+        watchdog_kick("user-task-exit");
         user_task_wake_waiters_for_pid(pid);
     }
     g_user_task_active_slot = NULL;
@@ -1829,6 +1887,7 @@ void user_task_notify_exit(int status) {
     g_user_task_pending_pid = 0;
     g_user_task_active = 0;
     g_user_task_term = -1;
+    watchdog_kick("user-task-exit");
     user_task_request_schedule();
 }
 
