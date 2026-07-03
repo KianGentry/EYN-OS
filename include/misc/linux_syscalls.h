@@ -37,15 +37,17 @@
 #define __NR_clock_gettime 265
 #define __NR_set_thread_area 243
 #define __NR_set_tid_address 258
+#define __NR_set_robust_list 311
+#define __NR_rseq          386
 #define __NR_clock_getres 266
 #define __NR_clock_nanosleep 267
 #define __NR_tgkill       270
 #define __NR_exit_group   252
 
 // Epoll syscalls (i386 numbers)
-#define __NR_epoll_create 211
-#define __NR_epoll_ctl    212
-#define __NR_epoll_wait   213
+#define __NR_epoll_create 254
+#define __NR_epoll_ctl    255
+#define __NR_epoll_wait   256
 
 // epoll_ctl operations
 #define EPOLL_CTL_ADD 1

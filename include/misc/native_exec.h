@@ -48,7 +48,16 @@ typedef struct {
         uint32 flags;   // PF_* flags from program header
     } segments[8];
     char name[64];              // Process name
+    
+    // Linux signal handling state (per-process)
+    uint32 sig_handlers[64];    // Handler addresses or SIG_DFL(0)/SIG_IGN(1) for each signal
+    uint32 sig_mask;            // Current signal mask (blocked signals)
+    uint32 sig_pending;         // Pending signals bitmask
 } native_process_t;
+
+#define LINUX_SIG_DFL 0u
+#define LINUX_SIG_IGN 1u
+#define LINUX_SA_RESTART 0x10000000u
 
 // Execution result
 typedef enum {

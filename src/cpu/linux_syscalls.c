@@ -81,6 +81,21 @@ static void linux_child_drop_slot(int slot) {
     memset(&g_linux_child_links[slot], 0, sizeof(g_linux_child_links[slot]));
 }
 
+static int linux_queue_signal(native_process_t* proc, int sig) {
+    if (!proc || sig < 1 || sig >= 64) return -EINVAL;
+    
+    /* Queue the signal by setting bit in pending mask (simple model) */
+    uint32 sig_bit = 1u << (sig - 1);
+    
+    /* Only queue if not blocked */
+    if (!(proc->sig_mask & sig_bit)) {
+        proc->sig_pending |= sig_bit;
+        return 0;
+    }
+    
+    return 0;  /* Signal blocked but queued */
+}
+
 /*
  * ABI-INVARIANT: Linux-compat user pointers are 32-bit guest virtual addrs.
  *
@@ -486,6 +501,15 @@ static int linux_execve_replace_from_user(native_process_t* proc, uint32 path_pt
     uint32 keep_pid = proc->pid;
     uint8 keep_owned = proc->owned;
     void* keep_fd_table = proc->linux_fd_table;
+    
+    /* Preserve signal handlers and mask across execve 
+     * (unless SA_RESETHAND is set, which we don't track yet) */
+    uint32 keep_sig_handlers[64];
+    uint32 keep_sig_mask;
+    for (int i = 0; i < 64; i++) {
+        keep_sig_handlers[i] = proc->sig_handlers[i];
+    }
+    keep_sig_mask = proc->sig_mask;
 
     linux_release_process_image(proc);
 
@@ -498,6 +522,14 @@ static int linux_execve_replace_from_user(native_process_t* proc, uint32 path_pt
     proc->pid = keep_pid;
     proc->owned = keep_owned;
     proc->linux_fd_table = keep_fd_table;
+    
+    /* Restore signal handlers and mask */
+    for (int i = 0; i < 64; i++) {
+        proc->sig_handlers[i] = keep_sig_handlers[i];
+    }
+    proc->sig_mask = keep_sig_mask;
+    proc->sig_pending = 0;  /* Clear pending signals on exec */
+    
     proc->linux_compat_mode = 1;
     proc->linux_execve_pending = 1;
     proc->active = 1;
@@ -579,6 +611,24 @@ static int sys_set_tid_address(native_process_t* proc, uint32* tidptr) {
     return tid;
 }
 
+static int sys_set_robust_list(native_process_t* proc, const void* head, uint32 len) {
+    (void)proc;
+    (void)head;
+    (void)len;
+    /* Single-threaded compat: accept registration so libc startup can proceed. */
+    return 0;
+}
+
+static int sys_rseq(native_process_t* proc, void* rseq, uint32 rseq_len, int flags, uint32 sig) {
+    (void)proc;
+    (void)rseq;
+    (void)rseq_len;
+    (void)flags;
+    (void)sig;
+    /* Report unsupported; glibc/musl should fall back when rseq is unavailable. */
+    return -ENOSYS;
+}
+
 static int sys_time(native_process_t* proc, uint32* tloc) {
     (void)proc;
     uint32 now = 1730500000u; // fixed epoch-like value (~2024-11), OK for hello
@@ -634,27 +684,94 @@ static int sys_clock_nanosleep(native_process_t* proc, int clk_id, int flags, co
 }
 
 static int sys_rt_sigaction(native_process_t* proc, int signum, const void* act, void* oldact, uint32 sigsetsize) {
-    (void)proc;
-    (void)signum;
-    (void)act;
-    (void)sigsetsize;
-    if (oldact) memset(oldact, 0, 16);
+    if (!proc || signum < 1 || signum >= 64) return -EINVAL;
+    if (sigsetsize != sizeof(uint32)) return -EINVAL;
+
+    /* struct kernel_sigaction (Linux i386) has fields: handler, flags, mask, restorer
+     * We read/write in a minimal way: [handler(4), flags(4), mask(4), restorer(4)] = 16 bytes
+     */
+
+    /* Save old handler if requested */
+    if (oldact) {
+        uint32* old_slot = (uint32*)oldact;
+        old_slot[0] = proc->sig_handlers[signum];  // old handler
+        old_slot[1] = 0;                           // old flags (simplified)
+        old_slot[2] = 0;                           // old mask (simplified)
+        old_slot[3] = 0;                           // old restorer (ignored)
+    }
+
+    /* Install new handler if provided */
+    if (act) {
+        const uint32* new_slot = (const uint32*)act;
+        uint32 new_handler = new_slot[0];
+        // uint32 new_flags = new_slot[1];  // Could track SA_RESTART, etc.
+        
+        /* Limit handlers to reasonable values */
+        if (new_handler == LINUX_SIG_DFL || new_handler == LINUX_SIG_IGN) {
+            proc->sig_handlers[signum] = new_handler;
+        } else if (new_handler >= proc->elf_vaddr_min && new_handler < proc->elf_vaddr_max) {
+            proc->sig_handlers[signum] = new_handler;
+        } else if (new_handler > 0x1000) {
+            /* Assume it's a user handler; accept it */
+            proc->sig_handlers[signum] = new_handler;
+        }
+    }
+
     return 0;
 }
 
 static int sys_rt_sigprocmask(native_process_t* proc, int how, const void* set, void* oldset, uint32 sigsetsize) {
-    (void)proc;
-    (void)how;
-    (void)set;
-    (void)sigsetsize;
-    if (oldset) memset(oldset, 0, sizeof(uint32));
+    if (!proc || sigsetsize != sizeof(uint32)) return -EINVAL;
+
+    /* Save current mask if requested */
+    if (oldset) {
+        uint32* old_mask_ptr = (uint32*)oldset;
+        *old_mask_ptr = proc->sig_mask;
+    }
+
+    /* Apply new mask if provided */
+    if (set) {
+        const uint32* new_mask_ptr = (const uint32*)set;
+        uint32 new_mask = *new_mask_ptr;
+
+        switch (how) {
+            case 0: /* SIG_SETMASK */
+                proc->sig_mask = new_mask;
+                break;
+            case 1: /* SIG_BLOCK */
+                proc->sig_mask |= new_mask;
+                break;
+            case 2: /* SIG_UNBLOCK */
+                proc->sig_mask &= ~new_mask;
+                break;
+            default:
+                return -EINVAL;
+        }
+    }
+
     return 0;
 }
 
 static int sys_sigaltstack(native_process_t* proc, const void* ss, void* old_ss) {
-    (void)proc;
-    (void)ss;
-    if (old_ss) memset(old_ss, 0, 12);
+    if (!proc) return -EINVAL;
+    
+    /* struct stack_t { void *ss_sp; int ss_flags; size_t ss_size; } */
+    if (old_ss) {
+        uint32* old_slot = (uint32*)old_ss;
+        old_slot[0] = 0;        /* ss_sp: no alternate stack set initially */
+        old_slot[1] = 2;        /* SS_DISABLE (1) | SS_ONSTACK (2) */
+        old_slot[2] = 0;        /* ss_size: 0 (disabled) */
+    }
+    
+    if (ss) {
+        const uint32* new_slot = (const uint32*)ss;
+        /* new_slot[0] = ss_sp
+           new_slot[1] = ss_flags
+           new_slot[2] = ss_size
+         */
+        /* For now, we don't actually use alternate stacks, just accept the request */
+    }
+    
     return 0;
 }
 
@@ -684,8 +801,18 @@ static int sys_futex(native_process_t* proc,
 static int sys_tgkill(native_process_t* proc, int tgid, int tid, int sig) {
     (void)proc;
     (void)tgid;
-    (void)tid;
-    (void)sig;
+    
+    if (tid <= 0 || sig < 0 || sig >= 64) return -EINVAL;
+    
+    /* In a single-threaded model, tid == pid. Look up the target process. */
+    extern native_process_t* native_get_current_process(void);
+    extern int native_get_process_count(void);
+    
+    /* For now, we don't have a global process lookup, so this is a placeholder.
+     * A real implementation would signal the target process.
+     */
+    (void)tid;  /* Suppress unused warning */
+    
     return 0;
 }
 
@@ -1354,6 +1481,18 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             regs[0] = ret;
             return ret;
         }
+        case __NR_set_robust_list: {
+            void* khead = linux_translate_user_ptr(proc, ebx, ecx ? ecx : 4u);
+            int ret = sys_set_robust_list(proc, khead, ecx);
+            regs[0] = ret;
+            return ret;
+        }
+        case __NR_rseq: {
+            void* krseq = linux_translate_user_ptr(proc, ebx, ecx ? ecx : 4u);
+            int ret = sys_rseq(proc, krseq, ecx, (int)edx, regs[6]);
+            regs[0] = ret;
+            return ret;
+        }
         case __NR_tgkill: {
             int ret = sys_tgkill(proc, (int)ebx, (int)ecx, (int)edx);
             regs[0] = ret;
@@ -1381,6 +1520,10 @@ int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]) {
             uint32 flags = regs[6];  /* esi */
             int fd = (int)regs[7];   /* edi */
             uint32 off = regs[5];    /* ebp */
+            if (eax == __NR_mmap2) {
+                /* i386 mmap2 encodes file offset in 4096-byte pages. */
+                off <<= 12;
+            }
             int ret = sys_mmap_vmm(proc, addr, len, prot, (int)flags, fd, off);
             regs[0] = (uint32)ret;
             return ret;

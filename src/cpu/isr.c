@@ -4205,6 +4205,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             regs->eax = 0;
             break;
         }
+        case 192: /* Linux i386 mmap2 */
         case SYSCALL_MMAP: {
             // Check if this is fd-based mmap (standard POSIX) or path-based (legacy EYN-OS)
             // arg1=addr, arg2=len, arg3=prot, arg4=flags, arg5=fd
@@ -4214,7 +4215,11 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             int prot = (int)arg3;
             uint32 flags = (uint32)arg4;
             int fd = (int)arg5;
-            uint32 offset = 0;  // Would be in ebp for legacy mmap2, not available here
+            uint32 offset = 0;
+            if (syscall_num == 192) {
+                /* Linux i386 mmap2 uses EBP as page-based file offset. */
+                offset = regs->ebp << 12;
+            }
             
             printf("%c[MMAP] syscall: addr=0x%x len=%u prot=%d flags=0x%x fd=%d\n", 
                    255, 0, 0, addr, length, prot, flags, fd);
@@ -4368,7 +4373,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
 
                     memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
 
-                    uint32 file_off = va - target_addr;
+                    uint32 file_off = offset + (va - target_addr);
                     if (file_off < file_size) {
                         uint32 to_copy = file_size - file_off;
                         if (to_copy > PAGE_SIZE) to_copy = PAGE_SIZE;
@@ -7225,8 +7230,14 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 break;
             }
 
-            /* Linux allows -1 for "allocate me an entry". We always use GDT entry 7. */
-            if (ud.entry_number == 0xFFFFFFFFu || ud.entry_number == GDT_TLS_ENTRY) {
+            /* Linux allows -1 for "allocate me an entry".
+             * We expose a single TLS entry (GDT entry 7) and accept common
+             * user requests for 6/7/8 by mapping them to that slot. */
+            if (ud.entry_number == 0xFFFFFFFFu ||
+                ud.entry_number == 6u ||
+                ud.entry_number == 7u ||
+                ud.entry_number == 8u ||
+                ud.entry_number == GDT_TLS_ENTRY) {
                 ud.entry_number = GDT_TLS_ENTRY;
             } else {
                 /* Only support our single TLS slot */
@@ -7237,6 +7248,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             /* Populate the TLS GDT descriptor with the user-supplied base/limit. */
             uint32 tls_limit = ud.limit ? ud.limit : 0xFFFFF;
             gdt_set_tls_descriptor(ud.base_addr, tls_limit);
+            g_user_segdom_gs = GDT_TLS_SEL;
 
             /* Write back the assigned entry_number so caller can compute gs selector. */
             if (copyout(user_desc, &ud, sizeof(ud)) != 0) {
@@ -7244,6 +7256,30 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 break;
             }
 
+            printf("[TLS] set_thread_area: base=0x%08X limit=0x%08X entry=%u sel=0x%X\n",
+                   (unsigned)ud.base_addr, (unsigned)tls_limit,
+                   (unsigned)ud.entry_number, (unsigned)GDT_TLS_SEL);
+            regs->eax = 0;
+            break;
+        }
+
+        /* Linux i386 compat: get_thread_area (244). */
+        case 244: {
+            linux_user_desc_t ud;
+            linux_user_desc_t* user_desc = (linux_user_desc_t*)arg1;
+            if (!user_desc) {
+                regs->eax = (uint32)-22; /* EINVAL */
+                break;
+            }
+            if (copyin(&ud, user_desc, sizeof(ud)) != 0) {
+                regs->eax = (uint32)-14; /* EFAULT */
+                break;
+            }
+            ud.entry_number = GDT_TLS_ENTRY;
+            if (copyout(user_desc, &ud, sizeof(ud)) != 0) {
+                regs->eax = (uint32)-14; /* EFAULT */
+                break;
+            }
             regs->eax = 0;
             break;
         }
@@ -7324,40 +7360,55 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             break;
         }
 
-        /* Linux i386: epoll_create (211) */
-        case 211: {
+        /* Linux i386: set_robust_list (311)
+         * Single-threaded compat mode: accept registration. */
+        case 311:
+            regs->eax = 0;
+            break;
+
+        /* Linux i386/newer runtimes: rseq (386)
+         * Return ENOSYS so libc falls back to non-rseq paths. */
+        case 386:
+            regs->eax = (uint32)-38; /* -ENOSYS */
+            break;
+
+        /* Linux i386: epoll_create (254) */
+        case 254:
+        case 211: { /* legacy compat */
             if (!linux_proc || !linux_proc->linux_compat_mode) { regs->eax = (uint32)-1; break; }
-            uint32 regs_arr[8] = { 211, arg2, arg3, arg1, 0, 0, 0, 0 };
+            uint32 regs_arr[8] = { 254, arg2, arg3, arg1, 0, 0, 0, 0 };
             int ret = linux_syscall_dispatch(linux_proc, regs_arr);
             regs->eax = (uint32)ret;
             break;
         }
 
-        /* Linux i386: epoll_ctl (212) */
-        case 212: {
+        /* Linux i386: epoll_ctl (255) */
+        case 255:
+        case 212: { /* legacy compat */
             if (!linux_proc || !linux_proc->linux_compat_mode) { regs->eax = (uint32)-1; break; }
-            uint32 regs_arr[8] = { 212, arg2, arg3, arg1, 0, 0, arg4, arg5 };
+            uint32 regs_arr[8] = { 255, arg2, arg3, arg1, 0, 0, arg4, arg5 };
             int ret = linux_syscall_dispatch(linux_proc, regs_arr);
             regs->eax = (uint32)ret;
             break;
         }
 
-        /* Linux i386: epoll_wait (213) */
-        case 213: {
+        /* Linux i386: epoll_wait (256) */
+        case 256:
+        case 213: { /* legacy compat */
             if (!linux_proc || !linux_proc->linux_compat_mode) { regs->eax = (uint32)-1; break; }
-            uint32 regs_arr[8] = { 213, arg2, arg3, arg1, 0, 0, arg4, arg5 };
+            uint32 regs_arr[8] = { 256, arg2, arg3, arg1, 0, 0, arg4, arg5 };
             int ret = linux_syscall_dispatch(linux_proc, regs_arr);
             regs->eax = (uint32)ret;
             break;
         }
 
         default: {
-            /* Try to route low-numbered syscalls (1-300) to Linux i386 compat layer */
-            if (syscall_num > 0 && syscall_num < 300) {
+            /* Route Linux-compat syscalls broadly; modern i386 uses numbers >300 too. */
+            if (syscall_num > 0 && syscall_num < 1024) {
                 if (linux_proc && linux_proc->linux_compat_mode) {
-                    printf("[ROUTING] Low-numbered syscall %d routed to Linux dispatcher\n", syscall_num);
+                    printf("[ROUTING] syscall %d routed to Linux dispatcher\n", syscall_num);
                     /* Build register array for linux_syscall_dispatch: [eax, ecx, edx, ebx, esp, ebp, esi, edi] */
-                    uint32 regs_arr[8] = { syscall_num, arg2, arg3, arg1, 0, 0, arg4, arg5 };
+                    uint32 regs_arr[8] = { syscall_num, arg2, arg3, arg1, 0, regs->ebp, arg4, arg5 };
                     int ret = linux_syscall_dispatch(linux_proc, regs_arr);
                     regs->eax = (uint32)ret;
                     break;
@@ -7365,7 +7416,7 @@ static uint32 syscall_dispatch_core(regs_t* regs,
             }
             
             printf("[SYSCALL] Unknown syscall: %d\n", syscall_num);
-            regs->eax = (uint32)-1;
+            regs->eax = (uint32)-38; /* -ENOSYS */
             break;
         }
     }

@@ -18,3 +18,4 @@ eynfs_format
 tmp*
 /testdir/programs/doom1.wad
 .github/workflows/
+syscall_table_x86.md

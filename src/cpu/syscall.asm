@@ -7,6 +7,7 @@ extern syscall_dispatch
 extern g_abort_to_shell
 extern g_user_task_active
 extern g_user_segdom_ds
+extern g_user_segdom_gs
 extern stack_space
 extern stack_bottom
 extern isr_abort_stack_top
@@ -104,8 +105,17 @@ syscall_entry:
     mov fs, ax
     pop eax
 
-    ; Restore the user's GS (saved before kernel segments were loaded).
-    pop gs
+    ; Discard saved user GS from entry frame and restore GS from the tracked
+    ; selector. This lets set_thread_area updates persist across syscalls.
+    add esp, 4
+    push eax
+    mov ax, [g_user_segdom_gs]
+    test ax, ax
+    jnz .has_gs
+    mov ax, [g_user_segdom_ds]
+.has_gs:
+    mov gs, ax
+    pop eax
 
     iretd
 

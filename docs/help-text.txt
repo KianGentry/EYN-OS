@@ -120,6 +120,7 @@ Utility Commands:
   sort            - Sort strings alphabetically.
   spam            - Spam 'EYN-OS' to stdout 100 times.
   ssh             - SSH client with password auth and interactive shell relay.
+  test            - Run the test command.
   tetris          - Play classic falling-block puzzle game.
   tiling          - Launch the tiling manager.
   toybox          - Run the toybox command.

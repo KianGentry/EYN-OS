@@ -290,6 +290,14 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
                         prepare_linux_user_stack(process, filename);
                         if (!process->esp) process->esp = process->stack_start + process->stack_size - 4;
                         process->eip = process->entry_point;
+                        
+                        /* Initialize signal handlers to SIG_DFL and mask to 0 (no signals blocked) */
+                        for (int i = 0; i < 64; i++) {
+                            process->sig_handlers[i] = LINUX_SIG_DFL;
+                        }
+                        process->sig_mask = 0;
+                        process->sig_pending = 0;
+                        
                         process->active = 1;
                         safe_strcpy(process->name, filename, sizeof(process->name));
                         
@@ -354,6 +362,14 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
             prepare_linux_user_stack(process, filename);
             if (!process->esp) process->esp = process->stack_start + process->stack_size - 4; // fallback
             process->eip = process->entry_point;
+            
+            /* Initialize signal handlers to SIG_DFL and mask to 0 (no signals blocked) */
+            for (int i = 0; i < 64; i++) {
+                process->sig_handlers[i] = LINUX_SIG_DFL;
+            }
+            process->sig_mask = 0;
+            process->sig_pending = 0;
+            
             process->active = 1;
 
             safe_strcpy(process->name, filename, sizeof(process->name));
@@ -465,6 +481,14 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
             prepare_linux_user_stack(process, filename);
             if (!process->esp) process->esp = process->stack_start + process->stack_size - 4;
             process->eip = process->entry_point;
+            
+            /* Initialize signal handlers to SIG_DFL and mask to 0 (no signals blocked) */
+            for (int i = 0; i < 64; i++) {
+                process->sig_handlers[i] = LINUX_SIG_DFL;
+            }
+            process->sig_mask = 0;
+            process->sig_pending = 0;
+            
             process->active = 1;
             safe_strcpy(process->name, filename, sizeof(process->name));
 
@@ -504,6 +528,14 @@ exec_result_t native_load_program(const char* filename, native_process_t* proces
     prepare_linux_user_stack(process, filename);
     if (!process->esp) process->esp = process->stack_start + process->stack_size - 4;
     process->eip = process->entry_point;
+    
+    /* Initialize signal handlers to SIG_DFL and mask to 0 (no signals blocked) */
+    for (int i = 0; i < 64; i++) {
+        process->sig_handlers[i] = LINUX_SIG_DFL;
+    }
+    process->sig_mask = 0;
+    process->sig_pending = 0;
+    
     process->active = 1;
     safe_strcpy(process->name, filename, sizeof(process->name));
 

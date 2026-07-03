@@ -21,6 +21,7 @@ extern uint32 stack_space;
 
 volatile uint16 g_user_segdom_cs = GDT_USER_CS;
 volatile uint16 g_user_segdom_ds = GDT_USER_DS;
+volatile uint16 g_user_segdom_gs = GDT_USER_DS;
 #if !defined(EYNOS_ARCH_AMD64)
 static segdom_t g_user_segdom;
 #endif
@@ -739,12 +740,14 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 #if defined(EYNOS_ARCH_AMD64)
     g_user_segdom_cs = GDT_USER_CS;
     g_user_segdom_ds = GDT_USER_DS;
+    g_user_segdom_gs = GDT_USER_DS;
 #else
     uint32 seg_base = 0;
     uint32 seg_limit = USER_STACK_TOP;
     segdom_init(&g_user_segdom, seg_base, seg_limit);
     g_user_segdom_cs = g_user_segdom.user_cs;
     g_user_segdom_ds = g_user_segdom.user_ds;
+    g_user_segdom_gs = g_user_segdom.user_ds;
     segdom_load(&g_user_segdom);
 #endif
 
