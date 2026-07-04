@@ -65,7 +65,7 @@ KERNEL_CFLAGS = $(ARCH_KERNEL_CFLAGS_$(ARCH)) -c -ffreestanding -fno-builtin -fn
 		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \
 		 -Wno-unused-parameter -Wno-unused-variable \
 		 -Wnull-dereference -Wmissing-prototypes -Wstrict-prototypes -Wold-style-definition \
-		 -Wpointer-arith -Wshadow -Wundef -Wredundant-decls -Wswitch-enum -Wswitch-default
+		 -Wpointer-arith -Wshadow -Wundef -Wredundant-decls -Wswitch-enum -Wswitch-default \
 
 # Map legacy CFLAGS to kernel flags to avoid touching all compile rules below
 CFLAGS = $(KERNEL_CFLAGS)
@@ -651,3 +651,21 @@ analyze:
 	@find src -name "*.c" -print0 | xargs -0 -I{} sh -c 'echo Analyzing {}; $(COMPILER) $(KERNEL_CFLAGS) -fanalyzer -c {} -o /dev/null' || true
 # Auto-generated header dependency files (produced by -MMD -MP in KERNEL_CFLAGS).
 -include $(wildcard $(OBJDIR)/*.d)
+
+# Container wrapper
+DOCKER_WRAPPER := ./dev.sh
+
+.PHONY: docker-build docker-run docker-qemu-debug docker-%
+
+docker-build:
+	$(DOCKER_WRAPPER) build
+
+docker-run:
+	$(DOCKER_WRAPPER) run
+
+docker-qemu-debug:
+	$(DOCKER_WRAPPER) qemu-debug
+
+# Generic passthrough (covers any future target automatically)
+docker-%:
+	$(DOCKER_WRAPPER) $*

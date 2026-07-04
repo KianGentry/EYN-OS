@@ -1,8 +1,8 @@
 # EYN-OS Command Reference
 
-This document is auto-generated from userland command metadata and binaries. Last updated: 2026-07-03 18:35:31
+This document is auto-generated from userland command metadata and binaries. Last updated: 2026-07-04 14:08:53
 
-**Total Commands:** 111
+**Total Commands:** 110
 
 ## Table of Contents
 
@@ -1612,22 +1612,6 @@ ssh user@192.168.1.10
 
 ---
 
-### test
-
-**Binary:** `testdir/binaries/test`
-
-**Metadata Source:** `(metadata not found)`
-
-**Description:**
-Run the test command.
-
-**Example:**
-```bash
-test
-```
-
----
-
 ### tetris
 
 **Binary:** `testdir/binaries/tetris`
@@ -1814,5 +1798,5 @@ zsnes_1_51
 | Memory Commands | 7 |
 | GUI/Window Commands | 12 |
 | Development Commands | 9 |
-| Utility Commands | 52 |
+| Utility Commands | 51 |
 
