@@ -19,6 +19,20 @@ Thank you for helping improve EYN-OS. This project is a freestanding 32-bit x86 
 
 ## Build, Run, Debug
 
+- Optionally configure the ISO:
+
+```bash
+make menuconfig
+```
+
+- Build the OS in the docker container:
+
+```bash
+make docker-build
+```
+
+`menuconfig` uses Python `curses`, so it requires ncurses support on the host.
+
 - Build full artifacts (kernel + ramdisk + EYNFS image + docs + ISO):
 
 ```bash

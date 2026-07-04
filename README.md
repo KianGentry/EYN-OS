@@ -54,7 +54,21 @@ The codebase is organized by domain (CPU, drivers, misc, utilities, network) wit
 
 ## Getting started
 
-Build from a Linux host with standard toolchain components (GCC, NASM, GRUB):
+The recommended build path is containerised. From the repo root:
+
+```bash
+make docker-build  # build the OS in the container
+```
+
+If you want to change the final ISO configuration, run:
+
+```bash
+make menuconfig    # optional; requires ncurses / Python curses support
+```
+
+Then rebuild with `make docker-build` so the updated `.eynosconfig` is applied.
+
+If you prefer to build directly on a Linux host, you still need the usual toolchain components (GCC, NASM, GRUB):
 
 ```bash
 make menuconfig # configure architecture, installer payload, and build modes (GUI/TTY)
@@ -81,6 +95,13 @@ This disables the graphical subsystem and excludes GUI-related packages, produci
 - Serial console debugging
 
 See [TTY-Only Mode Documentation](docs/general/tty-mode.md) for details.
+
+### Containerized Build Flow
+
+- `make docker-build` runs the full build inside the repo's container image.
+- `make docker-run` launches the built OS through the same container wrapper.
+- `make menuconfig` remains an optional host-side step for adjusting the final ISO before rebuilding.
+- The menuconfig UI uses Python `curses`, so make sure your system has ncurses support available.
 
 ### Inside EYN-OS
 
