@@ -102,7 +102,12 @@ typedef enum tcp_state {
     TCP_FIN_WAIT
 } tcp_state;
 
-typedef struct tcp_conn {
+    typedef struct tcp_rx_slot {
+        uint8 valid;
+        net_tcp_rx_packet pkt;
+    } tcp_rx_slot;
+
+    typedef struct tcp_socket {
     tcp_state state;
     uint8 local_ip[4];
     uint16 local_port;
@@ -121,21 +126,12 @@ typedef struct tcp_conn {
     uint32 last_end_seq;
     uint32 last_payload_len;
     uint8 last_payload[NET_TCP_MAX_PAYLOAD];
-} tcp_conn;
+        tcp_rx_slot rxq[8];
+        uint32 rxq_head;
+        uint32 rxq_tail;
+        uint8 in_use;
+    } tcp_socket;
 
-typedef struct tcp_rx_slot {
-    uint8 valid;
-    net_tcp_rx_packet pkt;
-} tcp_rx_slot;
-
-typedef struct tcp_socket_meta {
-    uint8 in_use;
-    uint8 listening;
-    tcp_state state;
-    uint16 local_port;
-    uint8 remote_ip[4];
-    uint16 remote_port;
-} tcp_socket_meta;
 
 typedef struct net_timer_slot {
     uint8 active;
@@ -257,12 +253,8 @@ static struct {
     icmp_echo_reply_slot icmp_rxq[4];
     net_icmp_stats icmp_stats;
 
-    tcp_conn tcp;
+    tcp_socket tcp_sockets[NET_TCP_MAX_SOCKETS];
     net_tcp_stats tcp_stats;
-    tcp_rx_slot tcp_rxq[8];
-    uint32 tcp_rxq_head;
-    uint32 tcp_rxq_tail;
-    tcp_socket_meta tcp_sockets[NET_TCP_MAX_SOCKETS];
 
     udp_socket sockets[MAX_SOCKETS];
 
@@ -301,22 +293,24 @@ static void tcp_socket_meta_clear(int socket_id)
 
 static int tcp_socket_meta_is_legacy_in_use(void)
 {
-    if (g_net.tcp.listening) return 1;
-    if (g_net.tcp.state != TCP_CLOSED) return 1;
-    if (g_net.tcp.local_port != 0 || g_net.tcp.remote_port != 0) return 1;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    if (sock->listening) return 1;
+    if (sock->state != TCP_CLOSED) return 1;
+    if (sock->local_port != 0 || sock->remote_port != 0) return 1;
     return 0;
 }
 
 static void tcp_socket_meta_fill_legacy(net_tcp_socket_info* out)
 {
     if (!out) return;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
     memset(out, 0, sizeof(*out));
     out->in_use = tcp_socket_meta_is_legacy_in_use() ? 1u : 0u;
-    out->listening = g_net.tcp.listening;
-    out->state = (uint8)g_net.tcp.state;
-    out->local_port = g_net.tcp.local_port;
-    for (int i = 0; i < 4; i++) out->remote_ip[i] = g_net.tcp.remote_ip[i];
-    out->remote_port = g_net.tcp.remote_port;
+    out->listening = sock->listening;
+    out->state = (uint8)sock->state;
+    out->local_port = sock->local_port;
+    for (int i = 0; i < 4; i++) out->remote_ip[i] = sock->remote_ip[i];
+    out->remote_port = sock->remote_port;
 }
 
 void net_config_get(net_config* out)
