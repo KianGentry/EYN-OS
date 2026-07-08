@@ -291,6 +291,12 @@ static void tcp_socket_meta_clear(int socket_id)
     memset(&g_net.tcp_sockets[socket_id], 0, sizeof(g_net.tcp_sockets[socket_id]));
 }
 
+// Forward declarations for per-socket RX queue helpers
+static int tcp_socket_rxq_enqueue(int socket_id, const uint8 src_ip[4], uint16 src_port,
+                                  const uint8 dst_ip[4], uint16 dst_port,
+                                  const uint8* payload, uint32 payload_len);
+static void tcp_socket_rxq_clear(int socket_id);
+
 static int tcp_socket_meta_is_legacy_in_use(void)
 {
     tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
@@ -360,75 +366,98 @@ static uint16 tcp_checksum16(const uint8 src_ip[4], const uint8 dst_ip[4], const
 
 // Retransmit helpers (minimal reliability for SYN/SYN-ACK/DATA/FIN).
 // Stores the last outbound segment and retries it a few times on timeout.
+static void tcp_socket_retx_cancel(int socket_id)
+{
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    if (sock->retx_timer_id >= 0) {
+        net_timer_cancel(sock->retx_timer_id);
+    }
+    sock->retx_timer_id = -1;
+    sock->retx_active = 0;
+    sock->retx_count = 0;
+    sock->last_flags = 0;
+    sock->last_payload_len = 0;
+}
+
+static void tcp_socket_retx_arm(int socket_id, uint8 flags, uint32 seq, uint32 ack, const uint8* payload, uint32 payload_len)
+{
+    if (payload_len > NET_TCP_MAX_PAYLOAD) return;
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+
+    tcp_socket_retx_cancel(socket_id);
+
+    sock->last_flags = flags;
+    sock->last_seq = seq;
+    sock->last_ack = ack;
+    sock->last_payload_len = payload_len;
+    sock->last_end_seq = seq + payload_len;
+    if (flags & TCP_FLAG_SYN) sock->last_end_seq += 1u;
+    if (flags & TCP_FLAG_FIN) sock->last_end_seq += 1u;
+
+    if (payload_len > 0) {
+        memcpy(sock->last_payload, payload, payload_len);
+    }
+
+    sock->retx_count = 0;
+    sock->retx_active = 1;
+    sock->retx_timer_id = net_timer_start(net_timer_ticks_from_ms(TCP_RETX_INTERVAL_MS),
+                                             net_timer_ticks_from_ms(TCP_RETX_INTERVAL_MS),
+                                         tcp_retx_timer_cb, (void*)(uintptr_t)socket_id);
+}
+
+static void tcp_socket_retx_ack_received(int socket_id, uint32 ack)
+{
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    if (!sock->retx_active) return;
+    if (ack >= sock->last_end_seq) {
+        tcp_socket_retx_cancel(socket_id);
+    }
+}
+
 static void tcp_retx_cancel(void)
 {
-    if (g_net.tcp.retx_timer_id >= 0) {
-        net_timer_cancel(g_net.tcp.retx_timer_id);
-    }
-    g_net.tcp.retx_timer_id = -1;
-    g_net.tcp.retx_active = 0;
-    g_net.tcp.retx_count = 0;
-    g_net.tcp.last_flags = 0;
-    g_net.tcp.last_payload_len = 0;
+    tcp_socket_retx_cancel(NET_TCP_LEGACY_SOCKET_ID);
 }
 
 static void tcp_retx_arm(uint8 flags, uint32 seq, uint32 ack, const uint8* payload, uint32 payload_len)
 {
-    if (payload_len > NET_TCP_MAX_PAYLOAD) return;
-
-    tcp_retx_cancel();
-
-    g_net.tcp.last_flags = flags;
-    g_net.tcp.last_seq = seq;
-    g_net.tcp.last_ack = ack;
-    g_net.tcp.last_payload_len = payload_len;
-    g_net.tcp.last_end_seq = seq + payload_len;
-    if (flags & TCP_FLAG_SYN) g_net.tcp.last_end_seq += 1u;
-    if (flags & TCP_FLAG_FIN) g_net.tcp.last_end_seq += 1u;
-
-    if (payload_len > 0) {
-        memcpy(g_net.tcp.last_payload, payload, payload_len);
-    }
-
-    g_net.tcp.retx_count = 0;
-    g_net.tcp.retx_active = 1;
-    g_net.tcp.retx_timer_id = net_timer_start(net_timer_ticks_from_ms(TCP_RETX_INTERVAL_MS),
-                                             net_timer_ticks_from_ms(TCP_RETX_INTERVAL_MS),
-                                             tcp_retx_timer_cb, NULL);
+    tcp_socket_retx_arm(NET_TCP_LEGACY_SOCKET_ID, flags, seq, ack, payload, payload_len);
 }
 
 static void tcp_retx_ack_received(uint32 ack)
 {
-    if (!g_net.tcp.retx_active) return;
-    if (ack >= g_net.tcp.last_end_seq) {
-        tcp_retx_cancel();
-    }
+    tcp_socket_retx_ack_received(NET_TCP_LEGACY_SOCKET_ID, ack);
 }
-
 static void tcp_retx_timer_cb(void* ctx)
 {
-    (void)ctx;
-    if (!g_net.tcp.retx_active) return;
-    if (g_net.tcp.state == TCP_CLOSED) {
+    int socket_id = (int)(uintptr_t)ctx;
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    
+    if (!sock->retx_active) return;
+    if (sock->state == TCP_CLOSED) {
         tcp_retx_cancel();
         return;
     }
-    if (g_net.tcp.retx_count >= TCP_RETX_MAX_ATTEMPTS) {
+    if (sock->retx_count >= TCP_RETX_MAX_ATTEMPTS) {
         net_log("[NETSTACK] TCP retransmit limit reached\n");
         tcp_retx_cancel();
-        g_net.tcp.state = TCP_CLOSED;
+        sock->state = TCP_CLOSED;
         return;
     }
 
-    if (g_net.tcp.local_port == 0 || g_net.tcp.remote_port == 0) return;
+    if (sock->local_port == 0 || sock->remote_port == 0) return;
 
-    (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                           g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                           g_net.tcp.last_seq, g_net.tcp.last_ack,
-                           g_net.tcp.last_flags,
-                           g_net.tcp.last_payload_len ? g_net.tcp.last_payload : NULL,
-                           g_net.tcp.last_payload_len, 800000);
-    g_net.tcp.retx_count++;
+    (void)tcp_send_segment(sock->local_ip, sock->local_port,
+                           sock->remote_ip, sock->remote_port,
+                           sock->last_seq, sock->last_ack,
+                           sock->last_flags,
+                           sock->last_payload_len ? sock->last_payload : NULL,
+                           sock->last_payload_len, 800000);
+    sock->retx_count++;
 }
 
 int net_config_set(const net_config* in)
@@ -1229,6 +1258,16 @@ static int tcp_rxq_enqueue(const uint8 src_ip[4], uint16 src_port,
                            const uint8 dst_ip[4], uint16 dst_port,
                            const uint8* payload, uint32 payload_len)
 {
+    return tcp_socket_rxq_enqueue(NET_TCP_LEGACY_SOCKET_ID, src_ip, src_port, dst_ip, dst_port, payload, payload_len);
+}
+
+static int tcp_socket_rxq_enqueue(int socket_id, const uint8 src_ip[4], uint16 src_port,
+                                  const uint8 dst_ip[4], uint16 dst_port,
+                                  const uint8* payload, uint32 payload_len)
+{
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    
     if (payload_len > NET_TCP_MAX_PAYLOAD) {
         // Never truncate TCP payloads; caller keeps ACK unchanged on enqueue
         // failure so the peer retransmits a segment we can fully buffer.
@@ -1236,8 +1275,8 @@ static int tcp_rxq_enqueue(const uint8 src_ip[4], uint16 src_port,
         return -1;
     }
 
-    uint32 cap = (uint32)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0]));
-    tcp_rx_slot* s = &g_net.tcp_rxq[g_net.tcp_rxq_tail];
+    uint32 cap = 8u;
+    tcp_rx_slot* s = &sock->rxq[sock->rxq_tail];
     if (s->valid) {
         g_net.tcp_stats.tcp_rx_dropped++;
         return -1;
@@ -1254,7 +1293,7 @@ static int tcp_rxq_enqueue(const uint8 src_ip[4], uint16 src_port,
         memcpy(s->pkt.payload, payload, payload_len);
     }
 
-    g_net.tcp_rxq_tail = (g_net.tcp_rxq_tail + 1u) % cap;
+    sock->rxq_tail = (sock->rxq_tail + 1u) % cap;
     g_net.tcp_stats.tcp_rx_enqueued++;
     return 0;
 }
@@ -1275,11 +1314,19 @@ static void icmp_rxq_clear(void)
 
 static void tcp_rxq_clear(void)
 {
-    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
-        g_net.tcp_rxq[i].valid = 0;
+    tcp_socket_rxq_clear(NET_TCP_LEGACY_SOCKET_ID);
+}
+
+static void tcp_socket_rxq_clear(int socket_id)
+{
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    
+    for (int i = 0; i < 8; i++) {
+        sock->rxq[i].valid = 0;
     }
-    g_net.tcp_rxq_head = 0u;
-    g_net.tcp_rxq_tail = 0u;
+    sock->rxq_head = 0u;
+    sock->rxq_tail = 0u;
     g_net.tcp_stats.tcp_rx_enqueued = 0;
     g_net.tcp_stats.tcp_rx_dropped = 0;
 }
@@ -1421,9 +1468,10 @@ int net_init(const netdev* dev)
     tcp_rxq_clear();
     g_net.ip_stats.ipv4_rx_fragments = 0;
     g_net.ip_stats.ipv4_rx_frag_dropped = 0;
-    memset(&g_net.tcp, 0, sizeof(g_net.tcp));
-    g_net.tcp.retx_timer_id = -1;
-    memset(&g_net.tcp_stats, 0, sizeof(g_net.tcp_stats));
+    for (int i = 0; i < (int)NET_TCP_MAX_SOCKETS; i++) {
+        memset(&g_net.tcp_sockets[i], 0, sizeof(g_net.tcp_sockets[i]));
+        g_net.tcp_sockets[i].retx_timer_id = -1;
+    }
     memset(g_net.timers, 0, sizeof(g_net.timers));
     g_net.last_timer_tick = 0;
     (void)net_timer_start(net_ticks_from_ms(1000), net_ticks_from_ms(1000), arp_age_timer_cb, NULL);
@@ -1485,9 +1533,10 @@ int net_tcp_listen(uint16 local_port)
     if (local_port == 0) return -1;
     if (net_init_default() != 0) return -2;
 
-    g_net.tcp.listening = 1;
-    g_net.tcp.listen_port = local_port;
-    g_net.tcp.state = TCP_CLOSED;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    sock->listening = 1;
+    sock->listen_port = local_port;
+    sock->state = TCP_CLOSED;
     tcp_retx_cancel();
     tcp_rxq_clear();
     return 0;
@@ -1495,39 +1544,42 @@ int net_tcp_listen(uint16 local_port)
 
 int net_tcp_close(void)
 {
-    if (g_net.tcp.state == TCP_ESTABLISHED) {
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    if (sock->state == TCP_ESTABLISHED) {
         uint8 src_ip[4];
         net_get_local_ip(src_ip);
-        (void)tcp_send_segment(src_ip, g_net.tcp.local_port,
-                               g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                               g_net.tcp.seq, g_net.tcp.ack,
+        (void)tcp_send_segment(src_ip, sock->local_port,
+                               sock->remote_ip, sock->remote_port,
+                               sock->seq, sock->ack,
                                TCP_FLAG_FIN | TCP_FLAG_ACK,
                                NULL, 0, 800000);
-        tcp_retx_arm((uint8)(TCP_FLAG_FIN | TCP_FLAG_ACK), g_net.tcp.seq, g_net.tcp.ack, NULL, 0);
-        g_net.tcp.seq += 1;
+        tcp_socket_retx_arm(NET_TCP_LEGACY_SOCKET_ID, (uint8)(TCP_FLAG_FIN | TCP_FLAG_ACK), sock->seq, sock->ack, NULL, 0);
+        sock->seq += 1;
         g_net.tcp_stats.tcp_fin_tx++;
-        g_net.tcp.state = TCP_FIN_WAIT;
+        sock->state = TCP_FIN_WAIT;
     }
-    g_net.tcp.listening = 0;
+    sock->listening = 0;
     return 0;
 }
 
 int net_tcp_is_closed(void)
 {
-    return (g_net.tcp.state == TCP_CLOSED) ? 1 : 0;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    return (sock->state == TCP_CLOSED) ? 1 : 0;
 }
 
 int net_tcp_recv(net_tcp_rx_packet* out)
 {
     if (!out) return -1;
 
-    uint32 cap = (uint32)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0]));
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    uint32 cap = 8u;
     for (uint32 n = 0; n < cap; n++) {
-        uint32 idx = (g_net.tcp_rxq_head + n) % cap;
-        if (g_net.tcp_rxq[idx].valid) {
-            *out = g_net.tcp_rxq[idx].pkt;
-            g_net.tcp_rxq[idx].valid = 0;
-            g_net.tcp_rxq_head = (idx + 1u) % cap;
+        uint32 idx = (sock->rxq_head + n) % cap;
+        if (sock->rxq[idx].valid) {
+            *out = sock->rxq[idx].pkt;
+            sock->rxq[idx].valid = 0;
+            sock->rxq_head = (idx + 1u) % cap;
             return 1;
         }
     }
@@ -1540,11 +1592,11 @@ int net_tcp_recv(net_tcp_rx_packet* out)
         (void)net_poll(local_ip, 8);
 
         for (uint32 n = 0; n < cap; n++) {
-            uint32 idx = (g_net.tcp_rxq_head + n) % cap;
-            if (g_net.tcp_rxq[idx].valid) {
-                *out = g_net.tcp_rxq[idx].pkt;
-                g_net.tcp_rxq[idx].valid = 0;
-                g_net.tcp_rxq_head = (idx + 1u) % cap;
+            uint32 idx = (sock->rxq_head + n) % cap;
+            if (sock->rxq[idx].valid) {
+                *out = sock->rxq[idx].pkt;
+                sock->rxq[idx].valid = 0;
+                sock->rxq_head = (idx + 1u) % cap;
                 return 1;
             }
         }
@@ -1556,8 +1608,9 @@ int net_tcp_recv(net_tcp_rx_packet* out)
 uint32 net_tcp_queue_count(void)
 {
     uint32 count = 0;
-    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
-        if (g_net.tcp_rxq[i].valid) count++;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    for (int i = 0; i < 8; i++) {
+        if (sock->rxq[i].valid) count++;
     }
     return count;
 }
@@ -2030,31 +2083,32 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
             }
 
             // Passive listen: SYN on listen port.
-            if (g_net.tcp.listening && g_net.tcp.state == TCP_CLOSED &&
-                dst_port == g_net.tcp.listen_port && (tcp->flags & TCP_FLAG_SYN)) {
+            tcp_socket* tcp_sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+            if (tcp_sock->listening && tcp_sock->state == TCP_CLOSED &&
+                dst_port == tcp_sock->listen_port && (tcp->flags & TCP_FLAG_SYN)) {
                 g_net.tcp_stats.tcp_listen_syn_rx++;
-                for (int i = 0; i < 4; i++) g_net.tcp.local_ip[i] = ip->dst[i];
-                for (int i = 0; i < 4; i++) g_net.tcp.remote_ip[i] = ip->src[i];
-                g_net.tcp.local_port = dst_port;
-                g_net.tcp.remote_port = src_port;
-                g_net.tcp.seq = net_get_ticks();
-                g_net.tcp.ack = be32(tcp->seq_be) + 1;
-                g_net.tcp.state = TCP_SYN_RECEIVED;
+                for (int i = 0; i < 4; i++) tcp_sock->local_ip[i] = ip->dst[i];
+                for (int i = 0; i < 4; i++) tcp_sock->remote_ip[i] = ip->src[i];
+                tcp_sock->local_port = dst_port;
+                tcp_sock->remote_port = src_port;
+                tcp_sock->seq = net_get_ticks();
+                tcp_sock->ack = be32(tcp->seq_be) + 1;
+                tcp_sock->state = TCP_SYN_RECEIVED;
 
-                (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                                       g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                                       g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_SYN | TCP_FLAG_ACK,
+                (void)tcp_send_segment(tcp_sock->local_ip, tcp_sock->local_port,
+                                       tcp_sock->remote_ip, tcp_sock->remote_port,
+                                       tcp_sock->seq, tcp_sock->ack, TCP_FLAG_SYN | TCP_FLAG_ACK,
                                        NULL, 0, 800000);
-                tcp_retx_arm((uint8)(TCP_FLAG_SYN | TCP_FLAG_ACK), g_net.tcp.seq, g_net.tcp.ack, NULL, 0);
+                tcp_socket_retx_arm(NET_TCP_LEGACY_SOCKET_ID, (uint8)(TCP_FLAG_SYN | TCP_FLAG_ACK), tcp_sock->seq, tcp_sock->ack, NULL, 0);
                 g_net.tcp_stats.tcp_syn_sent++;
                 continue;
             }
 
             // Match against current connection only.
-            if (g_net.tcp.state != TCP_CLOSED &&
-                dst_port == g_net.tcp.local_port &&
-                src_port == g_net.tcp.remote_port &&
-                ipv4_eq(ip->src, g_net.tcp.remote_ip)) {
+            if (tcp_sock->state != TCP_CLOSED &&
+                dst_port == tcp_sock->local_port &&
+                src_port == tcp_sock->remote_port &&
+                ipv4_eq(ip->src, tcp_sock->remote_ip)) {
 
                 uint32 seq = be32(tcp->seq_be);
                 uint32 ack = be32(tcp->ack_be);
@@ -2062,42 +2116,42 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
 
                 if (flags & TCP_FLAG_RST) {
                     g_net.tcp_stats.tcp_rst_rx++;
-                    g_net.tcp.state = TCP_CLOSED;
+                    tcp_sock->state = TCP_CLOSED;
                     tcp_retx_cancel();
                     continue;
                 }
 
-                if (g_net.tcp.state == TCP_SYN_SENT) {
+                if (tcp_sock->state == TCP_SYN_SENT) {
                     if ((flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK) &&
-                        ack == g_net.tcp.seq + 1) {
+                        ack == tcp_sock->seq + 1) {
                         g_net.tcp_stats.tcp_synack_rx++;
                         tcp_retx_cancel();
-                        g_net.tcp.seq += 1;
-                        g_net.tcp.ack = seq + 1;
-                        (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                                               g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                                               g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                        tcp_sock->seq += 1;
+                        tcp_sock->ack = seq + 1;
+                        (void)tcp_send_segment(tcp_sock->local_ip, tcp_sock->local_port,
+                                               tcp_sock->remote_ip, tcp_sock->remote_port,
+                                               tcp_sock->seq, tcp_sock->ack, TCP_FLAG_ACK,
                                                NULL, 0, 800000);
                         g_net.tcp_stats.tcp_ack_tx++;
-                        g_net.tcp.state = TCP_ESTABLISHED;
+                        tcp_sock->state = TCP_ESTABLISHED;
                         g_net.tcp_stats.tcp_conn_established++;
                     }
                     continue;
                 }
 
-                if (g_net.tcp.state == TCP_SYN_RECEIVED) {
-                    if ((flags & TCP_FLAG_ACK) && ack == g_net.tcp.seq + 1) {
+                if (tcp_sock->state == TCP_SYN_RECEIVED) {
+                    if ((flags & TCP_FLAG_ACK) && ack == tcp_sock->seq + 1) {
                         tcp_retx_cancel();
-                        g_net.tcp.seq += 1;
-                        g_net.tcp.state = TCP_ESTABLISHED;
+                        tcp_sock->seq += 1;
+                        tcp_sock->state = TCP_ESTABLISHED;
                         g_net.tcp_stats.tcp_conn_established++;
                     }
                     continue;
                 }
 
-                if (g_net.tcp.state == TCP_ESTABLISHED || g_net.tcp.state == TCP_FIN_WAIT) {
+                if (tcp_sock->state == TCP_ESTABLISHED || tcp_sock->state == TCP_FIN_WAIT) {
                     if (flags & TCP_FLAG_ACK) {
-                        tcp_retx_ack_received(ack);
+                        tcp_socket_retx_ack_received(NET_TCP_LEGACY_SOCKET_ID, ack);
                     }
                     if (payload_len > 0) {
                         g_net.tcp_stats.tcp_data_rx++;
@@ -2105,17 +2159,17 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
                         // Reliability invariant: only advance ACK for payload that is
                         // in-order and successfully enqueued. If RX queue is full,
                         // keep ACK unchanged so the peer retransmits.
-                        if (seq == g_net.tcp.ack) {
+                        if (seq == tcp_sock->ack) {
                             int enq_rc = tcp_rxq_enqueue(ip->src, src_port, ip->dst, dst_port,
                                                          frame + payload_off, payload_len);
                             if (enq_rc == 0) {
-                                g_net.tcp.ack += payload_len;
+                                tcp_sock->ack += payload_len;
                             }
                         }
 
-                        (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                                               g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                                               g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                        (void)tcp_send_segment(tcp_sock->local_ip, tcp_sock->local_port,
+                                               tcp_sock->remote_ip, tcp_sock->remote_port,
+                                               tcp_sock->seq, tcp_sock->ack, TCP_FLAG_ACK,
                                                NULL, 0, 800000);
                         g_net.tcp_stats.tcp_ack_tx++;
                     }
@@ -2123,26 +2177,26 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
                     if (flags & TCP_FLAG_FIN) {
                         // Accept FIN only when it is in-order relative to current ACK.
                         uint32 fin_seq = seq + payload_len;
-                        if (fin_seq == g_net.tcp.ack) {
+                        if (fin_seq == tcp_sock->ack) {
                             g_net.tcp_stats.tcp_fin_rx++;
-                            g_net.tcp.ack += 1u;
-                            (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                                                   g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                                                   g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                            tcp_sock->ack += 1u;
+                            (void)tcp_send_segment(tcp_sock->local_ip, tcp_sock->local_port,
+                                                   tcp_sock->remote_ip, tcp_sock->remote_port,
+                                                   tcp_sock->seq, tcp_sock->ack, TCP_FLAG_ACK,
                                                    NULL, 0, 800000);
                             g_net.tcp_stats.tcp_ack_tx++;
-                            g_net.tcp.state = TCP_CLOSED;
+                            tcp_sock->state = TCP_CLOSED;
                             tcp_retx_cancel();
                         } else {
                             // Duplicate/out-of-order FIN: send current ACK only.
-                            (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                                                   g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                                                   g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                            (void)tcp_send_segment(tcp_sock->local_ip, tcp_sock->local_port,
+                                                   tcp_sock->remote_ip, tcp_sock->remote_port,
+                                                   tcp_sock->seq, tcp_sock->ack, TCP_FLAG_ACK,
                                                    NULL, 0, 800000);
                             g_net.tcp_stats.tcp_ack_tx++;
                         }
-                    } else if (g_net.tcp.state == TCP_FIN_WAIT && (flags & TCP_FLAG_ACK)) {
-                        g_net.tcp.state = TCP_CLOSED;
+                    } else if (tcp_sock->state == TCP_FIN_WAIT && (flags & TCP_FLAG_ACK)) {
+                        tcp_sock->state = TCP_CLOSED;
                         tcp_retx_cancel();
                     }
                 }
@@ -2500,19 +2554,21 @@ int net_tcp_send(const uint8 local_ip[4], uint16 local_port,
     }
 
     // Initialize connection state.
-    memset(&g_net.tcp, 0, sizeof(g_net.tcp));
-    for (int i = 0; i < 4; i++) g_net.tcp.local_ip[i] = local_ip[i];
-    for (int i = 0; i < 4; i++) g_net.tcp.remote_ip[i] = dst_ip[i];
-    g_net.tcp.local_port = local_port;
-    g_net.tcp.remote_port = dst_port;
-    g_net.tcp.seq = net_get_ticks();
-    g_net.tcp.ack = 0;
-    g_net.tcp.state = TCP_SYN_SENT;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    memset(sock, 0, sizeof(*sock));
+    sock->retx_timer_id = -1;
+    for (int i = 0; i < 4; i++) sock->local_ip[i] = local_ip[i];
+    for (int i = 0; i < 4; i++) sock->remote_ip[i] = dst_ip[i];
+    sock->local_port = local_port;
+    sock->remote_port = dst_port;
+    sock->seq = net_get_ticks();
+    sock->ack = 0;
+    sock->state = TCP_SYN_SENT;
 
     g_net.tcp_stats.tcp_syn_sent++;
     int rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
-                              g_net.tcp.seq, 0, TCP_FLAG_SYN, NULL, 0, timeout_spins);
-    tcp_retx_arm(TCP_FLAG_SYN, g_net.tcp.seq, 0, NULL, 0);
+                              sock->seq, 0, TCP_FLAG_SYN, NULL, 0, timeout_spins);
+    tcp_socket_retx_arm(NET_TCP_LEGACY_SOCKET_ID, TCP_FLAG_SYN, sock->seq, 0, NULL, 0);
     if (rc != 0) return rc;
 
     // Wait for SYN-ACK
@@ -2520,30 +2576,30 @@ int net_tcp_send(const uint8 local_ip[4], uint16 local_port,
     for (int spin = 0; spin < timeout_spins; spin++) {
         if ((spin & 0x1FFF) == 0) watchdog_kick("net-tcp-wait");
         (void)net_poll(local_ip, 16);
-        if (g_net.tcp.state == TCP_ESTABLISHED) break;
+        if (sock->state == TCP_ESTABLISHED) break;
     }
-    if (g_net.tcp.state != TCP_ESTABLISHED) return -5;
+    if (sock->state != TCP_ESTABLISHED) return -5;
 
     // Send payload if any.
     if (payload_len > 0) {
         rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
-                              g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_PSH | TCP_FLAG_ACK,
+                              sock->seq, sock->ack, TCP_FLAG_PSH | TCP_FLAG_ACK,
                               payload, payload_len, timeout_spins);
-        tcp_retx_arm((uint8)(TCP_FLAG_PSH | TCP_FLAG_ACK), g_net.tcp.seq, g_net.tcp.ack,
+        tcp_socket_retx_arm(NET_TCP_LEGACY_SOCKET_ID, (uint8)(TCP_FLAG_PSH | TCP_FLAG_ACK), sock->seq, sock->ack,
                      payload, payload_len);
         if (rc != 0) return rc;
-        g_net.tcp.seq += payload_len;
+        sock->seq += payload_len;
         g_net.tcp_stats.tcp_data_tx++;
     }
 
     // Send FIN
     rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
-                          g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_FIN | TCP_FLAG_ACK,
+                          sock->seq, sock->ack, TCP_FLAG_FIN | TCP_FLAG_ACK,
                           NULL, 0, timeout_spins);
-    tcp_retx_arm((uint8)(TCP_FLAG_FIN | TCP_FLAG_ACK), g_net.tcp.seq, g_net.tcp.ack, NULL, 0);
+    tcp_socket_retx_arm(NET_TCP_LEGACY_SOCKET_ID, (uint8)(TCP_FLAG_FIN | TCP_FLAG_ACK), sock->seq, sock->ack, NULL, 0);
     if (rc != 0) return rc;
-    g_net.tcp.seq += 1;
-    g_net.tcp.state = TCP_FIN_WAIT;
+    sock->seq += 1;
+    sock->state = TCP_FIN_WAIT;
     g_net.tcp_stats.tcp_fin_tx++;
 
     return (int)payload_len;
@@ -2562,22 +2618,24 @@ int net_tcp_connect(const uint8 local_ip[4], uint16 local_port,
     }
 
     // Initialize connection state.
-    memset(&g_net.tcp, 0, sizeof(g_net.tcp));
-    for (int i = 0; i < 4; i++) g_net.tcp.local_ip[i] = local_ip[i];
-    for (int i = 0; i < 4; i++) g_net.tcp.remote_ip[i] = dst_ip[i];
-    g_net.tcp.local_port = local_port;
-    g_net.tcp.remote_port = dst_port;
-    g_net.tcp.seq = net_get_ticks();
-    g_net.tcp.ack = 0;
-    g_net.tcp.state = TCP_SYN_SENT;
-    g_net.tcp.listening = 0;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    memset(sock, 0, sizeof(*sock));
+    sock->retx_timer_id = -1;
+    for (int i = 0; i < 4; i++) sock->local_ip[i] = local_ip[i];
+    for (int i = 0; i < 4; i++) sock->remote_ip[i] = dst_ip[i];
+    sock->local_port = local_port;
+    sock->remote_port = dst_port;
+    sock->seq = net_get_ticks();
+    sock->ack = 0;
+    sock->state = TCP_SYN_SENT;
+    sock->listening = 0;
     tcp_retx_cancel();
     tcp_rxq_clear();
 
     g_net.tcp_stats.tcp_syn_sent++;
     int rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
-                              g_net.tcp.seq, 0, TCP_FLAG_SYN, NULL, 0, timeout_spins);
-    tcp_retx_arm(TCP_FLAG_SYN, g_net.tcp.seq, 0, NULL, 0);
+                              sock->seq, 0, TCP_FLAG_SYN, NULL, 0, timeout_spins);
+    tcp_socket_retx_arm(NET_TCP_LEGACY_SOCKET_ID, TCP_FLAG_SYN, sock->seq, 0, NULL, 0);
     if (rc != 0) return rc;
 
     if (timeout_spins <= 0) timeout_spins = 2000000;
@@ -2591,9 +2649,9 @@ int net_tcp_connect(const uint8 local_ip[4], uint16 local_port,
             }
         }
         (void)net_poll(local_ip, 16);
-        if (g_net.tcp.state == TCP_ESTABLISHED) break;
+        if (sock->state == TCP_ESTABLISHED) break;
     }
-    if (g_net.tcp.state != TCP_ESTABLISHED) return -5;
+    if (sock->state != TCP_ESTABLISHED) return -5;
 
     return 0;
 }
@@ -2602,22 +2660,23 @@ int net_tcp_send_current(const uint8* payload, uint32 payload_len)
 {
     if (payload_len != 0u && !payload) return -1;
     if (!g_net.inited || !g_net.dev) return -2;
-    if (g_net.tcp.state != TCP_ESTABLISHED) return -3;
-    if (g_net.tcp.local_port == 0 || g_net.tcp.remote_port == 0) return -4;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    if (sock->state != TCP_ESTABLISHED) return -3;
+    if (sock->local_port == 0 || sock->remote_port == 0) return -4;
 
     if (payload_len > NET_TCP_MAX_PAYLOAD) return -5;
 
     if (payload_len == 0u) return 0;
 
-    int rc = tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                              g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                              g_net.tcp.seq, g_net.tcp.ack,
+    int rc = tcp_send_segment(sock->local_ip, sock->local_port,
+                              sock->remote_ip, sock->remote_port,
+                              sock->seq, sock->ack,
                               TCP_FLAG_PSH | TCP_FLAG_ACK,
                               payload, payload_len, 800000);
-    tcp_retx_arm((uint8)(TCP_FLAG_PSH | TCP_FLAG_ACK), g_net.tcp.seq, g_net.tcp.ack,
+    tcp_socket_retx_arm(NET_TCP_LEGACY_SOCKET_ID, (uint8)(TCP_FLAG_PSH | TCP_FLAG_ACK), sock->seq, sock->ack,
                  payload, payload_len);
     if (rc != 0) return rc;
-    g_net.tcp.seq += payload_len;
+    sock->seq += payload_len;
     g_net.tcp_stats.tcp_data_tx++;
     return (int)payload_len;
 }
