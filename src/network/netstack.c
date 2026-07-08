@@ -128,6 +128,15 @@ typedef struct tcp_rx_slot {
     net_tcp_rx_packet pkt;
 } tcp_rx_slot;
 
+typedef struct tcp_socket_meta {
+    uint8 in_use;
+    uint8 listening;
+    tcp_state state;
+    uint16 local_port;
+    uint8 remote_ip[4];
+    uint16 remote_port;
+} tcp_socket_meta;
+
 typedef struct net_timer_slot {
     uint8 active;
     uint32 expiry_tick;
@@ -253,6 +262,7 @@ static struct {
     tcp_rx_slot tcp_rxq[8];
     uint32 tcp_rxq_head;
     uint32 tcp_rxq_tail;
+    tcp_socket_meta tcp_sockets[NET_TCP_MAX_SOCKETS];
 
     udp_socket sockets[MAX_SOCKETS];
 
@@ -279,6 +289,35 @@ static void net_log(const char* msg);
 static int dns_get_server_ip(uint8 out_ip[4]);
 static int dns_encode_name(const char* name, uint8* out, uint32 out_cap, uint32* out_len);
 static int dns_skip_name(const uint8* msg, uint32 len, uint32* io_off);
+static void tcp_socket_meta_clear(int socket_id);
+static int tcp_socket_meta_is_legacy_in_use(void);
+static void tcp_socket_meta_fill_legacy(net_tcp_socket_info* out);
+
+static void tcp_socket_meta_clear(int socket_id)
+{
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    memset(&g_net.tcp_sockets[socket_id], 0, sizeof(g_net.tcp_sockets[socket_id]));
+}
+
+static int tcp_socket_meta_is_legacy_in_use(void)
+{
+    if (g_net.tcp.listening) return 1;
+    if (g_net.tcp.state != TCP_CLOSED) return 1;
+    if (g_net.tcp.local_port != 0 || g_net.tcp.remote_port != 0) return 1;
+    return 0;
+}
+
+static void tcp_socket_meta_fill_legacy(net_tcp_socket_info* out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->in_use = tcp_socket_meta_is_legacy_in_use() ? 1u : 0u;
+    out->listening = g_net.tcp.listening;
+    out->state = (uint8)g_net.tcp.state;
+    out->local_port = g_net.tcp.local_port;
+    for (int i = 0; i < 4; i++) out->remote_ip[i] = g_net.tcp.remote_ip[i];
+    out->remote_port = g_net.tcp.remote_port;
+}
 
 void net_config_get(net_config* out)
 {
@@ -1423,6 +1462,30 @@ net_tcp_stats net_tcp_get_stats(void)
     return g_net.tcp_stats;
 }
 
+int net_tcp_socket_open(void)
+{
+    for (int i = 1; i < (int)NET_TCP_MAX_SOCKETS; i++) {
+        if (!g_net.tcp_sockets[i].in_use) {
+            tcp_socket_meta_clear(i);
+            g_net.tcp_sockets[i].in_use = 1;
+            g_net.tcp_sockets[i].state = TCP_CLOSED;
+            return i;
+        }
+    }
+    return -1;
+}
+
+int net_tcp_socket_close_id(int socket_id)
+{
+    if (socket_id == NET_TCP_LEGACY_SOCKET_ID) {
+        return net_tcp_close();
+    }
+    if (socket_id <= 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
+    if (!g_net.tcp_sockets[socket_id].in_use) return -1;
+    tcp_socket_meta_clear(socket_id);
+    return 0;
+}
+
 int net_tcp_listen(uint16 local_port)
 {
     if (local_port == 0) return -1;
@@ -1503,6 +1566,42 @@ uint32 net_tcp_queue_count(void)
         if (g_net.tcp_rxq[i].valid) count++;
     }
     return count;
+}
+
+uint32 net_tcp_socket_queue_count(int socket_id)
+{
+    if (socket_id == NET_TCP_LEGACY_SOCKET_ID) {
+        return net_tcp_queue_count();
+    }
+    if (socket_id <= 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return 0;
+    if (!g_net.tcp_sockets[socket_id].in_use) return 0;
+    return 0;
+}
+
+uint32 net_tcp_get_sockets(net_tcp_socket_info* out, uint32 out_cap)
+{
+    if (!out || out_cap == 0u) return 0;
+
+    uint32 written = 0;
+    if (written < out_cap && tcp_socket_meta_is_legacy_in_use()) {
+        tcp_socket_meta_fill_legacy(&out[written]);
+        out[written].queued = net_tcp_queue_count();
+        written++;
+    }
+
+    for (int i = 1; i < (int)NET_TCP_MAX_SOCKETS && written < out_cap; i++) {
+        if (!g_net.tcp_sockets[i].in_use) continue;
+        memset(&out[written], 0, sizeof(out[written]));
+        out[written].in_use = 1;
+        out[written].listening = g_net.tcp_sockets[i].listening;
+        out[written].state = (uint8)g_net.tcp_sockets[i].state;
+        out[written].local_port = g_net.tcp_sockets[i].local_port;
+        for (int j = 0; j < 4; j++) out[written].remote_ip[j] = g_net.tcp_sockets[i].remote_ip[j];
+        out[written].remote_port = g_net.tcp_sockets[i].remote_port;
+        written++;
+    }
+
+    return written;
 }
 
 int net_get_mac(uint8 out_mac[6])

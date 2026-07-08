@@ -740,6 +740,10 @@ uint32 get_last_error_eip() {
 #define SYSCALL_NET_TCP_SEND 121
 #define SYSCALL_NET_TCP_RECV 122
 #define SYSCALL_NET_TCP_CLOSE 123
+#define SYSCALL_NET_TCP_SOCKET_OPEN 157
+#define SYSCALL_NET_TCP_SOCKET_CLOSE 158
+#define SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT 159
+#define SYSCALL_NET_TCP_GET_SOCKETS 160
 
 /* IPC primitives */
 #define SYSCALL_PIPE 124
@@ -3807,6 +3811,37 @@ static uint32 syscall_dispatch_core(regs_t* regs,
 
             if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             regs->eax = (uint32)net_tcp_close();
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_OPEN: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_open();
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_CLOSE: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_close_id((int)arg1);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_queue_count((int)arg1);
+            break;
+        }
+        case SYSCALL_NET_TCP_GET_SOCKETS: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int out_cap = (int)arg1;
+            void* user_out = (void*)arg3;
+            if (!user_out || out_cap <= 0) { regs->eax = (uint32)-1; break; }
+            if (out_cap > (int)NET_TCP_MAX_SOCKETS) out_cap = (int)NET_TCP_MAX_SOCKETS;
+
+            net_tcp_socket_info infos[NET_TCP_MAX_SOCKETS];
+            uint32 written = net_tcp_get_sockets(infos, (uint32)out_cap);
+            if (written > 0 && copyout(user_out, infos, (size_t)(written * sizeof(infos[0]))) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            regs->eax = written;
             break;
         }
         case SYSCALL_FS_CHECK_INTEGRITY: {

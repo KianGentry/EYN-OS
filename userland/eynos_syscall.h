@@ -115,6 +115,10 @@ enum {
     EYN_SYSCALL_SYSTEMCFG_SET_DRIVE_LABEL = 154,
     EYN_SYSCALL_SYSTEMCFG_GET_DRIVE_LABEL = 155,
     EYN_SYSCALL_SYSTEMCFG_GET_INSTALL_DRIVE = 156,
+    EYN_SYSCALL_NET_TCP_SOCKET_OPEN = 157,
+    EYN_SYSCALL_NET_TCP_SOCKET_CLOSE = 158,
+    EYN_SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT = 159,
+    EYN_SYSCALL_NET_TCP_GET_SOCKETS = 160,
 };
 
 #define EYN_TTY_MODE_RAW 0x0001
@@ -129,6 +133,16 @@ typedef struct {
     char kernel_version[32];  /* e.g., "EYN/amd64" */
     char shell[64];           /* shell executable name */
 } eyn_sysinfo_t;
+
+typedef struct {
+    uint8_t in_use;
+    uint8_t listening;
+    uint8_t state;
+    uint16_t local_port;
+    uint8_t remote_ip[4];
+    uint16_t remote_port;
+    uint32_t queued;
+} eyn_net_tcp_socket_info_t;
 
 typedef struct {
     const char* path;
@@ -404,6 +418,50 @@ static inline int eyn_sys_net_close(int socket_id) {
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_NET_CLOSE), "b"(socket_id)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_net_tcp_socket_open(void) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_OPEN)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_net_tcp_socket_close(int socket_id) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_CLOSE), "b"(socket_id)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_net_tcp_socket_queue_count(int socket_id) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT), "b"(socket_id)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_net_tcp_get_sockets(eyn_net_tcp_socket_info_t* out, int out_cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_GET_SOCKETS), "b"(out_cap), "c"(0), "d"(out)
         : "memory"
     );
     return ret;

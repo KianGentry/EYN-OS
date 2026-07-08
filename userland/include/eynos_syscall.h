@@ -317,6 +317,10 @@ enum {
     EYN_SYSCALL_TTY_GET_WINSIZE = 148,
     // allocate PTY endpoints: args (int out_fds[2]) -> 0 or -1
     EYN_SYSCALL_PTY_OPEN = 149,
+    EYN_SYSCALL_NET_TCP_SOCKET_OPEN = 157,
+    EYN_SYSCALL_NET_TCP_SOCKET_CLOSE = 158,
+    EYN_SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT = 159,
+    EYN_SYSCALL_NET_TCP_GET_SOCKETS = 160,
 };
 
 #define EYN_TTY_MODE_RAW 0x0001
@@ -399,6 +403,16 @@ typedef struct {
     uint32_t queued;
     uint32_t dropped;
 } eyn_net_socket_info_t;
+
+typedef struct {
+    uint8_t in_use;
+    uint8_t listening;
+    uint8_t state;
+    uint16_t local_port;
+    uint8_t remote_ip[4];
+    uint16_t remote_port;
+    uint32_t queued;
+} eyn_net_tcp_socket_info_t;
 
 typedef struct {
     int32_t pid;
@@ -803,6 +817,26 @@ static inline int eyn_sys_net_tcp_recv(void* buf, uint32_t buflen) {
 // Close the current TCP connection.
 static inline int eyn_sys_net_tcp_close(void) {
     return eyn_syscall1(EYN_SYSCALL_NET_TCP_CLOSE, 0);
+}
+
+// Allocate a TCP socket ID for the multi-session socket API.
+static inline int eyn_sys_net_tcp_socket_open(void) {
+    return eyn_syscall0(EYN_SYSCALL_NET_TCP_SOCKET_OPEN);
+}
+
+// Close a TCP socket allocation by ID.
+static inline int eyn_sys_net_tcp_socket_close(int socket_id) {
+    return eyn_syscall1(EYN_SYSCALL_NET_TCP_SOCKET_CLOSE, socket_id);
+}
+
+// Query queued TCP RX packets for a specific socket ID.
+static inline int eyn_sys_net_tcp_socket_queue_count(int socket_id) {
+    return eyn_syscall1(EYN_SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT, socket_id);
+}
+
+// Query active TCP socket allocations.
+static inline int eyn_sys_net_tcp_get_sockets(eyn_net_tcp_socket_info_t* out, int out_cap) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_TCP_GET_SOCKETS, out_cap, 0, out);
 }
 
 static inline int eyn_sys_fs_check_integrity(void) {

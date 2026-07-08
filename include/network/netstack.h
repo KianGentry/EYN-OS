@@ -125,6 +125,16 @@ typedef struct net_tcp_stats {
     uint32 tcp_rx_dropped;
 } net_tcp_stats;
 
+typedef struct net_tcp_socket_info {
+    uint8 in_use;
+    uint8 listening;
+    uint8 state;
+    uint16 local_port;
+    uint8 remote_ip[4];
+    uint16 remote_port;
+    uint32 queued;
+} net_tcp_socket_info;
+
 /*
  * ABI-INVARIANT: Per-segment TCP payload buffer cap.
  *
@@ -140,6 +150,8 @@ typedef struct net_tcp_stats {
  * Security-critical: Yes (bounds copies from NIC frame data).
  */
 #define NET_TCP_MAX_PAYLOAD 1536u
+#define NET_TCP_MAX_SOCKETS 8u
+#define NET_TCP_LEGACY_SOCKET_ID 0
 
 typedef struct net_tcp_rx_packet {
     uint8 src_ip[4];
@@ -277,6 +289,24 @@ net_icmp_stats net_icmp_get_stats(void);
 
 // Returns a snapshot of current TCP stats.
 net_tcp_stats net_tcp_get_stats(void);
+
+// Allocate a TCP socket ID for future multi-session APIs.
+// Socket 0 is reserved as the legacy compatibility lane.
+// Returns socket id >= 1 on success, <0 on error.
+int net_tcp_socket_open(void);
+
+// Close a TCP socket allocation by ID.
+// Socket 0 closes the legacy connection lane.
+// Returns 0 on success, <0 on error.
+int net_tcp_socket_close_id(int socket_id);
+
+// Returns number of queued TCP packets for a specific socket ID.
+// Socket 0 reflects the legacy compatibility lane.
+uint32 net_tcp_socket_queue_count(int socket_id);
+
+// Get list of active TCP socket allocations, including the legacy lane when in use.
+// Returns number of entries written to out (up to out_cap).
+uint32 net_tcp_get_sockets(net_tcp_socket_info* out, uint32 out_cap);
 
 // TCP listener/receive API (minimal passive open).
 // Listen on local_port for a single connection.
