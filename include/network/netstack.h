@@ -308,6 +308,39 @@ uint32 net_tcp_socket_queue_count(int socket_id);
 // Returns number of entries written to out (up to out_cap).
 uint32 net_tcp_get_sockets(net_tcp_socket_info* out, uint32 out_cap);
 
+// Per-socket TCP API for pool sockets (id 1..NET_TCP_MAX_SOCKETS-1) obtained
+// via net_tcp_socket_open(). Socket 0 (the legacy lane) is not accepted by
+// these functions; use the dedicated net_tcp_listen()/net_tcp_connect()/
+// net_tcp_send_current()/net_tcp_recv()/net_tcp_close() API for it instead.
+
+// Bind a local port to a socket ahead of listen(). Returns 0 on success,
+// <0 on error (bad socket id, port 0, or port already owned by a listener).
+int net_tcp_socket_bind(int socket_id, uint16 local_port);
+
+// Mark a bound socket as a passive listener. backlog is accepted but capped
+// at a fixed internal depth (NET_TCP_ACCEPT_BACKLOG). Returns 0 on success,
+// <0 on error (bad socket id, or bind() not called yet).
+int net_tcp_socket_listen(int socket_id, int backlog);
+
+// Block (polling, like connect()) until a fully-established inbound
+// connection is available on a listening socket, or until timeout_spins
+// elapses (0 selects a default timeout). Returns the new socket_id (>= 1)
+// on success, <0 on error/timeout.
+int net_tcp_socket_accept(int socket_id, int timeout_spins);
+
+// Actively connect a pool socket to a remote endpoint. local_port==0
+// auto-assigns an ephemeral port; timeout_spins<=0 selects a default
+// timeout. Returns 0 on success, <0 on error.
+int net_tcp_socket_connect(int socket_id, const uint8 dst_ip[4], uint16 dst_port,
+                          uint16 local_port, int timeout_spins);
+
+// Send on an established pool socket. Returns bytes sent (>=0) or <0 on error.
+int net_tcp_socket_send(int socket_id, const uint8* payload, uint32 payload_len);
+
+// Receive one queued packet from a pool socket (performs a poll pass if the
+// queue is empty). Returns 1 if a packet was received, 0 if none, <0 on error.
+int net_tcp_socket_recv(int socket_id, net_tcp_rx_packet* out);
+
 // TCP listener/receive API (minimal passive open).
 // Listen on local_port for a single connection.
 int net_tcp_listen(uint16 local_port);

@@ -744,6 +744,12 @@ uint32 get_last_error_eip() {
 #define SYSCALL_NET_TCP_SOCKET_CLOSE 162
 #define SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT 163
 #define SYSCALL_NET_TCP_GET_SOCKETS 164
+#define SYSCALL_NET_TCP_SOCKET_BIND 165
+#define SYSCALL_NET_TCP_SOCKET_LISTEN 166
+#define SYSCALL_NET_TCP_SOCKET_ACCEPT 167
+#define SYSCALL_NET_TCP_SOCKET_CONNECT 168
+#define SYSCALL_NET_TCP_SOCKET_SEND 169
+#define SYSCALL_NET_TCP_SOCKET_RECV 170
 
 /* IPC primitives */
 #define SYSCALL_PIPE 124
@@ -3842,6 +3848,67 @@ static uint32 syscall_dispatch_core(regs_t* regs,
                 break;
             }
             regs->eax = written;
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_BIND: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_bind((int)arg1, (uint16)arg2);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_LISTEN: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_listen((int)arg1, (int)arg2);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_ACCEPT: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_accept((int)arg1, (int)arg2);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_CONNECT: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int socket_id = (int)arg1;
+            uint16 dst_port = (uint16)arg2;
+            const void* user_dst = (const void*)arg3;
+            if (!user_dst) { regs->eax = (uint32)-1; break; }
+
+            uint8 dst_ip[4];
+            if (copyin(dst_ip, user_dst, 4) != 0) { regs->eax = (uint32)-1; break; }
+
+            // local_port (auto-assign) and timeout (kernel default) are not
+            // exposed at the syscall boundary, matching the legacy
+            // SYSCALL_NET_TCP_CONNECT convention above.
+            regs->eax = (uint32)net_tcp_socket_connect(socket_id, dst_ip, dst_port, 0, 0);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_SEND: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int socket_id = (int)arg1;
+            uint32 len = (uint32)arg2;
+            const void* user_buf = (const void*)arg3;
+            if (!user_buf) { regs->eax = (uint32)-1; break; }
+            if (len > NET_TCP_MAX_PAYLOAD) { regs->eax = (uint32)-2; break; }
+
+            uint8 buf[NET_TCP_MAX_PAYLOAD];
+            if (len != 0u && copyin(buf, user_buf, (size_t)len) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_send(socket_id, buf, len);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_RECV: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int socket_id = (int)arg1;
+            uint32 buflen = (uint32)arg2;
+            void* user_buf = (void*)arg3;
+            if (!user_buf) { regs->eax = (uint32)-1; break; }
+
+            net_tcp_rx_packet pkt;
+            int rc = net_tcp_socket_recv(socket_id, &pkt);
+            if (rc <= 0) { regs->eax = (uint32)rc; break; }
+
+            uint32 copy_len = pkt.payload_len;
+            if (copy_len > buflen) copy_len = buflen;
+            if (copy_len != 0u && copyout(user_buf, pkt.payload, (size_t)copy_len) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)copy_len;
             break;
         }
         case SYSCALL_FS_CHECK_INTEGRITY: {

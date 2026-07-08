@@ -119,6 +119,12 @@ enum {
     EYN_SYSCALL_NET_TCP_SOCKET_CLOSE = 162,
     EYN_SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT = 163,
     EYN_SYSCALL_NET_TCP_GET_SOCKETS = 164,
+    EYN_SYSCALL_NET_TCP_SOCKET_BIND = 165,
+    EYN_SYSCALL_NET_TCP_SOCKET_LISTEN = 166,
+    EYN_SYSCALL_NET_TCP_SOCKET_ACCEPT = 167,
+    EYN_SYSCALL_NET_TCP_SOCKET_CONNECT = 168,
+    EYN_SYSCALL_NET_TCP_SOCKET_SEND = 169,
+    EYN_SYSCALL_NET_TCP_SOCKET_RECV = 170,
 };
 
 #define EYN_TTY_MODE_RAW 0x0001
@@ -462,6 +468,80 @@ static inline int eyn_sys_net_tcp_get_sockets(eyn_net_tcp_socket_info_t* out, in
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_NET_TCP_GET_SOCKETS), "b"(out_cap), "c"(0), "d"(out)
+        : "memory"
+    );
+    return ret;
+}
+
+// Bind a local port to a pool socket (id 1..7) ahead of listen().
+static inline int eyn_sys_net_tcp_socket_bind(int socket_id, uint16_t local_port) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_BIND), "b"(socket_id), "c"(local_port)
+        : "memory"
+    );
+    return ret;
+}
+
+// Mark a bound pool socket as a passive listener.
+static inline int eyn_sys_net_tcp_socket_listen(int socket_id, int backlog) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_LISTEN), "b"(socket_id), "c"(backlog)
+        : "memory"
+    );
+    return ret;
+}
+
+// Block until an inbound connection is accepted or timeout_spins elapses
+// (0 selects a default timeout). Returns the new socket_id (>= 1) on success.
+static inline int eyn_sys_net_tcp_socket_accept(int socket_id, int timeout_spins) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_ACCEPT), "b"(socket_id), "c"(timeout_spins)
+        : "memory"
+    );
+    return ret;
+}
+
+// Actively connect a pool socket to a remote endpoint. Local port is
+// auto-assigned and the connect timeout uses the kernel default.
+static inline int eyn_sys_net_tcp_socket_connect(int socket_id, uint16_t dst_port, const void* dst_ip) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_CONNECT), "b"(socket_id), "c"(dst_port), "d"(dst_ip)
+        : "memory"
+    );
+    return ret;
+}
+
+// Send on an established pool socket. Returns bytes sent (>=0) or <0 on error.
+static inline int eyn_sys_net_tcp_socket_send(int socket_id, const void* buf, uint32_t len) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_SEND), "b"(socket_id), "c"(len), "d"(buf)
+        : "memory"
+    );
+    return ret;
+}
+
+// Receive from a pool socket. Returns bytes received, 0 if none, <0 on error.
+static inline int eyn_sys_net_tcp_socket_recv(int socket_id, void* buf, uint32_t buflen) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_RECV), "b"(socket_id), "c"(buflen), "d"(buf)
         : "memory"
     );
     return ret;

@@ -321,6 +321,12 @@ enum {
     EYN_SYSCALL_NET_TCP_SOCKET_CLOSE = 162,
     EYN_SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT = 163,
     EYN_SYSCALL_NET_TCP_GET_SOCKETS = 164,
+    EYN_SYSCALL_NET_TCP_SOCKET_BIND = 165,
+    EYN_SYSCALL_NET_TCP_SOCKET_LISTEN = 166,
+    EYN_SYSCALL_NET_TCP_SOCKET_ACCEPT = 167,
+    EYN_SYSCALL_NET_TCP_SOCKET_CONNECT = 168,
+    EYN_SYSCALL_NET_TCP_SOCKET_SEND = 169,
+    EYN_SYSCALL_NET_TCP_SOCKET_RECV = 170,
 };
 
 #define EYN_TTY_MODE_RAW 0x0001
@@ -837,6 +843,38 @@ static inline int eyn_sys_net_tcp_socket_queue_count(int socket_id) {
 // Query active TCP socket allocations.
 static inline int eyn_sys_net_tcp_get_sockets(eyn_net_tcp_socket_info_t* out, int out_cap) {
     return eyn_syscall3_iip(EYN_SYSCALL_NET_TCP_GET_SOCKETS, out_cap, 0, out);
+}
+
+// Bind a local port to a pool socket (id 1..7) ahead of listen().
+static inline int eyn_sys_net_tcp_socket_bind(int socket_id, uint16_t local_port) {
+    return eyn_syscall3_iii(EYN_SYSCALL_NET_TCP_SOCKET_BIND, socket_id, local_port, 0);
+}
+
+// Mark a bound pool socket as a passive listener.
+static inline int eyn_sys_net_tcp_socket_listen(int socket_id, int backlog) {
+    return eyn_syscall3_iii(EYN_SYSCALL_NET_TCP_SOCKET_LISTEN, socket_id, backlog, 0);
+}
+
+// Block until an inbound connection is accepted or timeout_spins elapses
+// (0 selects a default timeout). Returns the new socket_id (>= 1) on success.
+static inline int eyn_sys_net_tcp_socket_accept(int socket_id, int timeout_spins) {
+    return eyn_syscall3_iii(EYN_SYSCALL_NET_TCP_SOCKET_ACCEPT, socket_id, timeout_spins, 0);
+}
+
+// Actively connect a pool socket to a remote endpoint. Local port is
+// auto-assigned and the connect timeout uses the kernel default.
+static inline int eyn_sys_net_tcp_socket_connect(int socket_id, uint16_t dst_port, const uint8_t dst_ip[4]) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_TCP_SOCKET_CONNECT, socket_id, dst_port, dst_ip);
+}
+
+// Send on an established pool socket. Returns bytes sent (>=0) or <0 on error.
+static inline int eyn_sys_net_tcp_socket_send(int socket_id, const void* buf, uint32_t len) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_TCP_SOCKET_SEND, socket_id, (int)len, buf);
+}
+
+// Receive from a pool socket. Returns bytes received, 0 if none, <0 on error.
+static inline int eyn_sys_net_tcp_socket_recv(int socket_id, void* buf, uint32_t buflen) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_TCP_SOCKET_RECV, socket_id, (int)buflen, buf);
 }
 
 static inline int eyn_sys_fs_check_integrity(void) {
