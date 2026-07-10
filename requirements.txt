@@ -1,0 +1,17 @@
+gcc
+ld
+nasm
+make
+grub2-mkrescue / grub-mkrescue
+xorriso
+python3
+bash
+qemu-system-i386
+qemu-system-x86_64
+GTK3
+XWayland
+PipeWire
+mkfs.vfat
+mcopy
+dd
+gdb

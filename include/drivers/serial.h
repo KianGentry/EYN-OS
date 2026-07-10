@@ -1,7 +1,7 @@
 #ifndef SERIAL_H
 #define SERIAL_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // Serial port base addresses
 #define SERIAL_COM1 0x3F8

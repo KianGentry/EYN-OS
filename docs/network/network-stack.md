@@ -1,6 +1,6 @@
 # Network Stack
 
-EYN-OS implements a minimal but functional network stack supporting UDP over IPv4 with ARP.
+EYN-OS implements a minimal but functional network stack supporting UDP/TCP over IPv4 with ARP and a DNS resolver.
 
 ## Overview
 
@@ -12,21 +12,30 @@ The stack is built in layers:
 2. **ARP** - IP to MAC address resolution
 3. **IPv4** - Basic packet handling
 4. **UDP** - Datagram sockets
+5. **TCP** - Minimal client/server state machine
+6. **DNS** - UDP A-record resolver
 
 ## Architecture
 
 ### Initialization
 
-```c
-void net_init(void);
-```
+Boot now performs eager network bring-up from kernel init:
+- `kmain` calls `net_init_e1000_default()` after IRQ/PIT setup.
+- Failure is non-fatal, so systems without a usable NIC still boot.
 
-Called after e1000 driver initialization. Sets up:
+Runtime initialization entry points:
+- `net_init_e1000_default()` (driver + stack)
+- `net_init(const netdev* dev)` (stack over a provided device)
+
+Sets up:
 - Network device reference (e1000)
 - Local MAC address
 - ARP cache
 - UDP receive queue
 - Statistics counters
+
+Many network operations still include lazy init calls as a fallback when boot
+did not initialize networking.
 
 ### Packet Reception Flow
 
@@ -34,7 +43,9 @@ Called after e1000 driver initialization. Sets up:
 Hardware → e1000_receive() → net_poll_rx() → Protocol handlers
                                                ├→ handle_arp()
                                                ├→ handle_ipv4()
-                                               │   └→ handle_udp()
+                                               │   ├→ handle_udp()
+                                               │   ├→ handle_tcp()
+                                               │   └→ handle_icmp()
 ```
 
 The `net_poll_rx()` function:
@@ -119,7 +130,7 @@ struct ipv4_hdr {
 **Features**:
 - Basic header parsing
 - Checksum verification
-- Protocol dispatch (UDP only)
+- Protocol dispatch (UDP/TCP/ICMP)
 - Drop IPv4 fragments (no reassembly)
 - DF (Don't Fragment) set on TX
 
@@ -211,13 +222,24 @@ struct net_tcp_stats {
 };
 ```
 
+### DNS Resolver (Minimal)
+
+**Purpose**: Resolve hostnames to IPv4 addresses using UDP queries.
+
+**Features**:
+- RFC 1035 wire format, A-record queries only
+- Recursion desired (RD=1)
+- Nameserver from `/etc/resolv.conf`, fallback to runtime `netcfg` DNS
+- Fixed 512-byte UDP payload cap (no EDNS)
+
 ## API
 
 ### Initialization
 ```c
-void net_init(void);
+int net_init_e1000_default(void);
+int net_init(const netdev* dev);
 ```
-Initialize network stack (call after `e1000_init()`).
+Initialize the network stack (or no-op if already initialized).
 
 ### Polling
 ```c
@@ -402,10 +424,3 @@ Memory usage:
 - [e1000-driver.md](e1000-driver.md) - NIC driver details
 - [network-commands.md](network-commands.md) - Shell commands
 - [../api/syscalls.md](../api/syscalls.md) - Future: network syscalls
-
-## References
-
-- [RFC 768 - User Datagram Protocol](https://tools.ietf.org/html/rfc768)
-- [RFC 791 - Internet Protocol](https://tools.ietf.org/html/rfc791)
-- [RFC 826 - Ethernet Address Resolution Protocol](https://tools.ietf.org/html/rfc826)
-- [RFC 894 - IP over Ethernet](https://tools.ietf.org/html/rfc894)

@@ -1,0 +1,40 @@
+name: Build Matrix
+
+'on':
+  pull_request:
+  push:
+    branches:
+      - main
+      - dev
+      - amd64
+
+jobs:
+  kernel-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [i386, amd64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gcc-multilib binutils nasm python3
+
+      - name: Architecture preflight
+        run: make preflight-arch ARCH=${{ matrix.arch }}
+
+      - name: Build kernel
+        run: make all ARCH=${{ matrix.arch }} -j2
+
+      - name: Verify binary format
+        run: |
+          if [ "${{ matrix.arch }}" = "i386" ]; then
+            file tmp_user/boot/kernel.bin | grep -q "ELF 32-bit"
+          else
+            file tmp_user/boot/kernel.bin | grep -q "ELF 64-bit"
+          fi

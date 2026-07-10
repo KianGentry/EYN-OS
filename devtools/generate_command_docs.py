@@ -1,142 +1,173 @@
+import datetime
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
 
+
+@dataclass
 class CommandInfo:
-    def __init__(self, name: str, handler: str, cmd_type: str, description: str, example: str, file: str):
-        self.name = name
-        self.handler = handler
-        self.cmd_type = cmd_type
-        self.description = description
-        self.example = example
-        self.file = file
+    name: str
+    description: str
+    example: str
+    binary_file: str
+    source_file: str
 
-def parse_register_macro(line: str) -> Tuple[str, str, str, str, str, str]:
-    # Pattern to match the macro
-    pattern = r'REGISTER_SHELL_COMMAND\s*\(\s*(\w+)\s*,\s*"([^"]+)"\s*,\s*(\w+)\s*,\s*(\w+)\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)'
-    match = re.search(pattern, line)
-    
-    if match:
-        var_name = match.group(1)
-        cmd_name = match.group(2)
-        handler = match.group(3)
-        cmd_type = match.group(4)
-        description = match.group(5)
-        example = match.group(6)
-        return var_name, cmd_name, handler, cmd_type, description, example
-    
-    return None
 
-def find_commands_in_file(file_path: str) -> List[CommandInfo]:
-    commands = []
-    
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-            
-        for line_num, line in enumerate(lines, 1):
-            result = parse_register_macro(line.strip())
-            if result:
-                var_name, cmd_name, handler, cmd_type, description, example = result
-                commands.append(CommandInfo(
-                    name=cmd_name,
-                    handler=handler,
-                    cmd_type=cmd_type,
-                    description=description.replace('\\n', '\n'),
-                    example=example,
-                    file=os.path.basename(file_path)
-                ))
-    except Exception as e:
-        print(f"Warning: Could not parse {file_path}: {e}")
-    
+CMDMETA_RE = re.compile(
+    r'EYN_CMDMETA_V1\s*\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*\)',
+    re.DOTALL,
+)
+
+
+def _unescape_c_string(value: str) -> str:
+    return value.replace(r'\n', '\n').replace(r'\"', '"').replace(r'\\', '\\')
+
+
+def _command_name_from_binary(filename: str) -> str:
+    if filename.endswith(".uelf"):
+        return filename[:-5]
+    return filename
+
+
+def scan_binary_commands(binaries_dir: Path) -> List[Tuple[str, str]]:
+    commands: Dict[str, str] = {}
+    if not binaries_dir.exists():
+        return []
+
+    for entry in sorted(binaries_dir.iterdir(), key=lambda p: p.name.lower()):
+        if not entry.is_file():
+            continue
+        if entry.name.startswith('.'):
+            continue
+
+        cmd_name = _command_name_from_binary(entry.name)
+        if not cmd_name:
+            continue
+
+        commands[cmd_name] = entry.name
+
+    return sorted(commands.items(), key=lambda item: item[0].lower())
+
+
+def scan_userland_metadata(repo_root: Path) -> Dict[str, Tuple[str, str, str]]:
+    metadata: Dict[str, Tuple[str, str, str]] = {}
+
+    packages_dir = repo_root / "EYN-packages" / "packages"
+    if packages_dir.exists():
+        for src in sorted(packages_dir.glob("*/*_uelf.c"), key=lambda p: p.name.lower()):
+            cmd_name = src.stem
+            if cmd_name.endswith("_uelf"):
+                cmd_name = cmd_name[:-5]
+
+            text = src.read_text(encoding="utf-8", errors="ignore")
+            match = CMDMETA_RE.search(text)
+            if not match:
+                continue
+
+            desc = _unescape_c_string(match.group(1)).strip()
+            example = _unescape_c_string(match.group(2)).strip()
+            source_ref = src.relative_to(repo_root).as_posix()
+            metadata[cmd_name] = (desc, example, source_ref)
+
+    return metadata
+
+
+def build_command_list(binaries_dir: Path, metadata: Dict[str, Tuple[str, str, str]]) -> List[CommandInfo]:
+    binaries = scan_binary_commands(binaries_dir)
+
+    commands: List[CommandInfo] = []
+    for cmd_name, binary_file in binaries:
+        desc, example, source_file = metadata.get(
+            cmd_name,
+            (f"Run the {cmd_name} command.", cmd_name, "(metadata not found)"),
+        )
+        commands.append(
+            CommandInfo(
+                name=cmd_name,
+                description=desc,
+                example=example,
+                binary_file=binary_file,
+                source_file=source_file,
+            )
+        )
+
     return commands
 
-def scan_source_directory(src_dir: str) -> List[CommandInfo]:
-    # Scan the source directory for all command registrations
-    all_commands = []
-    
-    for root, dirs, files in os.walk(src_dir):
-        for file in files:
-            if file.endswith('.c'):
-                file_path = os.path.join(root, file)
-                commands = find_commands_in_file(file_path)
-                all_commands.extend(commands)
-    
-    return all_commands
 
 def categorize_commands(commands: List[CommandInfo]) -> Dict[str, List[CommandInfo]]:
-    # Categorize commands by type
-    categories = {
-        'Essential Commands': [],
-        'Streaming Commands': [],
-        'Filesystem Commands': [],
-        'System Commands': [],
-        'Utility Commands': [],
-        'Development Commands': []
+    categories: Dict[str, List[CommandInfo]] = {
+        "Filesystem Commands": [],
+        "System Commands": [],
+        "Network Commands": [],
+        "Memory Commands": [],
+        "GUI/Window Commands": [],
+        "Development Commands": [],
+        "Utility Commands": [],
     }
-    
-    # Define command categories
-    filesystem_cmds = {'ls', 'cd', 'read', 'write', 'del', 'copy', 'move', 'makedir', 'deldir', 'fscheck', 'format', 'fdisk'}
-    system_cmds = {'init', 'exit', 'clear', 'help', 'status', 'memory', 'portable', 'drive', 'lsata'}
-    utility_cmds = {'echo', 'ver', 'calc', 'random', 'sort', 'search', 'history', 'log', 'hexdump', 'draw', 'spam'}
-    dev_cmds = {'assemble', 'run'}
-    
+
+    filesystem_cmds = {
+        "ls", "cd", "read", "write", "del", "copy", "move", "makedir", "deldir", "size",
+        "fscheck", "fatfix", "create", "delete", "pwd", "head", "tail",
+    }
+    system_cmds = {
+        "help", "exit", "clear", "ver", "init", "portable", "drive", "lsata", "serialtest",
+    }
+    network_cmds = {"pciscan", "e1000probe", "e1000", "ping", "netstat", "netcfg"}
+    memory_cmds = {"memory", "predict", "memory_stats", "mmap", "munmap", "msync", "pagingguards"}
+    gui_cmds = {
+        "stats", "kstats", "win_test", "kwin_test", "view", "vieww", "draw", "theme",
+        "setbg", "clearbg", "setfont", "rect", "title",
+    }
+    dev_cmds = {"run", "assemble", "link", "ring3", "pf", "panic", "assertfail", "hexdump", "validate", "error", "log", "crashlog"}
+
     for cmd in commands:
-        if cmd.cmd_type == 'CMD_ESSENTIAL':
-            categories['Essential Commands'].append(cmd)
-        elif cmd.name in filesystem_cmds:
-            categories['Filesystem Commands'].append(cmd)
+        if cmd.name in filesystem_cmds:
+            categories["Filesystem Commands"].append(cmd)
         elif cmd.name in system_cmds:
-            categories['System Commands'].append(cmd)
+            categories["System Commands"].append(cmd)
+        elif cmd.name in network_cmds:
+            categories["Network Commands"].append(cmd)
+        elif cmd.name in memory_cmds:
+            categories["Memory Commands"].append(cmd)
+        elif cmd.name in gui_cmds:
+            categories["GUI/Window Commands"].append(cmd)
         elif cmd.name in dev_cmds:
-            categories['Development Commands'].append(cmd)
-        elif cmd.name in utility_cmds:
-            categories['Utility Commands'].append(cmd)
+            categories["Development Commands"].append(cmd)
         else:
-            categories['Streaming Commands'].append(cmd)
-    
-    # Remove empty categories
+            categories["Utility Commands"].append(cmd)
+
     return {k: v for k, v in categories.items() if v}
 
-def generate_markdown(commands: List[CommandInfo], output_file: str):
-    # Generate Markdown documentation
+
+def generate_markdown(commands: List[CommandInfo], output_file: Path) -> None:
     categorized = categorize_commands(commands)
-    
-    with open(output_file, 'w', encoding='utf-8') as f:
+
+    with output_file.open("w", encoding="utf-8") as f:
         f.write("# EYN-OS Command Reference\n\n")
-        f.write("This document is auto-generated from the source code. ")
-        f.write(f"Last updated: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        
+        f.write("This document is auto-generated from userland command metadata and binaries. ")
+        f.write(f"Last updated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         f.write(f"**Total Commands:** {len(commands)}\n\n")
-        
-        # Table of Contents
+
         f.write("## Table of Contents\n\n")
         for category in categorized.keys():
             f.write(f"- [{category}](#{category.lower().replace(' ', '-')})\n")
         f.write("\n")
-        
-        # Generate sections for each category
+
         for category, cmd_list in categorized.items():
-            if not cmd_list:
-                continue
-                
-            f.write(f"## {category}\n\n")
-            
-            # Sort commands alphabetically
             cmd_list.sort(key=lambda x: x.name)
-            
+            f.write(f"## {category}\n\n")
+
             for cmd in cmd_list:
                 f.write(f"### {cmd.name}\n\n")
-                f.write(f"**Handler:** `{cmd.handler}`\n\n")
-                f.write(f"**Type:** {cmd.cmd_type}\n\n")
-                f.write(f"**File:** `{cmd.file}`\n\n")
+                f.write(f"**Binary:** `testdir/binaries/{cmd.binary_file}`\n\n")
+                f.write(f"**Metadata Source:** `{cmd.source_file}`\n\n")
                 f.write(f"**Description:**\n{cmd.description}\n\n")
                 f.write(f"**Example:**\n```bash\n{cmd.example}\n```\n\n")
                 f.write("---\n\n")
-        
-        # Add usage statistics
+
         f.write("## Command Statistics\n\n")
         f.write("| Category | Count |\n")
         f.write("|----------|-------|\n")
@@ -144,76 +175,65 @@ def generate_markdown(commands: List[CommandInfo], output_file: str):
             f.write(f"| {category} | {len(cmd_list)} |\n")
         f.write("\n")
 
-def generate_help_text(commands: List[CommandInfo], output_file: str):
-    # Generate a simple help text format for the OS
+
+def generate_help_text(commands: List[CommandInfo], output_file: Path) -> None:
     categorized = categorize_commands(commands)
-    
-    with open(output_file, 'w', encoding='utf-8') as f:
+
+    with output_file.open("w", encoding="utf-8") as f:
         f.write("EYN-OS Command Help\n")
         f.write("==================\n\n")
-        
+
         for category, cmd_list in categorized.items():
-            if not cmd_list:
-                continue
-                
+            cmd_list.sort(key=lambda x: x.name)
             f.write(f"{category}:\n")
             f.write("-" * len(category) + "\n")
-            
-            # Sort commands alphabetically
-            cmd_list.sort(key=lambda x: x.name)
-            
+
             for cmd in cmd_list:
-                # Get the first sentence, but handle multiple periods better
-                description = cmd.description
-                # Find the first sentence (up to first period followed by space or newline)
-                first_sentence = description
-                for i, char in enumerate(description):
-                    if char == '.' and (i + 1 >= len(description) or description[i + 1] in ' \n'):
-                        first_sentence = description[:i + 1]
-                        break
-                
-                f.write(f"  {cmd.name:<15} - {first_sentence}\n")
+                first_line = cmd.description.splitlines()[0].strip() if cmd.description else ""
+                if first_line and not first_line.endswith('.'):
+                    first_line += "."
+                f.write(f"  {cmd.name:<15} - {first_line}\n")
             f.write("\n")
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 generate_command_docs.py <src_directory>")
-        print("Example: python3 generate_command_docs.py src/")
+
+def main() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    if len(sys.argv) >= 2:
+        candidate = Path(sys.argv[1])
+        if candidate.is_dir():
+            resolved = candidate.resolve()
+            if (resolved / "testdir" / "binaries").exists():
+                repo_root = resolved
+            elif resolved.name == "src" and (resolved.parent / "testdir" / "binaries").exists():
+                repo_root = resolved.parent
+
+    binaries_dir = repo_root / "testdir" / "binaries"
+    metadata = scan_userland_metadata(repo_root)
+
+    if not binaries_dir.exists():
+        print(f"Error: binaries directory not found: {binaries_dir}")
         sys.exit(1)
-    
-    src_dir = sys.argv[1]
-    
-    if not os.path.exists(src_dir):
-        print(f"Error: Source directory '{src_dir}' does not exist")
-        sys.exit(1)
-    
-    print(f"Scanning {src_dir} for commands...")
-    commands = scan_source_directory(src_dir)
-    
+
+    print(f"Scanning binaries in {binaries_dir} ...")
+    commands = build_command_list(binaries_dir, metadata)
+
     if not commands:
-        print("No commands found!")
+        print("No commands found in testdir/binaries")
         sys.exit(1)
-    
-    print(f"Found {len(commands)} commands")
-    
-    # Generate documentation
-    os.makedirs('docs', exist_ok=True)
-    
-    # Generate Markdown documentation
-    markdown_file = 'docs/command-reference.md'
+
+    docs_dir = repo_root / "docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+
+    markdown_file = docs_dir / "command-reference.md"
+    help_file = docs_dir / "help-text.txt"
+
     generate_markdown(commands, markdown_file)
-    print(f"Generated Markdown documentation: {markdown_file}")
-    
-    # Generate help text
-    help_file = 'docs/help-text.txt'
     generate_help_text(commands, help_file)
+
+    print(f"Found {len(commands)} commands")
+    print(f"Generated Markdown documentation: {markdown_file}")
     print(f"Generated help text: {help_file}")
-    
-    # Print summary
-    categorized = categorize_commands(commands)
-    print("\nCommand Summary:")
-    for category, cmd_list in categorized.items():
-        print(f"  {category}: {len(cmd_list)} commands")
+
 
 if __name__ == "__main__":
-    main() 
+    main()

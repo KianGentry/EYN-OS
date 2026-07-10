@@ -1,21 +1,17 @@
 #include <run_command.h>
 #include <native_exec.h>
-#include <shell_script.h>
 #include <util.h>
-#include <types.h>
+#include <misc/types.h>
 #include <vga.h>
-#include <shell_command_info.h>
 #include <string.h>
 #include <fs_commands.h> // resolve_path, shell_current_path
 #include <cpu/user_elf.h>
 #include <context.h>
 #include <misc/sched.h>
-#include <utilities/shell/shell_args.h>
+#include <fs/vfs.h>
+#include <utilities/shell/shell_script.h>
 
 extern uint8 g_current_drive;
-
-// Function declarations
-void run_cmd(const shell_args_t* args);
 
 static int run_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -68,16 +64,38 @@ void run_command(string arg) {
     // Resolve relative paths against current shell directory so subdirectories work
     char abspath[128];
     resolve_path(filename, shell_current_path, abspath, sizeof(abspath));
+
+    /* ELF detection takes priority so dynamically linked binaries can be
+     * launched through the normal run path regardless of extension. */
+    uint8 magic[4] = {0, 0, 0, 0};
+    int magic_read = vfs_read_file(g_current_drive, abspath, magic, 4);
+    int is_elf = (magic_read >= 4 && magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F');
+
+    if (is_elf) {
+        (void)user_task_spawn_argv(g_current_drive, abspath, argc, argv);
+        return;
+    }
     
     if (ext && strcmp(ext, ".shell") == 0) {
-        // execute as shell script
-        result = execute_shell_script(abspath);
-    } else if (ext && strcmp(ext, ".uelf") == 0) {
-        // execute as ring3 ELF using the EYN-OS syscall ABI
-        (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
+        // execute as shell script via the script interpreter
+        (void)shell_script_run(g_current_drive, abspath, argc, argv);
         return;
-    } else if ((ext && strcmp(ext, ".eyn") == 0) || (ext && strcmp(ext, ".bin") == 0) || (ext && strcmp(ext, ".flat") == 0) || !ext) {
-        // execute as native program
+    } else if (ext && strcmp(ext, ".uelf") == 0) {
+        // execute as ring3 ELF using the EYN-OS syscall ABI (asynchronously)
+        (void)user_task_spawn_argv(g_current_drive, abspath, argc, argv);
+        return;
+    } else if ((ext && strcmp(ext, ".eyn") == 0) || (ext && strcmp(ext, ".bin") == 0) || (ext && strcmp(ext, ".flat") == 0)) {
+        // execute as native program (explicit native extension)
+        result = native_execute_program(abspath);
+    } else if (!ext) {
+        /*
+         * No extension: if it was not ELF above, treat as shell script or
+         * fall back to native.  This keeps the legacy extensionless flow.
+         */
+        if (magic[0] == '#') {
+            (void)shell_script_run(g_current_drive, abspath, argc, argv);
+            return;
+        }
         result = native_execute_program(abspath);
     } else {
         printf("Error: Unsupported file format. Use .eyn/.bin/.flat for native programs, .uelf for ring3 ELF, or .shell for scripts\n");
@@ -133,5 +151,3 @@ void* user_malloc(uint32 size) {
     if (!run_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
     return malloc(size); // Use standard malloc
 }
-
-REGISTER_SHELL_COMMAND(run, "run", run_cmd, CMD_STREAMING, "Run a native program, ring3 ELF, or a shell script.\nUsage: run <program.eyn|program.bin|program.flat|program.uelf|script.shell>", "run user_hello.uelf");

@@ -6,6 +6,7 @@ extern irq_dispatch_c
 extern g_abort_to_shell
 extern stack_space
 extern stack_bottom
+extern isr_abort_stack_top
 extern ui_return_from_user_task
 
 %macro IRQ_STUB 1
@@ -13,21 +14,31 @@ global irq%1
 irq%1:
     pushad
 
-    ; Stack overflow tripwire: if the kernel stack underflowed, bail out
-    ; to the shell immediately on a known-good stack.
+    ; Stack overflow tripwire: if the kernel C call stack underflowed (ESP below
+    ; stack_bottom), bail out to a known-good stack.
+    ; NOTE: when entering from ring 3, the CPU has already switched ESP to
+    ; TSS.esp0 = isr_abort_stack_top via the hardware ring switch, so ESP is
+    ; always high here in that case.  When entering from ring 0 (interrupt
+    ; fires during kernel boot/shell code), ESP is on the C call stack in
+    ; [stack_bottom, stack_space]; values below stack_bottom indicate overflow.
     cmp esp, stack_bottom
     jae .stack_ok_%1
     mov dword [g_abort_to_shell], 1
     jmp .do_abort_%1
 .stack_ok_%1:
 
+    mov eax, esp
+    push eax
     push dword %1
     call irq_dispatch_c
-    add esp, 4
+    add esp, 8
 
     ; If requested, abandon return-to-user and jump back into the shell.
     cmp dword [g_abort_to_shell], 0
     je .no_abort_%1
+    mov ax, [esp + 36]
+    test ax, 3
+    jz .clear_abort_%1
 .do_abort_%1:
     mov dword [g_abort_to_shell], 0
     mov ax, 0x10
@@ -36,12 +47,14 @@ irq%1:
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov esp, stack_space
+    mov esp, isr_abort_stack_top
     sti
     call ui_return_from_user_task
 .halt_%1:
     hlt
     jmp .halt_%1
+.clear_abort_%1:
+    mov dword [g_abort_to_shell], 0
 .no_abort_%1:
     popad
     iretd

@@ -1,6 +1,8 @@
 #ifndef TERMINALS_H
 #define TERMINALS_H
 
+#include <stdint.h>
+
 void vterm_init_all();
 void vterm_write_char(int idx, char ch);
 // Erase a single previously echoed output character (used for interactive stdin echo).
@@ -10,12 +12,14 @@ const char* vterm_get_line(int idx, int row);
 void vterm_feed_input(int idx, int key);
 void vterm_set_active(int idx, int active);
 int vterm_is_active(int idx);
+// Move all terminal state from src slot to dst slot and reset src to a fresh state.
+void vterm_move_state(int dst_idx, int src_idx);
 // Set/Get scrollback offset (0 = follow tail). Positive values scroll up into history.
 void vterm_set_scroll(int idx, int scroll);
 int vterm_get_scroll(int idx);
 // Handle a full key press for the vterm: editing, history, enter to execute command
 void vterm_handle_key(int idx, int key);
-// Stream a single redirected output character directly into a vterm (with color).
+// Stream a single redirected output character directly into a vterm (with colour).
 // Used to keep the GUI updating while a ring3 task is running.
 void vterm_stream_redirect_char(int idx, char ch, int r, int g, int b);
 // Print the shell prompt into the vterm (e.g. "0:/! ")
@@ -32,10 +36,10 @@ int vterm_is_selected(int idx, int row, int col);
 // Get the Nth line from the tail when showing last visible lines. 
 // visible_index is 0..(visible_count-1), where 0 is the earliest visible line.
 const char* vterm_get_tail_line(int idx, int visible_index, int visible_count);
-// Get color for tail line
-void vterm_get_tail_line_color(int idx, int visible_index, int visible_count, int* out_r, int* out_g, int* out_b);
-// Get color for a specific character column in the tail view
-void vterm_get_tail_char_color(int idx, int visible_index, int visible_count, int char_col, int* out_r, int* out_g, int* out_b);
+// Get colour for tail line
+void vterm_get_tail_line_colour(int idx, int visible_index, int visible_count, int* out_r, int* out_g, int* out_b);
+// Get colour for a specific character column in the tail view
+void vterm_get_tail_char_colour(int idx, int visible_index, int visible_count, int char_col, int* out_r, int* out_g, int* out_b);
 
 // Per-line icon metadata for rendering small file/dir icons alongside text.
 // Icons are anchored to a character column (cell start) and are not meant to
@@ -48,15 +52,21 @@ const char* vterm_get_line_icon_key(int idx, int row, int* out_indent_px, int* o
 int vterm_get_line_icon_count(int idx, int row);
 const char* vterm_get_line_icon_key_n(int idx, int row, int n, int* out_anchor_col);
 
+// Register an icon on the current output line at the current cursor column.
+// Intended for ring3 tasks that print directly into a vterm via syscalls.
+void vterm_register_line_icon(int idx, const char* icon_key);
+
 // Absolute helpers for rendering/wrapping
-// Get per-character color at absolute (row, col) indices
-void vterm_get_char_color_abs(int idx, int row, int col, int* out_r, int* out_g, int* out_b);
+// Get per-character colour at absolute (row, col) indices
+void vterm_get_char_colour_abs(int idx, int row, int col, int* out_r, int* out_g, int* out_b);
 // Monotonic version counter for each vterm that increments when content changes.
 // Use to drive incremental redraws in the tiler.
 int vterm_get_version(int idx);
 
 // Get per-vterm current working directory (read-only pointer).
 const char* vterm_get_cwd(int idx);
+// Set per-vterm current working directory (used by ring3 cd syscall path).
+void vterm_set_cwd(int idx, const char* cwd);
 
 #define TERM_COLS 80
 // Increase terminal buffer height so the terminal can fill tall tiles/screens (480px ~= 60 rows)
@@ -80,5 +90,15 @@ const char* vterm_stdin_data(int idx);
 int vterm_stdin_len(int idx);
 // Consume/clear the stdin buffer after the syscall has read the data
 void vterm_stdin_consume(int idx);
+// Consume a specific number of bytes from the head of stdin buffer.
+void vterm_stdin_consume_bytes(int idx, int count);
+
+// TTY mode controls for user-task stdin routing.
+void vterm_stdin_set_raw(int idx, int enabled);
+int vterm_stdin_is_raw(int idx);
+
+// TTY winsize state stored per-vterm.
+void vterm_stdin_set_winsize(int idx, uint16_t rows, uint16_t cols);
+void vterm_stdin_get_winsize(int idx, uint16_t* out_rows, uint16_t* out_cols);
 
 #endif // TERMINALS_H

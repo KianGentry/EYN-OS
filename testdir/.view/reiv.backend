@@ -1,0 +1,5 @@
+name=reiv
+kind=video
+extensions=.reiv
+magic32=0x52455600
+exec=/binaries/view_backend_reiv

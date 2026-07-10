@@ -11,6 +11,11 @@ This document describes the current, minimal ABI/format requirements for **ring3
 
 The kernel loader reads the entire ELF into memory, validates the ELF header, walks program headers, and maps a single contiguous region covering all `PT_LOAD` segments.
 
+Low-RAM behavior:
+- The loader pre-creates PTEs for the full `PT_LOAD` span as **demand-zero** (not present).
+- It then allocates/maps/initializes only the pages that contain file-backed bytes.
+- The remaining zero-fill span (typical `.bss`) is backed by demand paging: physical frames are allocated and zeroed on first access.
+
 Implementation: [src/cpu/user_elf.c](src/cpu/user_elf.c)
 
 ## 2) Virtual address expectations
@@ -110,3 +115,31 @@ Syscall documentation: [docs/api/syscalls.md](docs/api/syscalls.md)
 - Max mapped `PT_LOAD` span: 1024 pages (4MB) per current safety check
 
 These are pragmatic limits for small-memory QEMU configurations and may be raised later when we stream ELF loading and/or improve memory accounting.
+
+## 8) Optional command metadata for `help`
+
+EYN-OS can optionally embed per-program help text in a UELF so the kernel `help` command can show a **description** and **example** for binaries placed in `/binaries`.
+
+Mechanism:
+- Add an ELF **section** named `.eynos.cmdmeta`.
+- If the section is missing or malformed, `help` will still list the binary by filename, but with no description/example.
+
+Section payload format (version 1):
+
+- Bytes 0..3: ASCII magic `ECMD`
+- Bytes 4..5: `uint16` version = 1 (little-endian)
+- Bytes 6..7: reserved (must be 0)
+- Bytes 8..: NUL-terminated UTF-8 strings:
+	- `description` (may be empty)
+	- `example` (may be empty)
+
+Minimal C example:
+
+```c
+__attribute__((section(".eynos.cmdmeta"), used))
+static const unsigned char g_cmdmeta[] = {
+	'E','C','M','D', 1,0, 0,0,
+	'D','e','s','c','r','i','p','t','i','o','n',0,
+	'e','x','a','m','p','l','e',0,
+};
+```

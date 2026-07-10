@@ -10,8 +10,10 @@ EYN-OS is a small, educational operating system for 32‑bit x86 built entirely 
 - Ring‑3 userspace: proper privilege separation with syscall interface (int 0x80)
 - Native EYNFS filesystem with MBR partitioning support, plus FAT32 compatibility
 - Text‑based shell and TUI framework with customizable tiling window manager
+- Source-level X11/Xlib compatibility layer for small GUI ports (`xeyes`, test apps)
 - Bitmap font loading (`.hex` format, 8×8 or 8×16) with runtime system-font switching
 - Built‑in C compiler (chibicc) for native development and userland ELF programs (`.uelf`)
+- Native DOOM support: prebuilt host-cross-compiled port plus in-OS `build_doom` script using chibicc
 - Developer tools: assembler, linker, program loader, debugger facilities
 - Robustness features: watchdog timer, panic recovery, memory protection
 - REIV video format support for playing MP4/GIF animations in the viewer
@@ -22,14 +24,14 @@ Rather than relying on external libraries, EYN-OS includes minimal, well‑docum
 
 ## Architecture and philosophy
 
-EYN-OS follows a “learnable core” approach:
+EYN-OS follows a "learnable core" approach:
 - From‑scratch components with small, readable implementations (no libc)
 - Clear layering: CPU/interrupts → drivers → kernel utilities → UI/tools
 - Conservative memory footprint suitable for very low‑RAM targets
 - Deterministic behavior prioritized over feature breadth
 
 ### What makes it different
-- Education first: code explains the “why,” not just the “what”
+- Education first: code explains the "why," not just the "what"
 - Minimal dependencies: predictable builds and easy portability
 - Tight scope: only the primitives needed to understand an OS stack
 - Practical docs: APIs and internals documented alongside the code
@@ -43,20 +45,65 @@ EYN-OS follows a “learnable core” approach:
 - **Filesystems:** Native EYNFS with MBR partitioning, FAT32 read/write support
 - **Userspace:** Ring-3 privilege separation with syscall API (int 0x80), ELF32-based UELF format
 - **Compiler:** Integrated chibicc C compiler for on-system development
+- **Compatibility:** X11/Xlib shim for source-level ports to the native GUI
 - **UI:** Shell with command streaming, customizable tiling manager, bitmap font rendering (8×8, 8×16)
+- **Applications:** Native GUI apps, X11 demo apps, and a userland DOOM port
 - **Robustness:** Watchdog timer for hang detection, panic recovery, memory integrity checks
 
 The codebase is organized by domain (CPU, drivers, misc, utilities, network) with public headers under `include/` and implementation in `src/`.
 
 ## Getting started
 
-Build from a Linux host with standard toolchain components (GCC, NASM, GRUB):
+The recommended build path is containerised. From the repo root:
 
 ```bash
-make build      # build ISO and disk images
+make docker-build  # build the OS in the container
+```
+
+If you want to change the final ISO configuration, run:
+
+```bash
+make menuconfig    # optional; requires ncurses / Python curses support
+```
+
+Then rebuild with `make docker-build` so the updated `.eynosconfig` is applied.
+
+If you prefer to build directly on a Linux host, you still need the usual toolchain components (GCC, NASM, GRUB):
+
+```bash
+make menuconfig # configure architecture, installer payload, and build modes (GUI/TTY)
+make build      # build ISO and disk images (default: GUI+TTY dual mode)
 make run        # build and run in QEMU
+
+# Or build specific modes:
+make iso-gui    # full ISO with GUI and text mode
+make iso-tty    # lightweight TTY-only ISO (no graphics)
 make qemu-gdb   # launch with GDB support (halted at startup, attach to :1234)
 ```
+
+### TTY-Only Mode
+
+For lightweight builds or headless debugging, use the **TTY-only mode**:
+
+```bash
+make iso-tty    # Build text-only ISO (~2-3 MB, no graphics)
+```
+
+This disables the graphical subsystem and excludes GUI-related packages, producing a smaller ISO suitable for:
+- Minimal resource environments
+- Headless/remote development
+- Serial console debugging
+
+See [TTY-Only Mode Documentation](docs/general/tty-mode.md) for details.
+
+### Containerized Build Flow
+
+- `make docker-build` runs the full build inside the repo's container image.
+- `make docker-run` launches the built OS through the same container wrapper.
+- `make menuconfig` remains an optional host-side step for adjusting the final ISO before rebuilding.
+- The menuconfig UI uses Python `curses`, so make sure your system has ncurses support available.
+
+### Inside EYN-OS
 
 Inside EYN-OS, try these commands:
 ```bash
@@ -65,8 +112,11 @@ ls              # list files
 help            # interactive help system
 e1000 init      # initialize network (if e1000 NIC present)
 chibicc --help  # C compiler help (chibicc.uelf needs to be in root)
+xeyes           # run the X11 compatibility demo
 run hello.uelf  # run a userland program
 ```
+
+`run` is the normal launcher for ELF binaries and scripts. `ldso` is the dynamic loader used when an ELF binary declares an interpreter (`PT_INTERP`), so you usually run programs with `run` instead of invoking `ldso` directly.
 
 To try it on real hardware, write `EYNOS.iso` to a USB drive or CD and boot on a 32‑bit compatible machine.
 
@@ -94,8 +144,10 @@ The `docs/` directory contains comprehensive project documentation:
 Key topics:
 - **Debugging:** Quick debug card, stop codes, GDB integration, serial logging
 - **UI & Shell:** Tiling manager, TUI system, shell scripting, help system
+- **GUI Compatibility:** X11/Xlib source-compatibility layer for small ports
 - **Filesystems:** EYNFS specification, FAT32 support, partitioning
-- **Development:** Assembler, chibicc compiler, UELF format, syscalls
+- **Development:** Assembler, chibicc compiler, UELF format, syscalls, in-OS builds
+- **Applications:** DOOM port, Second Reality demo, GUI utilities
 - **Networking:** e1000 driver, UDP/IPv4 stack (docs/network/)
 - **Memory:** Paging, virtual memory, heap management
 - **Hardware:** Watchdog timer, PCI enumeration, device drivers
@@ -107,7 +159,7 @@ Start here: **[docs/README.md](docs/README.md)**
 Contributions are welcome. This project values clarity and simplicity:
 
 - Keep implementations small and readable
-- Prefer clear comments that explain the “why”
+- Prefer clear comments that explain the "why"
 - Favor portable approaches and conservative memory use
 - Update docs alongside code changes
 

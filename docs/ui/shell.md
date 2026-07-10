@@ -23,13 +23,12 @@ The EYN-OS shell provides a command-line interface for interacting with the oper
 ### Essential Commands
 Always available in RAM for core functionality:
 - **System**: `init`, `exit`, `clear`, `help`
-- **Filesystem**: `ls`
 - **Memory Management**: `memory`, `portable`, `load`, `unload`, `status`
 
 ### Streaming Commands
 Loaded on-demand to conserve memory:
-- **Filesystem**: `format`, `fdisk`, `fscheck`, `copy`, `move`, `del`, `cd`, `makedir`, `deldir`
-- **File Operations**: `read`, `write`, `read_raw`, `read_md`
+- **Filesystem**: `format`, `fdisk`, `fscheck`, `copy`, `move`, `cd`
+- **File Operations**: `write`
 - **Basic Commands**: `echo`, `ver`, `calc`, `search`, `drive`, `run`
 - **Advanced**: `random`, `history`, `sort`, `game`, `draw`, `spam`
 - **Development**: `assemble`, `hexdump`, `log`
@@ -74,6 +73,20 @@ RAM:/!         # RAM disk (special drive)
 - **Ctrl+L**: Clear screen (in some contexts).
 
 ## Built-in Commands
+
+## External binaries (`/binaries`)
+
+In addition to built-in (kernel) commands, the shell can run **ring3 UELF executables** stored in:
+
+- `/binaries` (host path: `testdir/binaries/`)
+
+When you type an unknown command name, the shell will try:
+
+1. `/binaries/<name>` (extensionless, recommended)
+2. `/binaries/<name>.uelf` (supported for compatibility)
+3. The current directory (for explicit local execution, prefer `./<name>`)
+
+The `help` command lists `/binaries` entries too. If a UELF contains an ELF section named `.eynos.cmdmeta`, `help` will show the embedded description and example; otherwise it will list only the filename.
 
 ### System Commands
 
@@ -140,12 +153,11 @@ portable optimize # Optimize for current system
 
 ### Filesystem Commands
 
-#### `ls [path]`
+#### `files [path]`
 List directory contents.
 ```bash
-ls              # List current directory
-ls /games       # List games directory
-ls -l           # Long format (if supported)
+files            # List current directory
+files /games     # List games directory
 ```
 
 #### `cd <directory>`
@@ -156,45 +168,30 @@ cd ..           # Go to parent directory
 cd /            # Go to root directory
 ```
 
-#### `del <filename>`
-Delete a file.
+#### `create <path>`
+Create a file or directory.
+
+Rule: a trailing `/` means "directory".
 ```bash
-del test.txt    # Delete test.txt
-del *.tmp       # Delete all .tmp files (if supported)
+create test/     # Create a directory
+create test.txt  # Create an empty file
 ```
 
-#### `deldir <directory>`
-Delete a directory.
-```bash
-deldir old_dir  # Delete old_dir directory
-```
+#### `delete <path>`
+Delete a file or directory.
 
-#### `makedir <directory>`
-Create a new directory.
+Rule: a trailing `/` means "directory".
 ```bash
-makedir new_dir # Create new directory
+delete test/     # Delete an empty directory
+delete test.txt  # Delete a file
 ```
 
 ### File Operations
 
 #### `read <filename>`
-Display text files (.txt) or render markdown (.md). For images, use the GUI viewer commands `view` or `vieww`.
+Print a file to stdout.
 ```bash
-read test.txt   # Display text file
-read image.rei  # Display REI image
-read doc.md     # Display markdown with formatting
-```
-
-#### `read_raw <filename>`
-Display raw file contents.
-```bash
-read_raw test.bin # Display binary file as text
-```
-
-#### `read_md <filename>`
-Display markdown files with formatting.
-```bash
-read_md doc.md  # Display markdown with bold/italic formatting
+read test.txt   # Print file contents
 ```
 
 > Note: Image viewing moved to GUI commands:
@@ -258,21 +255,32 @@ Show version information.
 ver             # Display EYN-OS version
 ```
 
-#### `setfont <file.hex>` / `setfont builtin`
+#### `schedstat`
+Print scheduler internals for debugging.
+
+- Shows tick/timeslice settings, configured MLFQ queue quanta, queue depths, and MLFQ accounting counters.
+- Useful while diagnosing fairness, wakeup latency, and unexpected demotion/boost behavior.
+
+```bash
+schedstat       # Print scheduler debug snapshot
+```
+
+#### `setfont <file.hex|file.otf|file.ttf>` / `setfont builtin`
 Switch the **system font** at runtime.
 
-- Loads a `.hex` bitmap font from disk into RAM and makes it the active font used by text rendering.
+- Loads a `.hex` bitmap font, or rasterizes a `.otf`/`.ttf` scalable font into the runtime 8xN glyph table, and makes it the active font used by text rendering.
 - Use `setfont builtin` to revert to the built-in fallback font.
 - Fonts are typically stored under `/fonts/` in the EYNFS image (the build copies the repository's top-level `fonts/` directory into the image).
 
 ```bash
 setfont /fonts/unscii-16.hex
+setfont /fonts/unscii-16.otf
 setfont /fonts/unscii-8.hex
 setfont builtin
 ```
 
 Notes:
-- Today the UI/terminal text pipeline is **byte-based** (glyph indices 0–255). Unicode-indexed `.hex` fonts will render correctly only for codepoints that map into 0–255 in the font table.
+- Today the UI/terminal text pipeline is **byte-based** (glyph indices 0–255). Rasterization currently targets the first 256 codepoints only.
 - GUI/TUI sizing is based on the active font metrics (see `vga_text_cell_w()` / `vga_text_cell_h()`).
 
 ### Utility Commands

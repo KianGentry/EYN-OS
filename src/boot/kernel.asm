@@ -30,6 +30,8 @@ extern kmain ; kernel.c
 global Shutdown  ; Export Shutdown function
 global stack_space
 global stack_bottom
+global isr_abort_stack_top
+global isr_abort_stack_bottom
 
 start:
         cli ; clears interrupts 
@@ -45,11 +47,24 @@ start:
         hlt
 
 section .bss
-; Kernel stack. This stack is also used as the ring0 stack (TSS.esp0) for
-; syscalls/interrupts while running ring3 tasks, so keep it reasonably sized.
+; Main kernel C call stack. Shell, script executor, and all normal kernel code
+; run on this stack. It must NOT be touched by interrupt/abort handlers so that
+; kernel_longjmp() can safely return into it after a user-task exit.
 stack_bottom:
 resb 32768
 stack_space:
+
+; Dedicated ISR/abort-handler stack (TSS.esp0 = isr_abort_stack_top).
+; Syscall, exception, and IRQ abort-to-shell paths use this stack exclusively
+; so they never clobber the main C call stack that shell script commands run on.
+; 8 KB is sufficient for a single non-nested ISR invocation chain.
+;
+; ABI-INVARIANT: isr_abort_stack_top is the value stored in TSS.esp0 for all
+; ring-3 user tasks. Changing the size requires no other adjustments, but
+; decreasing below ~4 KB risks overflow under deep syscall call chains.
+isr_abort_stack_bottom:
+resb 8192
+isr_abort_stack_top:
 
 Shutdown: ; actually a reboot but i dont dare rename it
     mov ax, 0x1000

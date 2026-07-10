@@ -16,3 +16,4 @@ struct stat {
 #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
 
 int stat(const char* path, struct stat* st);
+int fstat(int fd, struct stat* st);  /* EYN-OS: returns size via lseek, mode=S_IFREG */

@@ -1,8 +1,27 @@
 #include <time.h>
 #include <string.h>
+#include <eynos_syscall.h>
 
 time_t time(time_t* t) {
     if (t) *t = 0;
+    return 0;
+}
+
+/*
+ * gettimeofday() -- return wall-clock time derived from the PIT tick counter.
+ *
+ * EYN-OS has no real-time clock, so tv_sec counts seconds since kernel boot
+ * (not the Unix epoch).  Resolution is 1000/hz ms (10ms at default 100Hz).
+ * This is sufficient for DOOM's I_GetTime() which only needs relative timing.
+ *
+ * tz is ignored (no timezone support).
+ */
+int gettimeofday(struct timeval* tv, struct timezone* tz) {
+    (void)tz;
+    if (!tv) return -1;
+    unsigned int ms = (unsigned int)eyn_syscall0(EYN_SYSCALL_GET_TICKS_MS);
+    tv->tv_sec  = (long)(ms / 1000u);
+    tv->tv_usec = (long)((ms % 1000u) * 1000u);
     return 0;
 }
 

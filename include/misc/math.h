@@ -1,7 +1,7 @@
 #ifndef MATH_H
 #define MATH_H
 
-#include <types.h>
+#include <misc/types.h>
 #include "multiboot.h"
 #include <stdint.h>
 

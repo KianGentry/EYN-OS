@@ -1,7 +1,7 @@
 #ifndef VGA_H
 #define VGA_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <multiboot.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -13,12 +13,13 @@
 
 // Misc
 void render_markdown(const char* content);
-void vga_set_color(int nr, int ng, int nb);
+void vga_set_colour(int nr, int ng, int nb);
 
 // Function prototypes
 void init_dynamic_log_buffer(void);
 void shell_log_enable(void);
 void shell_log_disable(void);
+int shell_log_is_enabled(void);
 void shell_log_flush(void);
 
 // Drawing functions
@@ -32,12 +33,30 @@ void drawCharAt(int x, int y, int charnum, int r, int g, int b);
 // font_handle 0 is the built-in fallback font.
 void drawCharAt_font(int font_handle, int x, int y, int charnum, int r, int g, int b);
 
-// Acquire a bitmap font from a .hex file via the VFS. Returns a font handle (>0) on success.
+// Acquire a bitmap font from disk via the VFS. Supported formats:
+// - .hex bitmap fonts (8x8 / 8x16)
+// - .otf and .ttf scalable fonts (rasterized to 8xN at load time)
 // The returned handle is refcounted; call vga_font_release() when no longer needed.
 // On failure returns <0.
 int vga_font_acquire_hex(uint8 drive, const char* path);
+// Preferred alias for vga_font_acquire_hex() when format-agnostic semantics are desired.
+int vga_font_acquire_path(uint8 drive, const char* path);
 // Release a previously-acquired font handle (safe no-op for handle <= 0).
 void vga_font_release(int font_handle);
+
+// Return the glyph height (in pixels) of a font handle.
+// Built-in fallback returns 8; scalable fonts may return other valid pixel heights.
+// Safe for handle <= 0 (returns 8).
+int vga_font_glyph_height(int font_handle);
+// Return the recommended line step (in pixels) for a font handle.
+// Safe for handle <= 0 (returns 8).
+int vga_font_line_height(int font_handle);
+// Return a nominal glyph advance width for a font handle (max per-glyph advance).
+// Safe for handle <= 0 (returns 8).
+int vga_font_advance_width(int font_handle);
+// Return per-character advance width for a font handle.
+// Safe for handle <= 0 (returns 8).
+int vga_font_char_advance(int font_handle, int charnum);
 
 // Acquire the system default font handle (refcounted). Returns >0 when the
 // configured system font is available; returns 0 to indicate the built-in
@@ -52,10 +71,10 @@ int vga_system_font_acquire(void);
 int vga_system_font_set(uint8 drive, const char* path);
 
 // Text cell metrics for the currently active system font used by drawText/drawCharAt.
-// Width is always 8; height is 8 or 16 depending on the loaded system font.
+// Width is always 8; height matches the loaded system font's glyph height.
 int vga_text_cell_w(void);
 int vga_text_cell_h(void);
-// Query glyph height (8 or 16) for a specific font handle (0 = built-in).
+// Query glyph height for a specific font handle (0 = built-in).
 int vga_font_glyph_h(int font_handle);
 void drawText_bold(int charnum, int r, int g, int b);
 void drawText_italic(int charnum, int r, int g, int b);
@@ -91,11 +110,11 @@ extern int g_shell_capture_mode;
 extern char shell_redirect_buf[SHELL_REDIRECT_BUF_SIZE];
 // Current write position in shell_redirect_buf while redirect is active.
 extern int shell_redirect_pos;
-// Color used for the last redirected output (set by printf while redirect active)
-extern int shell_redirect_color_r;
-extern int shell_redirect_color_g;
-extern int shell_redirect_color_b;
-// Per-character color for redirected output (parallel to shell_redirect_buf)
+// Colour used for the last redirected output (set by printf while redirect active)
+extern int shell_redirect_colour_r;
+extern int shell_redirect_colour_g;
+extern int shell_redirect_colour_b;
+// Per-character colour for redirected output (parallel to shell_redirect_buf)
 extern unsigned char shell_redirect_r[SHELL_REDIRECT_BUF_SIZE];
 extern unsigned char shell_redirect_g[SHELL_REDIRECT_BUF_SIZE];
 extern unsigned char shell_redirect_b[SHELL_REDIRECT_BUF_SIZE];
@@ -119,10 +138,45 @@ extern int shell_log_line_starts[1001];
 extern int shell_log_current_line_start;
 #define LOG_BUF_SIZE 65536
 
+typedef struct {
+	uint8 initialized;
+	uint8 has_multiboot_state;
+	uint8 has_multiboot_fb_info;
+	uint8 has_multiboot_vbe_info;
+	uint8 has_framebuffer_addr;
+	uint8 has_framebuffer_geometry;
+	uint8 valid_boot_framebuffer;
+	uint8 bochs_dispi_available;
+	uint8 bios_vbe_backend_available;
+	uint8 bios_runtime_mode_switch_available;
+	uint8 runtime_mode_switch_available;
+	uint8 fallback_grub_fb_eligible;
+	uint8 fallback_text_eligible;
+	uint8 boot_fb_bpp;
+	uint16 bochs_dispi_id;
+	uint16 boot_vbe_mode;
+	uint16 bios_active_mode;
+	uint32 boot_fb_addr;
+	uint32 boot_fb_pitch;
+	uint32 boot_fb_width;
+	uint32 boot_fb_height;
+	uint32 boot_vbe_control_info;
+	uint32 boot_vbe_mode_info;
+} vga_capabilities_t;
+
 // Double buffer integration
 void vga_swap_buffers(void);
 // Initialize the software backbuffer (safe no-op if allocation fails)
 void vga_init_double_buffer(void);
+// Log boot-time graphics capability/handoff details from multiboot.
+void vga_log_boot_capabilities(void);
+// Snapshot current graphics capability state used for mode selection/fallbacks.
+void vga_get_capabilities(vga_capabilities_t* out);
+// Returns 1 when Bochs/QEMU VBE runtime mode switching is available.
+int vga_can_set_mode(void);
+// Attempt runtime hardware mode switch (e.g. 1024x768x32).
+// Returns 0 on success, -1 on unsupported/invalid/failure.
+int vga_set_mode(int width, int height, int bpp);
 // Mark a rectangle in the backbuffer as dirty (so swap will blit it)
 void vga_mark_dirty_rect(int x, int y, int w, int h);
 // Begin a new frame (reset dirty rect tracking)
@@ -133,6 +187,8 @@ void vga_clear_swap_exclude(void);
 // Overlay helpers (draw directly to framebuffer without touching backbuffer)
 void vga_drawPixel_fb(int x, int y, int r, int g, int b);
 void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h);
+// Returns 1 if a software backbuffer is allocated and being used, else 0.
+int vga_has_backbuffer(void);
 // Blit a RGB565LE source image into the backbuffer, scaling (nearest-neighbor)
 // into the destination rectangle. Call vga_mark_dirty_rect() separately.
 void vga_blit_rgb565_scaled_bb(int dst_x, int dst_y, int dst_w, int dst_h,
@@ -165,5 +221,15 @@ extern int vga_default_r, vga_default_g, vga_default_b;
 // Printf function
 void printf(const char* format, ...);
 int snprintf(char *str, size_t size, const char *format, ...);
+
+// Console cursor and movement helpers (framebuffer-friendly)
+// Move the console cursor one character cell left/right/up/down.
+void vga_console_move_left(void);
+void vga_console_move_right(void);
+void vga_console_move_up(void);
+void vga_console_move_down(void);
+// Erase and draw the software cursor (used by input routines).
+void vga_console_erase_cursor(void);
+void vga_console_draw_cursor(void);
 
 #endif // VGA_H

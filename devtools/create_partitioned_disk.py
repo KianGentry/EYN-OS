@@ -2,10 +2,10 @@
 """
 create_partitioned_disk.py - Create a partitioned disk image for EYN-OS
 
-Creates a 10MB disk image with:
+Creates a 50MB disk image with:
 - MBR partition table
-- Partition 1: 5MB EYNFS (user files)
-- Partition 2: 5MB Swap
+- Partition 1: 40MB EYNFS (user files)
+- Partition 2: 10MB Swap
 
 Usage: python3 create_partitioned_disk.py [output.img]
 """
@@ -124,28 +124,46 @@ def create_swap_header(total_pages):
     return bytes(header)
 
 
-def create_partitioned_disk(filename, total_size_mb=10, part1_size_mb=5, part2_size_mb=5):
+def create_partitioned_disk(
+    filename,
+    total_size_mb=10,
+    part1_size_mb=5,
+    part2_size_mb=5,
+    part1_start_sector=2048,
+    total_sectors_override=None,
+    part1_sectors_override=None,
+    part2_sectors_override=None,
+):
     """Create a partitioned disk image."""
+
+    total_sectors = int(total_sectors_override) if total_sectors_override is not None else (total_size_mb * MB) // SECTOR_SIZE
     
-    total_sectors = (total_size_mb * MB) // SECTOR_SIZE
-    
-    # Partition 1 starts at sector 2048 (1MB offset, standard alignment)
-    part1_start = 2048
+    # Partition 1 start sector is configurable. Default keeps historical 1MB offset,
+    # but installer RAM media can use a smaller offset to reduce module byte size.
+    part1_start = max(1, int(part1_start_sector))
     
     # Calculate available space after reserved area
     available_sectors = total_sectors - part1_start
     
-    # If requested sizes exceed available, scale them down proportionally
-    requested_sectors = ((part1_size_mb + part2_size_mb) * MB) // SECTOR_SIZE
-    if requested_sectors > available_sectors:
-        # Scale down proportionally
+    if part1_sectors_override is not None:
+        part1_sectors = int(part1_sectors_override)
+    else:
+        part1_sectors = (part1_size_mb * MB) // SECTOR_SIZE
+
+    if part2_sectors_override is not None:
+        part2_sectors = int(part2_sectors_override)
+    else:
+        part2_sectors = (part2_size_mb * MB) // SECTOR_SIZE
+
+    # If requested sizes exceed available and overrides were not provided, scale down proportionally.
+    requested_sectors = part1_sectors + part2_sectors
+    if requested_sectors > available_sectors and part1_sectors_override is None and part2_sectors_override is None:
         scale = available_sectors / requested_sectors
         part1_size_mb = int(part1_size_mb * scale)
         part2_size_mb = int(part2_size_mb * scale)
         print(f"  Scaled partitions to fit: {part1_size_mb}MB + {part2_size_mb}MB")
-    
-    part1_sectors = (part1_size_mb * MB) // SECTOR_SIZE
-    part2_sectors = (part2_size_mb * MB) // SECTOR_SIZE
+        part1_sectors = (part1_size_mb * MB) // SECTOR_SIZE
+        part2_sectors = (part2_size_mb * MB) // SECTOR_SIZE
     
     # Adjust part2 to use remaining space
     part1_end = part1_start + part1_sectors
@@ -154,9 +172,9 @@ def create_partitioned_disk(filename, total_size_mb=10, part1_size_mb=5, part2_s
     part2_end = part2_start + part2_sectors
     
     print(f"Creating partitioned disk: {filename}")
-    print(f"  Total size: {total_size_mb} MB ({total_sectors} sectors)")
-    print(f"  Partition 1 (EYNFS): {part1_size_mb} MB @ sector {part1_start}")
-    print(f"  Partition 2 (Swap):  {part2_size_mb} MB @ sector {part2_start}")
+    print(f"  Total size: {total_sectors} sectors")
+    print(f"  Partition 1 (EYNFS): {part1_sectors} sectors @ sector {part1_start}")
+    print(f"  Partition 2 (Swap):  {part2_sectors} sectors @ sector {part2_start}")
     
     # Verify we have enough space
     if part2_end > total_sectors:

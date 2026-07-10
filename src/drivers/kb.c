@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <watchdog.h>
 
 extern multiboot_info_t *g_mbi;
 
@@ -111,7 +112,10 @@ string readStr() {
     
     while(reading)
     {
-                if ((spin++ & 0x3FFu) == 0u) kb_ctx_account(SCHED_COST_CONSOLE);
+                if ((spin++ & 0x3FFu) == 0u) {
+                        kb_ctx_account(SCHED_COST_CONSOLE);
+                        watchdog_kick("shell-input");
+                }
                 {
                         uint8 status = inportb(0x64);
                         if (!(status & 0x1)) {
@@ -151,12 +155,30 @@ string readStr() {
                 continue;
             }
             
+                        // Arrow keys: handle cursor movement in framebuffer mode
+                        if (scancode == 75) { // Left
+                                vga_console_move_left();
+                                continue;
+                        }
+                        if (scancode == 77) { // Right
+                                vga_console_move_right();
+                                continue;
+                        }
+                        if (scancode == 72) { // Up
+                                vga_console_move_up();
+                                continue;
+                        }
+                        if (scancode == 80) { // Down
+                                vga_console_move_down();
+                                continue;
+                        }
+
             // Check for Ctrl+C
                         if(ctrl_pressed && scancode == 46) {  // 'c' key
                                 g_user_interrupt = 1;
                                 buffstr[0] = '\0';  // Clear the buffer
                                 reading = 0;        // Exit the reading loop
-                                /* Print ^C without color formatting (kernel printf doesn't accept RGB args here) */
+                                /* Print ^C without colour formatting (kernel printf doesn't accept RGB args here) */
                                 printf("^C\n");
                                 /* Return the (cleared) buffer to the caller */
                                 return buffstr;

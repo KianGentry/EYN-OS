@@ -1,88 +1,134 @@
 EYN-OS Command Help
 ==================
 
-Essential Commands:
-------------------
-  clear           - Clears the screen and resets the shell display.
-  exit            - Exits the kernel and shuts down the system.
-  help            - Display this message and show all available commands with descriptions and examples.
-  init            - Initialize full system services (ATA drives, etc.).
-  memory          - Memory management and testing.
-  portable        - Display portability optimizations and memory usage.
-
-Streaming Commands:
-------------------
-  assertfail      - Trigger an assertion failure (ASSERT).
-  catram          - Display contents of a file from RAM disk (FAT32).
-  clearbg         - Clear background image for the focused tile.
-  crashlog        - Inspect or clear the crash-consistent kernel object log.
-  e1000           - Intel e1000 utilities (probe + bring-up helpers).
-  e1000probe      - Probe the Intel e1000 NIC (read-only MMIO sanity check).
-  error           - Display system error statistics and status.
-  fatfix          - Scan and repair FAT32 entries incorrectly marked as directories.
-  lsram           - List files in the RAM disk (FAT32) with directory tree.
-  memory_stats    - Show predictive memory statistics
-  mmap            - Memory map a file for zero-copy access
-  msync           - Synchronize memory-mapped file to disk
-  munmap          - Unmap a memory-mapped file
-  netcfg          - Network configuration (defaults match QEMU user-net).
-  netstat         - Network status (netstack + ARP + UDP + ICMP).
-  pagingguards    - Install optional paging guards (null-page, .text/.rodata RO).
-  panic           - Trigger a kernel panic to test diagnostics.
-  pciscan         - Scan PCI devices and print vendor/device IDs and BAR0.
-  pf              - Intentionally trigger a page fault (read/write/exec a chosen address).
-  ping            - Send ICMP echo request(s).
-  predict         - Predictive memory management
-  rect            - Draw a rectangle.
-  ring3           - Switch to ring 3 and run a tiny user-mode stub (prints via int 0x80).
-  serialtest      - Write a test line to COM1 to verify serial output.
-  setbg           - Set a REI image as background for the focused tile (shows Tile/Scale/Center chooser).
-  setfont         - Set the system font at runtime (loads .hex from disk into RAM).
-  size            - Show the size of a file in bytes.
-  stats           - Graphical system performance monitor with CPU, memory, disk pies and sortable table
-  theme           - Open a GUI theme editor (colors + font).
-  tiling          - Launch the tiling front-end manager.
-  userrun         - Load a raw user-mode code blob from VFS into ring 3 and run it at 0x00400000.
-  validate        - Display input validation statistics and test validation.
-  view            - Open a REI image in a GUI viewer.
-  vieww           - Open a REI image in a floating window.
-  win_test        - Open a sample floating window to test compositor performance.
-
 Filesystem Commands:
 -------------------
   cd              - Change the current directory.
   copy            - Copy a file from source to destination.
+  create          - Create a file or directory.
   del             - Delete a file from the filesystem.
   deldir          - Delete an empty directory.
-  fdisk           - List partition table or create partitions.
-  format          - Format partition n (0-3) as FAT32 or EYNFS.
+  delete          - Delete a file or directory.
+  fatfix          - Repair FAT32 directory entry flags.
   fscheck         - Check filesystem integrity.
-  ls              - List files in the root directory of the selected drive.
+  head            - Print the first lines of a file.
+  ls              - Run the ls command.
   makedir         - Create a new directory.
   move            - Move a file from source to destination.
-  read            - Display text files (.txt) or render markdown (.md).
-  write           - Open nano-like text editor for a file.
+  pwd             - Print the current working directory.
+  read            - Run the read command.
+  size            - Show the size of a file in bytes.
+  tail            - Print the last lines of a file.
 
 System Commands:
 ---------------
-  drive           - Change between different drives (from lsata).
-  lsata           - List detected ATA drives and their details.
+  clear           - Clear terminal output.
+  drive           - Drive selection helper.
+  exit            - Exits the kernel and shuts down the system.
+  help            - Display command help.
+  init            - Initialize core services.
+  lsata           - List detected logical drives.
+  portable        - Show portability optimization status.
+  serialtest      - Serial output test (userland).
+  ver             - Show system version information.
 
-Utility Commands:
+Network Commands:
 ----------------
-  calc            - 32-bit fixed-point calculator.
-  draw            - Create or edit a REI image with a GUI.
-  echo            - Reprints a given text to the screen.
-  history         - Show or clear command history.
-  log             - Enable or disable shell logging.
-  random          - Generate random numbers.
-  search          - Search for text in filenames and file contents using Boyer-Moore algorithm.
-  sort            - Sort strings alphabetically.
-  spam            - Spam 'EYN-OS' to the shell 100 times for fun.
-  ver             - Shows the current system version and release information.
+  e1000           - Intel e1000 utilities.
+  e1000probe      - Probe Intel e1000 NIC.
+  netcfg          - Network configuration command.
+  netstat         - Show network status.
+  pciscan         - Scan PCI devices.
+  ping            - Send ICMP echo requests (IPv4 or hostname).
+
+Memory Commands:
+---------------
+  memory          - Memory management and testing.
+  memory_stats    - Show predictive memory statistics.
+  mmap            - Memory map a file for zero-copy access.
+  msync           - Synchronize memory-mapped file to disk.
+  munmap          - Unmap a memory-mapped file.
+  pagingguards    - Install optional paging guards.
+  predict         - Predictive memory management.
+
+GUI/Window Commands:
+-------------------
+  clearbg         - Clear background image for focused tile.
+  draw            - Open the draw canvas editor.
+  kstats          - Legacy kernel stats GUI (migrated default is userland 'stats').
+  kwin_test       - Legacy kernel window-test command (migrated default is userland 'win_test').
+  rect            - Draw a rectangle.
+  setbg           - Set background image for focused tile.
+  setfont         - Set runtime system font (.hex/.otf/.ttf).
+  stats           - Open the stats GUI.
+  theme           - Open the theme editor.
+  title           - Run the title command.
+  view            - Dispatch a file to a view backend from /.view.
+  win_test        - Open compositor window test.
 
 Development Commands:
 --------------------
-  assemble        - Converts assembly code into machine code.
-  run             - Run a native program, ring3 ELF, or a shell script.
+  assertfail      - Trigger an assertion failure (ASSERT).
+  crashlog        - Inspect and clear crashlog records.
+  hexdump         - Hex dump file bytes.
+  log             - Enable or disable shell logging.
+  panic           - Trigger a kernel panic for diagnostics.
+  pf              - Intentionally trigger a page fault.
+  ring3           - Switch to ring 3 and run a tiny user-mode stub.
+  run             - Run a native program, .uelf, or script.
+  validate        - Show input validation status and tests.
+
+Utility Commands:
+----------------
+  alias           - Create or remove command aliases.
+  breakout        - Arcade brick-breaker with paddle controls.
+  calc            - Integer calculator supporting + - * /.
+  cat             - Print a file to stdout.
+  diskmgr         - Manage logical drives from userland.
+  download        - Download a file over HTTP/1.1 or HTTPS/TLS (GET only) with DNS support.
+  drivelabel      - Set or list logical drive labels.
+  drives          - List logical drives and partitions.
+  echo            - Print arguments to stdout.
+  edit            - Graphical text editor.
+  extract         - Extract a TAR or TAR.GZ archive into a directory.
+  eynfetch        - Display system information with ASCII art logo.
+  fdisk           - Run the fdisk command.
+  files           - Graphical file explorer.
+  fontpreview     - Preview an OTF/TTF font in multiple sizes.
+  format          - Run the format command.
+  gui_demo        - Run the gui_demo command.
+  hello           - Run the hello command.
+  hello_c         - Print Hello World.
+  history         - Show or clear command history.
+  install         - Install, update, remove, and search packages.
+  installer       - EYN-OS graphical installer.
+  jobs            - List background jobs.
+  jsonparse       - Parse and normalize JSON files.
+  ldso            - Minimal ELF dynamic loader for EYN-OS.
+  ldso_debug      - Run the ldso_debug command.
+  list            - List directory entries with terminal icons.
+  metadata        - Show metadata for a file or directory.
+  notify          - Show a graphical notification popup.
+  pipe            - Run a command pipeline from userspace command launcher.
+  ptyspawn        - Spawn a child process on a PTY slave and relay its output.
+  random          - Generate random numbers.
+  search          - Search for text in filenames and file contents.
+  setinstalldrive - Set install binary lookup drive.
+  settings        - Open system settings (video + customization).
+  sha256          - Compute SHA-256 digests for files or strings.
+  snake           - Classic snake game with keyboard controls.
+  sort            - Sort strings alphabetically.
+  spam            - Spam 'EYN-OS' to stdout 100 times.
+  ssh             - SSH client with password auth and interactive shell relay.
+  tetris          - Play classic falling-block puzzle game.
+  tiling          - Launch the tiling manager.
+  toybox          - Run the toybox command.
+  view_backend_bmp - Run the view_backend_bmp command.
+  view_backend_builtin - Open an REI, BMP image, REIV video, REIS audio, or WAV audio viewer.
+  view_backend_rei - Run the view_backend_rei command.
+  view_backend_reis - Play a REIS audio file in a dedicated backend.
+  view_backend_reiv - Play a REIV video file in a dedicated backend.
+  xeyes           - X11 xeyes - eyes that follow the mouse pointer.
+  xeyes_local     - Run the xeyes_local command.
+  zsnes_1_51      - Run the zsnes_1_51 command.
 

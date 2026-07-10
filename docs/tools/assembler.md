@@ -66,7 +66,7 @@ run output.eyn
 
 ## Error Reporting
 
-The assembler provides comprehensive error reporting with colored output:
+The assembler provides comprehensive error reporting with coloured output:
 
 - **Red Errors**: Syntax errors, unknown instructions, memory allocation failures
 - **Pink Warnings**: Unused labels, data definitions, potential issues
@@ -184,4 +184,4 @@ Style note: keep new function comments to 1–2 lines summarizing purpose, consi
 3. Check for "unsupported instruction" errors and report them
 4. Use `Ctrl+C` to interrupt running programs
 5. Monitor memory usage with large programs
-6. Use colored error messages to quickly identify issues
+6. Use coloured error messages to quickly identify issues

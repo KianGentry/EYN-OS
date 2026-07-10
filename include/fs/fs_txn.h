@@ -1,7 +1,7 @@
 #ifndef FS_TXN_H
 #define FS_TXN_H
 
-#include <types.h>
+#include <misc/types.h>
 
 #define FS_TXN_TAG_SUPERBLOCK 1u
 #define FS_TXN_TAG_DIR        2u

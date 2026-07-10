@@ -37,7 +37,7 @@ def create_rei_header(width, height, depth, flags=0):
         REI_MAGIC,      # Magic number
         width,          # Width
         height,         # Height
-        depth,          # Color depth (1=mono, 3=RGB, 4=RGBA)
+        depth,          # Colour depth (1=mono, 3=RGB, 4=RGBA)
         flags & 0xFF,   # Flags/Compression (low nibble)
         0               # Reserved2
     )
@@ -208,7 +208,7 @@ def convert_media_to_reiv(input_file, output_file, max_w=REIV_MAX_WIDTH, max_h=R
                 prev_frame = frame
             else:
                 # Interframe: XOR delta vs previous, then bytewise PackBits RLE.
-                # This tends to compress well even for “noisy” video due to temporal redundancy.
+                # This tends to compress well even for "noisy" video due to temporal redundancy.
                 delta = bytes((a ^ b) for a, b in zip(prev_frame, frame))
                 compressed8 = _encode_rle(delta, 1)
                 # Only take delta+RLE8 if it is materially smaller than raw delta.
@@ -446,7 +446,7 @@ def main():
     parser.add_argument('input', nargs='?', help='Input PNG file')
     parser.add_argument('-o', '--output', help='Output REI file')
     parser.add_argument('-d', '--depth', type=int, choices=[1, 3, 4], default=3,
-                       help='Color depth (1=mono, 3=RGB, 4=RGBA). If the input has an alpha channel, depth will be promoted to 4 unless --no-auto-depth is passed.')
+                       help='Colour depth (1=mono, 3=RGB, 4=RGBA). If the input has an alpha channel, depth will be promoted to 4 unless --no-auto-depth is passed.')
     parser.add_argument('--no-auto-depth', action='store_true', help='Disable auto alpha detection; use the exact depth specified.')
     # Compression options: default is RLE enabled; --no-rle disables.
     # Keep --rle for compatibility; it is redundant when default is on.

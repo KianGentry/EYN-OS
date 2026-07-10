@@ -53,7 +53,7 @@ int rei_validate_header(const rei_header_t* header) {
         return -1;
     }
     
-    // Check color depth
+    // Check colour depth
     if (header->depth != REI_DEPTH_MONO && 
         header->depth != REI_DEPTH_RGB && 
         header->depth != REI_DEPTH_RGBA) {
@@ -163,8 +163,8 @@ int rei_get_pixel_offset(const rei_header_t* header, int x, int y) {
     return (y * header->width + x) * header->depth;
 }
 
-// Get pixel color as 32-bit value
-uint32_t rei_get_pixel_color(const rei_image_t* image, int x, int y) {
+// Get pixel colour as 32-bit value
+uint32_t rei_get_pixel_colour(const rei_image_t* image, int x, int y) {
     if (!image || !image->data) return 0;
     
     int offset = rei_get_pixel_offset(&image->header, x, y);
@@ -188,8 +188,8 @@ uint32_t rei_get_pixel_color(const rei_image_t* image, int x, int y) {
     }
 }
 
-// Set pixel color
-void rei_set_pixel_color(rei_image_t* image, int x, int y, uint32_t color) {
+// Set pixel colour
+void rei_set_pixel_colour(rei_image_t* image, int x, int y, uint32_t colour) {
     if (!image || !image->data) return;
     
     int offset = rei_get_pixel_offset(&image->header, x, y);
@@ -199,25 +199,25 @@ void rei_set_pixel_color(rei_image_t* image, int x, int y, uint32_t color) {
     
     switch (image->header.depth) {
         case REI_DEPTH_MONO:
-            pixel[0] = (color & 0xFF);
+            pixel[0] = (colour & 0xFF);
             break;
             
         case REI_DEPTH_RGB:
-            pixel[0] = (color >> 16) & 0xFF; // R
-            pixel[1] = (color >> 8) & 0xFF;  // G
-            pixel[2] = color & 0xFF;         // B
+            pixel[0] = (colour >> 16) & 0xFF; // R
+            pixel[1] = (colour >> 8) & 0xFF;  // G
+            pixel[2] = colour & 0xFF;         // B
             break;
             
         case REI_DEPTH_RGBA:
-            pixel[0] = (color >> 16) & 0xFF; // R
-            pixel[1] = (color >> 8) & 0xFF;  // G
-            pixel[2] = color & 0xFF;         // B
-            pixel[3] = (color >> 24) & 0xFF; // A
+            pixel[0] = (colour >> 16) & 0xFF; // R
+            pixel[1] = (colour >> 8) & 0xFF;  // G
+            pixel[2] = colour & 0xFF;         // B
+            pixel[3] = (colour >> 24) & 0xFF; // A
             break;
     }
 }
 
-// Convert RGB to VGA color (simplified)
+// Convert RGB to VGA colour (simplified)
 uint32_t rei_rgb_to_vga(uint8_t r, uint8_t g, uint8_t b) {
     // Simple RGB to VGA conversion
     // For now, use a basic mapping
@@ -228,9 +228,9 @@ uint32_t rei_rgb_to_vga(uint8_t r, uint8_t g, uint8_t b) {
     return (vga_r << 5) | (vga_g << 2) | vga_b;
 }
 
-// Convert monochrome to VGA color
+// Convert monochrome to VGA colour
 uint32_t rei_mono_to_vga(uint8_t mono) {
-    // Convert grayscale to VGA color
+    // Convert grayscale to VGA colour
     uint8_t vga = (mono * 15) / 255;
     return vga;
 }
@@ -291,13 +291,13 @@ int rei_display_image(const rei_image_t* image, int x, int y) {
     for (int py = 0; py < image->header.height; py += scale) {
         if ((py & 0x7) == 0) rei_ctx_account(SCHED_COST_CONSOLE);
         for (int px = 0; px < image->header.width; px += scale) {
-            uint32_t color = rei_get_pixel_color(image, px, py);
+            uint32_t colour = rei_get_pixel_colour(image, px, py);
             
-            // Convert VGA color back to RGB
+            // Convert VGA colour back to RGB
             uint8_t r, g, b;
             if (image->header.depth == REI_DEPTH_MONO) {
                 // Monochrome: convert grayscale to RGB
-                uint8_t gray = color & 0xFF;
+                uint8_t gray = colour & 0xFF;
                 r = g = b = gray;
             } else {
                 // RGB: extract from the original pixel data

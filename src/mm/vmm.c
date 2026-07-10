@@ -1,10 +1,11 @@
 #include <mm/vmm.h>
-#include <types.h>
+#include <misc/types.h>
 #include <string.h>
 #include <vga.h>
 #include <panic.h>
 #include <multiboot.h>
 #include <arch.h>
+#include <cpu/gdt.h>
 
 /* External multiboot info for framebuffer mapping */
 extern multiboot_info_t *g_mbi;
@@ -23,6 +24,9 @@ static frame_allocator_t g_frame_alloc;
 /* Swap state */
 static swap_state_t g_swap;
 
+/* Forward declarations (used by early teardown paths). */
+static void swap_free_slot(uint32 slot);
+
 /* Clock page replacement state */
 static clock_state_t g_clock;
 
@@ -36,42 +40,171 @@ address_space_t* vmm_current_as = &vmm_kernel_as;
 static uint32 early_heap_ptr = 0;
 static int paging_enabled = 0;
 
+/*
+ * ABI-INVARIANT: Physical RAM covered by the KERNEL_BASE alias.
+ *
+ * Why: vmm_walk_page_tables (and create_address_space) access physical frames
+ *   for page tables via (KERNEL_BASE + pt_phys). This alias must cover every
+ *   frame that frame_alloc() can return, otherwise a write to a newly-allocated
+ *   page-table frame above the alias limit causes a kernel-mode #PF.
+ *
+ * The alias is extended at vmm_init time to span all detected RAM. The default
+ *   here (64 MB) is sized to handle large-BSS user programs like chibicc
+ *   (32+ MB heap) and doom without triggering kernel-mode page faults when
+ *   allocating page tables for those programs.
+ *
+ * Breakage if too small: kernel panics with PAGE FAULT (kernel) targeting
+ *   KERNEL_BASE + first_unaliased_frame when a large-BSS user program (e.g.
+ *   chibicc with 32 MB heap) causes the PT frame pool to exceed the old limit.
+ * Breakage if too large: no functional issue; wastes a few early_alloc page
+ *   tables at boot (4 KB per extra 4 MB of covered RAM).
+ */
+static uint32 g_kernel_phys_alias_bytes = 64u * 1024u * 1024u;
+
+/*
+ * ABI-INVARIANT: Core paging structures use 32-bit physical/virtual fields.
+ *
+ * Why: The current MM subsystem stores page-table addresses and many kernel VA
+ * values in uint32-era structures.
+ * Invariant: Any pointer converted through vmm_ptr_to_u32() must be losslessly
+ * representable in 32 bits.
+ * Breakage if violated: Silent truncation can target the wrong page tables and
+ * corrupt memory-management state.
+ */
+static inline uint32 vmm_ptr_to_u32(const void* pointer) {
+    uintptr raw = (uintptr)pointer;
+    uint32 narrowed = (uint32)raw;
+    if ((uintptr)narrowed != raw) {
+        PANIC("vmm_ptr_to_u32 overflow: pointer exceeds 32-bit MM contract");
+    }
+    return narrowed;
+}
+
+static inline void* vmm_u32_to_ptr(uint32 address) {
+    return (void*)(uintptr)address;
+}
+
+static inline void* vmm_kphys_to_ptr(uint32 phys_addr) {
+    return (void*)((uintptr)KERNEL_BASE + (uintptr)phys_addr);
+}
+
 // LOW-LEVEL CR REGISTER ACCESS
 
-static inline uint32 read_cr0(void) {
-    uint32 val;
+static inline uintptr read_cr0(void) {
+    uintptr val;
     asm volatile("mov %%cr0, %0" : "=r"(val));
     return val;
 }
 
-static inline void write_cr0(uint32 val) {
+static inline void write_cr0(uintptr val) {
     asm volatile("mov %0, %%cr0" :: "r"(val));
 }
 
-static inline uint32 read_cr2(void) {
-    uint32 val;
+static inline uintptr read_cr2(void) {
+    uintptr val;
     asm volatile("mov %%cr2, %0" : "=r"(val));
     return val;
 }
 
-static inline uint32 read_cr3(void) {
-    uint32 val;
+static inline uintptr read_cr3(void) {
+    uintptr val;
     asm volatile("mov %%cr3, %0" : "=r"(val));
     return val;
 }
 
-static inline void write_cr3(uint32 val) {
+static inline void write_cr3(uintptr val) {
     asm volatile("mov %0, %%cr3" :: "r"(val));
 }
 
 // TLB MANAGEMENT
 
+/*
+ * 80386 performance: when INVLPG is unavailable, per-page invalidation
+ * degenerates into CR3 reloads. Some operations (e.g. user-task teardown)
+ * can unmap many pages at once, so allow callers to explicitly defer flushes
+ * and pay a single CR3 reload at the end.
+ */
+static uint32 g_tlb_defer_depth = 0;
+static uint32 g_tlb_flush_pending = 0;
+
+void vm_tlb_defer_begin(void) {
+    g_tlb_defer_depth++;
+}
+
+void vm_tlb_defer_end(void) {
+    if (g_tlb_defer_depth == 0) {
+        return;
+    }
+
+    g_tlb_defer_depth--;
+    if (g_tlb_defer_depth == 0 && g_tlb_flush_pending) {
+        g_tlb_flush_pending = 0;
+        invalidate_tlb_all();
+    }
+}
+
+void vm_invalidate_page(void* addr) {
+    if (!addr) return;
+#if CONFIG_CPU_HAS_INVLPG
+    /* 486+: invalidate one page without flushing the full TLB. */
+    asm volatile("invlpg (%0)" :: "r"(addr) : "memory");
+#else
+    /*
+     * 80386 fallback: INVLPG is unavailable, so we must flush the entire TLB.
+     * CR3 reload is the only architecturally-correct single-CPU mechanism.
+     */
+    (void)addr;
+    if (g_tlb_defer_depth) {
+        g_tlb_flush_pending = 1;
+        return;
+    }
+    invalidate_tlb_all();
+#endif
+}
+
+void vm_invalidate_range(void* start, size_t len) {
+    if (!start || len == 0) return;
+
+    uintptr start_addr = (uintptr)start;
+    uintptr end_addr_full = start_addr + (uintptr)len - 1u;
+    if (end_addr_full < start_addr || start_addr > 0xFFFFFFFFu || end_addr_full > 0xFFFFFFFFu) {
+        /* overflow -> conservatively flush all */
+        if (!CONFIG_CPU_HAS_INVLPG && g_tlb_defer_depth) {
+            g_tlb_flush_pending = 1;
+        } else {
+            invalidate_tlb_all();
+        }
+        return;
+    }
+    uint32 s = ((uint32)start_addr) & PAGE_MASK;
+    uint32 end_addr = (uint32)end_addr_full;
+    uint32 e = end_addr & PAGE_MASK;
+
+#if CONFIG_CPU_HAS_INVLPG
+    for (uint32 va = s; va <= e; va += PAGE_SIZE) {
+        vm_invalidate_page(vmm_u32_to_ptr(va));
+    }
+#else
+    /* 80386: range invalidation collapses to a single full flush. */
+    (void)s;
+    (void)e;
+    if (g_tlb_defer_depth) {
+        g_tlb_flush_pending = 1;
+        return;
+    }
+    invalidate_tlb_all();
+#endif
+}
+
 void invalidate_tlb_entry(uint32 va) {
-    asm volatile("invlpg (%0)" :: "r"(va) : "memory");
+    vm_invalidate_page(vmm_u32_to_ptr(va));
 }
 
 void invalidate_tlb_all(void) {
-    /* Reloading CR3 flushes all non-global TLB entries */
+    /*
+     * CR3 reload flushes the entire TLB.
+     * Keep this for legacy callers, but prefer vm_invalidate_page/range.
+     */
     write_cr3(read_cr3());
 }
 
@@ -97,6 +230,131 @@ static inline int frame_test(uint32 frame_num) {
     return (g_frame_alloc.bitmap[frame_num / 32] & (1 << (frame_num % 32))) != 0;
 }
 
+static void frame_reserve_range_bytes(uint32 start, uint32 end_exclusive) {
+    if (end_exclusive <= start) return;
+
+    uint32 pa = start & PAGE_MASK;
+    uint32 end = (end_exclusive + PAGE_SIZE - 1u) & PAGE_MASK;
+    for (; pa < end; pa += PAGE_SIZE) {
+        uint32 frame_num = pa / PAGE_SIZE;
+        if (frame_num >= g_frame_alloc.total_frames) break;
+        if (!frame_test(frame_num)) {
+            frame_set(frame_num);
+            if (g_frame_alloc.free_frames) g_frame_alloc.free_frames--;
+        }
+    }
+}
+
+/*
+ * ABI-INVARIANT: Multiboot payload ranges (modules + metadata) must stay reserved.
+ *
+ * Why: GRUB modules (e.g. installer ramdisk) are stored in physical RAM before
+ * paging starts. If these frames are not reserved in the frame allocator, early
+ * kernel allocations can reuse/overwrite them and make RAM:/ appear empty.
+ */
+static void frame_reserve_multiboot_ranges(void) {
+    if (!g_mbi) return;
+
+    frame_reserve_range_bytes(vmm_ptr_to_u32(g_mbi),
+                              vmm_ptr_to_u32(g_mbi) + (uint32)sizeof(multiboot_info_t));
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_MEM_MAP) && g_mbi->mmap_addr && g_mbi->mmap_length) {
+        frame_reserve_range_bytes((uint32)(uintptr)g_mbi->mmap_addr,
+                                  (uint32)g_mbi->mmap_addr + (uint32)g_mbi->mmap_length);
+    }
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_CMDLINE) && g_mbi->cmdline) {
+        uint32 cmd = (uint32)(uintptr)g_mbi->cmdline;
+        uint32 len = 0;
+        while (((const char*)(uintptr)cmd)[len] && len < 4096u) len++;
+        frame_reserve_range_bytes(cmd, cmd + len + 1u);
+    }
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_MODS) && g_mbi->mods_addr && g_mbi->mods_count) {
+        uint32 mods_start = (uint32)(uintptr)g_mbi->mods_addr;
+        uint32 mods_size = (uint32)g_mbi->mods_count * (uint32)sizeof(multiboot_module_t);
+        frame_reserve_range_bytes(mods_start, mods_start + mods_size);
+
+        multiboot_module_t* mods = (multiboot_module_t*)(uintptr)g_mbi->mods_addr;
+        for (uint32 i = 0; i < g_mbi->mods_count; ++i) {
+            if (mods[i].mod_end > mods[i].mod_start) {
+                frame_reserve_range_bytes((uint32)(uintptr)mods[i].mod_start,
+                                          (uint32)(uintptr)mods[i].mod_end);
+            }
+            if (mods[i].cmdline) {
+                uint32 cmd = (uint32)(uintptr)mods[i].cmdline;
+                uint32 len = 0;
+                while (((const char*)(uintptr)cmd)[len] && len < 4096u) len++;
+                frame_reserve_range_bytes(cmd, cmd + len + 1u);
+            }
+        }
+    }
+}
+
+static void boot_range_extend(uint32* max_end, uint32 start, uint32 end_exclusive) {
+    (void)start;
+    if (!max_end) return;
+    if (end_exclusive > *max_end) {
+        *max_end = end_exclusive;
+    }
+}
+
+/*
+ * SECURITY-INVARIANT: early_alloc base must not overlap multiboot payloads.
+ *
+ * Why: The bootstrap bump allocator carves page tables/page directory before
+ * the regular heap is online. If it starts near __kernel_end without checking
+ * multiboot module ranges, it can overwrite the installer RAM disk in-place.
+ *
+ * Invariant: early_alloc begins at a page-aligned address strictly above the
+ * kernel image and all known multiboot metadata/module spans.
+ */
+static uint32 compute_boot_alloc_base(void) {
+    uint32 max_end = vmm_ptr_to_u32(&__kernel_end);
+
+    if (!g_mbi) {
+        return (max_end + PAGE_SIZE - 1u) & PAGE_MASK;
+    }
+
+    boot_range_extend(&max_end,
+                      vmm_ptr_to_u32(g_mbi),
+                      vmm_ptr_to_u32(g_mbi) + (uint32)sizeof(multiboot_info_t));
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_MEM_MAP) && g_mbi->mmap_addr && g_mbi->mmap_length) {
+        boot_range_extend(&max_end,
+                          (uint32)(uintptr)g_mbi->mmap_addr,
+                          (uint32)g_mbi->mmap_addr + (uint32)g_mbi->mmap_length);
+    }
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_CMDLINE) && g_mbi->cmdline) {
+        uint32 cmd = (uint32)(uintptr)g_mbi->cmdline;
+        uint32 len = 0;
+        while (((const char*)(uintptr)cmd)[len] && len < 4096u) len++;
+        boot_range_extend(&max_end, cmd, cmd + len + 1u);
+    }
+
+    if ((g_mbi->flags & MULTIBOOT_INFO_MODS) && g_mbi->mods_addr && g_mbi->mods_count) {
+        uint32 mods_start = (uint32)(uintptr)g_mbi->mods_addr;
+        uint32 mods_end = mods_start + ((uint32)g_mbi->mods_count * (uint32)sizeof(multiboot_module_t));
+        boot_range_extend(&max_end, mods_start, mods_end);
+
+        multiboot_module_t* mods = (multiboot_module_t*)(uintptr)g_mbi->mods_addr;
+        for (uint32 i = 0; i < g_mbi->mods_count; ++i) {
+            if (mods[i].mod_end > mods[i].mod_start) {
+                boot_range_extend(&max_end, (uint32)(uintptr)mods[i].mod_start, (uint32)(uintptr)mods[i].mod_end);
+            }
+            if (mods[i].cmdline) {
+                uint32 cmd = (uint32)(uintptr)mods[i].cmdline;
+                uint32 len = 0;
+                while (((const char*)(uintptr)cmd)[len] && len < 4096u) len++;
+                boot_range_extend(&max_end, cmd, cmd + len + 1u);
+            }
+        }
+    }
+
+    return (max_end + PAGE_SIZE - 1u) & PAGE_MASK;
+}
+
 /* Initialize frame allocator based on detected RAM */
 static void frame_alloc_init(uint32 total_ram_bytes) {
     memset(&g_frame_alloc, 0, sizeof(g_frame_alloc));
@@ -114,7 +372,7 @@ static void frame_alloc_init(uint32 total_ram_bytes) {
     }
     
     /* Reserve frames occupied by kernel (1MB to kernel_end) */
-    uint32 kernel_end_frame = ((uint32)&__kernel_end) / PAGE_SIZE + 1;
+    uint32 kernel_end_frame = vmm_ptr_to_u32(&__kernel_end) / PAGE_SIZE + 1;
     for (uint32 i = 256; i <= kernel_end_frame && i < g_frame_alloc.total_frames; i++) {
         frame_set(i);
         g_frame_alloc.free_frames--;
@@ -260,11 +518,11 @@ static void* early_alloc(uint32 size, uint32 alignment) {
     /* Align up */
     early_heap_ptr = (early_heap_ptr + alignment - 1) & ~(alignment - 1);
     
-    void* ptr = (void*)early_heap_ptr;
+    void* ptr = vmm_u32_to_ptr(early_heap_ptr);
     early_heap_ptr += size;
     
     /* Mark allocated frames as used */
-    uint32 start_frame = ((uint32)ptr) / PAGE_SIZE;
+    uint32 start_frame = vmm_ptr_to_u32(ptr) / PAGE_SIZE;
     uint32 end_frame = (early_heap_ptr - 1) / PAGE_SIZE;
     for (uint32 f = start_frame; f <= end_frame; f++) {
         if (f < g_frame_alloc.total_frames) {
@@ -315,11 +573,11 @@ pte_t* vmm_walk_page_tables(address_space_t* as, uint32 va, int create) {
                 return 0;  /* Out of memory */
             }
             /* Map the new page table temporarily to access it */
-            pt = (page_table_t*)(KERNEL_BASE + pt_phys);
+            pt = (page_table_t*)vmm_kphys_to_ptr(pt_phys);
         } else {
             /* Before paging: allocate from early heap */
             pt = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
-            pt_phys = (uint32)pt;
+            pt_phys = vmm_ptr_to_u32(pt);
         }
         
         memset(pt, 0, sizeof(page_table_t));
@@ -338,14 +596,14 @@ pte_t* vmm_walk_page_tables(address_space_t* as, uint32 va, int create) {
          * the KERNEL_BASE alias to avoid recursive-map faults while PDEs
          * are being created on-demand.
          */
-        if (pt_phys < (16u * 1024u * 1024u)) {
-            pt = (page_table_t*)(KERNEL_BASE + pt_phys);
+        if (pt_phys < g_kernel_phys_alias_bytes) {
+            pt = (page_table_t*)vmm_kphys_to_ptr(pt_phys);
         } else {
-            pt = (page_table_t*)PT_VA(pdi);
+            pt = (page_table_t*)(uintptr)PT_VA(pdi);
         }
     } else {
         /* Before paging: physical = virtual */
-        pt = (page_table_t*)pt_phys;
+        pt = (page_table_t*)vmm_u32_to_ptr(pt_phys);
     }
     
     return &pt->entries[pti];
@@ -366,11 +624,7 @@ int vmm_map_page(address_space_t* as, uint32 va, uint32 pa, uint32 flags) {
         *pde |= PTE_USER;
     }
     
-    /* If page already mapped, unmap first (avoids frame leak) */
-    if (*pte & PTE_PRESENT) {
-        /* Could be replacing mapping - don't free the old frame 
-         * if caller is remapping same address */
-    }
+    uint32 was_present = (*pte & PTE_PRESENT);
     
     *pte = (pa & PTE_FRAME_MASK) | flags | PTE_PRESENT;
     
@@ -379,14 +633,45 @@ int vmm_map_page(address_space_t* as, uint32 va, uint32 pa, uint32 flags) {
         clock_add_page(pa, pte, va, as);
     }
     
-    invalidate_tlb_entry(va);
+    /*
+     * 386-OPT: Only invalidate when this VA could already be cached.
+     * - Mapping a previously-nonpresent VA does not require invalidation.
+     * - Updating a present mapping or permissions does.
+     * Also avoid touching the TLB for inactive address spaces.
+     */
+    if (as == vmm_current_as && was_present) {
+        vm_invalidate_page(vmm_u32_to_ptr(va));
+    }
     return 0;
 }
 
 int vmm_unmap_page(address_space_t* as, uint32 va) {
     pte_t* pte = vmm_walk_page_tables(as, va, 0);
-    if (!pte || !(*pte & PTE_PRESENT)) {
-        return -1;  /* Page not mapped */
+    if (!pte) {
+        return -1;  /* No page table / no PTE */
+    }
+
+    /* Treat non-present demand-zero and swapped pages as mapped so callers can
+     * tear down reserved regions without faulting them in.
+     */
+    if (!(*pte & PTE_PRESENT)) {
+        if (*pte & PTE_SWAPPED) {
+            uint32 slot = (*pte >> 12) & 0xFFFFF;
+            swap_free_slot(slot);
+            *pte = 0;
+            if (as == vmm_current_as) {
+                vm_invalidate_page(vmm_u32_to_ptr(va));
+            }
+            return 0;
+        }
+        if (*pte & PTE_DEMAND) {
+            *pte = 0;
+            if (as == vmm_current_as) {
+                vm_invalidate_page(vmm_u32_to_ptr(va));
+            }
+            return 0;
+        }
+        return -1;  /* Not mapped */
     }
     
     uint32 frame = *pte & PTE_FRAME_MASK;
@@ -400,7 +685,9 @@ int vmm_unmap_page(address_space_t* as, uint32 va) {
     }
     
     *pte = 0;
-    invalidate_tlb_entry(va);
+    if (as == vmm_current_as) {
+        vm_invalidate_page(vmm_u32_to_ptr(va));
+    }
     
     return 0;
 }
@@ -421,7 +708,7 @@ address_space_t* create_address_space(void) {
         return 0;
     }
     
-    as->pd = (page_directory_t*)(KERNEL_BASE + pd_phys);
+    as->pd = (page_directory_t*)vmm_kphys_to_ptr(pd_phys);
     as->pd_phys = pd_phys;
     memset(as->pd, 0, sizeof(page_directory_t));
     
@@ -459,7 +746,7 @@ void destroy_address_space(address_space_t* as) {
         }
         
         /* Walk page table and free frames */
-        page_table_t* pt = (page_table_t*)(KERNEL_BASE + (pde & PTE_FRAME_MASK));
+        page_table_t* pt = (page_table_t*)vmm_kphys_to_ptr(pde & PTE_FRAME_MASK);
         for (int pti = 0; pti < ENTRIES_PER_TABLE; pti++) {
             pte_t pte = pt->entries[pti];
             if (pte & PTE_PRESENT) {
@@ -502,6 +789,7 @@ address_space_t* clone_address_space(address_space_t* src) {
     dst->stack_bottom = src->stack_bottom;
     
     /* Mark all user pages as COW in both source and destination */
+    int need_src_tlb_flush = 0;
     for (int pdi = 0; pdi < 768; pdi++) {
         pde_t src_pde = src->pd->entries[pdi];
         if (!(src_pde & PTE_PRESENT)) {
@@ -509,7 +797,7 @@ address_space_t* clone_address_space(address_space_t* src) {
         }
         
         /* Create corresponding page table in destination */
-        page_table_t* src_pt = (page_table_t*)(KERNEL_BASE + (src_pde & PTE_FRAME_MASK));
+        page_table_t* src_pt = (page_table_t*)vmm_kphys_to_ptr(src_pde & PTE_FRAME_MASK);
         
         /* Allocate destination page table */
         uint32 dst_pt_phys = frame_alloc();
@@ -518,7 +806,7 @@ address_space_t* clone_address_space(address_space_t* src) {
             return 0;
         }
         
-        page_table_t* dst_pt = (page_table_t*)(KERNEL_BASE + dst_pt_phys);
+        page_table_t* dst_pt = (page_table_t*)vmm_kphys_to_ptr(dst_pt_phys);
         dst->pd->entries[pdi] = dst_pt_phys | (src_pde & 0xFFF);
         
         /* Copy PTEs, marking writable pages as COW */
@@ -533,14 +821,23 @@ address_space_t* clone_address_space(address_space_t* src) {
                 /* Writable page: mark as COW and read-only in both */
                 pte = (pte & ~PTE_RW) | PTE_COW;
                 src_pt->entries[pti] = pte;
+                if (src == vmm_current_as) {
+#if CONFIG_CPU_HAS_INVLPG
+                    vm_invalidate_page((void*)VA_FROM_INDICES((uint32)pdi, (uint32)pti));
+#else
+                    need_src_tlb_flush = 1;
+#endif
+                }
             }
             
             dst_pt->entries[pti] = pte;
         }
     }
-    
-    /* Flush TLB since we modified source's PTEs */
-    invalidate_tlb_all();
+
+    /* Flush once on strict-386 fallback if we changed src permissions. */
+    if (need_src_tlb_flush && src == vmm_current_as) {
+        invalidate_tlb_all();
+    }
     
     return dst;
 }
@@ -551,6 +848,7 @@ void switch_address_space(address_space_t* as) {
     }
     
     vmm_current_as = as;
+    /* CR3 reload is required on a full address space switch (TLB flush). */
     write_cr3(as->pd_phys);
 }
 
@@ -562,15 +860,27 @@ void switch_address_space(address_space_t* as) {
  */
 
 void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
-    address_space_t* as = vmm_current_as;
-    
-    /* Update fault statistics for working-set tracking */
-    as->fault_count++;
-    /* as->last_fault_tick = get_ticks(); */
-    
     int is_present = error_code & PF_ERR_PRESENT;
     int is_write = error_code & PF_ERR_WRITE;
     int is_user = error_code & PF_ERR_USER;
+
+    /*
+     * SECURITY-INVARIANT: Supervisor-mode (#PF with U/S=0) indicates a kernel bug.
+     *
+     * Why: Recovery logic below is designed for user address spaces (demand pages,
+     * swap-in, stack/heap growth, COW). Retrying a faulting CPL0 instruction can
+     * re-enter paging/IO paths and trigger cascading corruption.
+     */
+    if (!is_user) {
+        PANICF("PAGE FAULT (kernel): addr=0x%08X eip=0x%08X err=0x%08X",
+               (unsigned)fault_addr, (unsigned)eip, (unsigned)error_code);
+    }
+
+    address_space_t* as = vmm_current_as;
+
+    /* Update fault statistics for working-set tracking */
+    as->fault_count++;
+    /* as->last_fault_tick = get_ticks(); */
     
     pte_t* pte = vmm_walk_page_tables(as, fault_addr, 0);
     
@@ -586,7 +896,7 @@ void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
             }
             
             /* Zero the new page for security */
-            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+            memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
             
             /* Map with original permissions (restore RW if it was set) */
             uint32 flags = (entry & 0xFFF) & ~PTE_DEMAND;
@@ -622,19 +932,31 @@ void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
     /* CASE 3: Access in valid region but page not yet allocated
      * Check if address falls within heap or stack growth area */
     if (!is_present) {
-        /* Stack growth: address between stack_bottom and USER_STACK_TOP */
-        if (fault_addr >= as->stack_bottom - PAGE_SIZE && 
+        /* Stack growth: address anywhere between USER_STACK_BASE and the
+         * current stack_bottom.
+         *
+         * We allow the fault to land arbitrarily far below stack_bottom
+         * (not just one page) because programs can skip many pages in a
+         * single call if they allocate a large stack frame or use alloca().
+         * Constraining growth to one page at a time would cause a segfault
+         * whenever a function reserves more than 4 KB of locals in one shot.
+         *
+         * Security invariant: fault_addr must be at or above USER_STACK_BASE
+         * (0xB0000000) so a rogue program cannot silently map arbitrary
+         * pages below the intended stack region.
+         */
+        if (fault_addr >= USER_STACK_BASE &&
             fault_addr < USER_STACK_TOP) {
-            /* Grow stack down */
+            /* Grow stack down to cover the faulted page. */
             uint32 new_page = fault_addr & PAGE_MASK;
             uint32 frame = frame_alloc();
             if (frame == 0) {
                 goto segfault;
             }
-            
-            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+
+            memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
             vmm_map_page(as, new_page, frame, PTE_USER | PTE_RW);
-            
+
             if (new_page < as->stack_bottom) {
                 as->stack_bottom = new_page;
             }
@@ -650,7 +972,7 @@ void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip) {
                 goto segfault;
             }
             
-            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+            memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
             vmm_map_page(as, page_va, frame, PTE_USER | PTE_RW);
             return;
         }
@@ -677,6 +999,103 @@ segfault:
     }
 }
 
+/*
+ * vmm_fault_in_user_write -- pre-fault user pages for kernel-initiated writes.
+ *
+ * copyout() must not fail when writing to valid user memory that merely hasn't
+ * been physically mapped yet (demand-zero PTE_DEMAND pages, or stack/heap
+ * pages that would be allocated by the normal page-fault handler).
+ * user_access_ok() checks PTE_PRESENT which is always 0 for such pages, so
+ * without this helper every copyout to an alloca'd stack buffer silently
+ * returns -1 and the user program reads garbage.
+ *
+ * This function replicates the demand-fault resolution from
+ * vmm_page_fault_handler() but can be called from kernel context (CPL0)
+ * without a hardware #PF: for each 4KB page in [va_start, va_start+len):
+ *   - Already present + user + rw: skip.
+ *   - PTE_DEMAND: allocate a zeroed frame, mark present.
+ *   - PTE_SWAPPED: bring back from swap.
+ *   - In stack or heap growth area with no PTE: allocate a zeroed frame.
+ *   - Anything else: return -1 (access will be denied by user_access_ok).
+ *
+ * On success returns 0; all pages are present, user-accessible, and writable
+ * before user_access_ok is called.
+ *
+ * Security: only touches pages in the user range. The subsequent
+ * user_access_ok call remains the authoritative gate.
+ */
+int vmm_fault_in_user_write(uint32 va_start, size_t len) {
+    if (len == 0) return 0;
+    if (va_start < USER_CODE_BASE || va_start >= USER_STACK_TOP) return -1;
+
+    address_space_t* as = vmm_current_as ? vmm_current_as : &vmm_kernel_as;
+
+    uint32 page = va_start & PAGE_MASK;
+    uint32 end  = va_start + (uint32)len;
+    if (end < va_start) return -1;  /* overflow */
+    if (end > USER_STACK_TOP) return -1;
+
+    for (; page < end; page += PAGE_SIZE) {
+        pte_t* pte = vmm_walk_page_tables(as, page, 0);
+
+        if (pte) {
+            pte_t entry = *pte;
+
+            if (entry & PTE_PRESENT) {
+                /* Already physically present; check user + writable. */
+                if ((entry & PTE_USER) && (entry & PTE_RW)) continue;
+                return -1;  /* Present but not user-writable (text/ro page). */
+            }
+
+            /* Demand-zero: allocate and zero a frame now. */
+            if (entry & PTE_DEMAND) {
+                uint32 frame = frame_alloc();
+                if (frame == 0) return -1;
+                memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
+                uint32 flags = (entry & 0xFFFu) & ~PTE_DEMAND;
+                flags |= PTE_PRESENT;
+                *pte = (frame & PTE_FRAME_MASK) | flags;
+                invalidate_tlb_entry(page);
+                continue;
+            }
+
+            /* Swapped page: restore from swap. */
+            if (entry & PTE_SWAPPED) {
+                uint32 swap_slot = (entry >> 12) & 0xFFFFF;
+                if (swap_in_page(as, page, swap_slot) != 0) return -1;
+                continue;
+            }
+
+            /* PTE exists but has no recognised state -- deny. */
+            return -1;
+        }
+
+        /* No PTE: grow stack if in the stack region. */
+        if (page >= USER_STACK_BASE && page < USER_STACK_TOP) {
+            uint32 frame = frame_alloc();
+            if (frame == 0) return -1;
+            memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
+            vmm_map_page(as, page, frame, PTE_USER | PTE_RW);
+            if (page < as->stack_bottom) as->stack_bottom = page;
+            continue;
+        }
+
+        /* No PTE: grow heap if in the brk region. */
+        if (page >= USER_HEAP_BASE && page < as->heap_break) {
+            uint32 frame = frame_alloc();
+            if (frame == 0) return -1;
+            memset((void*)vmm_kphys_to_ptr(frame), 0, PAGE_SIZE);
+            vmm_map_page(as, page, frame, PTE_USER | PTE_RW);
+            continue;
+        }
+
+        /* Unmapped region -- deny. */
+        return -1;
+    }
+
+    return 0;
+}
+
 // COPY-ON-WRITE HANDLING
 
 int vmm_handle_cow_fault(address_space_t* as, uint32 va, pte_t* pte) {
@@ -690,8 +1109,8 @@ int vmm_handle_cow_fault(address_space_t* as, uint32 va, pte_t* pte) {
     }
     
     /* Copy page contents */
-    memcpy((void*)(KERNEL_BASE + new_frame), 
-           (void*)(KERNEL_BASE + old_frame), 
+        memcpy((void*)vmm_kphys_to_ptr(new_frame), 
+            (void*)vmm_kphys_to_ptr(old_frame), 
            PAGE_SIZE);
     
     /* Update PTE: new frame, writable, clear COW flag */
@@ -711,13 +1130,24 @@ int vmm_handle_cow_fault(address_space_t* as, uint32 va, pte_t* pte) {
 }
 
 void vmm_mark_region_cow(address_space_t* as, uint32 start, uint32 end) {
+    int need_flush = 0;
     for (uint32 va = start & PAGE_MASK; va < end; va += PAGE_SIZE) {
         pte_t* pte = vmm_walk_page_tables(as, va, 0);
         if (pte && (*pte & PTE_PRESENT) && (*pte & PTE_RW)) {
             *pte = (*pte & ~PTE_RW) | PTE_COW;
+            if (as == vmm_current_as) {
+#if CONFIG_CPU_HAS_INVLPG
+                vm_invalidate_page((void*)va);
+#else
+                need_flush = 1;
+#endif
+            }
         }
     }
-    invalidate_tlb_all();
+
+    if (need_flush && as == vmm_current_as) {
+        invalidate_tlb_all();
+    }
 }
 
 /*
@@ -763,10 +1193,10 @@ static int swap_write_page(uint32 slot, void* page_data) {
     if (swap_partition_get_info()) {
         return swap_partition_write_page(slot, page_data);
     }
-    /* Fallback: no swap partition, operation fails silently */
+    /* No swap partition: swapping is unavailable (report failure). */
     (void)slot;
     (void)page_data;
-    return 0;
+    return -1;
 }
 
 /* Read page from swap device */
@@ -775,9 +1205,38 @@ static int swap_read_page(uint32 slot, void* page_data) {
     if (swap_partition_get_info()) {
         return swap_partition_read_page(slot, page_data);
     }
-    /* Fallback: zero the page as placeholder */
+    /* No swap partition: swapping is unavailable (report failure). */
     (void)slot;
-    memset(page_data, 0, PAGE_SIZE);
+    (void)page_data;
+    return -1;
+}
+
+/*
+ * Eviction helper: swap out a present PTE but keep the physical frame allocated.
+ *
+ * Why: `frame_alloc()` may call `clock_evict_page()` when `free_frames == 0`.
+ * In that case we want to *reclaim* a frame for immediate reuse, not free it
+ * into the general free list (which would allow double-allocation).
+ */
+static int swap_out_page_reclaim_frame(pte_t* pte, uint32 va) {
+    if (!pte || !(*pte & PTE_PRESENT)) {
+        return -1;
+    }
+
+    uint32 frame = *pte & PTE_FRAME_MASK;
+    uint32 slot = swap_alloc_slot();
+    if (slot == SWAP_SLOT_NONE) {
+        return -1;
+    }
+
+    if (swap_write_page(slot, (void*)vmm_kphys_to_ptr(frame)) != 0) {
+        swap_free_slot(slot);
+        return -1;
+    }
+
+    /* Not-present, store swap slot in the frame bits. Preserve user/rw flags. */
+    *pte = (slot << 12) | PTE_SWAPPED | (*pte & (PTE_USER | PTE_RW));
+    invalidate_tlb_entry(va);
     return 0;
 }
 
@@ -796,7 +1255,7 @@ uint32 swap_out_page(pte_t* pte, uint32 va, address_space_t* as) {
     }
     
     /* Write page to swap */
-    if (swap_write_page(slot, (void*)(KERNEL_BASE + frame)) != 0) {
+    if (swap_write_page(slot, (void*)vmm_kphys_to_ptr(frame)) != 0) {
         swap_free_slot(slot);
         return SWAP_SLOT_NONE;
     }
@@ -825,7 +1284,7 @@ int swap_in_page(address_space_t* as, uint32 va, uint32 swap_slot) {
     }
     
     /* Read from swap */
-    if (swap_read_page(swap_slot, (void*)(KERNEL_BASE + frame)) != 0) {
+    if (swap_read_page(swap_slot, (void*)vmm_kphys_to_ptr(frame)) != 0) {
         frame_free(frame);
         return -1;
     }
@@ -924,23 +1383,38 @@ uint32 clock_evict_page(void) {
             continue;
         }
         
-        /* Victim found! Swap out if dirty, then reclaim frame */
+        /* Victim found! Swap out (even if clean), then reclaim frame */
         uint32 frame = entry->frame;
-        
-        if (*pte & PTE_DIRTY) {
-            /* Page was modified - must write to swap */
-            swap_out_page(pte, entry->va, entry->as);
-        } else {
-            /* Clean page - just invalidate */
-            *pte = 0;
-            invalidate_tlb_entry(entry->va);
+
+        /*
+         * SECURITY-INVARIANT: Evicted user pages must remain logically intact.
+         *
+         * EYN-OS currently does not have a file-backed pager to
+         * reconstruct executable/text pages on demand. A page being "clean" only
+         * means the CPU hasn't written through that *user* PTE; kernel writes via
+         * the KERNEL_BASE alias do not set this PTE's dirty bit.
+         *
+         * Therefore, to avoid silent corruption, we must preserve *all* evicted
+         * user pages by swapping them out.
+         */
+        if (swap_out_page_reclaim_frame(pte, entry->va) != 0) {
+            /* Swap is full or I/O failed; try another victim. */
+            continue;
         }
-        
+
         /* Clear clock entry */
         entry->frame = 0;
         entry->pte_ptr = 0;
-        g_clock.count--;
-        
+        entry->va = 0;
+        entry->as = 0;
+        if (g_clock.count) {
+            g_clock.count--;
+        }
+
+        /*
+         * IMPORTANT: Do NOT call frame_free(frame) here.
+         * The returned frame is reclaimed for immediate reuse by the caller.
+         */
         return frame;
     }
     
@@ -966,7 +1440,7 @@ void vmm_update_working_set(address_space_t* as) {
             continue;
         }
         
-        page_table_t* pt = (page_table_t*)PT_VA(pdi);
+        page_table_t* pt = (page_table_t*)(uintptr)PT_VA(pdi);
         for (int pti = 0; pti < ENTRIES_PER_TABLE; pti++) {
             pte_t pte = pt->entries[pti];
             if ((pte & PTE_PRESENT) && (pte & PTE_ACCESSED)) {
@@ -1053,13 +1527,13 @@ void* vmm_kmalloc_page(void) {
     }
     
     /* Kernel pages are identity-mapped at KERNEL_BASE + phys */
-    return (void*)(KERNEL_BASE + frame);
+    return (void*)vmm_kphys_to_ptr(frame);
 }
 
 void vmm_kfree_page(void* ptr) {
     if (!ptr) return;
     
-    uint32 va = (uint32)ptr;
+    uint32 va = vmm_ptr_to_u32(ptr);
     if (va < KERNEL_BASE) return;
     
     uint32 phys = va - KERNEL_BASE;
@@ -1072,7 +1546,7 @@ void* vmm_kmalloc_aligned(uint32 size) {
     if (phys == 0) {
         return 0;
     }
-    return (void*)(KERNEL_BASE + phys);
+    return (void*)vmm_kphys_to_ptr(phys);
 }
 
 // QUERY FUNCTIONS
@@ -1116,9 +1590,12 @@ void vmm_init(uint32 total_ram_bytes) {
     
     /* Set up frame allocator */
     frame_alloc_init(total_ram_bytes);
+
+    /* Preserve multiboot modules/metadata (installer RAM disk, mmap buffers, etc.). */
+    frame_reserve_multiboot_ranges();
     
-    /* Set early heap pointer to right after kernel */
-    early_heap_ptr = ((uint32)&__kernel_end + PAGE_SIZE) & PAGE_MASK;
+    /* Set early boot allocator above kernel + multiboot payloads. */
+    early_heap_ptr = compute_boot_alloc_base();
     uint32 boot_alloc_start = early_heap_ptr;
     
     /* Allocate kernel page directory */
@@ -1126,24 +1603,43 @@ void vmm_init(uint32 total_ram_bytes) {
     memset(kernel_pd, 0, sizeof(page_directory_t));
     
     vmm_kernel_as.pd = kernel_pd;
-    vmm_kernel_as.pd_phys = (uint32)kernel_pd;  /* Before paging: virt == phys */
+    vmm_kernel_as.pd_phys = vmm_ptr_to_u32(kernel_pd);  /* Before paging: virt == phys */
     vmm_kernel_as.refcount = 1;
     
     /*
-     * IDENTITY MAP: Map first 16MB at both 0x00000000 and 0xC0000000
-     * This allows kernel to run at high addresses while still accessing
-     * low memory (BIOS, VGA, etc.) during transition.
-     */
-    
-    /*
-     * Create page tables for first 16MB identity mapped.
+     * Map all detected physical RAM at both 0x00000000 (low identity) and
+     * KERNEL_BASE (0xC0000000+), covering the full detected RAM range.
+     *
+     * IDENTITY MAP: Map physical RAM at 0x00000000 and 0xC0000000 so the
+     * kernel can run at its link address while still accessing low memory
+     * (BIOS, VGA, etc.) during the paging transition.
+     *
      * IMPORTANT: do NOT share the same PT between the low and high mappings.
      * User tasks are mapped into low user space (e.g. 0x00400000). If the low
-     * and high-half identity maps share a PT, those user mappings would
+     * and high-half identity maps shared a PT, those user mappings would
      * overwrite/unmap the kernel's high-half alias (0xC0400000 etc.), causing
      * kernel page faults when the kernel uses KERNEL_BASE + phys pointers.
+     *
+     * This alias must span all physical RAM so that (KERNEL_BASE + pt_phys)
+     * is always a valid kernel VA for any frame frame_alloc() returns, including
+     * page-table frames allocated for large-BSS programs (e.g. chibicc's 32 MB
+     * internal heap, which causes frame_alloc to return frames above 16 MB).
      */
-    for (uint32 pdi = 0; pdi < 4; pdi++) {  /* 4 PDEs = 16MB */
+    uint32 ram_pdes = (total_ram_bytes + (4u * 1024u * 1024u) - 1u)
+                      / (4u * 1024u * 1024u);
+    if (ram_pdes < 4u)   ram_pdes = 4u;    /* Always cover at least 16 MB */
+    if (ram_pdes > 254u) ram_pdes = 254u;  /* Kernel high-half has PDEs 768..1022 (254 slots) */
+    g_kernel_phys_alias_bytes = ram_pdes * (4u * 1024u * 1024u);
+    
+    /* SAFETY: Explicitly clamp to prevent out-of-bounds PDE writes.
+       Page directory has 1024 entries (0-1023). High-half starts at 768.
+       So we can use PDE[768..1022] (255 slots) for identity mapping, leaving
+       PDE[1023] for the recursive mapping. Use 254 to be conservative. */
+    if (ram_pdes > 254u) {
+        ram_pdes = 254u;
+    }
+
+    for (uint32 pdi = 0; pdi < ram_pdes; pdi++) {
         page_table_t* pt_low = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
         page_table_t* pt_high = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
         memset(pt_low, 0, sizeof(page_table_t));
@@ -1158,53 +1654,98 @@ void vmm_init(uint32 total_ram_bytes) {
         }
 
         /* Low mapping (0x00000000+) */
-        kernel_pd->entries[pdi] = (uint32)pt_low | PTE_PRESENT | PTE_RW;
+        kernel_pd->entries[pdi] = vmm_ptr_to_u32(pt_low) | PTE_PRESENT | PTE_RW;
 
         /* High mapping (0xC0000000+) - kernel's preferred addresses */
-        kernel_pd->entries[768 + pdi] = (uint32)pt_high | PTE_PRESENT | PTE_RW;
+        kernel_pd->entries[768 + pdi] = vmm_ptr_to_u32(pt_high) | PTE_PRESENT | PTE_RW;
+    }
+    
+    /* CRITICAL: Ensure kernel code region is always mapped before paging enable.
+     * The kernel at 0xC0100000 needs PDE[768] to be valid.
+     * With 2GB RAM, ram_pdes gets clamped to 254, covering only 1GB in high-half.
+     * Verify that the kernel region (at least 16MB) is mapped. */
+    {
+        uint32 kernel_pde_idx = 768;  /* 0xC0000000 >> 22 */
+        uint32 kernel_pde_entry = kernel_pd->entries[kernel_pde_idx];
+        if (!(kernel_pde_entry & PTE_PRESENT)) {
+            printf("VMM ERROR: Kernel PDE not present! PDE[768] = 0x%X\n", (unsigned)kernel_pde_entry);
+            while(1) arch_halt();  /* Cannot proceed without kernel mapping */
+        }
     }
     
     /*
-     * Map framebuffer region (MMIO) if available
-     * The framebuffer is typically at a high address (e.g., 0xFD000000)
-     * We identity-map the region containing it.
+     * Map framebuffer region (MMIO) if available.
+     * The framebuffer is typically at a high physical address (e.g., 0xFD000000).
+     * VGA/UI code writes to g_mbi->framebuffer_addr directly; once paging is on,
+     * that linear address must be mapped or we'll take a kernel-mode #PF.
+     *
+     * Note: Some bootloaders/configs may populate the framebuffer fields but not
+     * set MULTIBOOT_INFO_FRAMEBUFFER_INFO. Prefer mapping when the address looks
+     * usable so paging-on doesn't regress graphics.
      */
-    if (g_mbi && (g_mbi->flags & MULTIBOOT_INFO_FRAMEBUFFER_INFO)) {
+    if (g_mbi) {
         uint32 fb_addr = (uint32)g_mbi->framebuffer_addr;
-        uint32 fb_size = g_mbi->framebuffer_pitch * g_mbi->framebuffer_height;
-        if (fb_size == 0) fb_size = 4 * 1024 * 1024;  /* Default 4MB if unknown */
-        
-        /* Round fb_addr down to 4MB boundary for simpler mapping */
-        uint32 fb_start = fb_addr & ~0x3FFFFF;  /* Align to 4MB */
-        uint32 fb_end = (fb_addr + fb_size + 0x3FFFFF) & ~0x3FFFFF;
-        
-        /* Map each 4MB region (create page table for each PDE) */
-        for (uint32 addr = fb_start; addr < fb_end; addr += 4 * 1024 * 1024) {
-            uint32 pdi = addr >> 22;  /* PDE index */
-            
-            /* Skip if already mapped (shouldn't happen for high addresses) */
-            if (kernel_pd->entries[pdi] & PTE_PRESENT) continue;
-            
-            /* Allocate page table for this region */
-            page_table_t* pt = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
-            memset(pt, 0, sizeof(page_table_t));
-            
-            /* Fill page table: identity map */
-            for (uint32 pti = 0; pti < ENTRIES_PER_TABLE; pti++) {
-                uint32 pa = (pdi * ENTRIES_PER_TABLE + pti) * PAGE_SIZE;
-                /* Mark as present, RW, and uncacheable for MMIO */
-                pt->entries[pti] = pa | PTE_PRESENT | PTE_RW | PTE_PCD | PTE_PWT;
+        uint32 fb_size = 0;
+        int fb_flag = (g_mbi->flags & MULTIBOOT_INFO_FRAMEBUFFER_INFO) != 0;
+
+        if (fb_flag) {
+            fb_size = g_mbi->framebuffer_pitch * g_mbi->framebuffer_height;
+        }
+
+        /* If the flag isn't set but the address is non-zero, still map conservatively. */
+        if (fb_addr != 0 && fb_size == 0) {
+            uint32 fb_pitch = g_mbi->framebuffer_pitch;
+            uint32 fb_height = g_mbi->framebuffer_height;
+            if (fb_pitch != 0 && fb_height != 0) {
+                fb_size = fb_pitch * fb_height;
             }
-            
-            kernel_pd->entries[pdi] = (uint32)pt | PTE_PRESENT | PTE_RW;
+        }
+
+        if (fb_addr != 0) {
+            if (fb_size == 0) {
+                fb_size = 4 * 1024 * 1024; /* Default 4MB if unknown */
+            }
+
+            /* Round fb_addr down to 4MB boundary for simpler mapping */
+            uint32 fb_start = fb_addr & ~0x3FFFFF; /* Align to 4MB */
+            uint32 fb_end = (fb_addr + fb_size + 0x3FFFFF) & ~0x3FFFFF;
+
+            /* Map each 4MB region (create page table for each PDE) */
+            for (uint32 addr = fb_start; addr < fb_end; addr += 4 * 1024 * 1024) {
+                uint32 pdi = addr >> 22; /* PDE index */
+
+                /* Don't clobber the recursive mapping slot. */
+                if (pdi == RECURSIVE_PD_INDEX) {
+                    printf("%cVMM warning: framebuffer overlaps recursive PDE\n", 255, 165, 0);
+                    continue;
+                }
+
+                /* Skip if already mapped (expected for low identity map) */
+                if (kernel_pd->entries[pdi] & PTE_PRESENT) {
+                    continue;
+                }
+
+                /* Allocate page table for this region */
+                page_table_t* pt = (page_table_t*)early_alloc(sizeof(page_table_t), PAGE_SIZE);
+                memset(pt, 0, sizeof(page_table_t));
+
+                /* Fill page table: identity map */
+                for (uint32 pti = 0; pti < ENTRIES_PER_TABLE; pti++) {
+                    uint32 pa = (pdi * ENTRIES_PER_TABLE + pti) * PAGE_SIZE;
+                    /* Mark as present, RW, and uncacheable for MMIO */
+                    pt->entries[pti] = pa | PTE_PRESENT | PTE_RW | PTE_PCD | PTE_PWT;
+                }
+
+                kernel_pd->entries[pdi] = vmm_ptr_to_u32(pt) | PTE_PRESENT | PTE_RW;
+            }
         }
     }
     
     /* Set up recursive mapping: PD[1023] points to PD itself */
-    kernel_pd->entries[RECURSIVE_PD_INDEX] = (uint32)kernel_pd | PTE_PRESENT | PTE_RW;
+    kernel_pd->entries[RECURSIVE_PD_INDEX] = vmm_ptr_to_u32(kernel_pd) | PTE_PRESENT | PTE_RW;
     
     /* Set null page as not-present (null pointer guard) */
-    page_table_t* pt0 = (page_table_t*)(kernel_pd->entries[0] & PTE_FRAME_MASK);
+    page_table_t* pt0 = (page_table_t*)vmm_u32_to_ptr(kernel_pd->entries[0] & PTE_FRAME_MASK);
     pt0->entries[0] = 0;  /* First page not present - dereferencing NULL faults */
 
     /* IMPORTANT: Reserve all boot-time early_alloc() memory in the frame bitmap.
@@ -1236,14 +1777,33 @@ void vmm_enable_paging(void) {
     write_cr3(vmm_kernel_as.pd_phys);
     
     /* Enable paging by setting CR0.PG (bit 31) */
-    uint32 cr0 = read_cr0();
+    uintptr cr0 = read_cr0();
     cr0 |= 0x80000000;  /* Set PG bit */
+
+    /* Enable paging, then perform a far jump to reload CS and serialize.
+     * A true far jump is more conservative on older x86 hardware than a
+     * near jump after CR0.PG transitions.
+     */
     write_cr0(cr0);
+    {
+        struct {
+            uint32 offset;
+            uint16 selector;
+        } __attribute__((packed)) far_jump = {
+            (uint32)(uintptr)&&paging_enabled_after_jump,
+            GDT_KERNEL_CS
+        };
+
+        asm volatile("ljmp *%0" :: "m"(far_jump) : "memory");
+    }
+
+paging_enabled_after_jump:
     
     paging_enabled = 1;
-    
-    /* Now executing with paging enabled!
-     * Thanks to identity mapping, current EIP is still valid. */
-    
-    printf("VMM: Paging enabled\n");
+    vmm_kernel_as.pd = (page_directory_t*)vmm_kphys_to_ptr(vmm_kernel_as.pd_phys);
+}
+
+void vmm_mark_paging_enabled(void) {
+    paging_enabled = 1;
+    vmm_kernel_as.pd = (page_directory_t*)vmm_kphys_to_ptr(vmm_kernel_as.pd_phys);
 }

@@ -72,6 +72,7 @@ status          # Check which commands are loaded
 | `help` | Show help | `help` |
 | `history` | Show command history | `history` |
 | `alias` | Create command alias | `alias ll ls -la` |
+| `schedstat` | Show scheduler MLFQ runtime snapshot | `schedstat` |
 | `exit` | Exit EYN-OS | `exit` |
 
 ## Development Tools
@@ -90,11 +91,22 @@ status          # Check which commands are loaded
 | Command | Description | Example |
 |---------|-------------|---------|
 | `game` | Launch game | `game snake` |
+| `doom` | Run the prebuilt DOOM port | `doom -iwad /DOOM1.WAD` |
+| `build_doom` | Build `doom_chibicc` inside EYN-OS | `build_doom` |
+| `xeyes` | Run the X11 compatibility demo | `xeyes` |
 | `write` | Text editor | `write file.txt` |
 | `draw` | Draw rectangle | `draw 10 20 100 50 255 0 0` |
 | `run` | Second Reality demo (WIP) | `run /testdir/demo.uelf` |
 
 Second Reality demo controls: `Q` quits, Space pauses, Left/Right arrows switch scenes.
+
+DOOM quick start:
+
+```bash
+doom -iwad /DOOM1.WAD   # run the host-built port
+build_doom             # compile the in-OS chibicc build
+doom_chibicc           # run the in-OS build output
+```
 
 ## Utility Commands
 
@@ -170,8 +182,8 @@ e1000 udp-drain
 | Command | Description | Example |
 |---------|-------------|---------|
 | `tile` | Tiling manager control | `tile focus 1` |
-| `theme` | Customize UI theme | `theme color fg 255 255 255` |
-| `setfont` | Change system font | `setfont /fonts/unscii-16.hex` |
+| `theme` | Customize UI theme | `theme colour fg 255 255 255` |
+| `setfont` | Change system font | `setfont /fonts/unscii-16.otf` |
 | `setbg` | Set background image | `setbg image.rei` |
 | `clearbg` | Clear background | `clearbg` |
 
@@ -184,10 +196,10 @@ tile focus 2
 # Resize windows
 tile resize 400 300
 
-# Set custom theme colors
-theme color fg 255 255 255
-theme color bg 0 0 0
-theme color accent 0 150 255
+# Set custom theme colours
+theme colour fg 255 255 255
+theme colour bg 0 0 0
+theme colour accent 0 150 255
 ```
 
 ## Pipeline and Redirection
@@ -440,7 +452,7 @@ status              # Check command loading status
 
 ### TUI System
 - **Consistent Interface**: All TUI apps use same framework
-- **Color Support**: Multiple colors for different elements
+- **Colour Support**: Multiple colours for different elements
 - **Keyboard Handling**: Unified input processing
 - **Dual-Pane Layout**: Interactive help system
 

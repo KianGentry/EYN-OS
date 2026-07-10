@@ -1,6 +1,5 @@
 #include <pipeline.h>
 #include <shell.h>
-#include <shell_commands.h>
 #include <shell_command_info.h>
 #include <utilities/shell/shell_args.h>
 #include <fs_commands.h>
@@ -8,10 +7,33 @@
 #include <vga.h>
 #include <string.h>
 #include <eynfs.h>
-#include <types.h>
+#include <misc/types.h>
 #include <utilities/shell/alias.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <cpu/isr.h>
+#include <serial.h>
+#include <fs/vfs.h>
+#include <cpu/user_elf.h>
+
+// Temporary runtime diagnostics for pipeline debugging.
+#ifndef PIPELINE_DEBUG
+#define PIPELINE_DEBUG 0
+#endif
+
+#if PIPELINE_DEBUG
+#define PIPE_DBG(fmt, ...) do { \
+    char _pipe_dbg_buf[256]; \
+    int _pipe_dbg_n = snprintf(_pipe_dbg_buf, sizeof(_pipe_dbg_buf), "[PIPEDBG] " fmt "\n", ##__VA_ARGS__); \
+    if (_pipe_dbg_n > 0) { \
+        if (_pipe_dbg_n > (int)sizeof(_pipe_dbg_buf)) _pipe_dbg_n = (int)sizeof(_pipe_dbg_buf); \
+        serial_write(SERIAL_COM1, _pipe_dbg_buf, _pipe_dbg_n); \
+        printf("%s", _pipe_dbg_buf); \
+    } \
+} while (0)
+#else
+#define PIPE_DBG(fmt, ...) do { } while (0)
+#endif
 
 // Global variables
 file_descriptor_t g_file_descriptors[MAX_FDS];
@@ -19,6 +41,21 @@ background_process_t g_background_processes[MAX_BACKGROUND_PROCESSES];
 int g_next_fd = 3;  // Start after stdin, stdout, stderr
 int g_next_bg_pid = 1;
 char* g_pipeline_input_data = NULL;  // Pipeline input data for filter commands
+
+typedef struct {
+    pipeline_t* pipeline;
+    command_t* next_cmd;
+    int current_input_fd;
+    int pending_close_in_fd;
+    int pending_close_out_fd;
+    int active;
+} pipeline_runtime_t;
+
+static pipeline_runtime_t g_pipeline_rt = {0};
+
+static void pipeline_restore_stdio_defaults(void);
+
+extern uint8 g_current_drive;
 
 static int pipeline_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -29,14 +66,6 @@ static int pipeline_ctx_allow(uint32 caps, uint32 cost) {
         if (sched_det_is_enabled()) ctx->det_seq++;
     }
     return 1;
-}
-
-static void pipeline_ctx_account(uint32 cost) {
-    command_context_t* ctx = current_command_context;
-    if (!ctx) return;
-    scheduler_account(ctx->wo, cost);
-    scheduler_yield_if_needed(ctx->wo);
-    if (sched_det_is_enabled()) ctx->det_seq++;
 }
 
 // Initialize pipeline system
@@ -430,40 +459,8 @@ command_t* parse_command(const char* cmd_str) {
 
     cmd->name = cmd->args[0];
 
-    // Alias expansion for pipeline segments (simple commands only).
-    // Do not override built-in commands.
-    if (find_command(cmd->name) == NULL) {
-        char linebuf[256];
-        linebuf[0] = '\0';
-        for (int a = 0; a < cmd->argc && cmd->args[a]; a++) {
-            if (a != 0)
-                strcat(linebuf, " ");
-            strcat(linebuf, cmd->args[a]);
-        }
-
-        char expanded[256];
-        int rc = shell_alias_expand_line(linebuf, expanded, (int)sizeof(expanded));
-        if (rc == 1) {
-            // Reject expansions that would require re-parsing pipeline/redirection.
-            for (int x = 0; expanded[x]; x++) {
-                if (expanded[x] == '|' || expanded[x] == '<' || expanded[x] == '>' || expanded[x] == '&') {
-                    free_args(cmd->args, cmd->argc);
-                    free(cmd);
-                    free(input_copy);
-                    return NULL;
-                }
-            }
-
-            free_args(cmd->args, cmd->argc);
-            cmd->args = split_command(expanded, &cmd->argc);
-            if (!cmd->args || cmd->argc == 0) {
-                free(cmd);
-                free(input_copy);
-                return NULL;
-            }
-            cmd->name = cmd->args[0];
-        }
-    }
+    // Alias expansion is intentionally deferred to handle_shell_command() to
+    // keep pipeline parsing deterministic and avoid parse-time stage loss.
     cmd->type = PIPELINE_CMD_SIMPLE;
     
     free(input_copy);
@@ -474,13 +471,15 @@ command_t* parse_command(const char* cmd_str) {
 pipeline_t* parse_pipeline(const char* input) {
     if (!input) return NULL;
     if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return NULL;
+    PIPE_DBG("parse input='%s'", input);
 
     pipeline_t* pipeline = malloc(sizeof(pipeline_t));
     if (!pipeline) return NULL;
     memset(pipeline, 0, sizeof(pipeline_t));
     
-    // Count commands
-    pipeline->command_count = count_pipeline_commands(input);
+    // Count parsed commands from actual segments (do not trust delimiter count
+    // if a segment later fails to parse).
+    pipeline->command_count = 0;
     
     // Split by pipe character
     char* input_copy = malloc(strlen(input) + 1);
@@ -490,27 +489,55 @@ pipeline_t* parse_pipeline(const char* input) {
     }
     strcpy(input_copy, input);
     
-    char* token = simple_strtok(input_copy, "|");
     command_t* prev_cmd = NULL;
-    
-    while (token) {
-        char* trimmed = trim_whitespace(token);
+
+    // Use local in-place splitting instead of simple_strtok(). The tokenizer
+    // used by split_command() shares global state, which previously clobbered
+    // pipeline tokenization after the first stage.
+    char* segment = input_copy;
+    while (segment && *segment) {
+        char* sep = segment;
+        while (*sep && *sep != '|') sep++;
+        int had_pipe = (*sep == '|');
+        if (had_pipe) {
+            *sep = '\0';
+        }
+
+        char* trimmed = trim_whitespace(segment);
+        PIPE_DBG("segment raw='%s' trimmed='%s' had_pipe=%d", segment, trimmed, had_pipe);
         if (strlen(trimmed) > 0) {
             command_t* cmd = parse_command(trimmed);
-            if (cmd) {
-                if (prev_cmd) {
-                    prev_cmd->next = cmd;
-                    cmd->prev = prev_cmd;
-                } else {
-                    pipeline->first = cmd;
-                }
-                prev_cmd = cmd;
+            if (!cmd) {
+                PIPE_DBG("segment parse failed: '%s'", trimmed);
+                free(input_copy);
+                free_pipeline(pipeline);
+                return NULL;
             }
+            if (prev_cmd) {
+                prev_cmd->next = cmd;
+                cmd->prev = prev_cmd;
+            } else {
+                pipeline->first = cmd;
+            }
+            prev_cmd = cmd;
+            pipeline->command_count++;
+            PIPE_DBG("segment parsed: cmd='%s' argc=%d total=%d", cmd->name ? cmd->name : "(null)", cmd->argc, pipeline->command_count);
         }
-        token = simple_strtok(NULL, "|");
+
+        if (had_pipe) {
+            segment = sep + 1;
+        } else {
+            segment = NULL;
+        }
     }
     
     free(input_copy);
+    if (!pipeline->first || pipeline->command_count <= 0) {
+        PIPE_DBG("parse failed: empty pipeline after parsing");
+        free_pipeline(pipeline);
+        return NULL;
+    }
+    PIPE_DBG("parse success: command_count=%d", pipeline->command_count);
     return pipeline;
 }
 
@@ -653,17 +680,8 @@ int execute_simple_command(command_t* cmd) {
         // Use existing shell redirection mechanism
         start_shell_redirect();
         
-        // Execute command
-        shell_cmd_handler_t handler = find_command(cmd->name);
-        if (handler) {
-            shell_args_t args;
-            if (shell_args_parse(&args, cmd_str) == 0)
-                handler(&args);
-            else
-                printf("Command line too long: %s\n", cmd->name);
-        } else {
-            printf("Command not found: %s\n", cmd->name);
-        }
+        // Execute through unified shell path (binaries-only resolution).
+        handle_shell_command(cmd_str);
         
         // Stop redirection and write to file
         stop_shell_redirect();
@@ -692,16 +710,7 @@ int execute_simple_command(command_t* cmd) {
         }
     } else {
         // No output redirection, execute normally
-        shell_cmd_handler_t handler = find_command(cmd->name);
-        if (handler) {
-            shell_args_t args;
-            if (shell_args_parse(&args, cmd_str) == 0)
-                handler(&args);
-            else
-                printf("Command line too long: %s\n", cmd->name);
-        } else {
-            printf("Command not found: %s\n", cmd->name);
-        }
+        handle_shell_command(cmd_str);
     }
     
     // Clean up input data
@@ -734,18 +743,16 @@ int execute_background_command(command_t* cmd) {
     // Simulate background execution
     printf("Running command in background: %s\n", cmd_str);
     
-    // Execute the command (for now, synchronously)
-    shell_cmd_handler_t handler = find_command(cmd->name);
-    if (handler) {
-        shell_args_t args;
-        if (shell_args_parse(&args, cmd_str) == 0)
-            handler(&args);
-        else
-            printf("Command line too long: %s\n", cmd->name);
-    } else {
-        printf("Command not found: %s\n", cmd->name);
-        return -1;
-    }
+    // Execute through unified shell path (binaries-only resolution).
+    handle_shell_command(cmd_str);
+
+    /* Background launches must not leave fd inheritance or stdio remapping
+     * armed for the next foreground command. The child task captures whatever
+     * state it needs at spawn time; the shell should always return to its
+     * default stdio configuration after dispatch.
+     */
+    pipeline_restore_stdio_defaults();
+    syscall_reset_user_fds();
     
     // Add to background process list (simulated PID)
     int simulated_pid = add_background_process(12345, cmd_str); // Simulated PID
@@ -768,254 +775,210 @@ int execute_command(command_t* cmd) {
     return execute_simple_command(cmd);
 }
 
+static void pipeline_restore_stdio_defaults(void) {
+    syscall_reset_user_stdio_fds();
+    syscall_set_user_fd_inherit_mode(0);
+}
+
+static void pipeline_runtime_reset(void) {
+    g_pipeline_rt.pipeline = NULL;
+    g_pipeline_rt.next_cmd = NULL;
+    g_pipeline_rt.current_input_fd = 0;
+    g_pipeline_rt.pending_close_in_fd = -1;
+    g_pipeline_rt.pending_close_out_fd = -1;
+    g_pipeline_rt.active = 0;
+}
+
+static void pipeline_runtime_finish(void) {
+    if (g_pipeline_rt.pending_close_out_fd > 2) {
+        (void)syscall_kernel_close_user_fd(g_pipeline_rt.pending_close_out_fd);
+    }
+    if (g_pipeline_rt.pending_close_in_fd > 2) {
+        (void)syscall_kernel_close_user_fd(g_pipeline_rt.pending_close_in_fd);
+    }
+    if (g_pipeline_rt.current_input_fd > 2) {
+        (void)syscall_kernel_close_user_fd(g_pipeline_rt.current_input_fd);
+    }
+
+    pipeline_restore_stdio_defaults();
+    syscall_reset_user_fds();
+
+    if (g_pipeline_rt.pipeline) {
+        free_pipeline(g_pipeline_rt.pipeline);
+    }
+    pipeline_runtime_reset();
+}
+
+static int command_has_arg(command_t* cmd, const char* arg) {
+    if (!cmd || !arg || !cmd->args) return 0;
+    for (int i = 0; i < cmd->argc; ++i) {
+        if (cmd->args[i] && strcmp(cmd->args[i], arg) == 0) return 1;
+    }
+    return 0;
+}
+
+static void build_command_string(command_t* cmd, char* out, int out_cap, const char* extra_arg) {
+    if (!out || out_cap <= 0) return;
+    out[0] = '\0';
+    if (!cmd || !cmd->args) return;
+
+    for (int i = 0; i < cmd->argc && cmd->args[i]; ++i) {
+        if (i > 0) strncat(out, " ", (size_t)(out_cap - (int)strlen(out) - 1));
+        strncat(out, cmd->args[i], (size_t)(out_cap - (int)strlen(out) - 1));
+    }
+
+    if (extra_arg && extra_arg[0]) {
+        strncat(out, " ", (size_t)(out_cap - (int)strlen(out) - 1));
+        strncat(out, extra_arg, (size_t)(out_cap - (int)strlen(out) - 1));
+    }
+}
+
+static int pipeline_try_spawn_user_program(command_t* cmd, const char* extra_arg) {
+    if (!cmd || !cmd->name || !cmd->name[0]) return 0;
+
+    char target[128];
+    vfs_stat_t st;
+    uint8 exec_drive = shell_get_binary_lookup_drive();
+    const char* base = shell_get_binary_lookup_base();
+    if (!base || !base[0]) base = "/binaries";
+
+    int n = snprintf(target, sizeof(target), "%s/%s", base, cmd->name);
+    if (n <= 0 || n >= (int)sizeof(target)) return 0;
+    if (vfs_stat(exec_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) {
+        n = snprintf(target, sizeof(target), "%s/%s.uelf", base, cmd->name);
+        if (n <= 0 || n >= (int)sizeof(target)) return 0;
+        if (vfs_stat(exec_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) return 0;
+    }
+
+    const char* argv[32];
+    int argc = 0;
+    for (int i = 1; i < cmd->argc && cmd->args[i] && argc < (int)(sizeof(argv) / sizeof(argv[0])); ++i) {
+        argv[argc++] = cmd->args[i];
+    }
+    if (extra_arg && extra_arg[0] && argc < (int)(sizeof(argv) / sizeof(argv[0]))) {
+        argv[argc++] = extra_arg;
+    }
+
+    int pid = user_task_spawn_argv(exec_drive, target, argc, argv);
+    if (pid <= 0) return 0;
+    (void)user_task_waitpid(pid, NULL, 0);
+    return 1;
+}
+
 // Execute pipeline (improved implementation)
 int execute_pipeline(pipeline_t* pipeline) {
     if (!pipeline || !pipeline->first) return -1;
     if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
-    
-    if (pipeline->command_count == 1) {
-        // Single command, no pipes needed
+    PIPE_DBG("exec start command_count=%d", pipeline->command_count);
+
+    if (pipeline->command_count <= 1) {
+        PIPE_DBG("exec single command path: '%s'", pipeline->first && pipeline->first->name ? pipeline->first->name : "(null)");
         return execute_command(pipeline->first);
     }
-    
-    // For simple pipelines (2 commands), capture output and pass as input
-    if (pipeline->command_count == 2) {
-        command_t* first_cmd = pipeline->first;
-        command_t* second_cmd = first_cmd->next;
-        
-        if (!first_cmd || !second_cmd) return -1;
-        
-        // Capture output from first command
-        start_shell_redirect();
-        
-        // Execute first command
-        char first_cmd_str[512] = "";
-        for (int i = 0; i < first_cmd->argc && first_cmd->args[i]; i++) {
-            if (i > 0) strcat(first_cmd_str, " ");
-            strcat(first_cmd_str, first_cmd->args[i]);
-        }
-        
-        shell_cmd_handler_t first_handler = find_command(first_cmd->name);
-        if (first_handler) {
-            shell_args_t args;
-            if (shell_args_parse(&args, first_cmd_str) == 0) {
-                first_handler(&args);
-            } else {
-                printf("Pipeline: failed to parse command: %s\n", first_cmd_str);
-                stop_shell_redirect();
-                return -1;
-            }
-        } else {
-            printf("Command not found: %s\n", first_cmd->name);
-            stop_shell_redirect();
-            return -1;
-        }
-        
-        // Get the output
-        stop_shell_redirect();
-        char* output = shell_redirect_buf;
-        
-        // Check if second command is a filter command (like search)
-        if (strcmp(second_cmd->name, "search") == 0) {
-            // For search command, pass the output as stdin-like input
-            // Build command with pattern and mark it as filter mode
-            char second_cmd_str[1024] = "";
-            strcpy(second_cmd_str, second_cmd->name);
-            
-            // Add original arguments (the search pattern)
-            for (int i = 1; i < second_cmd->argc && second_cmd->args[i]; i++) {
-                strcat(second_cmd_str, " ");
-                strcat(second_cmd_str, second_cmd->args[i]);
-            }
-            
-            // Add special flag to indicate this is filter mode
-            strcat(second_cmd_str, " --filter");
-            
-            // Store the input data for the search command to use
-            g_pipeline_input_data = output;
-            
-            // Execute second command
-            shell_cmd_handler_t second_handler = find_command(second_cmd->name);
-            if (second_handler) {
-                shell_args_t args;
-                if (shell_args_parse(&args, second_cmd_str) == 0) {
-                    second_handler(&args);
-                } else {
-                    printf("Pipeline: failed to parse command: %s\n", second_cmd_str);
-                }
-            } else {
-                printf("Command not found: %s\n", second_cmd->name);
-            }
-            
-            // Clear the pipeline input data
-            g_pipeline_input_data = NULL;
-        } else {
-            // For other commands, pass output as arguments (original behavior)
-            char second_cmd_str[1024] = "";
-            strcpy(second_cmd_str, second_cmd->name);
-            
-            // Add original arguments
-            for (int i = 1; i < second_cmd->argc && second_cmd->args[i]; i++) {
-                strcat(second_cmd_str, " ");
-                strcat(second_cmd_str, second_cmd->args[i]);
-            }
-            
-            // Add the output from first command as additional arguments
-            // Split output by whitespace and add each word as an argument
-            char* output_copy = malloc(strlen(output) + 1);
-            if (!output_copy) {
-                printf("Pipeline: out of memory while passing output to %s\n", second_cmd->name);
-                return -1;
-            }
-            strcpy(output_copy, output);
-            
-            char* word = simple_strtok(output_copy, " \t\n\r");
-            while (word) {
-                char* trimmed = trim_whitespace(word);
-                if (strlen(trimmed) > 0) {
-                    strcat(second_cmd_str, " ");
-                    strcat(second_cmd_str, trimmed);
-                }
-                word = simple_strtok(NULL, " \t\n\r");
-            }
-            
-            free(output_copy);
-            
-            // Execute second command
-            shell_cmd_handler_t second_handler = find_command(second_cmd->name);
-            if (second_handler) {
-                shell_args_t args;
-                if (shell_args_parse(&args, second_cmd_str) == 0) {
-                    second_handler(&args);
-                } else {
-                    printf("Pipeline: failed to parse command: %s\n", second_cmd_str);
-                }
-            } else {
-                printf("Command not found: %s\n", second_cmd->name);
-            }
-        }
-        
-        return 0;
+
+    if (g_pipeline_rt.active) {
+        PIPE_DBG("exec rejected: runtime already active");
+        return -1;
     }
-    
-    // For complex pipelines (3+ commands), implement proper pipe chaining
-    if (pipeline->command_count >= 3) {
-        return execute_complex_pipeline(pipeline);
-    }
-    
-    // Fallback for any other cases
-    command_t* cmd = pipeline->first;
-    while (cmd) {
-        execute_command(cmd);
-        cmd = cmd->next;
-    }
-    
+
+    syscall_set_user_fd_inherit_mode(1);
+    g_pipeline_rt.pipeline = pipeline;
+    g_pipeline_rt.next_cmd = pipeline->first;
+    g_pipeline_rt.current_input_fd = 0;
+    g_pipeline_rt.pending_close_in_fd = -1;
+    g_pipeline_rt.pending_close_out_fd = -1;
+    g_pipeline_rt.active = 1;
+
+    PIPE_DBG("exec runtime armed; first stage='%s'", g_pipeline_rt.next_cmd && g_pipeline_rt.next_cmd->name ? g_pipeline_rt.next_cmd->name : "(null)");
     return 0;
 }
 
 // Execute complex pipeline with proper pipe chaining
 int execute_complex_pipeline(pipeline_t* pipeline) {
-    if (!pipeline || pipeline->command_count < 3) return -1;
-    if (!pipeline_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) return -1;
-    
-    // Create a chain of pipes for data flow
-    char* current_input = NULL;
-    command_t* cmd = pipeline->first;
-    int cmd_index = 0;
-    
-    while (cmd) {
-        if ((cmd_index & 0x3) == 0) pipeline_ctx_account(SCHED_COST_FS);
-        // Start shell redirection to capture output
-        start_shell_redirect();
-        
-        // Build command string
-        char cmd_str[1024] = "";
-        strcpy(cmd_str, cmd->name);
-        
-        // Add original arguments
-        for (int i = 1; i < cmd->argc && cmd->args[i]; i++) {
-            strcat(cmd_str, " ");
-            strcat(cmd_str, cmd->args[i]);
+    return execute_pipeline(pipeline);
+}
+
+int pipeline_is_runtime_active(void) {
+    return g_pipeline_rt.active;
+}
+
+// Resume one or more pending pipeline stages.
+// Returns 1 if it consumed work, 0 if no pipeline was active.
+int pipeline_resume_pending(void) {
+    if (!g_pipeline_rt.active) return 0;
+
+    int stage_idx = 0;
+    while (g_pipeline_rt.active && g_pipeline_rt.next_cmd) {
+        command_t* cmd = g_pipeline_rt.next_cmd;
+        int next_read_fd = -1;
+        int next_write_fd = -1;
+        int stage_output_fd = 1;
+
+        // Close deferred FDs from the previously completed stage.
+        if (g_pipeline_rt.pending_close_out_fd > 2) {
+            (void)syscall_kernel_close_user_fd(g_pipeline_rt.pending_close_out_fd);
+            PIPE_DBG("resume closed deferred out_fd=%d", g_pipeline_rt.pending_close_out_fd);
+            g_pipeline_rt.pending_close_out_fd = -1;
         }
-        
-        // If this is not the first command, add input from previous command
-        if (current_input) {
-            // For filter commands like search, use --filter mode
-            if (strcmp(cmd->name, "search") == 0) {
-                strcat(cmd_str, " --filter");
-                // Store input data for the command to use
-                g_pipeline_input_data = current_input;
-            } else {
-                // For other commands, append input as arguments
-                char* input_copy = malloc(strlen(current_input) + 1);
-                strcpy(input_copy, current_input);
-                
-                char* word = simple_strtok(input_copy, " \t\n\r");
-                while (word) {
-                    char* trimmed = trim_whitespace(word);
-                    if (strlen(trimmed) > 0) {
-                        strcat(cmd_str, " ");
-                        strcat(cmd_str, trimmed);
-                    }
-                    word = simple_strtok(NULL, " \t\n\r");
-                }
-                
-                free(input_copy);
-            }
+        if (g_pipeline_rt.pending_close_in_fd > 2) {
+            (void)syscall_kernel_close_user_fd(g_pipeline_rt.pending_close_in_fd);
+            PIPE_DBG("resume closed deferred in_fd=%d", g_pipeline_rt.pending_close_in_fd);
+            g_pipeline_rt.pending_close_in_fd = -1;
         }
-        
-        // Execute the command
-        shell_cmd_handler_t handler = find_command(cmd->name);
-        if (handler) {
-            shell_args_t args;
-            if (shell_args_parse(&args, cmd_str) == 0)
-                handler(&args);
-            else
-                printf("Command line too long: %s\n", cmd->name);
-        } else {
-            printf("Command not found: %s\n", cmd->name);
-            stop_shell_redirect();
-            if (current_input) free(current_input);
-            return -1;
-        }
-        
-        // Stop redirection and get output
-        stop_shell_redirect();
-        char* output = shell_redirect_buf;
-        
-        // Free previous input if it exists
-        if (current_input) {
-            free(current_input);
-        }
-        
-        // If this is not the last command, store output for next command
+
+        PIPE_DBG("resume stage %d cmd='%s' current_input_fd=%d has_next=%d", stage_idx, cmd->name ? cmd->name : "(null)", g_pipeline_rt.current_input_fd, cmd->next ? 1 : 0);
+
         if (cmd->next) {
-            current_input = malloc(strlen(output) + 1);
-            if (!current_input) {
-                printf("Pipeline: out of memory while chaining command output\n");
-                return -1;
+            if (syscall_kernel_pipe_create(&next_read_fd, &next_write_fd) != 0) {
+                printf("Pipeline: failed to create pipe\n");
+                PIPE_DBG("resume stage %d pipe_create failed", stage_idx);
+                pipeline_runtime_finish();
+                return 1;
             }
-            strcpy(current_input, output);
+            // Sequential stage execution can overrun the in-kernel pipe ring;
+            // enable bounded spool fallback for this pipeline link.
+            (void)syscall_kernel_set_user_pipe_spool(next_write_fd, 1);
+            stage_output_fd = next_write_fd;
+            PIPE_DBG("resume stage %d pipe read_fd=%d write_fd=%d", stage_idx, next_read_fd, next_write_fd);
+        }
+
+        syscall_set_user_stdio_fds(g_pipeline_rt.current_input_fd, stage_output_fd, stage_output_fd);
+        PIPE_DBG("resume stage %d stdio remap in=%d out=%d err=%d", stage_idx, g_pipeline_rt.current_input_fd, stage_output_fd, stage_output_fd);
+
+        // Advance runtime state BEFORE executing; SYSCALL_EXIT may non-locally
+        // abort back to shell loop and skip the rest of this function.
+        g_pipeline_rt.pending_close_in_fd = g_pipeline_rt.current_input_fd;
+        g_pipeline_rt.pending_close_out_fd = stage_output_fd;
+        g_pipeline_rt.current_input_fd = cmd->next ? next_read_fd : -1;
+        g_pipeline_rt.next_cmd = cmd->next;
+
+        if (g_pipeline_rt.pending_close_out_fd <= 2) g_pipeline_rt.pending_close_out_fd = -1;
+        if (g_pipeline_rt.pending_close_in_fd <= 2) g_pipeline_rt.pending_close_in_fd = -1;
+
+        if (g_pipeline_rt.pending_close_in_fd > 2 && cmd->name && strcmp(cmd->name, "search") == 0 && !command_has_arg(cmd, "--stdin")) {
+            if (!pipeline_try_spawn_user_program(cmd, "--stdin")) {
+                char cmd_str[640];
+                build_command_string(cmd, cmd_str, (int)sizeof(cmd_str), "--stdin");
+                PIPE_DBG("resume stage %d exec via handle_shell_command: %s", stage_idx, cmd_str);
+                handle_shell_command(cmd_str);
+            }
         } else {
-            // Last command - output goes to terminal (already handled by shell_redirect)
-            current_input = NULL;
+            PIPE_DBG("resume stage %d exec command path: '%s'", stage_idx, cmd->name ? cmd->name : "(null)");
+            if (!pipeline_try_spawn_user_program(cmd, NULL)) {
+                (void)execute_command(cmd);
+            }
         }
-        
-        // Clear pipeline input data if it was set
-        if (g_pipeline_input_data) {
-            g_pipeline_input_data = NULL;
-        }
-        
-        cmd = cmd->next;
-        cmd_index++;
+
+        // If execution returns normally (e.g., kernel-side command), continue
+        // to next stage immediately.
+        stage_idx++;
     }
-    
-    // Clean up
-    if (current_input) {
-        free(current_input);
+
+    if (g_pipeline_rt.active && !g_pipeline_rt.next_cmd) {
+        PIPE_DBG("resume finish pipeline");
+        pipeline_runtime_finish();
     }
-    
-    return 0;
+    return 1;
 }
 
 // Background process management

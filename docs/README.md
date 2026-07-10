@@ -7,6 +7,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 ### Core System
 - **[System Overview](system-overview.md)** - High-level architecture and design principles
 - **[Memory Management with Paging](mm/virtual-memory.md)** - Virtual memory and paging system
+- **[Low-Memory Notes](general/low-memory.md)** - Boot/runtime behavior in 4–9MB RAM targets
 - **[Panic & Assertions](general/panic.md)** - Panic screen, assertions, and developer macros
 - **[Watchdog Timer](general/watchdog.md)** - Detecting stalls and tuning timeouts
 - **[Pipeline System](general/pipeline-system.md)** - Unix-like pipelines and redirection
@@ -24,7 +25,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 - **[Shell Scripts](ui/shell-scripts.md)** - Shell scripting support
 - **[Command Aliases](ui/shell.md#aliases)** - Persistent command aliases with parameters
 - **[Tiling Manager](ui/tiling-manager.md)** - Tile-based UI and floating windows (GUI API)
-- **[Theme Customization](ui/tiling-manager.md#themes)** - Customizable colors and fonts
+- **[Theme Customization](ui/tiling-manager.md#themes)** - Customizable colours and fonts
 - **[Stats Monitor](ui/stats-gui.md)** - Graphical CPU/memory/disk monitor
 - **[Help System](ui/enhanced-help-system.md)** - Interactive help command
 - **[Command Reference](command-reference.md)** - Complete command documentation (auto-generated)
@@ -32,12 +33,14 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 ### Development Tools
 - **[Assembler](tools/assembler.md)** - Built-in NASM-compatible assembler
 - **[C Compiler](tools/chibicc.md)** - Integrated chibicc C compiler (C11 compliant)
+- **[X11 Compatibility](api/x11-compat.md)** - Source-level Xlib compatibility layer for GUI ports
 - **[UELF Format](api/userland-uelf-abi.md)** - Userland ELF executable format specification
 - **[Ring-3 Userspace](api/userland-uelf-abi.md#ring3)** - Privilege separation and protection
 - **[Program Loading](tools/loader.md)** - How user programs are loaded and executed
 
 ### Games & Applications
 - **[Game Engine](applications/game-engine.md)** - Built-in game framework
+- **[DOOM Port](applications/doom.md)** - Native DOOM port and in-OS `build_doom` workflow
 - **[Write Editor](ui/tui.md#write-editor)** - Text editor documentation
 - **[GUI Applications](ui/tiling-manager.md#gui-clients)** - Creating GUI applications
 - **[Second Reality](applications/second-reality.md)** - Second Reality demo port (visuals only)
@@ -73,6 +76,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 3. **For Debugging**: See [Quick Debug Reference](QUICK-DEBUG.md) and [Stop Codes](stop-codes.md)
 4. **For Networking**: See [Networking Overview](network/README.md) and [Quick Reference](quick-reference.md#networking-commands)
 5. **For Filesystem Work**: See [EYNFS](filesystems/eynfs.md) and [Command Reference](command-reference.md#filesystem-commands)
+6. **For Building**: Run `make docker-build` from the repository root; optionally run `make menuconfig` first if you need to adjust the final ISO configuration
 
 ## Contributing to Documentation
 

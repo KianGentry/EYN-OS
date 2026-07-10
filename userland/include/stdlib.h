@@ -13,9 +13,28 @@ void* realloc(void* p, size_t n);
 
 int atexit(void (*fn)(void));
 char* getenv(const char* name);
+extern char** environ;
+
+/* Runtime startup hook used by crt0 to publish argc/argv/envp to libc. */
+void _eyn_libc_init(int argc, char** argv, char** envp);
 
 void abort(void);
 void exit(int code);
 
+#ifndef RAND_MAX
+#define RAND_MAX 32767
+#endif
+
+int rand(void);
+void srand(unsigned int seed);
+
 unsigned long strtoul(const char* nptr, char** endptr, int base);
 long double strtold(const char* nptr, char** endptr);
+long strtol(const char* nptr, char** endptr, int base);
+double strtod(const char* nptr, char** endptr);
+
+int atoi(const char* s);
+long atol(const char* s);
+
+int    abs(int x);
+long   labs(long x);

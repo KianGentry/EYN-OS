@@ -1,0 +1,38 @@
+# build_doom.shell -- Compile DOOM from source using chibicc on EYN-OS
+#
+# Usage:  build_doom
+#
+# This script invokes chibicc to:
+#   1. Compile doom_unity.c → assembly (.s)
+#   2. Assemble + link the assembly → UELF binary
+#
+# The resulting binary is placed at /binaries/doom_chibicc
+# and can be run directly from the shell.
+
+set CC=chibicc
+set SRC=/DOOM/doom_unity.c
+set ASM=/doom_compiled.s
+set OUT=/binaries/doom_chibicc
+
+echo ========================================
+echo  Building DOOM from source using chibicc
+echo ========================================
+
+echo [1/2] Compiling C to assembly...
+$CC -m32 -I/DOOM -I/include -DNORMALUNIX -DLINUX -USNDSERV -S -o $ASM $SRC
+
+if -f $ASM
+    echo [2/2] Assembling and linking...
+    $CC --as $ASM -o $OUT
+
+    if -f $OUT
+        echo ========================================
+        echo  Build complete: $OUT
+        echo  Run with: doom_chibicc
+        echo ========================================
+    else
+        echo Error: Linking failed -- output not created
+    endif
+else
+    echo Error: Compilation failed -- assembly not created
+endif

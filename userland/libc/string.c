@@ -1,17 +1,28 @@
 #include <string.h>
+#include <stdint.h>
 
 // malloc/free are provided by userland/libc/stdlib.c
 void* malloc(size_t n);
 
+static int cstr_ptr_is_invalid(const char* s) {
+    if (!s) return 1;
+    /*
+     * User mappings start well above the first page in EYN-OS.
+     * Treat near-null pointers as invalid to avoid crashing formatter paths
+     * when buggy callers pass values like 0x2c as a string pointer.
+     */
+    return ((uintptr_t)s < 0x1000u);
+}
+
 size_t strlen(const char* s) {
     size_t n = 0;
-    if (!s) return 0;
+    if (cstr_ptr_is_invalid(s)) return 0;
     while (s[n]) n++;
     return n;
 }
 
 size_t strnlen(const char* s, size_t maxlen) {
-    if (!s) return 0;
+    if (cstr_ptr_is_invalid(s)) return 0;
     size_t n = 0;
     while (n < maxlen && s[n]) n++;
     return n;
@@ -19,8 +30,8 @@ size_t strnlen(const char* s, size_t maxlen) {
 
 int strcmp(const char* a, const char* b) {
     if (a == b) return 0;
-    if (!a) return -1;
-    if (!b) return 1;
+    if (cstr_ptr_is_invalid(a)) return -1;
+    if (cstr_ptr_is_invalid(b)) return 1;
     while (*a && (*a == *b)) { a++; b++; }
     return (unsigned char)*a - (unsigned char)*b;
 }
@@ -28,8 +39,8 @@ int strcmp(const char* a, const char* b) {
 int strncmp(const char* a, const char* b, size_t n) {
     if (n == 0) return 0;
     if (a == b) return 0;
-    if (!a) return -1;
-    if (!b) return 1;
+    if (cstr_ptr_is_invalid(a)) return -1;
+    if (cstr_ptr_is_invalid(b)) return 1;
     while (n && *a && (*a == *b)) { a++; b++; n--; }
     if (n == 0) return 0;
     return (unsigned char)*a - (unsigned char)*b;
@@ -186,6 +197,19 @@ int strncasecmp(const char* a, const char* b, size_t n) {
         if (a[i] == '\0') return 0;
     }
     return 0;
+}
+
+int strcasecmp(const char* a, const char* b) {
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    while (*a && *b) {
+        unsigned char ca = tolower_ascii((unsigned char)*a);
+        unsigned char cb = tolower_ascii((unsigned char)*b);
+        if (ca != cb) return (int)ca - (int)cb;
+        a++; b++;
+    }
+    return tolower_ascii((unsigned char)*a) - tolower_ascii((unsigned char)*b);
 }
 
 static int is_delim(char c, const char* delim) {

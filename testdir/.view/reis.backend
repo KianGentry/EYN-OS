@@ -1,0 +1,5 @@
+name=reis
+kind=audio
+extensions=.reis
+magic32=0x52454953
+exec=/binaries/view_backend_reis

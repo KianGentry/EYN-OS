@@ -87,6 +87,7 @@ Think of EYN-OS as a custom-built house. Instead of buying pre-made rooms (libra
 - **Shell System**: Command-line interface with streaming command architecture
 - **Help System**: Interactive documentation viewer with dual-pane layout
 - **File Rendering**: Support for REI images and Markdown formatting
+- **GUI Compatibility**: Source-level X11/Xlib shim for lightweight desktop-style ports
 
 #### Fonts and text rendering
 
@@ -94,13 +95,14 @@ EYN-OS renders text using a bitmap **system font** provided by the VGA driver.
 
 - Default system font path: `/fonts/unscii-16.hex` (8×16)
 - Fonts live in the EYNFS image under `/fonts/` (the build tooling copies the repository `fonts/` directory into the disk image)
-- The active system font can be switched at runtime via the `setfont` shell command (see docs/command-reference.md)
+- The active system font can be switched at runtime via the `setfont` shell command (supports `.hex`, `.otf`, and `.ttf`; see docs/command-reference.md)
 
-Important limitation: most UI/terminal code renders **bytes (0–255)** as glyph indices. Unicode-indexed `.hex` fonts are supported for loading, but full Unicode text rendering/mapping is not yet implemented.
+Important limitation: most UI/terminal code renders **bytes (0–255)** as glyph indices. Unicode-indexed fonts are supported for loading, but full Unicode text rendering/mapping is not yet implemented.
 
 ### Development Tools
 - **Assembler**: Built-in NASM-compatible assembler for assembly development
 - **C Compiler**: Integrated chibicc compiler for C development (C11 compliant)
+- **In-OS Build Workflow**: Shell scripts and chibicc can compile sizeable userland programs from inside EYN-OS
 - **Executable Formats**: 
   - Native flat binaries (`.eyn`)
   - UELF format (`.uelf`) - ELF32-based ring-3 userspace programs
@@ -110,6 +112,8 @@ Important limitation: most UI/terminal code renders **bytes (0–255)** as glyph
 
 ### Applications
 - **Game Engine**: Framework for built-in games (Snake, Maze Runner)
+- **DOOM Port**: Native userland port with both host-built and in-OS chibicc-built workflows
+- **X11 Demo Apps**: Example compatibility ports such as `xeyes`
 - **Text Editor**: Write editor for file editing
 - **Utilities**: Math functions, search, sort, random number generation
 - **File Operations**: Copy, move, and advanced file management
@@ -275,7 +279,7 @@ Loaded on-demand to conserve memory:
 - **Aliases** (Jan 2026): Persistent command aliases with parameter substitution
 - **Window Resizing** (Jan 2026): Dynamic window sizing in tiling manager
 - **REIV Format** (Dec 2025): Video/GIF playback support (MP4→REIV converter)
-- **Theme Customization** (Jan 2026): Customizable tiling manager colors and fonts
+- **Theme Customization** (Jan 2026): Customizable tiling manager colours and fonts
 - **Watchdog** (Dec 2025): Hang detection and recovery system
 - **Partitioning** (Dec 2025): MBR partition support, multi-partition disk images
 - **PCI Enumeration** (Dec 2025): Device scanning and identification

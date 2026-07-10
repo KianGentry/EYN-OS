@@ -2,20 +2,70 @@ COMPILER = gcc
 LINKER = ld
 ASSEMBLER = nasm
 
+CONFIG_FILE ?= .eynosconfig
+-include $(CONFIG_FILE)
+
+# Build mode configuration (TTY/GUI)
+CONFIG_GUI_ENABLED ?= 1
+CONFIG_TTY_ENABLED ?= 1
+CONFIG_DEBUG_SERIAL_TO_VGA ?= 0
+
+# List of packages to exclude in TTY-only mode (no GUI)
+TTY_EXCLUDES := xeyes draw rect fontpreview gui_demo win_test kwin_test tiling \
+                settings theme title setfont setbg clearbg view_backend_bmp \
+                view_backend_builtin view_backend_rei view_backend_reis \
+                view_backend_reiv tetris snake breakout doom zsnes_1_51
+
+# Target architecture selection for portability work.
+ARCH ?= i386
+SUPPORTED_ARCHES := i386 amd64
+OBJDIR := obj/$(ARCH)
+
+ifeq ($(filter $(ARCH),$(SUPPORTED_ARCHES)),)
+$(error Unsupported ARCH '$(ARCH)'. Supported values: $(SUPPORTED_ARCHES))
+endif
+
 # Prefer grub2-mkrescue if available; fall back to grub-mkrescue
 # Path is resolved at parse time; if neither exists, we'll stop in the build rule with a friendly message
 GRUB_MKRESCUE := $(shell command -v grub2-mkrescue 2>/dev/null || command -v grub-mkrescue 2>/dev/null)
 
 # Kernel (freestanding) compiler flags
 # Note: keep frame pointers for stack traces; avoid stack protector & fortify in freestanding kernel
-KERNEL_CFLAGS = -m32 -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-common \
+CPU_HAS_INVLPG ?= 0
+CONFIG_SCHED_MLFQ ?= 1
+CONFIG_SCHED_MLFQ_IRQ_PREEMPT ?= 0
+CONFIG_SCHED_MLFQ_Q0_MS ?= 10
+CONFIG_SCHED_MLFQ_Q1_MS ?= 25
+CONFIG_SCHED_MLFQ_Q2_MS ?= 50
+CONFIG_SCHED_MLFQ_BOOST_MS ?= 1000
+CONFIG_ATA_LBA48_SMOKE ?= 0
+CONFIG_RUST_ALLOCATOR ?= 0
+CONFIG_RUST_EYNFS ?= 0
+
+ARCH_KERNEL_CFLAGS_i386 = -m32 -march=i386 -mtune=i386 -DEYNOS_ARCH_I386=1
+ARCH_KERNEL_CFLAGS_amd64 = -m64 -march=x86-64 -mtune=generic -mno-red-zone -DEYNOS_ARCH_AMD64=1
+
+KERNEL_CFLAGS = $(ARCH_KERNEL_CFLAGS_$(ARCH)) -c -ffreestanding -fno-builtin -fno-omit-frame-pointer -fno-common -MMD -MP \
 		 -Os -fno-strict-overflow -fwrapv \
+		 -DCONFIG_CPU_HAS_INVLPG=$(CPU_HAS_INVLPG) \
+		 -DCONFIG_SCHED_MLFQ=$(CONFIG_SCHED_MLFQ) \
+		 -DCONFIG_SCHED_MLFQ_IRQ_PREEMPT=$(CONFIG_SCHED_MLFQ_IRQ_PREEMPT) \
+		 -DCONFIG_SCHED_MLFQ_Q0_MS=$(CONFIG_SCHED_MLFQ_Q0_MS) \
+		 -DCONFIG_SCHED_MLFQ_Q1_MS=$(CONFIG_SCHED_MLFQ_Q1_MS) \
+		 -DCONFIG_SCHED_MLFQ_Q2_MS=$(CONFIG_SCHED_MLFQ_Q2_MS) \
+		 -DCONFIG_SCHED_MLFQ_BOOST_MS=$(CONFIG_SCHED_MLFQ_BOOST_MS) \
+		 -DCONFIG_ATA_LBA48_SMOKE=$(CONFIG_ATA_LBA48_SMOKE) \
+		 -DCONFIG_RUST_ALLOCATOR=$(CONFIG_RUST_ALLOCATOR) \
+		 -DCONFIG_RUST_EYNFS=$(CONFIG_RUST_EYNFS) \
+		 -DCONFIG_GUI_ENABLED=$(CONFIG_GUI_ENABLED) \
+		 -DCONFIG_TTY_ENABLED=$(CONFIG_TTY_ENABLED) \
+	         -DCONFIG_DEBUG_SERIAL_TO_VGA=$(CONFIG_DEBUG_SERIAL_TO_VGA) \
 		 -fdata-sections -ffunction-sections \
 		 -I include/ -I include/cpu -I include/drivers -I include/misc -I include/graphics -I include/network -I include/utilities -I include/utilities/shell \
 		 -Wall -Wextra -Werror=implicit-function-declaration -Wformat=2 -Wformat-security \
 		 -Wno-unused-parameter -Wno-unused-variable \
 		 -Wnull-dereference -Wmissing-prototypes -Wstrict-prototypes -Wold-style-definition \
-		 -Wpointer-arith -Wshadow -Wundef -Wredundant-decls -Wswitch-enum -Wswitch-default
+		 -Wpointer-arith -Wshadow -Wundef -Wredundant-decls -Wswitch-enum -Wswitch-default \
 
 # Map legacy CFLAGS to kernel flags to avoid touching all compile rules below
 CFLAGS = $(KERNEL_CFLAGS)
@@ -33,12 +83,48 @@ HOST_LDFLAGS = -Wl,-z,relro,-z,now
 # Optional toggles (not wired to rules by default)
 DEBUG_CFLAGS = $(KERNEL_CFLAGS) -g -O0 -DDEBUG -D_DEBUG
 RELEASE_CFLAGS = $(KERNEL_CFLAGS) -O2 -DNDEBUG
-ASFLAGS = -f elf32
+ARCH_ASFLAGS_i386 = -f elf32
+ARCH_ASFLAGS_amd64 = -f elf64
+ASFLAGS = $(ARCH_ASFLAGS_$(ARCH))
 ## Linker flags: target i386 linker script, enable section GC, strip symbols, and emit a map
 TMPDIR ?= tmp_user
 BOOTDIR = $(TMPDIR)/boot
-LDFLAGS = -m elf_i386 -T src/boot/link.ld --gc-sections -Map $(BOOTDIR)/kernel.map -s
-EMULATOR = qemu-system-i386
+ARCH_LDFORMAT_i386 = elf_i386
+ARCH_LDFORMAT_amd64 = elf_x86_64
+ARCH_LINK_SCRIPT_i386 = src/boot/link.ld
+ARCH_LINK_SCRIPT_amd64 = src/boot/link_amd64.ld
+LDFLAGS = -m $(ARCH_LDFORMAT_$(ARCH)) -T $(ARCH_LINK_SCRIPT_$(ARCH)) --gc-sections -Map $(BOOTDIR)/kernel.map -s
+
+ARCH_IDT_SRC_i386 = src/cpu/idt.c
+ARCH_IDT_SRC_amd64 = src/cpu/idt_amd64_stub.c
+ARCH_FPU_SRC_i386 = src/cpu/fpu.c
+ARCH_FPU_SRC_amd64 = src/cpu/fpu_amd64.c
+ARCH_CPUID_SRC_i386 = src/cpu/cpuid.c
+ARCH_CPU_ARCH_SRC_i386 = src/cpu/arch.c
+ARCH_CPU_ARCH_SRC_amd64 = src/cpu/arch_amd64.c
+ARCH_ISR_STUB_SRC_i386 = src/cpu/isr.asm
+ARCH_ISR_STUB_SRC_amd64 = src/cpu/isr_amd64.asm
+ARCH_IRQ_STUB_SRC_i386 = src/cpu/irq.asm
+ARCH_IRQ_STUB_SRC_amd64 = src/cpu/irq_amd64.asm
+ARCH_SYSCALL_STUB_SRC_i386 = src/cpu/syscall.asm
+ARCH_SYSCALL_STUB_SRC_amd64 = src/cpu/syscall_amd64.asm
+ARCH_BOOT_SRC_i386 = src/boot/kernel.asm
+ARCH_BOOT_SRC_amd64 = src/boot/kernel_amd64.asm
+ARCH_MEM_ASM_SRC_i386 = src/misc/mem386.asm
+ARCH_MEM_ASM_SRC_amd64 = src/misc/mem_amd64.asm
+ARCH_GDT_SRC_i386 = src/cpu/gdt.c
+ARCH_GDT_SRC_amd64 = src/cpu/gdt_amd64.c
+ARCH_GDT_ASM_SRC_i386 = src/cpu/gdt.asm
+ARCH_GDT_ASM_SRC_amd64 = src/cpu/gdt_amd64.asm
+
+ARCH_EMULATOR_i386 = qemu-system-i386
+ARCH_EMULATOR_amd64 = qemu-system-x86_64
+EMULATOR = $(ARCH_EMULATOR_$(ARCH))
+
+RUSTC ?= rustc
+RUSTFLAGS_KERNEL_i386 = --target i686-unknown-linux-gnu
+RUSTFLAGS_KERNEL_amd64 = --target x86_64-unknown-linux-gnu
+RUSTFLAGS_KERNEL_COMMON = --crate-type lib --emit=obj -C panic=abort -C opt-level=s -C relocation-model=static
 
 # QEMU display backend.
 QEMU_DISPLAY ?= gtk,grab-on-hover=on
@@ -51,285 +137,354 @@ QEMU_DISPLAY ?= gtk,grab-on-hover=on
 QEMU_ENV ?= GDK_BACKEND=x11
 EMULATOR_FLAGS = -kernel
 
-OBJS = obj/kasm.o obj/kc.o obj/gdt.o obj/gdt_asm.o obj/idt.o obj/isr.o obj/isr_stubs.o obj/syscall.o obj/fpu.o obj/kb.o obj/string.o obj/system.o obj/arch.o obj/util.o obj/shell.o obj/shell_args.o obj/math.o obj/vga.o obj/serial.o obj/fat32.o obj/ata.o obj/eynfs.o obj/rei.o obj/reiv.o obj/shell_commands.o obj/fs_commands.o obj/fdisk_commands.o obj/format_command.o obj/write_editor.o obj/tui.o obj/help_tui.o obj/assemble.o obj/instruction_set.o obj/linker.o obj/run_command.o obj/shell_script.o obj/history.o obj/subcommands.o obj/alias.o obj/alias_cmd.o obj/predictive_memory.o obj/predictive_commands.o obj/zero_copy.o obj/zero_copy_commands.o obj/vmm.o obj/paging_compat.o obj/user_access.o obj/pipeline.o obj/kernel_api.o obj/native_exec.o obj/native_run.o obj/user_elf.o obj/sched.o obj/irq.o obj/irq_stubs.o obj/mouse.o obj/draw_gui.o obj/image_viewer_gui.o obj/window_test.o obj/vfs.o obj/stats_gui.o obj/panic.o obj/watchdog.o obj/capabilities.o obj/segdom.o obj/crashlog.o obj/context.o obj/fs_txn.o obj/linux_syscalls.o
+OBJS = $(OBJDIR)/kasm.o $(OBJDIR)/kc.o $(OBJDIR)/gdt.o $(OBJDIR)/gdt_asm.o $(OBJDIR)/idt.o $(OBJDIR)/isr.o $(OBJDIR)/isr_stubs.o $(OBJDIR)/syscall.o $(OBJDIR)/fpu.o $(OBJDIR)/cpuid.o $(OBJDIR)/kb.o $(OBJDIR)/string.o $(OBJDIR)/system.o $(OBJDIR)/arch.o $(OBJDIR)/util.o $(OBJDIR)/mem386.o $(OBJDIR)/slab.o $(OBJDIR)/shell.o $(OBJDIR)/shell_args.o $(OBJDIR)/math.o $(OBJDIR)/vga.o $(OBJDIR)/vga_text.o $(OBJDIR)/serial.o $(OBJDIR)/fat32.o $(OBJDIR)/ata.o $(OBJDIR)/ahci.o $(OBJDIR)/eynfs.o $(OBJDIR)/rei.o $(OBJDIR)/reiv.o $(OBJDIR)/tui.o $(OBJDIR)/run_command.o $(OBJDIR)/history.o $(OBJDIR)/alias.o $(OBJDIR)/predictive_memory.o $(OBJDIR)/zero_copy.o $(OBJDIR)/vmm.o $(OBJDIR)/paging_compat.o $(OBJDIR)/user_access.o $(OBJDIR)/pipeline.o $(OBJDIR)/kernel_api.o $(OBJDIR)/native_exec.o $(OBJDIR)/user_elf.o $(OBJDIR)/sched.o $(OBJDIR)/irq.o $(OBJDIR)/irq_stubs.o $(OBJDIR)/mouse.o $(OBJDIR)/vfs.o $(OBJDIR)/panic.o $(OBJDIR)/watchdog.o $(OBJDIR)/capabilities.o $(OBJDIR)/segdom.o $(OBJDIR)/crashlog.o $(OBJDIR)/context.o $(OBJDIR)/fs_txn.o $(OBJDIR)/linux_syscalls.o
 
-OBJS += obj/tiling_manager.o obj/tiling_cmd.o obj/theme_cmd.o obj/ui_prefs.o
-OBJS += obj/terminals.o
-OBJS += obj/partition.o obj/diskmgr.o
-OBJS += obj/pci.o
-OBJS += obj/e1000.o
-OBJS += obj/netstack.o
+OBJS += $(OBJDIR)/tiling_manager.o $(OBJDIR)/ui_prefs.o $(OBJDIR)/system_config.o
+OBJS += $(OBJDIR)/terminals.o
+OBJS += $(OBJDIR)/partition.o
+OBJS += $(OBJDIR)/pci.o
+OBJS += $(OBJDIR)/e100.o
+OBJS += $(OBJDIR)/e1000.o
+OBJS += $(OBJDIR)/netstack.o
+OBJS += $(OBJDIR)/shell_script.o
+OBJS += $(OBJDIR)/ac97.o
+OBJS += $(OBJDIR)/reis.o
+OBJS += $(OBJDIR)/otf_font.o
+
+ifeq ($(CONFIG_RUST_ALLOCATOR),1)
+OBJS += $(OBJDIR)/rust_alloc.o
+endif
+
+ifeq ($(CONFIG_RUST_EYNFS),1)
+OBJS += $(OBJDIR)/rust_eynfs.o
+endif
+
+ifeq ($(ARCH),i386)
+OBJS += $(OBJDIR)/vbe_bios.o
+endif
 OUTPUT = $(BOOTDIR)/kernel.bin
 
 # Source files to object files
 
-all:$(OBJS)
+all: $(OBJS)
 	mkdir $(TMPDIR)/ -p
 	mkdir $(BOOTDIR)/ -p
 	$(LINKER) $(LDFLAGS) -o $(OUTPUT) $(OBJS)
 
+$(OBJS): | preflight
+
+.PHONY: preflight
+preflight:
+	@mkdir -p $(OBJDIR)/
+
+.PHONY: preflight-arch
+preflight-arch:
+	@echo "[preflight] ARCH=$(ARCH)"
+	@echo "[preflight] CFLAGS: $(ARCH_KERNEL_CFLAGS_$(ARCH))"
+	@echo "[preflight] ASFLAGS: $(ARCH_ASFLAGS_$(ARCH))"
+	@echo "[preflight] LDFORMAT: $(ARCH_LDFORMAT_$(ARCH))"
+	@echo "[preflight] LINK_SCRIPT: $(ARCH_LINK_SCRIPT_$(ARCH))"
+	@if [ ! -f "$(ARCH_LINK_SCRIPT_$(ARCH))" ]; then \
+		echo "[preflight] ERROR: missing linker script $(ARCH_LINK_SCRIPT_$(ARCH))"; \
+		exit 1; \
+	fi
+	@if [ "$(ARCH)" = "amd64" ]; then \
+		echo "[preflight] amd64 compile/link scaffolding: ready"; \
+		echo "[preflight] amd64 runtime note: long-mode interrupt/syscall/user ABI paths are still in progress"; \
+	fi
+
 docs: all
 	python3 devtools/generate_command_docs.py src/
 
-obj/kasm.o:src/boot/kernel.asm
-	mkdir obj/ -p
-	$(ASSEMBLER) $(ASFLAGS) -o obj/kasm.o src/boot/kernel.asm
+.PHONY: test-rust-allocator
+test-rust-allocator:
+	@echo "[test-rust-allocator] Build util.c with Rust allocator OFF"
+	$(MAKE) obj/i386/util.o ARCH=i386 CONFIG_RUST_ALLOCATOR=0
+	@echo "[test-rust-allocator] Build rust_alloc.o with Rust allocator ON"
+	$(MAKE) obj/i386/rust_alloc.o ARCH=i386 CONFIG_RUST_ALLOCATOR=1
+	@echo "[test-rust-allocator] Build util.c and zero_copy.c with Rust allocator ON"
+	$(MAKE) obj/i386/util.o obj/i386/zero_copy.o ARCH=i386 CONFIG_RUST_ALLOCATOR=1
+	@echo "[test-rust-allocator] Build full kernel with Rust allocator ON"
+	$(MAKE) all ARCH=i386 CONFIG_RUST_ALLOCATOR=1
 
-obj/syscall.o:src/cpu/syscall.asm
-	mkdir obj/ -p
-	$(ASSEMBLER) $(ASFLAGS) -o obj/syscall.o src/cpu/syscall.asm
+.PHONY: test-rust-eynfs
+test-rust-eynfs:
+	@echo "[test-rust-eynfs] Build eynfs.c with Rust EYNFS OFF"
+	$(MAKE) obj/i386/eynfs.o ARCH=i386 CONFIG_RUST_EYNFS=0
+	@echo "[test-rust-eynfs] Build rust_eynfs.o with Rust EYNFS ON"
+	$(MAKE) obj/i386/rust_eynfs.o ARCH=i386 CONFIG_RUST_EYNFS=1
+	@echo "[test-rust-eynfs] Build eynfs.c with Rust EYNFS ON"
+	$(MAKE) obj/i386/eynfs.o ARCH=i386 CONFIG_RUST_EYNFS=1
+	@echo "[test-rust-eynfs] Build full kernel with Rust EYNFS ON"
+	$(MAKE) all ARCH=i386 CONFIG_RUST_EYNFS=1
 
-obj/isr_stubs.o:src/cpu/isr.asm
-	mkdir obj/ -p
-	$(ASSEMBLER) $(ASFLAGS) -o obj/isr_stubs.o src/cpu/isr.asm
+$(OBJDIR)/kasm.o:$(ARCH_BOOT_SRC_$(ARCH))
+	mkdir $(OBJDIR)/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/kasm.o $(ARCH_BOOT_SRC_$(ARCH))
 
-obj/irq_stubs.o:src/cpu/irq.asm
-	mkdir obj/ -p
-	$(ASSEMBLER) $(ASFLAGS) -o obj/irq_stubs.o src/cpu/irq.asm
+$(OBJDIR)/syscall.o:$(ARCH_SYSCALL_STUB_SRC_$(ARCH))
+	mkdir $(OBJDIR)/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/syscall.o $(ARCH_SYSCALL_STUB_SRC_$(ARCH))
+
+$(OBJDIR)/isr_stubs.o:$(ARCH_ISR_STUB_SRC_$(ARCH))
+	mkdir $(OBJDIR)/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/isr_stubs.o $(ARCH_ISR_STUB_SRC_$(ARCH))
+
+$(OBJDIR)/irq_stubs.o:$(ARCH_IRQ_STUB_SRC_$(ARCH))
+	mkdir $(OBJDIR)/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/irq_stubs.o $(ARCH_IRQ_STUB_SRC_$(ARCH))
+
+$(OBJDIR)/mem386.o:$(ARCH_MEM_ASM_SRC_$(ARCH))
+	mkdir $(OBJDIR)/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/mem386.o $(ARCH_MEM_ASM_SRC_$(ARCH))
+
+ifeq ($(ARCH),i386)
+$(OBJDIR)/vbe_bios.o:src/drivers/vbe_bios_i386.asm
+	mkdir $(OBJDIR)/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/vbe_bios.o src/drivers/vbe_bios_i386.asm
+endif
 	
-obj/kc.o:src/entry/kernel.c
-	$(COMPILER) $(CFLAGS) src/entry/kernel.c -o obj/kc.o 
+$(OBJDIR)/kc.o:src/entry/kernel.c
+	$(COMPILER) $(CFLAGS) src/entry/kernel.c -o $(OBJDIR)/kc.o 
 	
-obj/idt.o:src/cpu/idt.c
-	$(COMPILER) $(CFLAGS) src/cpu/idt.c -o obj/idt.o 
+$(OBJDIR)/idt.o:$(ARCH_IDT_SRC_$(ARCH))
+	$(COMPILER) $(CFLAGS) $(ARCH_IDT_SRC_$(ARCH)) -o $(OBJDIR)/idt.o 
 
-obj/fpu.o:src/cpu/fpu.c
-	$(COMPILER) $(CFLAGS) src/cpu/fpu.c -o obj/fpu.o
+$(OBJDIR)/fpu.o:$(ARCH_FPU_SRC_$(ARCH))
+	$(COMPILER) $(CFLAGS) $(ARCH_FPU_SRC_$(ARCH)) -o $(OBJDIR)/fpu.o
 
-obj/gdt.o:src/cpu/gdt.c
-	$(COMPILER) $(CFLAGS) src/cpu/gdt.c -o obj/gdt.o
+$(OBJDIR)/cpuid.o:src/cpu/cpuid.c
+	$(COMPILER) $(CFLAGS) src/cpu/cpuid.c -o $(OBJDIR)/cpuid.o
 
-obj/gdt_asm.o:src/cpu/gdt.asm
-	mkdir obj/ -p
-	$(ASSEMBLER) $(ASFLAGS) -o obj/gdt_asm.o src/cpu/gdt.asm
+$(OBJDIR)/gdt.o:$(ARCH_GDT_SRC_$(ARCH))
+	$(COMPILER) $(CFLAGS) $(ARCH_GDT_SRC_$(ARCH)) -o $(OBJDIR)/gdt.o
 
-obj/kb.o:src/drivers/kb.c
-	$(COMPILER) $(CFLAGS) src/drivers/kb.c -o obj/kb.o
+$(OBJDIR)/gdt_asm.o:$(ARCH_GDT_ASM_SRC_$(ARCH))
+	mkdir $(OBJDIR)/ -p
+	$(ASSEMBLER) $(ASFLAGS) -o $(OBJDIR)/gdt_asm.o $(ARCH_GDT_ASM_SRC_$(ARCH))
 
-obj/isr.o:src/cpu/isr.c
-	$(COMPILER) $(CFLAGS) src/cpu/isr.c -o obj/isr.o
+$(OBJDIR)/kb.o:src/drivers/kb.c
+	$(COMPILER) $(CFLAGS) src/drivers/kb.c -o $(OBJDIR)/kb.o
 
-obj/user_elf.o:src/cpu/user_elf.c
-	$(COMPILER) $(CFLAGS) src/cpu/user_elf.c -o obj/user_elf.o
+$(OBJDIR)/isr.o:src/cpu/isr.c
+	$(COMPILER) $(CFLAGS) src/cpu/isr.c -o $(OBJDIR)/isr.o
 
-obj/string.o:src/utilities/shell/string.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/string.c -o obj/string.o
+$(OBJDIR)/user_elf.o:src/cpu/user_elf.c
+	$(COMPILER) $(CFLAGS) src/cpu/user_elf.c -o $(OBJDIR)/user_elf.o
 
-obj/shell_args.o:src/utilities/shell/shell_args.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/shell_args.c -o obj/shell_args.o
+$(OBJDIR)/string.o:src/utilities/shell/string.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/string.c -o $(OBJDIR)/string.o
 
-obj/system.o:src/cpu/system.c
-	$(COMPILER) $(CFLAGS) src/cpu/system.c -o obj/system.o
+$(OBJDIR)/shell_args.o:src/utilities/shell/shell_args.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/shell_args.c -o $(OBJDIR)/shell_args.o
 
-obj/arch.o:src/cpu/arch.c
-	$(COMPILER) $(CFLAGS) src/cpu/arch.c -o obj/arch.o
+$(OBJDIR)/system.o:src/cpu/system.c
+	$(COMPILER) $(CFLAGS) src/cpu/system.c -o $(OBJDIR)/system.o
 
-obj/util.o:src/utilities/util.c
-	$(COMPILER) $(CFLAGS) src/utilities/util.c -o obj/util.o
+$(OBJDIR)/arch.o:$(ARCH_CPU_ARCH_SRC_$(ARCH))
+	$(COMPILER) $(CFLAGS) $(ARCH_CPU_ARCH_SRC_$(ARCH)) -o $(OBJDIR)/arch.o
+
+$(OBJDIR)/util.o:src/utilities/util.c
+	$(COMPILER) $(CFLAGS) src/utilities/util.c -o $(OBJDIR)/util.o
+
+ifeq ($(CONFIG_RUST_ALLOCATOR),1)
+$(OBJDIR)/rust_alloc.o:src/rust/rust_alloc.rs
+	$(RUSTC) $(RUSTFLAGS_KERNEL_$(ARCH)) $(RUSTFLAGS_KERNEL_COMMON) src/rust/rust_alloc.rs -o $(OBJDIR)/rust_alloc.o
+endif
+
+ifeq ($(CONFIG_RUST_EYNFS),1)
+$(OBJDIR)/rust_eynfs.o:src/rust/rust_eynfs.rs
+	$(RUSTC) $(RUSTFLAGS_KERNEL_$(ARCH)) $(RUSTFLAGS_KERNEL_COMMON) src/rust/rust_eynfs.rs -o $(OBJDIR)/rust_eynfs.o
+endif
+
+$(OBJDIR)/slab.o:src/mm/slab.c
+	$(COMPILER) $(CFLAGS) src/mm/slab.c -o $(OBJDIR)/slab.o
 	
-obj/shell.o:src/utilities/shell/shell.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/shell.c -o obj/shell.o
+$(OBJDIR)/shell.o:src/utilities/shell/shell.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/shell.c -o $(OBJDIR)/shell.o
 
-obj/math.o:src/utilities/basic/math.c
-	$(COMPILER) $(CFLAGS) src/utilities/basic/math.c -o obj/math.o
+$(OBJDIR)/shell_script.o:src/utilities/shell/shell_script.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/shell_script.c -o $(OBJDIR)/shell_script.o
 
-obj/vga.o:src/drivers/vga.c
-	$(COMPILER) $(CFLAGS) src/drivers/vga.c -o obj/vga.o
-obj/mouse.o:src/drivers/mouse.c
-	$(COMPILER) $(CFLAGS) src/drivers/mouse.c -o obj/mouse.o
+$(OBJDIR)/math.o:src/utilities/basic/math.c
+	$(COMPILER) $(CFLAGS) src/utilities/basic/math.c -o $(OBJDIR)/math.o
 
-obj/serial.o:src/drivers/serial.c
-	$(COMPILER) $(CFLAGS) src/drivers/serial.c -o obj/serial.o
+$(OBJDIR)/vga.o:src/drivers/vga.c
+	$(COMPILER) $(CFLAGS) src/drivers/vga.c -o $(OBJDIR)/vga.o
+$(OBJDIR)/vga_text.o:src/drivers/vga_text.c
+	$(COMPILER) $(CFLAGS) src/drivers/vga_text.c -o $(OBJDIR)/vga_text.o
+$(OBJDIR)/mouse.o:src/drivers/mouse.c
+	$(COMPILER) $(CFLAGS) src/drivers/mouse.c -o $(OBJDIR)/mouse.o
 
-obj/pci.o:src/drivers/pci.c
-	$(COMPILER) $(CFLAGS) src/drivers/pci.c -o obj/pci.o
+$(OBJDIR)/serial.o:src/drivers/serial.c
+	$(COMPILER) $(CFLAGS) src/drivers/serial.c -o $(OBJDIR)/serial.o
 
-obj/e1000.o:src/drivers/e1000.c
-	$(COMPILER) $(CFLAGS) src/drivers/e1000.c -o obj/e1000.o
+$(OBJDIR)/pci.o:src/drivers/pci.c
+	$(COMPILER) $(CFLAGS) src/drivers/pci.c -o $(OBJDIR)/pci.o
 
-obj/netstack.o:src/network/netstack.c
-	$(COMPILER) $(CFLAGS) src/network/netstack.c -o obj/netstack.o
+$(OBJDIR)/e100.o:src/drivers/e100.c
+	$(COMPILER) $(CFLAGS) src/drivers/e100.c -o $(OBJDIR)/e100.o
 
-obj/panic.o:src/misc/panic.c
-	$(COMPILER) $(CFLAGS) src/misc/panic.c -o obj/panic.o
+$(OBJDIR)/e1000.o:src/drivers/e1000.c
+	$(COMPILER) $(CFLAGS) src/drivers/e1000.c -o $(OBJDIR)/e1000.o
 
-obj/watchdog.o:src/misc/watchdog.c
-	$(COMPILER) $(CFLAGS) src/misc/watchdog.c -o obj/watchdog.o
+$(OBJDIR)/netstack.o:src/network/netstack.c
+	$(COMPILER) $(CFLAGS) src/network/netstack.c -o $(OBJDIR)/netstack.o
 
-obj/capabilities.o:src/misc/capabilities.c
-	$(COMPILER) $(CFLAGS) src/misc/capabilities.c -o obj/capabilities.o
+$(OBJDIR)/panic.o:src/misc/panic.c
+	$(COMPILER) $(CFLAGS) src/misc/panic.c -o $(OBJDIR)/panic.o
 
-obj/segdom.o:src/cpu/segdom.c
-	$(COMPILER) $(CFLAGS) src/cpu/segdom.c -o obj/segdom.o
+$(OBJDIR)/watchdog.o:src/misc/watchdog.c
+	$(COMPILER) $(CFLAGS) src/misc/watchdog.c -o $(OBJDIR)/watchdog.o
 
-obj/crashlog.o:src/misc/crashlog.c
-	$(COMPILER) $(CFLAGS) src/misc/crashlog.c -o obj/crashlog.o
+$(OBJDIR)/capabilities.o:src/misc/capabilities.c
+	$(COMPILER) $(CFLAGS) src/misc/capabilities.c -o $(OBJDIR)/capabilities.o
 
-obj/context.o:src/misc/context.c
-	$(COMPILER) $(CFLAGS) src/misc/context.c -o obj/context.o
+$(OBJDIR)/segdom.o:src/cpu/segdom.c
+	$(COMPILER) $(CFLAGS) src/cpu/segdom.c -o $(OBJDIR)/segdom.o
 
-obj/fs_txn.o:src/fs/fs_txn.c
-	$(COMPILER) $(CFLAGS) src/fs/fs_txn.c -o obj/fs_txn.o
+$(OBJDIR)/crashlog.o:src/misc/crashlog.c
+	$(COMPILER) $(CFLAGS) src/misc/crashlog.c -o $(OBJDIR)/crashlog.o
+
+$(OBJDIR)/context.o:src/misc/context.c
+	$(COMPILER) $(CFLAGS) src/misc/context.c -o $(OBJDIR)/context.o
+
+$(OBJDIR)/fs_txn.o:src/fs/fs_txn.c
+	$(COMPILER) $(CFLAGS) src/fs/fs_txn.c -o $(OBJDIR)/fs_txn.o
 
 ## QR renderer disabled (no longer used by panic screen)
 
-obj/fat32.o:src/drivers/fat32.c
-	$(COMPILER) $(CFLAGS) src/drivers/fat32.c -o obj/fat32.o
+$(OBJDIR)/fat32.o:src/drivers/fat32.c
+	$(COMPILER) $(CFLAGS) src/drivers/fat32.c -o $(OBJDIR)/fat32.o
 
-obj/ata.o:src/drivers/ata.c
-	$(COMPILER) $(CFLAGS) src/drivers/ata.c -o obj/ata.o
+$(OBJDIR)/ata.o:src/drivers/ata.c
+	$(COMPILER) $(CFLAGS) src/drivers/ata.c -o $(OBJDIR)/ata.o
 
-obj/eynfs.o:src/drivers/eynfs.c
-	$(COMPILER) $(CFLAGS) src/drivers/eynfs.c -o obj/eynfs.o
+$(OBJDIR)/ahci.o:src/drivers/ahci.c
+	$(COMPILER) $(CFLAGS) src/drivers/ahci.c -o $(OBJDIR)/ahci.o
 
-obj/partition.o:src/drivers/partition.c
-	$(COMPILER) $(CFLAGS) src/drivers/partition.c -o obj/partition.o
+$(OBJDIR)/eynfs.o:src/drivers/eynfs.c
+	$(COMPILER) $(CFLAGS) src/drivers/eynfs.c -o $(OBJDIR)/eynfs.o
 
-obj/rei.o:src/drivers/rei.c
-	$(COMPILER) $(CFLAGS) src/drivers/rei.c -o obj/rei.o
+$(OBJDIR)/partition.o:src/drivers/partition.c
+	$(COMPILER) $(CFLAGS) src/drivers/partition.c -o $(OBJDIR)/partition.o
 
-obj/reiv.o:src/drivers/reiv.c
-	$(COMPILER) $(CFLAGS) src/drivers/reiv.c -o obj/reiv.o
+$(OBJDIR)/rei.o:src/drivers/rei.c
+	$(COMPILER) $(CFLAGS) src/drivers/rei.c -o $(OBJDIR)/rei.o
 
-obj/shell_commands.o:src/utilities/shell/shell_commands.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/shell_commands.c -o obj/shell_commands.o
+$(OBJDIR)/reiv.o:src/drivers/reiv.c
+	$(COMPILER) $(CFLAGS) src/drivers/reiv.c -o $(OBJDIR)/reiv.o
 
-obj/fs_commands.o:src/utilities/shell/fs_commands.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/fs_commands.c -o obj/fs_commands.o
+$(OBJDIR)/reis.o:src/drivers/reis.c
+	$(COMPILER) $(CFLAGS) src/drivers/reis.c -o $(OBJDIR)/reis.o
 
-obj/fdisk_commands.o:src/utilities/shell/fdisk_commands.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/fdisk_commands.c -o obj/fdisk_commands.o
+OTF_CFLAGS = $(KERNEL_CFLAGS) -Wno-shadow -Wno-switch-enum -Wno-switch-default -Wno-old-style-definition -Wno-strict-prototypes -Wno-missing-prototypes
+$(OBJDIR)/otf_font.o:src/drivers/otf_font.c include/drivers/otf_font.h include/third_party/stb_truetype.h
+	$(COMPILER) $(OTF_CFLAGS) src/drivers/otf_font.c -o $(OBJDIR)/otf_font.o
 
-obj/diskmgr.o:src/utilities/shell/diskmgr.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/diskmgr.c -o obj/diskmgr.o
+$(OBJDIR)/ac97.o:src/drivers/ac97.c
+	$(COMPILER) $(CFLAGS) src/drivers/ac97.c -o $(OBJDIR)/ac97.o
 
-obj/format_command.o:src/utilities/shell/format_command.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/format_command.c -o obj/format_command.o
+$(OBJDIR)/run_command.o:src/utilities/shell/run_command.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/run_command.c -o $(OBJDIR)/run_command.o
 
-obj/write_editor.o:src/utilities/shell/write_editor.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/write_editor.c -o obj/write_editor.o
+$(OBJDIR)/alias.o:src/utilities/shell/alias.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/alias.c -o $(OBJDIR)/alias.o
 
-obj/run_command.o:src/utilities/shell/run_command.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/run_command.c -o obj/run_command.o
+$(OBJDIR)/history.o:src/utilities/shell/history.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/history.c -o $(OBJDIR)/history.o
 
-obj/shell_script.o:src/utilities/shell/shell_script.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/shell_script.c -o obj/shell_script.o
+$(OBJDIR)/compile_command.o:src/utilities/shell/compile_command.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/compile_command.c -o $(OBJDIR)/compile_command.o
 
-obj/alias.o:src/utilities/shell/alias.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/alias.c -o obj/alias.o
+$(OBJDIR)/tui.o:src/utilities/tui/tui.c
+	$(COMPILER) $(GUI_CFLAGS) src/utilities/tui/tui.c -o $(OBJDIR)/tui.o
+$(OBJDIR)/tiling_manager.o:src/gui/tiling_manager.c src/gui/gui_state.c src/gui/gui_wm.c src/gui/gui_tiles.c src/gui/gui_taskbar.c src/gui/gui_input.c
+	$(COMPILER) $(GUI_CFLAGS) src/gui/tiling_manager.c -o $(OBJDIR)/tiling_manager.o
 
-obj/alias_cmd.o:src/utilities/shell/alias_cmd.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/alias_cmd.c -o obj/alias_cmd.o
+$(OBJDIR)/terminals.o:src/utilities/tui/terminals.c
+	$(COMPILER) $(GUI_CFLAGS) src/utilities/tui/terminals.c -o $(OBJDIR)/terminals.o
 
-obj/history.o:src/utilities/shell/history.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/history.c -o obj/history.o
+$(OBJDIR)/ui_prefs.o:src/utilities/tui/ui_prefs.c
+	$(COMPILER) $(CFLAGS) src/utilities/tui/ui_prefs.c -o $(OBJDIR)/ui_prefs.o
 
-obj/compile_command.o:src/utilities/shell/compile_command.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/compile_command.c -o obj/compile_command.o
+$(OBJDIR)/system_config.o:src/utilities/system_config.c
+	$(COMPILER) $(CFLAGS) src/utilities/system_config.c -o $(OBJDIR)/system_config.o
 
-obj/tui.o:src/utilities/tui/tui.c
-	$(COMPILER) $(GUI_CFLAGS) src/utilities/tui/tui.c -o obj/tui.o
-obj/tiling_manager.o:src/utilities/tui/tiling_manager.c
-	$(COMPILER) $(GUI_CFLAGS) src/utilities/tui/tiling_manager.c -o obj/tiling_manager.o
+$(OBJDIR)/vfs.o:src/fs/vfs.c
+	$(COMPILER) $(CFLAGS) src/fs/vfs.c -o $(OBJDIR)/vfs.o
 
-obj/terminals.o:src/utilities/tui/terminals.c
-	$(COMPILER) $(GUI_CFLAGS) src/utilities/tui/terminals.c -o obj/terminals.o
+$(OBJDIR)/linux_syscalls.o:src/cpu/linux_syscalls.c
+	$(COMPILER) $(CFLAGS) src/cpu/linux_syscalls.c -o $(OBJDIR)/linux_syscalls.o
 
-obj/tiling_cmd.o:src/utilities/shell/tiling_cmd.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/tiling_cmd.c -o obj/tiling_cmd.o
+$(OBJDIR)/predictive_memory.o:src/utilities/predictive_memory.c
+	$(COMPILER) $(CFLAGS) src/utilities/predictive_memory.c -o $(OBJDIR)/predictive_memory.o
 
-obj/theme_cmd.o:src/utilities/shell/theme_cmd.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/theme_cmd.c -o obj/theme_cmd.o
+$(OBJDIR)/zero_copy.o:src/utilities/zero_copy.c
+	$(COMPILER) $(CFLAGS) src/utilities/zero_copy.c -o $(OBJDIR)/zero_copy.o
 
-obj/ui_prefs.o:src/utilities/tui/ui_prefs.c
-	$(COMPILER) $(CFLAGS) src/utilities/tui/ui_prefs.c -o obj/ui_prefs.o
+$(OBJDIR)/vmm.o:src/mm/vmm.c
+	$(COMPILER) $(CFLAGS) -I include/mm src/mm/vmm.c -o $(OBJDIR)/vmm.o
 
-obj/help_tui.o:src/utilities/shell/help_tui.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/help_tui.c -o obj/help_tui.o
+$(OBJDIR)/paging_compat.o:src/mm/paging_compat.c
+	$(COMPILER) $(CFLAGS) -I include/mm src/mm/paging_compat.c -o $(OBJDIR)/paging_compat.o
 
-obj/draw_gui.o:src/utilities/shell/draw_gui.c
-	$(COMPILER) $(GUI_CFLAGS) src/utilities/shell/draw_gui.c -o obj/draw_gui.o
+$(OBJDIR)/user_access.o:src/mm/user_access.c include/mm/user_access.h
+	$(COMPILER) $(CFLAGS) src/mm/user_access.c -o $(OBJDIR)/user_access.o
 
-obj/image_viewer_gui.o:src/utilities/shell/image_viewer_gui.c
-	$(COMPILER) $(GUI_CFLAGS) src/utilities/shell/image_viewer_gui.c -o obj/image_viewer_gui.o
+$(OBJDIR)/pipeline.o:src/utilities/shell/pipeline.c
+	$(COMPILER) $(CFLAGS) src/utilities/shell/pipeline.c -o $(OBJDIR)/pipeline.o
 
-obj/window_test.o:src/utilities/shell/window_test.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/window_test.c -o obj/window_test.o
+$(OBJDIR)/kernel_api.o:src/cpu/kernel_api.c
+	$(COMPILER) $(CFLAGS) src/cpu/kernel_api.c -o $(OBJDIR)/kernel_api.o
 
-obj/stats_gui.o:src/utilities/shell/stats_gui.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/stats_gui.c -o obj/stats_gui.o
+$(OBJDIR)/native_exec.o:src/cpu/native_exec.c
+	$(COMPILER) $(CFLAGS) src/cpu/native_exec.c -o $(OBJDIR)/native_exec.o
 
-obj/vfs.o:src/fs/vfs.c
-	$(COMPILER) $(CFLAGS) src/fs/vfs.c -o obj/vfs.o
+$(OBJDIR)/sched.o:src/cpu/sched.c include/misc/sched.h
+	$(COMPILER) $(CFLAGS) src/cpu/sched.c -o $(OBJDIR)/sched.o
 
-obj/linux_syscalls.o:src/cpu/linux_syscalls.c
-	$(COMPILER) $(CFLAGS) src/cpu/linux_syscalls.c -o obj/linux_syscalls.o
-
-obj/assemble.o: src/utilities/assembler/assemble.c obj/instruction_set.o obj/linker.o
-	$(COMPILER) $(CFLAGS) src/utilities/assembler/assemble.c -o obj/assemble.o
-
-# Provide an explicit rule so parallel builds can make this target independently
-obj/instruction_set.o:src/utilities/assembler/instruction_set.c
-	$(COMPILER) $(CFLAGS) src/utilities/assembler/instruction_set.c -o obj/instruction_set.o 
-
-obj/linker.o:src/utilities/linker/linker.c
-	$(COMPILER) $(CFLAGS) src/utilities/linker/linker.c -o obj/linker.o
-
-obj/subcommands.o:src/utilities/shell/subcommands.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/subcommands.c -o obj/subcommands.o
-
-obj/predictive_memory.o:src/utilities/predictive_memory.c
-	$(COMPILER) $(CFLAGS) src/utilities/predictive_memory.c -o obj/predictive_memory.o
-
-obj/predictive_commands.o:src/utilities/shell/predictive_commands.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/predictive_commands.c -o obj/predictive_commands.o
-
-obj/zero_copy.o:src/utilities/zero_copy.c
-	$(COMPILER) $(CFLAGS) src/utilities/zero_copy.c -o obj/zero_copy.o
-
-obj/zero_copy_commands.o:src/utilities/shell/zero_copy_commands.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/zero_copy_commands.c -o obj/zero_copy_commands.o
-
-obj/vmm.o:src/mm/vmm.c
-	$(COMPILER) $(CFLAGS) -I include/mm src/mm/vmm.c -o obj/vmm.o
-
-obj/paging_compat.o:src/mm/paging_compat.c
-	$(COMPILER) $(CFLAGS) -I include/mm src/mm/paging_compat.c -o obj/paging_compat.o
-
-obj/user_access.o:src/mm/user_access.c include/mm/user_access.h
-	$(COMPILER) $(CFLAGS) src/mm/user_access.c -o obj/user_access.o
-
-obj/pipeline.o:src/utilities/shell/pipeline.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/pipeline.c -o obj/pipeline.o
-
-obj/kernel_api.o:src/cpu/kernel_api.c
-	$(COMPILER) $(CFLAGS) src/cpu/kernel_api.c -o obj/kernel_api.o
-
-obj/native_exec.o:src/cpu/native_exec.c
-	$(COMPILER) $(CFLAGS) src/cpu/native_exec.c -o obj/native_exec.o
-
-obj/native_run.o:src/utilities/shell/native_run.c
-	$(COMPILER) $(CFLAGS) src/utilities/shell/native_run.c -o obj/native_run.o
-
-obj/sched.o:src/cpu/sched.c include/misc/sched.h
-	$(COMPILER) $(CFLAGS) src/cpu/sched.c -o obj/sched.o
-
-obj/irq.o:src/cpu/irq.c include/cpu/irq.h
-	$(COMPILER) $(CFLAGS) src/cpu/irq.c -o obj/irq.o
+$(OBJDIR)/irq.o:src/cpu/irq.c include/cpu/irq.h
+	$(COMPILER) $(CFLAGS) src/cpu/irq.c -o $(OBJDIR)/irq.o
 
 # Actually building the OS (The stuff you should actually run, i.e. make run, make build, etc.)
 
-build: all eynfsimg docs
+build: all installer_ramdisk eynfsimg docs
 	@if [ -z "$(GRUB_MKRESCUE)" ]; then \
 		echo "grub-mkrescue not found. Install grub2 (grub2-mkrescue) or grub-pc-bin (grub-mkrescue)."; \
 		exit 1; \
 	fi
 	bash devtools/build_iso.sh "$(GRUB_MKRESCUE)"
 
+# TTY-only ISO build target
+iso-tty: clean
+	CONFIG_GUI_ENABLED=0 CONFIG_TTY_ENABLED=1 $(MAKE) build
+	mv EYNOS.iso eyn-os-tty.iso
+
+# GUI+TTY ISO build target
+iso-gui: clean
+	CONFIG_GUI_ENABLED=1 CONFIG_TTY_ENABLED=1 $(MAKE) build
+	mv EYNOS.iso eyn-os-gui.iso
+
+.PHONY: installer_userland installer_ramdisk
+menuconfig:
+	python3 devtools/menuconfig.py $(CONFIG_FILE)
+
+.PHONY: installer_userland installer_ramdisk menuconfig
+installer_userland:
+	bash EYN-packages/devtools/build_user_c.sh packages/installer/installer_uelf.c ../testdir/binaries/installer
+	bash EYN-packages/devtools/build_user_c.sh packages/install/install_uelf.c ../testdir/binaries/install
+	bash EYN-packages/devtools/build_user_c.sh packages/extract/extract_uelf.c ../testdir/binaries/extract
+
+installer_ramdisk: installer_userland
+	mkdir -p tmp_user/boot
+	python3 devtools/build_installer_ramdisk.py tmp_user/boot/installer_ramdisk.img
+
 clean:
-	rm -rf obj/*.o tmp/boot/kernel.bin *.img eynfs_format EYNOS.iso
+	rm -rf obj tmp/boot/kernel.bin *.img eynfs_format EYNOS.iso
 	@rm -rf tmp/grub_minimal tmp/grub_ultra_minimal tmp/grub_ultra_minimal.* tmp/grub.* tmp/iso_edit.* tmp/iso_clean.* 2>/dev/null || true
 	rm -f userland/*.o userland/*.bin
+	rm -rf tmp tmp_user
 
 clear: clean
 
@@ -344,6 +499,21 @@ eynfsimg:
 	python3 devtools/create_partitioned_disk.py eynfs.img
 	python3 devtools/copy_testdir_to_eynfs.py testdir/
 
+# Rebuild all userland C programs from EYN-packages package sources.
+# Run this after editing package *_uelf.c files, then run 'make build'.
+# Usage: make userland
+.PHONY: sharedlibs userland
+sharedlibs:
+	bash devtools/build_libc_shared.sh
+	bash devtools/build_libX11.sh
+	bash devtools/build_libXi.sh
+	bash devtools/build_x11_compat.sh
+
+userland: sharedlibs
+	$(MAKE) -C EYN-packages userland OUT_DIR=../testdir/binaries \
+		CONFIG_GUI_ENABLED=$(CONFIG_GUI_ENABLED) \
+		TTY_EXCLUDES="$(TTY_EXCLUDES)"
+
 # Legacy non-partitioned disk image (for testing/compatibility)
 eynfsimg-legacy:
 	rm -f eynfs.img
@@ -357,40 +527,75 @@ eynfsimg-legacy:
 # Create blank drive for testing
 testimg: eynfs_format
 	rm -f testimg.img
-	dd if=/dev/zero of=testimg.img bs=1M count=10
+	dd if=/dev/zero of=testimg.img bs=1M count=30
 	$(COMPILER) $(HOST_CFLAGS) -o eynfs_format eynfs_format.c $(HOST_LDFLAGS)
 	./eynfs_format testimg.img 20480
 
 # Rebuilds and runs the OS
 
 run: build
-	$(QEMU_ENV) qemu-system-i386 -cdrom EYNOS.iso \
+	$(QEMU_ENV) $(EMULATOR) -cdrom EYNOS.iso \
 	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
 	-display $(QEMU_DISPLAY) \
 	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
 	-device e1000,netdev=net0 \
-	-m 9M
+	-audiodev pipewire,id=audio0 \
+	-device ac97,audiodev=audio0 \
+	-m 128M
 
 # Debug run with serial logging and detailed CPU/interrupt logs
 .PHONY: qemu-debug
 qemu-debug: build
 	@mkdir -p tmp
-	$(QEMU_ENV) qemu-system-i386 -cdrom EYNOS.iso \
+	$(QEMU_ENV) $(EMULATOR) -cdrom EYNOS.iso \
 	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
 	-display $(QEMU_DISPLAY) \
 	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
 	-device e1000,netdev=net0 \
+	-audiodev pipewire,id=audio0 \
+	-device ac97,audiodev=audio0 \
 	-serial stdio \
 	-d int,cpu_reset -D tmp/qemu-debug.log \
 	-no-reboot -no-shutdown \
-	-m 9M
+	-m 64M
+
+.PHONY: installer-debug
+installer-debug: build
+	@mkdir -p tmp
+	$(QEMU_ENV) $(EMULATOR) -cdrom EYNOS.iso \
+	-drive file=testimg.img,format=raw,if=ide,index=0,media=disk \
+	-boot d \
+	-display $(QEMU_DISPLAY) \
+	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
+	-device e1000,netdev=net0 \
+	-audiodev pipewire,id=audio0 \
+	-device ac97,audiodev=audio0 \
+	-serial stdio \
+	-d int,cpu_reset -D tmp/qemu-debug.log \
+	-no-reboot -no-shutdown \
+	-m 64M
+
+.PHONY: installer-debug
+installer-nobuild:
+	@mkdir -p tmp
+	$(QEMU_ENV) $(EMULATOR) -cdrom EYNOS.iso \
+	-drive file=testimg.img,format=raw,if=ide,index=0,media=disk \
+	-boot c \
+	-display $(QEMU_DISPLAY) \
+	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
+	-device e1000,netdev=net0 \
+	-audiodev pipewire,id=audio0 \
+	-device ac97,audiodev=audio0 \
+	-serial stdio \
+	-d int,cpu_reset -D tmp/qemu-debug.log \
+	-m 64M
 
 # Halt at start for GDB attach on tcp:1234 (target remote :1234)
 .PHONY: qemu-gdb
 qemu-gdb: build
-	qemu-system-i386 -cdrom EYNOS.iso \
+	$(EMULATOR) -cdrom EYNOS.iso \
 	-hda eynfs.img \
 	-boot d \
 	-S -s \
@@ -399,11 +604,16 @@ qemu-gdb: build
 # Just runs the OS, no rebuilding.
 
 test: testimg
-	qemu-system-i386 -cdrom EYNOS.iso \
-	-hda eynfs.img \
-	-hdb testimg.img \
+	$(QEMU_ENV) $(EMULATOR) -cdrom EYNOS.iso \
+	-drive file=eynfs.img,format=raw,if=ide,index=0,media=disk \
 	-boot d \
-	-m 64M
+	-display $(QEMU_DISPLAY) \
+	-netdev user,id=net0,hostfwd=udp::10000-:9999,hostfwd=tcp::10000-:9999 \
+	-device e1000,netdev=net0 \
+	-serial stdio \
+	-d int,cpu_reset -D tmp/qemu-debug.log \
+	-no-reboot -no-shutdown \
+	-m 24M
 
 # Create a FAT32 disk image for testing (requires mkfs.vfat from dosfstools)
 fat32img:
@@ -428,21 +638,34 @@ fat32img-populate: fat32img
 
 # Run with FAT32 drive attached as primary disk
 runfat32: build fat32img
-	qemu-system-i386 -cdrom EYNOS.iso \
+	$(EMULATOR) -cdrom EYNOS.iso \
 	-hda eynfs.img \
 	-hdb fat32.img \
 	-boot d \
 	-m 64M
-
-.PHONY: fsck_eynfs
-fsck_eynfs: eynfsimg
-	python3 devtools/fsck_eynfs.py eynfs.img || true
-
-.PHONY: checkfs
-checkfs: fsck_eynfs
 
 # Static analysis (GCC -fanalyzer) over all kernel sources
 .PHONY: analyze
 analyze:
 	@echo "Running GCC static analyzer over src/**/*.c ..."
 	@find src -name "*.c" -print0 | xargs -0 -I{} sh -c 'echo Analyzing {}; $(COMPILER) $(KERNEL_CFLAGS) -fanalyzer -c {} -o /dev/null' || true
+# Auto-generated header dependency files (produced by -MMD -MP in KERNEL_CFLAGS).
+-include $(wildcard $(OBJDIR)/*.d)
+
+# Container wrapper
+DOCKER_WRAPPER := ./dev.sh
+
+.PHONY: docker-build docker-run docker-qemu-debug docker-%
+
+docker-build:
+	$(DOCKER_WRAPPER) build
+
+docker-run:
+	$(DOCKER_WRAPPER) run
+
+docker-qemu-debug:
+	$(DOCKER_WRAPPER) qemu-debug
+
+# Generic passthrough (covers any future target automatically)
+docker-%:
+	$(DOCKER_WRAPPER) $*

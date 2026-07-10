@@ -1,4 +1,4 @@
-#include <types.h>
+#include <misc/types.h>
 #include "multiboot.h"
 
 #ifndef ISR_H
@@ -72,10 +72,57 @@ uint32 syscall_dispatch(regs_t* r);
 // Reset the user-task file descriptor table (used when starting/ending ring3 tasks).
 void syscall_reset_user_fds(void);
 
+// Toggle whether user FD table should be preserved across SYSCALL_EXIT and
+// subsequent user_elf_run_argv launches. Used by shell pipelines.
+void syscall_set_user_fd_inherit_mode(int enabled);
+int syscall_get_user_fd_inherit_mode(void);
+
+// Configure fd numbers backing user stdin/stdout/stderr for the next/active task.
+void syscall_set_user_stdio_fds(int stdin_fd, int stdout_fd, int stderr_fd);
+void syscall_reset_user_stdio_fds(void);
+void syscall_get_user_stdio_fds(int* stdin_fd, int* stdout_fd, int* stderr_fd);
+
+// Kernel-side helpers for creating/closing user FD entries for shell plumbing.
+int syscall_kernel_pipe_create(int* out_read_fd, int* out_write_fd);
+int syscall_kernel_close_user_fd(int fd);
+int syscall_kernel_set_user_fd_nonblock(int fd, int enabled);
+int syscall_kernel_set_user_pipe_spool(int fd, int enabled);
+
+// Reset the user-task EYNFS streaming-writer handles (used when starting/ending ring3 tasks).
+void syscall_reset_user_streams(void);
+
 // Reset/cleanup user-task GUI resources (created tiles + title strings).
 void syscall_reset_user_guis(void);
 
 // CPU exception C dispatcher (called from src/cpu/isr.asm)
 void isr_dispatch(regs_t* regs);
+
+#if defined(EYNOS_ARCH_AMD64)
+/* amd64 native trap-frame views produced by assembly entry stubs. */
+typedef struct amd64_interrupt_frame_t {
+    uint64 vector;
+    uint64 error_code;
+    uint64 rip;
+    uint64 cs;
+    uint64 rflags;
+} amd64_interrupt_frame_t;
+
+typedef struct amd64_syscall_frame_t {
+    uint64 syscall_no;
+    uint64 arg1;
+    uint64 arg2;
+    uint64 arg3;
+    uint64 arg4;
+    uint64 arg5;
+    uint64 rip;
+    uint64 cs;
+    uint64 rflags;
+    uint64 user_rsp;
+    uint64 user_ss;
+} amd64_syscall_frame_t;
+
+void isr_amd64_dispatch_frame(const amd64_interrupt_frame_t* frame);
+uint64 syscall_dispatch_amd64_frame(const amd64_syscall_frame_t* frame);
+#endif
 
 #endif

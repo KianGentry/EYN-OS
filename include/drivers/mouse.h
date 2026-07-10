@@ -1,7 +1,7 @@
 #ifndef MOUSE_H
 #define MOUSE_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <rei.h>
 
 // Mouse button definitions

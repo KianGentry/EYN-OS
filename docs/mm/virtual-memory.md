@@ -192,6 +192,11 @@ uint32 frame_alloc_contiguous(uint32 count);  /* For DMA */
 ### Beginner's Guide: What is a Page Fault?
 A "Page Fault" sounds bad, but it's actually a normal part of how the OS works. It happens when a program tries to access a memory page that isn't currently "Present" in RAM.
 
+EYN-OS-specific notes:
+- **Kernel-mode faults are bugs** and generally result in a panic/stop code.
+- **User-mode not-present faults can be normal** under demand paging (demand-zero pages, swap-in, stack growth).
+- For low-RAM performance, recoverable user-mode faults may be handled without printing a verbose dump.
+
 Think of it like a library:
 1.  You look for a book on the shelf (Memory Access).
 2.  The book isn't there (Page Fault!).

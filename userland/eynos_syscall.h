@@ -58,7 +58,107 @@ enum {
     // Deterministic execution mode
     EYN_SYSCALL_DET_ENABLE = 47,
     EYN_SYSCALL_DET_STEP = 48,
+
+    // Filesystem mutation helpers
+    // args: (const char* path)
+    EYN_SYSCALL_MKDIR = 49,
+    EYN_SYSCALL_UNLINK = 50,
+    EYN_SYSCALL_RMDIR = 51,
+
+    // Query current working directory (vterm cwd)
+    // args: (char* buf, int buflen)
+    // returns: bytes written excluding NUL, or -1
+    EYN_SYSCALL_GETCWD = 52,
+
+    // Low-memory streaming file writer (EYNFS only today)
+    // begin: args (const char* path)
+    // write: args (int handle, const void* buf, int len) -> bytes written or -1
+    // end: args (int handle) -> 0 or -1
+    EYN_SYSCALL_EYNFS_STREAM_BEGIN = 53,
+    EYN_SYSCALL_EYNFS_STREAM_WRITE = 54,
+    EYN_SYSCALL_EYNFS_STREAM_END = 55,
+
+    // Audio (AC97) syscalls
+    EYN_SYSCALL_AUDIO_PROBE        = 113,
+    EYN_SYSCALL_AUDIO_INIT         = 114,
+    EYN_SYSCALL_AUDIO_WRITE        = 115,
+    EYN_SYSCALL_AUDIO_STOP         = 116,
+    EYN_SYSCALL_AUDIO_IS_AVAILABLE = 117,
+    EYN_SYSCALL_AUDIO_WRITE_BULK   = 118,
+    EYN_SYSCALL_NET_DNS_RESOLVE    = 119,
+    EYN_SYSCALL_NET_TCP_CONNECT    = 120,
+    EYN_SYSCALL_NET_TCP_SEND       = 121,
+    EYN_SYSCALL_NET_TCP_RECV       = 122,
+    EYN_SYSCALL_NET_TCP_CLOSE      = 123,
+
+    // IPC primitives
+    EYN_SYSCALL_PIPE = 124,
+    EYN_SYSCALL_MKFIFO = 125,
+    EYN_SYSCALL_DUP = 126,
+    EYN_SYSCALL_DUP2 = 127,
+    EYN_SYSCALL_FD_SET_INHERIT = 128,
+    EYN_SYSCALL_FD_SET_STDIO = 129,
+    EYN_SYSCALL_FD_SET_NONBLOCK = 130,
+    EYN_SYSCALL_SPAWN = 131,
+    EYN_SYSCALL_WAITPID = 132,
+    EYN_SYSCALL_SPAWN_EX = 150,
+    EYN_SYSCALL_GUI_LOAD_FONT = 137,
+    EYN_SYSCALL_GUI_DRAW_TEXT_FONT = 138,
+    EYN_SYSCALL_GUI_DRAW_CHAR_FONT = 139,
+    EYN_SYSCALL_TTY_SET_MODE = 145,
+    EYN_SYSCALL_TTY_GET_MODE = 146,
+    EYN_SYSCALL_TTY_SET_WINSIZE = 147,
+    EYN_SYSCALL_TTY_GET_WINSIZE = 148,
+    EYN_SYSCALL_PTY_OPEN = 149,
+    EYN_SYSCALL_GET_SYSINFO = 152,
+    EYN_SYSCALL_SYSTEMCFG_SET_INSTALL_DRIVE = 153,
+    EYN_SYSCALL_SYSTEMCFG_SET_DRIVE_LABEL = 154,
+    EYN_SYSCALL_SYSTEMCFG_GET_DRIVE_LABEL = 155,
+    EYN_SYSCALL_SYSTEMCFG_GET_INSTALL_DRIVE = 156,
+    EYN_SYSCALL_NET_TCP_SOCKET_OPEN = 161,
+    EYN_SYSCALL_NET_TCP_SOCKET_CLOSE = 162,
+    EYN_SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT = 163,
+    EYN_SYSCALL_NET_TCP_GET_SOCKETS = 164,
+    EYN_SYSCALL_NET_TCP_SOCKET_BIND = 165,
+    EYN_SYSCALL_NET_TCP_SOCKET_LISTEN = 166,
+    EYN_SYSCALL_NET_TCP_SOCKET_ACCEPT = 167,
+    EYN_SYSCALL_NET_TCP_SOCKET_CONNECT = 168,
+    EYN_SYSCALL_NET_TCP_SOCKET_SEND = 169,
+    EYN_SYSCALL_NET_TCP_SOCKET_RECV = 170,
 };
+
+#define EYN_TTY_MODE_RAW 0x0001
+
+typedef struct {
+    uint16_t rows;
+    uint16_t cols;
+} eyn_tty_winsize_t;
+
+typedef struct {
+    char os_version[64];      /* e.g., "EYN-OS Release 15" */
+    char kernel_version[32];  /* e.g., "EYN/amd64" */
+    char shell[64];           /* shell executable name */
+} eyn_sysinfo_t;
+
+typedef struct {
+    uint8_t in_use;
+    uint8_t listening;
+    uint8_t state;
+    uint16_t local_port;
+    uint8_t remote_ip[4];
+    uint16_t remote_port;
+    uint32_t queued;
+} eyn_net_tcp_socket_info_t;
+
+typedef struct {
+    const char* path;
+    const char* const* argv;
+    int argc;
+    int stdin_fd;
+    int stdout_fd;
+    int stderr_fd;
+    int inherit_mode;
+} eyn_spawn_ex_req_t;
 
 enum {
     EYN_CAP_OBJ_USER_FD = 1,
@@ -104,6 +204,127 @@ static inline int eyn_sys_read(int fd, void* buf, int len) {
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_READ), "b"(fd), "c"(buf), "d"(len)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_tty_set_mode(int mode_flags) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_TTY_SET_MODE), "b"(mode_flags)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_tty_get_mode(void) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_TTY_GET_MODE)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_tty_set_winsize(uint16_t rows, uint16_t cols) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_TTY_SET_WINSIZE), "b"((int)rows), "c"((int)cols)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_tty_get_winsize(eyn_tty_winsize_t* out) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_TTY_GET_WINSIZE), "b"(out)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_pty_open(int out_fds[2]) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_PTY_OPEN), "b"(out_fds)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_spawn_ex(const eyn_spawn_ex_req_t* req) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_SPAWN_EX), "b"(req)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_get_sysinfo(eyn_sysinfo_t* info) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_GET_SYSINFO), "b"(info)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_systemcfg_set_install_drive(uint32_t logical_drive) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_SYSTEMCFG_SET_INSTALL_DRIVE), "b"((int)logical_drive)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_systemcfg_get_install_drive(void) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_SYSTEMCFG_GET_INSTALL_DRIVE)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_systemcfg_set_drive_label(uint32_t logical_drive, const char* label) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_SYSTEMCFG_SET_DRIVE_LABEL), "b"((int)logical_drive), "c"(label)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_systemcfg_get_drive_label(uint32_t logical_drive, char* out, int out_cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_SYSTEMCFG_GET_DRIVE_LABEL), "b"((int)logical_drive), "c"(out), "d"(out_cap)
         : "memory"
     );
     return ret;
@@ -203,6 +424,124 @@ static inline int eyn_sys_net_close(int socket_id) {
         "int $0x80"
         : "=a"(ret)
         : "a"(EYN_SYSCALL_NET_CLOSE), "b"(socket_id)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_net_tcp_socket_open(void) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_OPEN)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_net_tcp_socket_close(int socket_id) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_CLOSE), "b"(socket_id)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_net_tcp_socket_queue_count(int socket_id) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT), "b"(socket_id)
+        : "memory"
+    );
+    return ret;
+}
+
+static inline int eyn_sys_net_tcp_get_sockets(eyn_net_tcp_socket_info_t* out, int out_cap) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_GET_SOCKETS), "b"(out_cap), "c"(0), "d"(out)
+        : "memory"
+    );
+    return ret;
+}
+
+// Bind a local port to a pool socket (id 1..7) ahead of listen().
+static inline int eyn_sys_net_tcp_socket_bind(int socket_id, uint16_t local_port) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_BIND), "b"(socket_id), "c"(local_port)
+        : "memory"
+    );
+    return ret;
+}
+
+// Mark a bound pool socket as a passive listener.
+static inline int eyn_sys_net_tcp_socket_listen(int socket_id, int backlog) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_LISTEN), "b"(socket_id), "c"(backlog)
+        : "memory"
+    );
+    return ret;
+}
+
+// Block until an inbound connection is accepted or timeout_spins elapses
+// (0 selects a default timeout). Returns the new socket_id (>= 1) on success.
+static inline int eyn_sys_net_tcp_socket_accept(int socket_id, int timeout_spins) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_ACCEPT), "b"(socket_id), "c"(timeout_spins)
+        : "memory"
+    );
+    return ret;
+}
+
+// Actively connect a pool socket to a remote endpoint. Local port is
+// auto-assigned and the connect timeout uses the kernel default.
+static inline int eyn_sys_net_tcp_socket_connect(int socket_id, uint16_t dst_port, const void* dst_ip) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_CONNECT), "b"(socket_id), "c"(dst_port), "d"(dst_ip)
+        : "memory"
+    );
+    return ret;
+}
+
+// Send on an established pool socket. Returns bytes sent (>=0) or <0 on error.
+static inline int eyn_sys_net_tcp_socket_send(int socket_id, const void* buf, uint32_t len) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_SEND), "b"(socket_id), "c"(len), "d"(buf)
+        : "memory"
+    );
+    return ret;
+}
+
+// Receive from a pool socket. Returns bytes received, 0 if none, <0 on error.
+static inline int eyn_sys_net_tcp_socket_recv(int socket_id, void* buf, uint32_t buflen) {
+    int ret;
+    __asm__ __volatile__(
+        "int $0x80"
+        : "=a"(ret)
+        : "a"(EYN_SYSCALL_NET_TCP_SOCKET_RECV), "b"(socket_id), "c"(buflen), "d"(buf)
         : "memory"
     );
     return ret;

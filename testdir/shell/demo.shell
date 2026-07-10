@@ -1,6 +1,0 @@
-# EYN-OS Shell Script Demo
-
-set RAND1=$(random 1 1000)
-set RAND2=$(random 1 1000)
-
-calc $RAND1 + $RAND2

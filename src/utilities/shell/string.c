@@ -1,7 +1,15 @@
 #include <string.h>
-#include <types.h>
+#include <misc/types.h>
 #include <serial.h>
 #include <vga.h>
+
+static void serial_write_hex_uintptr(uintptr value) {
+    static const char hex[] = "0123456789ABCDEF";
+    for (int i = (EYNOS_POINTER_BITS / 4) - 1; i >= 0; --i) {
+        uint8 nib = (uint8)((value >> (i * 4)) & 0xFu);
+        (void)serial_write_char(SERIAL_COM1, hex[nib]);
+    }
+}
 
 // Standard C library string functions
 size_t strlen(const char *s) {
@@ -10,7 +18,7 @@ size_t strlen(const char *s) {
     // Guard against obvious bad pointers (e.g. COM1 port 0x3F8 mistakenly passed
     // as a string pointer via varargs or memory corruption). This avoids taking
     // a page fault inside strlen and helps identify the caller.
-    if ((uint32)s < 0x1000) {
+    if ((uintptr)s < 0x1000u) {
         static int g_strlen_reporting = 0;
         if (!g_strlen_reporting) {
             g_strlen_reporting = 1;
@@ -18,22 +26,12 @@ size_t strlen(const char *s) {
             const char *prefix = "[strlen] bad ptr=0x";
             for (const char *p = prefix; *p; ++p) (void)serial_write_char(SERIAL_COM1, *p);
 
-            uint32 ptrv = (uint32)s;
-            for (int i = 7; i >= 0; --i) {
-                uint8 nib = (ptrv >> (i * 4)) & 0xF;
-                char ch = (nib < 10) ? (char)('0' + nib) : (char)('A' + (nib - 10));
-                (void)serial_write_char(SERIAL_COM1, ch);
-            }
+            serial_write_hex_uintptr((uintptr)s);
 
             const char *mid = " ra=0x";
             for (const char *p = mid; *p; ++p) (void)serial_write_char(SERIAL_COM1, *p);
 
-            uint32 rav = (uint32)__builtin_return_address(0);
-            for (int i = 7; i >= 0; --i) {
-                uint8 nib = (rav >> (i * 4)) & 0xF;
-                char ch = (nib < 10) ? (char)('0' + nib) : (char)('A' + (nib - 10));
-                (void)serial_write_char(SERIAL_COM1, ch);
-            }
+            serial_write_hex_uintptr((uintptr)__builtin_return_address(0));
 
             (void)serial_write_char(SERIAL_COM1, '\n');
 
@@ -53,10 +51,14 @@ size_t strlen(const char *s) {
 
         // If we hit the limit, emit a breadcrumb and return the capped length.
         {
-            uint32 ra = (uint32)__builtin_return_address(0);
-            char buf[96];
-            int n = snprintf(buf, sizeof(buf), "[strlen] no-nul ptr=0x%08X ra=0x%08X\n", (uint32)s, ra);
-            for (int i = 0; i < n; ++i) serial_write_char(SERIAL_COM1, buf[i]);
+            const char *prefix = "[strlen] no-nul ptr=0x";
+            for (const char *q = prefix; *q; ++q) (void)serial_write_char(SERIAL_COM1, *q);
+            serial_write_hex_uintptr((uintptr)s);
+
+            const char *mid = " ra=0x";
+            for (const char *q = mid; *q; ++q) (void)serial_write_char(SERIAL_COM1, *q);
+            serial_write_hex_uintptr((uintptr)__builtin_return_address(0));
+            (void)serial_write_char(SERIAL_COM1, '\n');
         }
         return (size_t)kMaxScan;
 }

@@ -1,7 +1,7 @@
 #ifndef UTIL_H
 #define UTIL_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <stddef.h>
 
 // Global interrupt flag
@@ -31,6 +31,10 @@ void user_task_cleanup_mappings(void);
 // Return control to the interactive UI after aborting a user task.
 // Chooses the tiling-manager UI when available; otherwise falls back to the classic shell.
 void ui_return_from_user_task(void);
+
+// Central abort/exit continuation hook used by ISR/syscall assembly stubs.
+// This decouples low-level abort control flow from the UI-specific fallback.
+void user_task_abort_continue(void);
 
 // Memory management (standardized names, standard signatures)
 void *malloc(size_t nbytes);

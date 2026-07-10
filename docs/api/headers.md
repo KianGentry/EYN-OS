@@ -77,10 +77,11 @@ void clearScreen(void);
 ```
 
 #### Font acquisition and lifetime
-Fonts are loaded from `.hex` files via the VFS and stored as a 256-glyph bitmap table in RAM.
+Fonts are loaded from `.hex`, `.otf`, or `.ttf` files via the VFS and stored as a 256-glyph bitmap table in RAM.
 
 ```c
 int vga_font_acquire_hex(uint8 drive, const char* path);
+int vga_font_acquire_path(uint8 drive, const char* path);
 void vga_font_release(int font_handle);
 
 int vga_system_font_acquire(void);
@@ -188,7 +189,7 @@ typedef struct {
     uint32_t magic;        // Magic number to identify REI
     uint16_t width;        // Image width in pixels
     uint16_t height;       // Image height in pixels
-    uint8_t depth;         // Color depth (1, 3, or 4 bytes per pixel)
+    uint8_t depth;         // Colour depth (1, 3, or 4 bytes per pixel)
     uint8_t reserved1;     // Reserved for future use
     uint16_t reserved2;    // Reserved for future use
 } rei_header_t;
@@ -237,13 +238,50 @@ typedef struct {
 
 ## User Interface Headers
 
+### `gui.h`
+Ring-3 immediate-mode GUI API for tile/floating windows.
+
+#### Core drawing functions
+```c
+int gui_begin(int handle);
+int gui_clear(int handle, const gui_rgb_t* rgb);
+int gui_fill_rect(int handle, const gui_rect_t* rect);
+int gui_draw_text(int handle, const gui_text_t* cmd);
+int gui_draw_char(int handle, const gui_char_t* cmd);
+int gui_draw_line(int handle, const gui_line_t* cmd);
+int gui_present(int handle);
+```
+
+#### Font APIs for user programs
+```c
+int gui_set_font(int handle, const char* font_path);
+int gui_get_font_metrics(int handle, gui_font_metrics_t* out);
+
+int gui_load_font(int handle, const char* font_path);
+int gui_draw_text_font(int handle, const gui_text_font_t* cmd);
+int gui_draw_char_font(int handle, const gui_char_font_t* cmd);
+```
+
+How fonts are used in user programs:
+- `gui_set_font()` sets the default font for the whole handle.
+- `gui_load_font()` loads additional fonts and returns a per-window font id (`1..8`).
+- `gui_draw_text_font()` / `gui_draw_char_font()` choose a font per draw call.
+- Pass `font_id = 0` to draw with the default handle font.
+- Always call `gui_get_font_metrics()` for layout; do not assume fixed 8x8 cells.
+
+Typical flow:
+1. `int h = gui_attach(...)`
+2. `gui_set_font(h, "/fonts/unscii-16.otf@16")`
+3. `int title_font = gui_load_font(h, "/fonts/unscii-16.otf@24")`
+4. In frame: `gui_draw_text_font(... title_font ...)` and `gui_draw_text_font(... 0 ...)` for mixed-font UI.
+
 ### `tui.h`
 Text User Interface framework.
 
 #### TUI Functions
 ```c
 void tui_init();
-void tui_draw_text(int x, int y, const char* text, uint8_t color);
+void tui_draw_text(int x, int y, const char* text, uint8_t colour);
 int tui_read_key();
 void tui_clear_window();
 void tui_draw_border(int x, int y, int width, int height);

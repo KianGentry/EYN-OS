@@ -3,6 +3,7 @@
 #include <fs/vfs.h>
 #include <tile_manager.h>
 #include <vga.h>
+#include <mm/vmm.h>
 #include <string.h>
 #include <crashlog.h>
 
@@ -11,7 +12,20 @@
 
 static char g_ui_font_path[96] = "/fonts/unscii-16.hex";
 static int g_ui_status_bar_mode = 0; // 0=hold Alt, 1=pinned
+static int g_ui_workspace_scale_pct = 100;
+static int g_ui_workspace_aspect_mode = 0;
+static int g_ui_display_width = 640;
+static int g_ui_display_height = 480;
+static int g_ui_display_bpp = 32;
 static uint32 g_ui_prefs_epoch = 1;
+
+/*
+ * Boot-time scalable font guard:
+ * very large OTF/TTF files can take too long to rasterize before IRQ/scheduler
+ * startup, appearing as a boot freeze at "Loading UI preferences...".
+ */
+#define UI_PREFS_BOOT_SCALABLE_MAX_BYTES (1024u * 1024u)
+#define UI_PREFS_BOOT_MIN_FREE_FRAMES 1024u
 
 typedef struct ui_prefs_snapshot_t {
     char font_path[96];
@@ -35,6 +49,54 @@ int ui_prefs_get_status_bar_mode(void) {
 
 void ui_prefs_set_status_bar_mode(int mode) {
     g_ui_status_bar_mode = mode ? 1 : 0;
+}
+
+int ui_prefs_get_workspace_scale_pct(void) {
+    return g_ui_workspace_scale_pct;
+}
+
+void ui_prefs_set_workspace_scale_pct(int pct) {
+    if (pct < 50) pct = 50;
+    if (pct > 100) pct = 100;
+    g_ui_workspace_scale_pct = pct;
+}
+
+int ui_prefs_get_workspace_aspect_mode(void) {
+    return g_ui_workspace_aspect_mode;
+}
+
+void ui_prefs_set_workspace_aspect_mode(int mode) {
+    if (mode < 0 || mode > 5) mode = 0;
+    g_ui_workspace_aspect_mode = mode;
+}
+
+int ui_prefs_get_display_width(void) {
+    return g_ui_display_width;
+}
+
+void ui_prefs_set_display_width(int mode_w) {
+    if (mode_w < 320) mode_w = 320;
+    if (mode_w > 3840) mode_w = 3840;
+    g_ui_display_width = mode_w;
+}
+
+int ui_prefs_get_display_height(void) {
+    return g_ui_display_height;
+}
+
+void ui_prefs_set_display_height(int mode_h) {
+    if (mode_h < 200) mode_h = 200;
+    if (mode_h > 2160) mode_h = 2160;
+    g_ui_display_height = mode_h;
+}
+
+int ui_prefs_get_display_bpp(void) {
+    return g_ui_display_bpp;
+}
+
+void ui_prefs_set_display_bpp(int bpp) {
+    if (bpp != 16 && bpp != 24 && bpp != 32) bpp = 32;
+    g_ui_display_bpp = bpp;
 }
 
 static const char* skip_ws(const char* s) {
@@ -62,6 +124,57 @@ static int parse_u8(const char* s, int* out_v, const char** out_end) {
     if (!any) return -1;
     if (out_v) *out_v = v;
     if (out_end) *out_end = s;
+    return 0;
+}
+
+static int parse_u32(const char* s, uint32* out_v, const char** out_end) {
+    uint32 v = 0;
+    int any = 0;
+    s = skip_ws(s);
+    while (*s >= '0' && *s <= '9') {
+        any = 1;
+        uint32 d = (uint32)(*s - '0');
+        if (v > 429496729u) v = 429496729u;
+        v = v * 10u + d;
+        ++s;
+    }
+    if (!any) return -1;
+    if (out_v) *out_v = v;
+    if (out_end) *out_end = s;
+    return 0;
+}
+
+static char ui_prefs_ascii_tolower(char c) {
+    if (c >= 'A' && c <= 'Z') return (char)('a' + (c - 'A'));
+    return c;
+}
+
+static int ui_prefs_ends_with_icase(const char* s, const char* suffix) {
+    if (!s || !suffix) return 0;
+    int sl = (int)strlen(s);
+    int su = (int)strlen(suffix);
+    if (su <= 0 || sl < su) return 0;
+    const char* tail = s + (sl - su);
+    for (int i = 0; i < su; ++i) {
+        if (ui_prefs_ascii_tolower(tail[i]) != ui_prefs_ascii_tolower(suffix[i])) return 0;
+    }
+    return 1;
+}
+
+static int ui_prefs_is_scalable_font_path(const char* path) {
+    if (!path || !path[0]) return 0;
+    return ui_prefs_ends_with_icase(path, ".otf") || ui_prefs_ends_with_icase(path, ".ttf");
+}
+
+static int ui_prefs_should_defer_font_load(uint8 drive, const char* path) {
+    if (!ui_prefs_is_scalable_font_path(path)) return 0;
+
+    uint32 free_frames = vmm_get_free_frames();
+    if (free_frames && free_frames < UI_PREFS_BOOT_MIN_FREE_FRAMES) return 1;
+
+    uint32 size = 0;
+    if (vfs_get_file_size(drive, path, &size) != 0) return 1;
+    if (size > UI_PREFS_BOOT_SCALABLE_MAX_BYTES) return 1;
     return 0;
 }
 
@@ -111,7 +224,9 @@ int ui_prefs_load_apply(uint8 drive) {
     ui_prefs_snapshot_t snap;
     if (crashlog_recover_latest(CRASHLOG_OBJ_UI_PREFS, 1, &snap, sizeof(snap), &g_ui_prefs_epoch) > 0) {
         if (snap.font_path[0]) {
-            if (vga_system_font_set(drive, snap.font_path) == 0) {
+            ui_prefs_set_font_path(snap.font_path);
+            if (!ui_prefs_should_defer_font_load(drive, snap.font_path) &&
+                vga_system_font_set(drive, snap.font_path) == 0) {
                 ui_prefs_set_font_path(snap.font_path);
             }
         }
@@ -147,9 +262,13 @@ int ui_prefs_load_apply(uint8 drive) {
 
         if (starts_with(key, "font")) {
             if (val[0]) {
-                // Best-effort apply; if it fails, keep defaults.
-                if (vga_system_font_set(drive, val) == 0) {
+                ui_prefs_set_font_path(val);
+                // Best-effort apply; keep defaults if rejected/failed.
+                if (!ui_prefs_should_defer_font_load(drive, val) &&
+                    vga_system_font_set(drive, val) == 0) {
                     ui_prefs_set_font_path(val);
+                    ok = 1;
+                } else {
                     ok = 1;
                 }
             }
@@ -171,6 +290,36 @@ int ui_prefs_load_apply(uint8 drive) {
             int v = 0;
             if (parse_int01(val, &v) == 0) {
                 ui_prefs_set_status_bar_mode(v);
+                ok = 1;
+            }
+        } else if (starts_with(key, "workspace_scale")) {
+            int v = 0;
+            if (parse_u8(val, &v, NULL) == 0) {
+                ui_prefs_set_workspace_scale_pct(v);
+                ok = 1;
+            }
+        } else if (starts_with(key, "workspace_aspect")) {
+            int v = 0;
+            if (parse_u8(val, &v, NULL) == 0) {
+                ui_prefs_set_workspace_aspect_mode(v);
+                ok = 1;
+            }
+        } else if (starts_with(key, "display_width")) {
+            uint32 v = 0;
+            if (parse_u32(val, &v, NULL) == 0) {
+                ui_prefs_set_display_width((int)v);
+                ok = 1;
+            }
+        } else if (starts_with(key, "display_height")) {
+            uint32 v = 0;
+            if (parse_u32(val, &v, NULL) == 0) {
+                ui_prefs_set_display_height((int)v);
+                ok = 1;
+            }
+        } else if (starts_with(key, "display_bpp")) {
+            int v = 0;
+            if (parse_u8(val, &v, NULL) == 0) {
+                ui_prefs_set_display_bpp(v);
                 ok = 1;
             }
         }
@@ -207,13 +356,23 @@ int ui_prefs_save(uint8 drive) {
         "title_unfocused=%u,%u,%u\n"
         "status=%u,%u,%u\n"
         "status_text=%u,%u,%u\n"
-        "status_bar_mode=%u\n",
+        "status_bar_mode=%u\n"
+        "workspace_scale=%u\n"
+        "workspace_aspect=%u\n"
+        "display_width=%u\n"
+        "display_height=%u\n"
+        "display_bpp=%u\n",
         ui_prefs_get_font_path(),
         (unsigned)theme.title_focused_r, (unsigned)theme.title_focused_g, (unsigned)theme.title_focused_b,
         (unsigned)theme.title_unfocused_r, (unsigned)theme.title_unfocused_g, (unsigned)theme.title_unfocused_b,
         (unsigned)theme.status_r, (unsigned)theme.status_g, (unsigned)theme.status_b,
         (unsigned)theme.status_text_r, (unsigned)theme.status_text_g, (unsigned)theme.status_text_b,
-        (unsigned)ui_prefs_get_status_bar_mode()
+        (unsigned)ui_prefs_get_status_bar_mode(),
+        (unsigned)ui_prefs_get_workspace_scale_pct(),
+        (unsigned)ui_prefs_get_workspace_aspect_mode(),
+        (unsigned)ui_prefs_get_display_width(),
+        (unsigned)ui_prefs_get_display_height(),
+        (unsigned)ui_prefs_get_display_bpp()
     );
     if (n <= 0) return -1;
     if (n >= (int)sizeof(out)) n = (int)sizeof(out) - 1;

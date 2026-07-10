@@ -1,33 +1,600 @@
 #include <vga.h>
+#include <vga_text.h>
 #include <multiboot.h>
 #include <eynfs.h>
 #include <util.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <string.h>
-#include <types.h>
+#include <misc/types.h>
 #include <shell.h>
 #include <system.h>
 #include <serial.h>
 #include <watchdog.h>
 #include <fs/vfs.h>
+#include <mm/vmm.h>
 #include <context.h>
 #include <misc/sched.h>
+#include <drivers/otf_font.h>
 
 extern multiboot_info_t *g_mbi;
+
+#if defined(EYNOS_ARCH_I386)
+extern uint32 vbe_bios_int10_set_mode_i386(uint16 mode);
+extern uint32 vbe_bios_int10_get_mode_info_i386(uint16 mode, void* out_block);
+#endif
 
 int width, height;
 int vga_default_r = 255, vga_default_g = 255, vga_default_b = 255; // Default to white
 // When non-zero, drawText operates in a minimal glyph-draw mode used by drawCharAt.
 static int g_drawCharAt_mode = 0;
+// Software cursor control for framebuffer-backed console
+static int g_console_cursor_visible = 1;
+static const int g_console_cursor_w = 1; // pixels
 
-// Bitmap font registry (8xN, 256 glyphs)
-// Supports 8x8 and 8x16 .hex fonts.
-#define VGA_FONT_GLYPH_W 8
+// Forward declarations for static helpers defined later in this file.
+static uint8 vga_font_line_h_or_builtin(int handle);
+static uint8 vga_font_advance_or_builtin(int handle, int charnum);
+static int vga_get_system_font_handle_raw(void);
+
+// Erase software cursor (if framebuffer-backed console active)
+void vga_console_erase_cursor(void) {
+	if (!g_console_cursor_visible || !g_mbi || !g_mbi->framebuffer_addr) return;
+	int font_handle = vga_get_system_font_handle_raw();
+	int line_h = (int)vga_font_line_h_or_builtin(font_handle);
+	drawRect(width, height, g_console_cursor_w, line_h, 0, 0, 0);
+}
+
+// Draw software cursor at current position
+void vga_console_draw_cursor(void) {
+	if (!g_console_cursor_visible || !g_mbi || !g_mbi->framebuffer_addr) return;
+	int font_handle = vga_get_system_font_handle_raw();
+	int line_h = (int)vga_font_line_h_or_builtin(font_handle);
+	drawRect(width, height, g_console_cursor_w, line_h, vga_default_r, vga_default_g, vga_default_b);
+}
+
+// Move cursor helpers
+void vga_console_move_left(void) {
+	if (g_mbi && g_mbi->framebuffer_addr) {
+		vga_console_erase_cursor();
+		int font_handle = vga_get_system_font_handle_raw();
+		int adv = (int)vga_font_advance_or_builtin(font_handle, 'W');
+		if (adv <= 0) adv = 8;
+		if (width >= adv) width -= adv; else width = 0;
+		vga_console_draw_cursor();
+	} else {
+		vga_text_putchar('\b');
+	}
+}
+
+void vga_console_move_right(void) {
+	if (g_mbi && g_mbi->framebuffer_addr) {
+		vga_console_erase_cursor();
+		int font_handle = vga_get_system_font_handle_raw();
+		int adv = (int)vga_font_advance_or_builtin(font_handle, 'W');
+		if (adv <= 0) adv = 8;
+		int fbw = g_mbi ? (int)g_mbi->framebuffer_width : 640;
+		if (width + adv < fbw) width += adv;
+		vga_console_draw_cursor();
+	} else {
+		// No direct right-move for VGA text; emulate by printing a space then backspacing
+		vga_text_putchar(' ');
+		vga_text_putchar('\b');
+	}
+}
+
+void vga_console_move_up(void) {
+	if (g_mbi && g_mbi->framebuffer_addr) {
+		vga_console_erase_cursor();
+		int font_handle = vga_get_system_font_handle_raw();
+		int line_h = (int)vga_font_line_h_or_builtin(font_handle);
+		if (height - line_h >= 0) height -= line_h; else height = 0;
+		vga_console_draw_cursor();
+	} else {
+		// Not supported in legacy VGA text
+	}
+}
+
+void vga_console_move_down(void) {
+	if (g_mbi && g_mbi->framebuffer_addr) {
+		vga_console_erase_cursor();
+		int font_handle = vga_get_system_font_handle_raw();
+		int line_h = (int)vga_font_line_h_or_builtin(font_handle);
+		int fbh = g_mbi ? (int)g_mbi->framebuffer_height : 480;
+		if (height + line_h < fbh) height += line_h;
+		vga_console_draw_cursor();
+	} else {
+		// Not supported in legacy VGA text
+	}
+}
+
+/*
+ * ABI-INVARIANT: Bochs/QEMU VBE register interface (ports 0x01CE/0x01CF).
+ *
+ * Why: Enables runtime hardware mode switching without BIOS callbacks.
+ * Invariant: Register indices and IDs follow the Bochs VBE extension ABI.
+ * Breakage if changed: Mode switches stop working or program wrong registers.
+ * ABI-sensitive: Yes (hardware I/O contract).
+ */
+#define VBE_DISPI_IOPORT_INDEX 0x01CE
+#define VBE_DISPI_IOPORT_DATA 0x01CF
+
+#define VBE_DISPI_INDEX_ID 0x0
+#define VBE_DISPI_INDEX_XRES 0x1
+#define VBE_DISPI_INDEX_YRES 0x2
+#define VBE_DISPI_INDEX_BPP 0x3
+#define VBE_DISPI_INDEX_ENABLE 0x4
+#define VBE_DISPI_INDEX_X_OFFSET 0x8
+#define VBE_DISPI_INDEX_Y_OFFSET 0x9
+
+#define VBE_DISPI_DISABLED 0x00
+#define VBE_DISPI_ENABLED 0x01
+#define VBE_DISPI_LFB_ENABLED 0x40
+
+#define VBE_DISPI_ID0 0xB0C0
+#define VBE_DISPI_ID5 0xB0C5
+
+static void vbe_dispi_write(uint16 index, uint16 value) {
+	outw(VBE_DISPI_IOPORT_INDEX, index);
+	outw(VBE_DISPI_IOPORT_DATA, value);
+}
+
+static uint16 vbe_dispi_read(uint16 index) {
+	outw(VBE_DISPI_IOPORT_INDEX, index);
+	return inw(VBE_DISPI_IOPORT_DATA);
+}
+
+static vga_capabilities_t g_vga_caps;
+
+typedef struct {
+	uint16 mode;
+	uint16 width;
+	uint16 height;
+	uint8 bpp;
+} vbe_mode_map_t;
+
+typedef struct __attribute__((packed)) {
+	uint16 mode_attributes;
+	uint8 win_a_attributes;
+	uint8 win_b_attributes;
+	uint16 win_granularity;
+	uint16 win_size;
+	uint16 win_a_segment;
+	uint16 win_b_segment;
+	uint32 win_func_ptr;
+	uint16 bytes_per_scan_line;
+	uint16 x_resolution;
+	uint16 y_resolution;
+	uint8 x_char_size;
+	uint8 y_char_size;
+	uint8 number_of_planes;
+	uint8 bits_per_pixel;
+	uint8 number_of_banks;
+	uint8 memory_model;
+	uint8 bank_size;
+	uint8 number_of_image_pages;
+	uint8 reserved0;
+	uint8 red_mask_size;
+	uint8 red_field_position;
+	uint8 green_mask_size;
+	uint8 green_field_position;
+	uint8 blue_mask_size;
+	uint8 blue_field_position;
+	uint8 reserved_mask_size;
+	uint8 reserved_field_position;
+	uint8 direct_color_mode_info;
+	uint32 phys_base_ptr;
+	uint32 off_screen_mem_offset;
+	uint16 off_screen_mem_size;
+	uint8 reserved1[206];
+} vbe_mode_info_block_t;
+
+static vbe_mode_info_block_t g_vbe_runtime_mode_info;
+
+/*
+ * Common VBE mode IDs used by many 1990s BIOS implementations.
+ * This table is intentionally conservative and is used only for selecting
+ * candidate BIOS modes in the i386 backend path.
+ */
+static const vbe_mode_map_t g_vbe_mode_map[] = {
+	{0x111, 640,  480, 16},
+	{0x114, 800,  600, 16},
+	{0x117, 1024, 768, 16},
+	{0x11A, 1280, 1024, 16},
+	{0x112, 640,  480, 24},
+	{0x115, 800,  600, 24},
+	{0x118, 1024, 768, 24},
+	{0x11B, 1280, 1024, 24},
+	/* 32bpp VBE mode IDs are less consistent; include common BIOS IDs. */
+	{0x141, 640,  480, 32},
+	{0x144, 800,  600, 32},
+	{0x147, 1024, 768, 32},
+};
+
+static uint16 vga_resolve_standard_vbe_mode(int width, int height, int bpp) {
+	for (size_t i = 0; i < sizeof(g_vbe_mode_map) / sizeof(g_vbe_mode_map[0]); ++i) {
+		if ((int)g_vbe_mode_map[i].width == width &&
+		    (int)g_vbe_mode_map[i].height == height &&
+		    (int)g_vbe_mode_map[i].bpp == bpp) {
+			return g_vbe_mode_map[i].mode;
+		}
+	}
+	return 0;
+}
+
+static int vga_bpp_to_bytes(uint8 bpp) {
+	if (bpp == 16) return 2;
+	if (bpp == 24) return 3;
+	if (bpp == 32) return 4;
+	return 0;
+}
+
+static int vga_boot_framebuffer_valid(const multiboot_info_t* mbi) {
+	if (!mbi) return 0;
+	if (!mbi->framebuffer_addr) return 0;
+	if (!mbi->framebuffer_width || !mbi->framebuffer_height || !mbi->framebuffer_pitch) return 0;
+
+	int bytes = vga_bpp_to_bytes(mbi->framebuffer_bpp);
+	if (bytes <= 0) return 0;
+
+	uint32 min_pitch = mbi->framebuffer_width * (uint32)bytes;
+	if (mbi->framebuffer_pitch < min_pitch) return 0;
+
+	return 1;
+}
+
+static int vga_try_bios_vbe_set_mode_i386(int mode_w, int mode_h, int bpp, const vga_capabilities_t* caps) {
+#if defined(EYNOS_ARCH_I386)
+	if (!caps || !caps->bios_runtime_mode_switch_available) {
+		printf("[gfx] bios mode switch fail: backend unavailable\n");
+		return -1;
+	}
+
+	uint16 candidate = vga_resolve_standard_vbe_mode(mode_w, mode_h, bpp);
+	if (!candidate) {
+		printf("[gfx] bios mode switch fail: no standard VBE mode mapping for %dx%dx%d\n",
+		       mode_w,
+		       mode_h,
+		       bpp);
+		return -1;
+	}
+
+	uint16 active_mode = (uint16)(caps->bios_active_mode & 0x01FFu);
+	uint16 target_mode = (uint16)(candidate & 0x01FFu);
+	if (active_mode == target_mode && caps->valid_boot_framebuffer) {
+		printf("[gfx] bios mode switch: mode 0x%X already active via boot framebuffer\n",
+		       (unsigned)candidate);
+		return 0;
+	}
+
+	if (!g_mbi || !g_mbi->framebuffer_addr) {
+		printf("[gfx] bios mode switch fail: framebuffer address unavailable\n");
+		return -1;
+	}
+
+	uint32 bios_status = vbe_bios_int10_set_mode_i386(candidate);
+	if ((bios_status & 0xFFFFu) != 0x004Fu) {
+		printf("[gfx] bios mode switch fail: int10 status=0x%X mode=0x%X\n",
+		       (unsigned)(bios_status & 0xFFFFu),
+		       (unsigned)candidate);
+		return -1;
+	}
+
+	vbe_mode_info_block_t mode_info;
+	memset(&mode_info, 0, sizeof(mode_info));
+	uint32 mode_info_status = vbe_bios_int10_get_mode_info_i386(candidate, &mode_info);
+
+	int resolved_w = mode_w;
+	int resolved_h = mode_h;
+	int resolved_bpp = bpp;
+	int bytes = vga_bpp_to_bytes((uint8)bpp);
+	if (bytes <= 0) {
+		bytes = 4;
+	}
+	uint32 resolved_pitch = (uint32)mode_w * (uint32)bytes;
+	uint32 resolved_fb_addr = (uint32)g_mbi->framebuffer_addr;
+	int mode_info_usable = 0;
+
+	if ((mode_info_status & 0xFFFFu) == 0x004Fu) {
+		int info_w = (int)mode_info.x_resolution;
+		int info_h = (int)mode_info.y_resolution;
+		int info_bpp = (int)mode_info.bits_per_pixel;
+		int info_bytes = vga_bpp_to_bytes(mode_info.bits_per_pixel);
+		uint32 info_pitch = (uint32)mode_info.bytes_per_scan_line;
+		uint32 min_pitch = 0;
+
+		if (info_w > 0 && info_bytes > 0) {
+			min_pitch = (uint32)info_w * (uint32)info_bytes;
+		}
+
+		if ((mode_info.mode_attributes & 0x0001u) &&
+		    info_w > 0 &&
+		    info_h > 0 &&
+		    info_bytes > 0 &&
+		    info_pitch >= min_pitch) {
+			resolved_w = info_w;
+			resolved_h = info_h;
+			resolved_bpp = info_bpp;
+			resolved_pitch = info_pitch;
+			if (mode_info.phys_base_ptr) {
+				resolved_fb_addr = mode_info.phys_base_ptr;
+			}
+			g_vbe_runtime_mode_info = mode_info;
+			mode_info_usable = 1;
+		} else {
+			printf("[gfx] bios mode info warning: unusable block mode=0x%X attr=0x%X %dx%dx%d pitch=%u lfb=0x%X\n",
+			       (unsigned)candidate,
+			       (unsigned)mode_info.mode_attributes,
+			       info_w,
+			       info_h,
+			       info_bpp,
+			       (unsigned)info_pitch,
+			       (unsigned)mode_info.phys_base_ptr);
+		}
+	} else {
+		printf("[gfx] bios mode info warning: int10 status=0x%X mode=0x%X\n",
+		       (unsigned)(mode_info_status & 0xFFFFu),
+		       (unsigned)candidate);
+	}
+
+	g_mbi->flags |= MULTIBOOT_INFO_FRAMEBUFFER_INFO;
+	g_mbi->flags |= MULTIBOOT_INFO_VBE_INFO;
+	g_mbi->vbe_mode = candidate;
+	if (mode_info_usable) {
+		g_mbi->vbe_mode_info = (uint32)(uintptr_t)&g_vbe_runtime_mode_info;
+	}
+	g_mbi->framebuffer_addr = (uint64)resolved_fb_addr;
+	g_mbi->framebuffer_width = (uint32)resolved_w;
+	g_mbi->framebuffer_height = (uint32)resolved_h;
+	g_mbi->framebuffer_bpp = (uint8)resolved_bpp;
+	g_mbi->framebuffer_pitch = resolved_pitch;
+
+	printf("[gfx] bios mode switch: mode=0x%X set=0x%X info=0x%X %dx%dx%d pitch=%u lfb=0x%X source=%s\n",
+	       (unsigned)candidate,
+	       (unsigned)(bios_status & 0xFFFFu),
+	       (unsigned)(mode_info_status & 0xFFFFu),
+	       resolved_w,
+	       resolved_h,
+	       resolved_bpp,
+	       (unsigned)resolved_pitch,
+	       (unsigned)resolved_fb_addr,
+	       mode_info_usable ? "bios-mode-info" : "fallback-requested");
+
+	return 0;
+#else
+	(void)mode_w;
+	(void)mode_h;
+	(void)bpp;
+	(void)caps;
+	printf("[gfx] bios mode switch fail: backend requires i386\n");
+	return -1;
+#endif
+}
+
+static void vga_refresh_capabilities_internal(int probe_dispi) {
+	uint16 dispi_id = g_vga_caps.bochs_dispi_id;
+
+	memset(&g_vga_caps, 0, sizeof(g_vga_caps));
+	g_vga_caps.initialized = 1;
+	g_vga_caps.fallback_text_eligible = 1;
+
+	if (g_mbi) {
+		g_vga_caps.has_multiboot_state = 1;
+		g_vga_caps.has_multiboot_fb_info = (g_mbi->flags & MULTIBOOT_INFO_FRAMEBUFFER_INFO) ? 1 : 0;
+		g_vga_caps.has_multiboot_vbe_info = (g_mbi->flags & MULTIBOOT_INFO_VBE_INFO) ? 1 : 0;
+		g_vga_caps.has_framebuffer_addr = g_mbi->framebuffer_addr ? 1 : 0;
+		g_vga_caps.has_framebuffer_geometry =
+			(g_mbi->framebuffer_width && g_mbi->framebuffer_height && g_mbi->framebuffer_pitch) ? 1 : 0;
+		g_vga_caps.valid_boot_framebuffer = vga_boot_framebuffer_valid(g_mbi) ? 1 : 0;
+
+		g_vga_caps.boot_fb_addr = (uint32)g_mbi->framebuffer_addr;
+		g_vga_caps.boot_fb_pitch = g_mbi->framebuffer_pitch;
+		g_vga_caps.boot_fb_width = g_mbi->framebuffer_width;
+		g_vga_caps.boot_fb_height = g_mbi->framebuffer_height;
+		g_vga_caps.boot_fb_bpp = g_mbi->framebuffer_bpp;
+		g_vga_caps.boot_vbe_mode = g_mbi->vbe_mode;
+		g_vga_caps.boot_vbe_control_info = g_mbi->vbe_control_info;
+		g_vga_caps.boot_vbe_mode_info = g_mbi->vbe_mode_info;
+		g_vga_caps.bios_active_mode = g_mbi->vbe_mode;
+
+#if defined(EYNOS_ARCH_I386)
+		if (g_vga_caps.has_multiboot_vbe_info && g_mbi->vbe_mode && g_mbi->vbe_mode != 0xFFFFu) {
+			g_vga_caps.bios_vbe_backend_available = 1;
+			g_vga_caps.bios_runtime_mode_switch_available = 1;
+		}
+#endif
+	}
+
+	if (probe_dispi || dispi_id == 0) {
+		dispi_id = vbe_dispi_read(VBE_DISPI_INDEX_ID);
+	}
+
+	g_vga_caps.bochs_dispi_id = dispi_id;
+	g_vga_caps.bochs_dispi_available = (dispi_id >= VBE_DISPI_ID0 && dispi_id <= VBE_DISPI_ID5) ? 1 : 0;
+	g_vga_caps.runtime_mode_switch_available =
+		(g_vga_caps.bochs_dispi_available || g_vga_caps.bios_runtime_mode_switch_available) ? 1 : 0;
+	g_vga_caps.fallback_grub_fb_eligible = g_vga_caps.valid_boot_framebuffer ? 1 : 0;
+}
+
+void vga_get_capabilities(vga_capabilities_t* out) {
+	vga_refresh_capabilities_internal(1);
+	if (out) {
+		*out = g_vga_caps;
+	}
+}
+
+int vga_can_set_mode(void) {
+	vga_refresh_capabilities_internal(1);
+	return g_vga_caps.runtime_mode_switch_available ? 1 : 0;
+}
+
+void vga_log_boot_capabilities(void) {
+	vga_capabilities_t caps;
+	vga_get_capabilities(&caps);
+
+	if (!caps.has_multiboot_state) {
+		printf("[gfx] boot: multiboot info missing\n");
+		return;
+	}
+
+	printf("[gfx] boot: flags=0x%X fb_flag=%d vbe_flag=%d\n",
+	       (unsigned)g_mbi->flags,
+	       (int)caps.has_multiboot_fb_info,
+	       (int)caps.has_multiboot_vbe_info);
+
+	if (caps.has_framebuffer_addr && caps.has_framebuffer_geometry) {
+		printf("[gfx] boot fb: addr=0x%X %ux%ux%u pitch=%u\n",
+		       (unsigned)caps.boot_fb_addr,
+		       (unsigned)caps.boot_fb_width,
+		       (unsigned)caps.boot_fb_height,
+		       (unsigned)caps.boot_fb_bpp,
+		       (unsigned)caps.boot_fb_pitch);
+	} else if (caps.has_framebuffer_addr) {
+		printf("[gfx] boot fb: addr=0x%X (geometry unavailable)\n", (unsigned)caps.boot_fb_addr);
+	} else {
+		printf("[gfx] boot fb: not provided\n");
+	}
+
+	printf("[gfx] boot fb validity: %s\n", caps.valid_boot_framebuffer ? "valid" : "invalid");
+
+	printf("[gfx] multiboot vbe: mode=0x%X ctrl=0x%X mode_info=0x%X\n",
+	       (unsigned)caps.boot_vbe_mode,
+	       (unsigned)caps.boot_vbe_control_info,
+	       (unsigned)caps.boot_vbe_mode_info);
+
+	printf("[gfx] capabilities: dispi_id=0x%X runtime_switch=%d grub_fb_fallback=%d text_fallback=%d\n",
+	       (unsigned)caps.bochs_dispi_id,
+	       (int)caps.runtime_mode_switch_available,
+	       (int)caps.fallback_grub_fb_eligible,
+	       (int)caps.fallback_text_eligible);
+	printf("[gfx] bios backend: available=%d runtime=%d active_mode=0x%X\n",
+	       (int)caps.bios_vbe_backend_available,
+	       (int)caps.bios_runtime_mode_switch_available,
+	       (unsigned)caps.bios_active_mode);
+
+	const char* runtime_path = "unavailable";
+	if (caps.bochs_dispi_available) {
+		runtime_path = "bochs/qemu-dispi";
+	} else if (caps.bios_runtime_mode_switch_available) {
+		runtime_path = "bios-vbe-i386";
+	}
+	printf("[gfx] runtime mode path: %s\n", runtime_path);
+}
+
+int vga_set_mode(int mode_w, int mode_h, int bpp) {
+    vga_capabilities_t caps;
+    vga_get_capabilities(&caps);
+
+	if (!caps.has_multiboot_state) {
+		printf("[gfx] mode switch fail: no multiboot state\n");
+		return -1;
+	}
+	if (mode_w < 320 || mode_h < 200) {
+		printf("[gfx] mode switch fail: invalid geometry %dx%d\n", mode_w, mode_h);
+		return -1;
+	}
+	if (bpp != 16 && bpp != 24 && bpp != 32) {
+		printf("[gfx] mode switch fail: unsupported bpp=%d\n", bpp);
+		return -1;
+	}
+	if (!caps.runtime_mode_switch_available) {
+		printf("[gfx] mode switch fail: runtime switch unavailable (grub_fb_fallback=%d text_fallback=%d)\n",
+		       (int)caps.fallback_grub_fb_eligible,
+		       (int)caps.fallback_text_eligible);
+		return -1;
+	}
+
+	if (!caps.bochs_dispi_available) {
+		int bios_rc = vga_try_bios_vbe_set_mode_i386(mode_w, mode_h, bpp, &caps);
+		if (bios_rc != 0) {
+			return -1;
+		}
+
+		/* Mode may already be active (no-op case) or updated by backend thunk. */
+		vga_refresh_capabilities_internal(1);
+		vga_init_double_buffer();
+		clearScreen();
+		vga_begin_frame();
+		vga_mark_dirty_rect(0, 0,
+					  (int)(g_mbi ? g_mbi->framebuffer_width : (uint32)mode_w),
+					  (int)(g_mbi ? g_mbi->framebuffer_height : (uint32)mode_h));
+		vga_swap_buffers();
+		printf("[gfx] mode switch: backend=bios-vbe-i386 requested=%dx%dx%d\n",
+		       mode_w,
+		       mode_h,
+		       bpp);
+		return 0;
+	}
+
+	vbe_dispi_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+	vbe_dispi_write(VBE_DISPI_INDEX_XRES, (uint16)mode_w);
+	vbe_dispi_write(VBE_DISPI_INDEX_YRES, (uint16)mode_h);
+	vbe_dispi_write(VBE_DISPI_INDEX_BPP, (uint16)bpp);
+	vbe_dispi_write(VBE_DISPI_INDEX_X_OFFSET, 0);
+	vbe_dispi_write(VBE_DISPI_INDEX_Y_OFFSET, 0);
+	vbe_dispi_write(VBE_DISPI_INDEX_ENABLE, VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+
+	int actual_w = (int)vbe_dispi_read(VBE_DISPI_INDEX_XRES);
+	int actual_h = (int)vbe_dispi_read(VBE_DISPI_INDEX_YRES);
+	int actual_bpp = (int)vbe_dispi_read(VBE_DISPI_INDEX_BPP);
+	if (actual_w <= 0 || actual_h <= 0) {
+		printf("[gfx] mode switch fail: invalid actual geometry %dx%d\n", actual_w, actual_h);
+		return -1;
+	}
+	if (actual_bpp != 16 && actual_bpp != 24 && actual_bpp != 32) {
+		printf("[gfx] mode switch fail: invalid actual bpp=%d\n", actual_bpp);
+		return -1;
+	}
+
+	g_mbi->flags |= MULTIBOOT_INFO_FRAMEBUFFER_INFO;
+	g_mbi->framebuffer_width = (uint32)actual_w;
+	g_mbi->framebuffer_height = (uint32)actual_h;
+	g_mbi->framebuffer_bpp = (uint8)actual_bpp;
+	g_mbi->framebuffer_pitch = (uint32)(actual_w * (actual_bpp / 8));
+	vga_refresh_capabilities_internal(1);
+
+	vga_init_double_buffer();
+	clearScreen();
+	vga_begin_frame();
+	vga_mark_dirty_rect(0, 0, actual_w, actual_h);
+	vga_swap_buffers();
+
+	printf("[gfx] mode switch: requested=%dx%dx%d actual=%dx%dx%d\n",
+	       mode_w,
+	       mode_h,
+	       bpp,
+	       actual_w,
+	       actual_h,
+	       actual_bpp);
+
+	return 0;
+}
+
+// Bitmap font registry (up to 64xN, 256 glyphs)
+// Supports .hex bitmaps and rasterized scalable fonts.
+#define VGA_FONT_DEFAULT_ADVANCE 8
+#define VGA_FONT_GLYPH_W_MAX 64
 #define VGA_FONT_GLYPH_H_8 8
 #define VGA_FONT_GLYPH_H_16 16
 #define VGA_FONT_GLYPHS 256
 #define VGA_FONT_MAX 12
+
+/*
+ * ABI-INVARIANT: Supported scalable font pixel-height bounds.
+ *
+ * Why: The text pipeline assumes fixed-width 8px glyph rows but permits
+ *      variable row counts for vertical scaling. Bounds keep per-font memory
+ *      usage predictable on low-RAM boots.
+ * Invariant: Scalable glyph_h must be in [VGA_SCALABLE_GLYPH_H_MIN, VGA_SCALABLE_GLYPH_H_MAX].
+ * Breakage if changed:
+ *   - Increasing raises per-font heap cost (VGA_FONT_GLYPHS * glyph_h bytes).
+ *   - Decreasing rejects previously-valid size hints and can change UI layout.
+ * ABI-sensitive: Yes (user-visible accepted @N values in font paths).
+ * Disk-format-sensitive: No.
+ * Security-critical: Yes (bounds memory allocations from user-supplied font paths).
+ */
+#define VGA_SCALABLE_GLYPH_H_MIN 6
+#define VGA_SCALABLE_GLYPH_H_MAX 64
 
 // System default font (used by drawText/drawCharAt when callers don't specify one).
 #define VGA_SYSTEM_FONT_DRIVE 0
@@ -54,8 +621,11 @@ typedef struct {
 	uint8 drive;
 	uint16 refcount;
 	char path[128];
-	uint8 glyph_h;  // 8 or 16
-	uint8* bitmap;  // VGA_FONT_GLYPHS * glyph_h
+	uint8 glyph_h;                  // rendered glyph bitmap height in pixels
+	uint8 line_h;                   // recommended line step in pixels
+	uint8 max_advance;              // widest per-glyph advance in pixels
+	uint8 advance[VGA_FONT_GLYPHS]; // per-glyph horizontal advance
+	uint64* rows;                   // VGA_FONT_GLYPHS * glyph_h rows (bit63 = left)
 } vga_font_entry_t;
 
 // Handle 0 = built-in font.
@@ -76,17 +646,48 @@ static vga_font_entry_t* vga_font_entry_from_handle(int handle) {
 	return &g_vga_fonts[idx];
 }
 
-static const unsigned char* vga_font_bitmap_or_builtin(int handle) {
-	vga_font_entry_t* e = vga_font_entry_from_handle(handle);
-	if (!e || !e->bitmap) return vga_builtin_font();
-	return (const unsigned char*)e->bitmap;
-}
-
 static uint8 vga_font_glyph_h_or_builtin(int handle) {
 	vga_font_entry_t* e = vga_font_entry_from_handle(handle);
-	if (!e || !e->bitmap) return (uint8)VGA_FONT_GLYPH_H_8;
-	if (e->glyph_h != VGA_FONT_GLYPH_H_16) return (uint8)VGA_FONT_GLYPH_H_8;
-	return (uint8)VGA_FONT_GLYPH_H_16;
+	if (!e || !e->rows) return (uint8)VGA_FONT_GLYPH_H_8;
+	if (e->glyph_h == 0) return (uint8)VGA_FONT_GLYPH_H_8;
+	return e->glyph_h;
+}
+
+static uint8 vga_font_line_h_or_builtin(int handle) {
+	vga_font_entry_t* e = vga_font_entry_from_handle(handle);
+	if (!e || !e->rows) return (uint8)VGA_FONT_GLYPH_H_8;
+	if (e->line_h == 0) return vga_font_glyph_h_or_builtin(handle);
+	return e->line_h;
+}
+
+static uint8 vga_font_advance_or_builtin(int handle, int charnum) {
+	vga_font_entry_t* e = vga_font_entry_from_handle(handle);
+	if (!e || !e->rows || charnum < 0) return (uint8)VGA_FONT_DEFAULT_ADVANCE;
+	unsigned int c = (unsigned int)(unsigned char)charnum;
+	uint8 adv = e->advance[c];
+	if (adv == 0) adv = (e->max_advance > 0) ? e->max_advance : (uint8)VGA_FONT_DEFAULT_ADVANCE;
+	return adv;
+}
+
+int vga_font_glyph_height(int font_handle) {
+	return (int)vga_font_glyph_h_or_builtin(font_handle);
+}
+
+int vga_font_line_height(int font_handle) {
+	return (int)vga_font_line_h_or_builtin(font_handle);
+}
+
+int vga_font_advance_width(int font_handle) {
+	vga_font_entry_t* e = vga_font_entry_from_handle(font_handle);
+	if (!e || !e->rows) return VGA_FONT_DEFAULT_ADVANCE;
+	uint8 adv = e->advance[(unsigned int)'W'];
+	if (adv == 0) adv = e->advance[(unsigned int)'M'];
+	if (adv == 0) adv = (e->max_advance > 0) ? e->max_advance : (uint8)VGA_FONT_DEFAULT_ADVANCE;
+	return (int)adv;
+}
+
+int vga_font_char_advance(int font_handle, int charnum) {
+	return (int)vga_font_advance_or_builtin(font_handle, charnum);
 }
 
 static void vga_try_init_system_font(void) {
@@ -95,7 +696,7 @@ static void vga_try_init_system_font(void) {
 	// Only attempt after a filesystem is detectable.
 	if (vfs_detect(g_vga_system_font_drive) == VFS_FS_NONE) return;
 	g_vga_system_font_attempted = 1;
-	int h = vga_font_acquire_hex(g_vga_system_font_drive, g_vga_system_font_path);
+	int h = vga_font_acquire_path(g_vga_system_font_drive, g_vga_system_font_path);
 	if (h > 0) g_vga_system_font_handle = h;
 }
 
@@ -107,7 +708,7 @@ static int vga_get_system_font_handle_raw(void) {
 int vga_system_font_acquire(void) {
 	vga_try_init_system_font();
 	if (g_vga_system_font_handle > 0) {
-		return vga_font_acquire_hex(g_vga_system_font_drive, g_vga_system_font_path);
+		return vga_font_acquire_path(g_vga_system_font_drive, g_vga_system_font_path);
 	}
 	return 0;
 }
@@ -127,7 +728,7 @@ int vga_system_font_set(uint8 drive, const char* path) {
 		return 0;
 	}
 
-	int new_handle = vga_font_acquire_hex(drive, path);
+	int new_handle = vga_font_acquire_path(drive, path);
 	if (new_handle <= 0) return -1;
 
 	int old = g_vga_system_font_handle;
@@ -142,18 +743,30 @@ int vga_system_font_set(uint8 drive, const char* path) {
 }
 
 int vga_text_cell_w(void) {
-	return VGA_FONT_GLYPH_W;
+	int h = vga_get_system_font_handle_raw();
+	vga_font_entry_t* e = vga_font_entry_from_handle(h);
+	if (!e || !e->rows) return VGA_FONT_DEFAULT_ADVANCE;
+	uint8 adv = e->advance[(unsigned int)'W'];
+	if (adv == 0) adv = e->advance[(unsigned int)'M'];
+	if (adv == 0) adv = (e->max_advance > 0) ? e->max_advance : (uint8)VGA_FONT_DEFAULT_ADVANCE;
+	return (int)adv;
 }
 
 int vga_text_cell_h(void) {
-	// Use the system font if it exists; otherwise, fall back to the built-in height.
-	int h = (int)vga_font_glyph_h_or_builtin(vga_get_system_font_handle_raw());
-	return (h == VGA_FONT_GLYPH_H_16) ? VGA_FONT_GLYPH_H_16 : VGA_FONT_GLYPH_H_8;
+	// Use recommended line height so larger scalable fonts do not overlap lines.
+	int h = (int)vga_font_line_h_or_builtin(vga_get_system_font_handle_raw());
+	if (h <= 0) return VGA_FONT_GLYPH_H_8;
+	return h;
 }
 
 int vga_font_glyph_h(int font_handle) {
 	int h = (int)vga_font_glyph_h_or_builtin(font_handle);
-	return (h == VGA_FONT_GLYPH_H_16) ? VGA_FONT_GLYPH_H_16 : VGA_FONT_GLYPH_H_8;
+	if (h <= 0) return VGA_FONT_GLYPH_H_8;
+	return h;
+}
+
+static int vga_is_scalable_glyph_h_valid(int glyph_h) {
+	return (glyph_h >= VGA_SCALABLE_GLYPH_H_MIN && glyph_h <= VGA_SCALABLE_GLYPH_H_MAX) ? 1 : 0;
 }
 
 static int vga_hex_nibble(char c) {
@@ -161,6 +774,60 @@ static int vga_hex_nibble(char c) {
 	if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
 	if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
 	return -1;
+}
+
+static char vga_ascii_tolower(char c) {
+	if (c >= 'A' && c <= 'Z') return (char)('a' + (c - 'A'));
+	return c;
+}
+
+static int vga_str_ends_with_icase(const char* s, const char* suffix) {
+	if (!s || !suffix) return 0;
+	size_t sl = strlen(s);
+	size_t su = strlen(suffix);
+	if (su == 0 || sl < su) return 0;
+	const char* tail = s + (sl - su);
+	for (size_t i = 0; i < su; ++i) {
+		if (vga_ascii_tolower(tail[i]) != vga_ascii_tolower(suffix[i])) return 0;
+	}
+	return 1;
+}
+
+static uint8 vga_font_pick_glyph_h_for_path(const char* path) {
+	if (!path) return (uint8)VGA_FONT_GLYPH_H_16;
+	if (strstr(path, "-8.") || strstr(path, "_8.") || strstr(path, "8x8")) return (uint8)VGA_FONT_GLYPH_H_8;
+	if (strstr(path, "-16.") || strstr(path, "_16.") || strstr(path, "8x16")) return (uint8)VGA_FONT_GLYPH_H_16;
+	return (uint8)VGA_FONT_GLYPH_H_16;
+}
+
+// Parse optional scalable-font size suffix from a path.
+// Supported suffix at the end of the string:
+//   @N where N is a decimal size in [VGA_SCALABLE_GLYPH_H_MIN, VGA_SCALABLE_GLYPH_H_MAX]
+// Example: /fonts/unscii-16.otf@14
+static int vga_font_prepare_open_path(const char* path, char* out_open_path, size_t out_cap, uint8* out_hint_h, int* out_has_hint) {
+	if (!path || !out_open_path || out_cap == 0 || !out_hint_h || !out_has_hint) return -1;
+	*out_hint_h = 0;
+	*out_has_hint = 0;
+	strncpy(out_open_path, path, out_cap - 1);
+	out_open_path[out_cap - 1] = '\0';
+	if (strncmp(path, out_open_path, out_cap) != 0) return -1;
+
+	char* at = strrchr(out_open_path, '@');
+	if (!at) return 0;
+	if (*(at + 1) == '\0') return 0;
+
+	int glyph_h = 0;
+	for (char* p = at + 1; *p; ++p) {
+		if (*p < '0' || *p > '9') return 0;
+		glyph_h = glyph_h * 10 + (*p - '0');
+		if (glyph_h > VGA_SCALABLE_GLYPH_H_MAX) return 0;
+	}
+	if (!vga_is_scalable_glyph_h_valid(glyph_h)) return 0;
+
+	*at = '\0';
+	*out_hint_h = (uint8)glyph_h;
+	*out_has_hint = 1;
+	return 0;
 }
 
 static int vga_hex_parse_u32(const char* s, int max_chars, uint32* out) {
@@ -394,6 +1061,14 @@ static int vga_font_load_hex_stream(uint8 drive, const char* path, uint8* out_bi
 int vga_font_acquire_hex(uint8 drive, const char* path) {
 	if (!vga_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
 	if (!path || !path[0]) return -1;
+	char open_path[128];
+	uint8 hint_h = 0;
+	int has_hint = 0;
+	if (vga_font_prepare_open_path(path, open_path, sizeof(open_path), &hint_h, &has_hint) != 0) return -1;
+	int is_hex = vga_str_ends_with_icase(open_path, ".hex");
+	int is_otf = vga_str_ends_with_icase(open_path, ".otf");
+	int is_ttf = vga_str_ends_with_icase(open_path, ".ttf");
+	if (!is_hex && !is_otf && !is_ttf) return -1;
 	// Reuse already-loaded fonts.
 	for (int i = 0; i < VGA_FONT_MAX; ++i) {
 		vga_font_entry_t* e = &g_vga_fonts[i];
@@ -413,17 +1088,64 @@ int vga_font_acquire_hex(uint8 drive, const char* path) {
 	vga_font_entry_t* e = &g_vga_fonts[slot];
 	memset(e, 0, sizeof(*e));
 	uint8 glyph_h = 0;
-	if (vga_font_probe_hex_glyph_h(drive, path, &glyph_h) != 0) {
-		memset(e, 0, sizeof(*e));
-		return -1;
+	if (is_hex) {
+		if (vga_font_probe_hex_glyph_h(drive, open_path, &glyph_h) != 0) {
+			memset(e, 0, sizeof(*e));
+			return -1;
+		}
+	} else {
+		glyph_h = has_hint ? hint_h : vga_font_pick_glyph_h_for_path(open_path);
 	}
-	int bitmap_bytes = VGA_FONT_GLYPHS * (int)glyph_h;
-	e->bitmap = (uint8*)malloc((size_t)bitmap_bytes);
-	if (!e->bitmap) { memset(e, 0, sizeof(*e)); return -1; }
-	if (vga_font_load_hex_stream(drive, path, e->bitmap, glyph_h) != 0) {
-		free(e->bitmap);
-		memset(e, 0, sizeof(*e));
-		return -1;
+	int row_count = VGA_FONT_GLYPHS * (int)glyph_h;
+	e->rows = (uint64*)malloc((size_t)row_count * sizeof(uint64));
+	if (!e->rows) { memset(e, 0, sizeof(*e)); return -1; }
+	memset(e->rows, 0, (size_t)row_count * sizeof(uint64));
+	e->line_h = glyph_h;
+	e->max_advance = (uint8)VGA_FONT_DEFAULT_ADVANCE;
+	for (int i = 0; i < VGA_FONT_GLYPHS; ++i) e->advance[i] = (uint8)VGA_FONT_DEFAULT_ADVANCE;
+
+	if (is_hex) {
+		uint8* packed_rows = (uint8*)malloc((size_t)row_count);
+		if (!packed_rows) {
+			free(e->rows);
+			memset(e, 0, sizeof(*e));
+			return -1;
+		}
+		if (vga_font_load_hex_stream(drive, open_path, packed_rows, glyph_h) != 0) {
+			free(packed_rows);
+			free(e->rows);
+			memset(e, 0, sizeof(*e));
+			return -1;
+		}
+		for (int cp = 0; cp < VGA_FONT_GLYPHS; ++cp) {
+			e->advance[cp] = (uint8)VGA_FONT_DEFAULT_ADVANCE;
+			for (int row = 0; row < glyph_h; ++row) {
+				uint8 bits8 = packed_rows[(cp * (int)glyph_h) + row];
+				uint64 row_bits = 0;
+				for (int x = 0; x < VGA_FONT_DEFAULT_ADVANCE; ++x) {
+					if (bits8 & (0x80u >> (unsigned)x)) {
+						row_bits |= (uint64)1uLL << (63u - (unsigned)x);
+					}
+				}
+				e->rows[(cp * (int)glyph_h) + row] = row_bits;
+			}
+		}
+		free(packed_rows);
+	} else {
+		int line_h = (int)glyph_h;
+		if (otf_font_rasterize_mono_from_vfs(drive, open_path, (int)glyph_h, (uint64_t*)e->rows, VGA_FONT_GLYPHS, e->advance, VGA_FONT_GLYPHS, &line_h) != 0) {
+			free(e->rows);
+			memset(e, 0, sizeof(*e));
+			return -1;
+		}
+		if (line_h < (int)glyph_h) line_h = (int)glyph_h;
+		if (line_h > 255) line_h = 255;
+		e->line_h = (uint8)line_h;
+		uint8 max_adv = (uint8)VGA_FONT_DEFAULT_ADVANCE;
+		for (int cp = 0; cp < VGA_FONT_GLYPHS; ++cp) {
+			if (e->advance[cp] > max_adv) max_adv = e->advance[cp];
+		}
+		e->max_advance = max_adv;
 	}
 	e->used = 1;
 	e->drive = drive;
@@ -434,12 +1156,16 @@ int vga_font_acquire_hex(uint8 drive, const char* path) {
 	return slot + 1;
 }
 
+int vga_font_acquire_path(uint8 drive, const char* path) {
+	return vga_font_acquire_hex(drive, path);
+}
+
 void vga_font_release(int font_handle) {
 	vga_font_entry_t* e = vga_font_entry_from_handle(font_handle);
 	if (!e) return;
 	if (e->refcount > 0) e->refcount--;
 	if (e->refcount == 0) {
-		if (e->bitmap) free(e->bitmap);
+		if (e->rows) free(e->rows);
 		memset(e, 0, sizeof(*e));
 	}
 }
@@ -449,22 +1175,91 @@ static unsigned char* g_backbuffer = NULL;
 static int g_backbuffer_w = 0;
 static int g_backbuffer_h = 0;
 
-static void vga_draw_glyph8xN_at(const unsigned char* font, int glyph_h, int x0, int y0, int charnum, int rr, int gg, int bb) {
-	if (!font) font = vga_builtin_font();
-	if (charnum < 0) return;
-	if (glyph_h != VGA_FONT_GLYPH_H_16) glyph_h = VGA_FONT_GLYPH_H_8;
+typedef enum {
+	VGA_BACKBUFFER_ALLOC_NONE = 0,
+	VGA_BACKBUFFER_ALLOC_HEAP = 1,
+	VGA_BACKBUFFER_ALLOC_CONTIG_FRAMES = 2,
+} vga_backbuffer_alloc_t;
+
+static vga_backbuffer_alloc_t g_backbuffer_alloc = VGA_BACKBUFFER_ALLOC_NONE;
+static uint32 g_backbuffer_pages = 0;
+
+static uint32 vga_ptr_to_u32(const void* ptr) {
+	uintptr raw = (uintptr)ptr;
+	uint32 narrowed = (uint32)raw;
+	if ((uintptr)narrowed != raw) {
+		return 0;
+	}
+	return narrowed;
+}
+
+static inline const void* vga_u32_to_ptr(uint32 address) {
+	return (const void*)(uintptr)address;
+}
+
+/*
+ * RESOURCE-INVARIANT: Backbuffer allocation on low-RAM systems.
+ *
+ * Why: A full-screen RGBA8 backbuffer is large (w*h*4). On ~5MB targets it can
+ *      easily consume essentially all free physical frames and starve paging,
+ *      slabs, and user programs. The UI can still function without a backbuffer
+ *      (with more flicker), so prefer skipping allocation when frames are tight.
+ */
+#define VGA_BACKBUFFER_MIN_FREE_FRAMES_AFTER 64u /* 256KB headroom */
+
+static void vga_free_backbuffer(void) {
+	if (!g_backbuffer) return;
+
+	if (g_backbuffer_alloc == VGA_BACKBUFFER_ALLOC_CONTIG_FRAMES) {
+		uint32 va = vga_ptr_to_u32(g_backbuffer);
+		if (va >= KERNEL_BASE && g_backbuffer_pages) {
+			uint32 phys = va - KERNEL_BASE;
+			for (uint32 i = 0; i < g_backbuffer_pages; ++i) {
+				frame_free(phys + i * PAGE_SIZE);
+			}
+		}
+	} else {
+		free(g_backbuffer);
+	}
+
+	g_backbuffer = NULL;
+	g_backbuffer_w = 0;
+	g_backbuffer_h = 0;
+	g_backbuffer_alloc = VGA_BACKBUFFER_ALLOC_NONE;
+	g_backbuffer_pages = 0;
+}
+
+static int vga_draw_glyph8xN_at(int font_handle, int x0, int y0, int charnum, int rr, int gg, int bb) {
+	if (charnum < 0) return 0;
+	vga_font_entry_t* e = vga_font_entry_from_handle(font_handle);
+	int glyph_h = (int)vga_font_glyph_h_or_builtin(font_handle);
+	if (glyph_h <= 0) glyph_h = VGA_FONT_GLYPH_H_8;
 	unsigned int c = (unsigned int)(unsigned char)charnum;
+	int draw_w = (int)vga_font_advance_or_builtin(font_handle, charnum);
+	if (draw_w <= 0) draw_w = VGA_FONT_DEFAULT_ADVANCE;
+	if (draw_w > VGA_FONT_GLYPH_W_MAX) draw_w = VGA_FONT_GLYPH_W_MAX;
+
+	int use_builtin = (!e || !e->rows);
+	const unsigned char* font = NULL;
+	if (use_builtin) font = vga_builtin_font();
+
 	// draw into backbuffer if present
 	if (g_backbuffer) {
 		for (int k = 0; k < glyph_h; k++) {
 			int yy = y0 + k;
 			if (yy < 0 || yy >= g_backbuffer_h) continue;
-			unsigned char rowbits = font[c * (unsigned)glyph_h + (unsigned)k];
-			for (int i = 0; i < 8; i++) {
+			for (int i = 0; i < draw_w; i++) {
 				int xx = x0 + i;
 				if (xx < 0 || xx >= g_backbuffer_w) continue;
-				// .hex fonts encode each row byte MSB->LSB (left->right)
-				if (rowbits & (0x80u >> (unsigned)i)) {
+				int on = 0;
+				if (use_builtin) {
+					unsigned char rowbits = font[c * (unsigned)glyph_h + (unsigned)k];
+					on = (rowbits & (0x80u >> (unsigned)i)) ? 1 : 0;
+				} else {
+					uint64 rowbits = e->rows[c * (unsigned)glyph_h + (unsigned)k];
+					on = (rowbits & ((uint64)1uLL << (63u - (unsigned)i))) ? 1 : 0;
+				}
+				if (on) {
 					unsigned char *px = g_backbuffer + ((size_t)yy * (size_t)g_backbuffer_w + (size_t)xx) * 4;
 					px[0] = (unsigned char)bb;
 					px[1] = (unsigned char)gg;
@@ -473,23 +1268,29 @@ static void vga_draw_glyph8xN_at(const unsigned char* font, int glyph_h, int x0,
 				}
 			}
 		}
-		vga_mark_dirty_rect(x0, y0, 8, glyph_h);
-		return;
+		vga_mark_dirty_rect(x0, y0, draw_w, glyph_h);
+		return draw_w;
 	}
 	// fallback to framebuffer pixel drawing
 	for (int k = 0; k < glyph_h; k++) {
-		for (int i = 0; i < 8; i++) {
-			if (font[c * (unsigned)glyph_h + (unsigned)k] & (0x80u >> (unsigned)i)) {
+		for (int i = 0; i < draw_w; i++) {
+			int on = 0;
+			if (use_builtin) {
+				on = (font[c * (unsigned)glyph_h + (unsigned)k] & (0x80u >> (unsigned)i)) ? 1 : 0;
+			} else {
+				uint64 rowbits = e->rows[c * (unsigned)glyph_h + (unsigned)k];
+				on = (rowbits & ((uint64)1uLL << (63u - (unsigned)i))) ? 1 : 0;
+			}
+			if (on) {
 				drawPixel(x0 + i, k + y0, rr, gg, bb);
 			}
 		}
 	}
+	return draw_w;
 }
 
 void drawCharAt_font(int font_handle, int x, int y, int charnum, int rr, int gg, int bb) {
-	const unsigned char* font = vga_font_bitmap_or_builtin(font_handle);
-	int glyph_h = (int)vga_font_glyph_h_or_builtin(font_handle);
-	vga_draw_glyph8xN_at(font, glyph_h, x, y, charnum, rr, gg, bb);
+	(void)vga_draw_glyph8xN_at(font_handle, x, y, charnum, rr, gg, bb);
 }
 // Optional exclusion rect for swap (e.g., software cursor overlay)
 static int g_exclude_x = -1, g_exclude_y = -1, g_exclude_w = 0, g_exclude_h = 0;
@@ -518,14 +1319,14 @@ static void vga_init_565_luts(void) {
 // Shell redirection globals
 int shell_redirect_active = 0;
 // Global capture mode to force capture during command substitution
-int g_shell_capture_mode = 0; // referenced from shell_script.c
+int g_shell_capture_mode = 0;
 char shell_redirect_buf[SHELL_REDIRECT_BUF_SIZE];
 int shell_redirect_pos = 0;
-// Color for redirected output
-int shell_redirect_color_r = 255;
-int shell_redirect_color_g = 255;
-int shell_redirect_color_b = 255;
-// Per-char redirect colors parallel to shell_redirect_buf
+// Colour for redirected output
+int shell_redirect_colour_r = 255;
+int shell_redirect_colour_g = 255;
+int shell_redirect_colour_b = 255;
+// Per-char redirect colours parallel to shell_redirect_buf
 unsigned char shell_redirect_r[SHELL_REDIRECT_BUF_SIZE];
 unsigned char shell_redirect_g[SHELL_REDIRECT_BUF_SIZE];
 unsigned char shell_redirect_b[SHELL_REDIRECT_BUF_SIZE];
@@ -554,7 +1355,7 @@ void init_dynamic_log_buffer() {
     if (g_mbi && (g_mbi->flags & MULTIBOOT_INFO_MEM_MAP)) {
         // Calculate total available memory from memory map
         uint32_t total_ram = 0;
-        multiboot_memory_map_t* mmap = (multiboot_memory_map_t*)g_mbi->mmap_addr;
+		multiboot_memory_map_t* mmap = (multiboot_memory_map_t*)vga_u32_to_ptr(g_mbi->mmap_addr);
         uint32_t entries = g_mbi->mmap_length / sizeof(multiboot_memory_map_t);
         
         for (uint32_t i = 0; i < entries && i < 50; i++) {
@@ -601,6 +1402,7 @@ void shell_log_enable() {
 	shell_log_active = 1;
 }
 void shell_log_disable() { shell_log_active = 0; }
+int shell_log_is_enabled(void) { return shell_log_active ? 1 : 0; }
 
 void shell_log_flush() {
 	if (!vga_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return;
@@ -690,7 +1492,7 @@ void drawRect(int x, int y, int w, int h, int r, int g, int b)
 
 	// If a backbuffer is available, draw into it; otherwise draw directly to framebuffer
 	if (g_backbuffer && g_backbuffer_w >= sw && g_backbuffer_h >= sh) {
-		// 32-bit packed color write for speed
+		// 32-bit packed colour write for speed
 		uint32_t packed = ((uint32_t)0 << 24) | ((uint32_t)(unsigned char)r << 16) | ((uint32_t)(unsigned char)g << 8) | (uint32_t)(unsigned char)b;
 		for (int i = 0; i < h; i++) {
 			uint32_t* row = (uint32_t*)(g_backbuffer + ((size_t)(y + i) * g_backbuffer_w + x) * 4);
@@ -800,23 +1602,58 @@ static const unsigned char* vga_builtin_font(void) {
 	return font;
 }
 
+static void vga_console_scroll_one_line(int line_h) {
+	if (!g_mbi) return;
+	int fb_h = (int)g_mbi->framebuffer_height;
+	if (fb_h <= 0) return;
+	if (line_h <= 0) line_h = 8;
+	if (line_h >= fb_h) {
+		clearScreen();
+		return;
+	}
+
+	int pitch = (int)g_mbi->framebuffer_pitch;
+	if (pitch <= 0) return;
+
+	int src_off = line_h * pitch;
+	int move_bytes = (fb_h - line_h) * pitch;
+
+	unsigned char* fb = (unsigned char*)(uintptr_t)g_mbi->framebuffer_addr;
+	if (fb) {
+		memmove(fb, fb + src_off, (size_t)move_bytes);
+		memset(fb + move_bytes, 0, (size_t)(line_h * pitch));
+	}
+
+	if (g_backbuffer && g_backbuffer_w == (int)g_mbi->framebuffer_width && g_backbuffer_h == fb_h) {
+		memmove(g_backbuffer, g_backbuffer + src_off, (size_t)move_bytes);
+		memset(g_backbuffer + move_bytes, 0, (size_t)(line_h * pitch));
+	}
+
+	width = 0;
+	height = fb_h - line_h;
+	if (height < 0) height = 0;
+}
+
 void drawText(int charnum, int r, int g, int b)
 {
 	int font_handle = vga_get_system_font_handle_raw();
-	const unsigned char* font = vga_font_bitmap_or_builtin(font_handle);
 	int glyph_h = (int)vga_font_glyph_h_or_builtin(font_handle);
-
-	int i; // column number in the 8x8 pattern
-	int k; // row number in the 8x8 pattern
-	int w; // horizontal position of the pixel in the 8x8 pattern
-	int h; // vertical position of the pixel in the 8x8 pattern
+	int line_h = (int)vga_font_line_h_or_builtin(font_handle);
+	int nominal_w = (int)vga_font_advance_or_builtin(font_handle, 'W');
+	if (nominal_w <= 0) nominal_w = VGA_FONT_DEFAULT_ADVANCE;
 
 	// Minimal side-effect-free path for drawCharAt to prevent console scrolling/wrapping side effects.
 	if (g_drawCharAt_mode) {
 		if (charnum >= 0) {
-			vga_draw_glyph8xN_at(font, glyph_h, width, height, charnum, r, g, b);
+			(void)vga_draw_glyph8xN_at(font_handle, width, height, charnum, r, g, b);
 		}
 		return;
+	}
+
+	// Erase software cursor before making changes (framebuffer console)
+	if (g_console_cursor_visible && g_mbi && g_mbi->framebuffer_addr) {
+		int cursor_h = (int)vga_font_line_h_or_builtin(font_handle);
+		drawRect(width, height, g_console_cursor_w, cursor_h, 0, 0, 0);
 	}
 	
 	// If shell output is being redirected (or forced capture), capture characters into the redirect buffer
@@ -842,51 +1679,57 @@ void drawText(int charnum, int r, int g, int b)
 	}
 
 
-	if (height == (int)(g_mbi->framebuffer_height)) 
-    {
-		clearScreen(); // "scrolling"
-	}
-
 	// charnum = charnum + 1;
 	// Moving the cursor to the next line when we reached the end of the existing line
-	if (width > (int)(g_mbi->framebuffer_width - 20))
+	if (width > (int)(g_mbi->framebuffer_width - nominal_w - 4))
     {
 		width = 0;
-		height = height + glyph_h;
+		height = height + line_h;
 	}
 	
 	if (width < -2 && height > 34)
     {
 		width = g_mbi->framebuffer_width - 30;
-		height = height - glyph_h;
+		height = height - line_h;
 	}
 	
 	if (charnum == -1)
     {
-		drawRect(width, height, 16, 16, 0, 0, 0);
-		width=width+16;
+		drawRect(width, height, nominal_w, line_h, 0, 0, 0);
+		width = width + nominal_w;
 	}
 
 	else if (charnum==10) // enter
     {
-		drawText(-1, r, g, b);
 		width = 0;
-		height = height + glyph_h;
+		height = height + line_h;
 	}
 
 	else if (charnum== 8) // backspace
     {
         if (width > 0) {  // Only backspace if we're not at the start of a line
-            width = width - 8;  // Move back one character width
+			width = width - nominal_w;
+			if (width < 0) width = 0;
             // Draw a black rectangle to erase the previous character
-			drawRect(width, height, 8, glyph_h, 0, 0, 0);
+			drawRect(width, height, nominal_w, line_h, 0, 0, 0);
         }
     }
 
 	else // drawing characters in 8x8
     {
-		vga_draw_glyph8xN_at(font, glyph_h, width, height, charnum, r, g, b);
-		width = width + 8; // move to draw the next character
+		int adv = vga_draw_glyph8xN_at(font_handle, width, height, charnum, r, g, b);
+		if (adv <= 0) adv = nominal_w;
+		width = width + adv;
+	}
+
+	if (height > (int)(g_mbi->framebuffer_height - line_h)) {
+		vga_console_scroll_one_line(line_h);
+	}
+
+	// Draw software cursor after text operations (framebuffer console)
+	if (g_console_cursor_visible && g_mbi && g_mbi->framebuffer_addr) {
+		int cursor_h = (int)vga_font_line_h_or_builtin(font_handle);
+		drawRect(width, height, g_console_cursor_w, cursor_h, vga_default_r, vga_default_g, vga_default_b);
 	}
 }
 
@@ -1087,17 +1930,17 @@ void printf(const char* format, ...)
 	uint8 *ptr;
 	static int r = 255, g = 255, b = 255; // Default to white, static to maintain state
 
-	// Reset color to white at the start of each printf call
+	// Reset colour to white at the start of each printf call
 	r = 255;
 	g = 255;
 	b = 255;
 
-	// Check if color parameters are provided
+	// Check if colour parameters are provided
 	if (format[0] == '%' && format[1] == 'c') {
 		r = va_arg(ap, int);
 		g = va_arg(ap, int);
 		b = va_arg(ap, int);
-		format += 2; // Skip the color format specifier
+		format += 2; // Skip the colour format specifier
 	}
 
 	// Redirection/capture logic
@@ -1105,16 +1948,16 @@ void printf(const char* format, ...)
 		char temp[512];
 		int temp_pos = vga_format_to_buffer(temp, (int)sizeof(temp), format, ap);
 		
-		// record color for redirected output so callers can render it with the same color
-		shell_redirect_color_r = r;
-		shell_redirect_color_g = g;
-		shell_redirect_color_b = b;
+		// record colour for redirected output so callers can render it with the same colour
+		shell_redirect_colour_r = r;
+		shell_redirect_colour_g = g;
+		shell_redirect_colour_b = b;
 		// Append to the global buffer (with bounds checking)
 		int to_copy = temp_pos;
 		if (shell_redirect_pos + to_copy >= SHELL_REDIRECT_BUF_SIZE - 1) {
 			to_copy = SHELL_REDIRECT_BUF_SIZE - shell_redirect_pos - 1;
 		}
-		// store per-char color metadata for the temp buffer (for the actual copied count)
+		// store per-char colour metadata for the temp buffer (for the actual copied count)
 		for (int i = 0; i < to_copy; ++i) {
 			shell_redirect_r[shell_redirect_pos + i] = (unsigned char)r;
 			shell_redirect_g[shell_redirect_pos + i] = (unsigned char)g;
@@ -1124,7 +1967,7 @@ void printf(const char* format, ...)
 			shell_redirect_buf[shell_redirect_pos++] = temp[i];
 		}
 		shell_redirect_buf[shell_redirect_pos] = '\0';
-		// Also mirror to serial without colors
+		// Also mirror to serial without colours
 		for (int i = 0; i < to_copy; ++i) {
 			serial_write_char(SERIAL_COM1, temp[i]);
 		}
@@ -1185,7 +2028,7 @@ void printf(const char* format, ...)
 		}
 	}
 
-	// Mirror output to serial as we render to VGA (without color codes)
+	// Mirror output to serial as we render to VGA (without colour codes)
 	{
 		va_list ap_serial;
 		va_copy(ap_serial, ap);
@@ -1203,12 +2046,37 @@ void printf(const char* format, ...)
 		int temp_pos = vga_format_to_buffer(temp, (int)sizeof(temp), format, ap);
 		for (int i = 0; i < temp_pos; ++i) {
 			unsigned char ch = (unsigned char)temp[i];
-			// Route through drawText so newline/scrolling uses the active font height.
+#if CONFIG_TTY_ENABLED
+			// In TTY mode, prefer the framebuffer/text-rendering console if a
+			// framebuffer is available (this is the same backend used for early
+			// boot messages). Fall back to the legacy VGA text driver when no
+			// framebuffer is present.
+			if (g_boot_text_mode) {
+				if (g_mbi && g_mbi->framebuffer_addr) {
+					if (ch == (unsigned char)'\n') {
+						drawText(10, r, g, b);
+					} else {
+						drawText((int)ch, r, g, b);
+					}
+				} else {
+					vga_text_putchar((char)ch);
+				}
+			} else {
+				// Graphics mode: render via the framebuffer text path
+				if (ch == (unsigned char)'\n') {
+					drawText(10, r, g, b);
+				} else {
+					drawText((int)ch, r, g, b);
+				}
+			}
+#else
+			// If TTY isn't enabled at build time, always use the graphics path
 			if (ch == (unsigned char)'\n') {
 				drawText(10, r, g, b);
 			} else {
 				drawText((int)ch, r, g, b);
 			}
+#endif
 		}
 	}
 
@@ -1233,11 +2101,28 @@ void drawPixel(int x, int y, int r, int g, int b)
 	}
 
 	unsigned char *video = (unsigned char *)(uintptr_t)g_mbi->framebuffer_addr;
-	unsigned int offset = (x + y * g_mbi->framebuffer_width) * 4; // finding loc of pixel
-	video[offset] = (unsigned char)b;   // setting the colour of pixel; blue, green, red
-	video[offset + 1] = (unsigned char)g;
-	video[offset + 2] = (unsigned char)r;
-	video[offset + 3] = 0;
+	int pitch = g_mbi->framebuffer_pitch;
+	int bpp = g_mbi->framebuffer_bpp / 8;
+	if (!video || pitch <= 0 || bpp <= 0) return;
+
+	unsigned char* p = video + y * pitch + x * bpp;
+	if (bpp >= 4) {
+		p[0] = (unsigned char)b;
+		p[1] = (unsigned char)g;
+		p[2] = (unsigned char)r;
+		p[3] = 0xFF;
+	} else if (bpp == 3) {
+		p[0] = (unsigned char)b;
+		p[1] = (unsigned char)g;
+		p[2] = (unsigned char)r;
+	} else if (bpp == 2) {
+		// RGB565 fallback for 16bpp framebuffers.
+		uint16_t pix565 = (uint16_t)((((unsigned)r & 0xF8u) << 8) |
+		                           (((unsigned)g & 0xFCu) << 3) |
+		                           (((unsigned)b & 0xF8u) >> 3));
+		p[0] = (unsigned char)(pix565 & 0xFFu);
+		p[1] = (unsigned char)((pix565 >> 8) & 0xFFu);
+	}
 	return;
 }
 
@@ -1532,21 +2417,40 @@ void vga_init_double_buffer(void) {
 	// If backbuffer already allocated and matches size, nothing to do
 	if (g_backbuffer && g_backbuffer_w == fbw && g_backbuffer_h == fbh) return;
 	// Free existing if sizes differ
-	if (g_backbuffer) {
-		free(g_backbuffer);
-		g_backbuffer = NULL;
-	}
+	vga_free_backbuffer();
 	// Try to allocate backbuffer; if allocation fails, leave g_backbuffer NULL and use direct framebuffer
 	size_t bytes = (size_t)fbw * (size_t)fbh * 4;
+	uint32 pages = (uint32)((bytes + PAGE_SIZE - 1) / PAGE_SIZE);
+	if (pages == 0) return;
+
+	// Low-RAM guard: skip the backbuffer when it would starve the system.
+	// This avoids noisy heap "Request too large" prints and prevents frame exhaustion.
+	uint32 free_frames = vmm_get_free_frames();
+	if (free_frames <= pages + VGA_BACKBUFFER_MIN_FREE_FRAMES_AFTER) {
+		return;
+	}
+
 	// Try predictive allocator first if available
 	void* buf = NULL;
 	// predictive_malloc is declared in predictive_memory.h if available
 	// We'll attempt to use it via weak reference: if symbol exists, use it, otherwise fall back to malloc
-	buf = malloc(bytes);
+	buf = vmm_kmalloc_aligned((uint32)bytes);
+	if (buf) {
+		g_backbuffer_alloc = VGA_BACKBUFFER_ALLOC_CONTIG_FRAMES;
+		g_backbuffer_pages = pages;
+	} else {
+		buf = malloc(bytes);
+		if (buf) {
+			g_backbuffer_alloc = VGA_BACKBUFFER_ALLOC_HEAP;
+			g_backbuffer_pages = 0;
+		}
+	}
 	g_backbuffer = (unsigned char*)buf;
 	if (!g_backbuffer) {
 		g_backbuffer_w = 0;
 		g_backbuffer_h = 0;
+		g_backbuffer_alloc = VGA_BACKBUFFER_ALLOC_NONE;
+		g_backbuffer_pages = 0;
 		return;
 	}
 	g_backbuffer_w = fbw;
@@ -1821,6 +2725,10 @@ void vga_blit_backbuffer_region_to_fb(int x, int y, int w, int h) {
 	}
 }
 
+int vga_has_backbuffer(void) {
+	return g_backbuffer != NULL;
+}
+
 // Fast overlay rectangle fill directly to framebuffer, clipped
 void vga_fillRect_fb(int x, int y, int w, int h, int rr, int gg, int bb) {
 	if (!g_mbi) return;
@@ -1918,7 +2826,8 @@ int vga_restore_fb_region(int x, int y, int w, int h, const unsigned char* in_bu
 void drawTextAt(int x, int y, const char* text, int rr, int gg, int bb)
 {
 	if (!text) return;
-	int glyph_h = (int)vga_font_glyph_h_or_builtin(vga_get_system_font_handle_raw());
+	int font_handle = vga_get_system_font_handle_raw();
+	int line_h = (int)vga_font_line_h_or_builtin(font_handle);
 	int old_w = width;
 	int old_h = height;
 	int cx = x;
@@ -1927,12 +2836,12 @@ void drawTextAt(int x, int y, const char* text, int rr, int gg, int bb)
 	for (const char* p = text; *p; ++p) {
 		if (*p == '\n') {
 			cx = x;
-			cy += glyph_h;
+			cy += line_h;
 			continue;
 		}
-		// draw a single char at the pixel position with color
-		drawCharAt(cx, cy, (int)(unsigned char)*p, rr, gg, bb);
-		cx += 8;
+		int adv = vga_draw_glyph8xN_at(font_handle, cx, cy, (int)(unsigned char)*p, rr, gg, bb);
+		if (adv <= 0) adv = VGA_FONT_DEFAULT_ADVANCE;
+		cx += adv;
 	}
 
 	// restore previous cursor
@@ -1949,16 +2858,16 @@ void start_shell_redirect() {
 	shell_redirect_active = 1;
 	shell_redirect_pos = 0;
 	shell_redirect_buf[0] = '\0';
-	// clear per-char redirect color arrays
+	// clear per-char redirect colour arrays
 	for (int i = 0; i < SHELL_REDIRECT_BUF_SIZE; ++i) {
 		shell_redirect_r[i] = 0;
 		shell_redirect_g[i] = 0;
 		shell_redirect_b[i] = 0;
 	}
-	// reset current redirect color so new typed input falls back to vterm default
-	shell_redirect_color_r = 0;
-	shell_redirect_color_g = 0;
-	shell_redirect_color_b = 0;
+	// reset current redirect colour so new typed input falls back to vterm default
+	shell_redirect_colour_r = 0;
+	shell_redirect_colour_g = 0;
+	shell_redirect_colour_b = 0;
 	// clear any previously recorded icons for this redirect session
 	shell_redirect_icon_count = 0;
 }
@@ -1967,10 +2876,10 @@ void start_shell_redirect() {
 void stop_shell_redirect() {
 	shell_redirect_active = 0;
 	shell_redirect_pos = 0;
-	// clear redirect color so subsequent typed input doesn't inherit last printed color
-	shell_redirect_color_r = 0;
-	shell_redirect_color_g = 0;
-	shell_redirect_color_b = 0;
+	// clear redirect colour so subsequent typed input doesn't inherit last printed colour
+	shell_redirect_colour_r = 0;
+	shell_redirect_colour_g = 0;
+	shell_redirect_colour_b = 0;
 }
 
 // Register an icon to be associated with the current output position in shell_redirect_buf.
@@ -2029,15 +2938,15 @@ int snprintf(char *str, size_t size, const char *format, ...) {
     return pos;
 }
 
-void vga_set_color(int nr, int ng, int nb) {
+void vga_set_colour(int nr, int ng, int nb) {
 	vga_default_r = nr;
 	vga_default_g = ng;
 	vga_default_b = nb;
 }
 
-// Bold font - just use regular drawText with brighter color for now
+// Bold font - just use regular drawText with brighter colour for now
 void drawText_bold(int charnum, int r, int g, int b) {
-    // For now, just use regular drawText with brighter color
+    // For now, just use regular drawText with brighter colour
     drawText(charnum, r, g, b);
 }
 
@@ -2085,7 +2994,7 @@ void render_markdown(const char* content) {
             }
             if (content[i] == ' ') {
                 in_header = 1;
-                // Print header with different color
+                // Print header with different colour
                 printf("%c", 200, 180, 255); // Soft lavender for headers
                 continue;
             } else {

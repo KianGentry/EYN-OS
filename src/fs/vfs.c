@@ -6,8 +6,27 @@
 #include <util.h>  // for malloc/free
 #include <context.h>
 #include <misc/sched.h>
+#include <vga.h>
+#include <utilities/shell/shell_args.h>
+#include <multiboot.h>
+#include <mm/vmm.h>
 
-#define EYNFS_SUPERBLOCK_LBA 2048
+#define VFS_FIFO_MARKER "EYNFIFO1\n"
+#define VFS_FIFO_MARKER_LEN 9
+
+#define RAMDISK_PART_TYPE_EYNFS 0xEFu
+
+extern multiboot_info_t *g_mbi;
+
+typedef struct {
+    uint8* base;
+    uint32 sectors;
+    uint32 part_start_lba;
+    eynfs_superblock_t sb;
+} vfs_ramdisk_ctx_t;
+
+static int vfs_ramdisk_debug_logged = 0;
+static int vfs_ramdisk_read_error_logged = 0;
 
 static int vfs_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -20,12 +39,428 @@ static int vfs_ctx_allow(uint32 caps, uint32 cost) {
     return 1;
 }
 
+static inline const void* vfs_u32_to_ptr(uint32 address) {
+    return (const void*)(uintptr)address;
+}
+
 static void vfs_ctx_account(uint32 cost) {
     command_context_t* ctx = current_command_context;
     if (!ctx) return;
     scheduler_account(ctx->wo, cost);
     scheduler_yield_if_needed(ctx->wo);
     if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
+static int vfs_is_fifo_marker_file(uint8 drive, const char* path) {
+    if (!path || !path[0]) return 0;
+
+    char marker[VFS_FIFO_MARKER_LEN];
+    int n = vfs_read_file_at(drive, path, marker, VFS_FIFO_MARKER_LEN, 0);
+    if (n != VFS_FIFO_MARKER_LEN) return 0;
+    for (int i = 0; i < VFS_FIFO_MARKER_LEN; ++i) {
+        if (marker[i] != VFS_FIFO_MARKER[i]) return 0;
+    }
+    return 1;
+}
+
+static int vfs_join_child_path(const char* parent, const char* name, char out[256]) {
+    if (!name || !name[0] || !out) return -1;
+
+    if (!parent || !parent[0] || strcmp(parent, "/") == 0) {
+        int n = snprintf(out, 256, "/%s", name);
+        return (n > 0 && n < 256) ? 0 : -1;
+    }
+
+    int n = snprintf(out, 256, "%s/%s", parent, name);
+    return (n > 0 && n < 256) ? 0 : -1;
+}
+
+static int vfs_str_contains_nocase(const char* haystack, const char* needle) {
+    if (!haystack || !needle || !needle[0]) return 0;
+    for (int i = 0; haystack[i]; ++i) {
+        int j = 0;
+        while (needle[j]) {
+            char hc = haystack[i + j];
+            char nc = needle[j];
+            if (!hc) return 0;
+            if (hc >= 'A' && hc <= 'Z') hc = (char)(hc - 'A' + 'a');
+            if (nc >= 'A' && nc <= 'Z') nc = (char)(nc - 'A' + 'a');
+            if (hc != nc) break;
+            j++;
+        }
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+static int vfs_ramdisk_pick_module(multiboot_module_t** out_mod) {
+    if (!out_mod || !g_mbi) return -1;
+    if (!(g_mbi->flags & MULTIBOOT_INFO_MODS) || g_mbi->mods_count == 0 || !g_mbi->mods_addr) return -1;
+
+    multiboot_module_t* mods = (multiboot_module_t*)vfs_u32_to_ptr(g_mbi->mods_addr);
+    uint32 pick = 0;
+    for (uint32 i = 0; i < g_mbi->mods_count; ++i) {
+        const char* cmdline = (const char*)vfs_u32_to_ptr(mods[i].cmdline);
+        if (cmdline && vfs_str_contains_nocase(cmdline, "ramdisk")) {
+            pick = i;
+            break;
+        }
+    }
+
+    if (mods[pick].mod_end <= mods[pick].mod_start) return -1;
+    *out_mod = &mods[pick];
+    return 0;
+}
+
+static int vfs_ramdisk_read_sector_raw(const vfs_ramdisk_ctx_t* rd, uint32 lba, uint8 out[512]) {
+    if (!rd || !rd->base || !out) return -1;
+    if (lba >= rd->sectors) return -1;
+    memcpy(out, rd->base + (lba * 512u), 512u);
+    return 0;
+}
+
+static int vfs_ramdisk_write_sector_raw(vfs_ramdisk_ctx_t* rd, uint32 lba, const uint8 in[512]) {
+    if (!rd || !rd->base || !in) return -1;
+    if (lba >= rd->sectors) return -1;
+    memcpy(rd->base + (lba * 512u), in, 512u);
+    return 0;
+}
+
+static int vfs_ramdisk_find_partition_start(const vfs_ramdisk_ctx_t* rd, uint32* out_start) {
+    if (!rd || !out_start) return -1;
+
+    uint8 mbr[512];
+    if (vfs_ramdisk_read_sector_raw(rd, 0, mbr) != 0) return -1;
+
+    if (mbr[510] == 0x55 && mbr[511] == 0xAA) {
+        uint32 first_nonempty_lba = 0;
+        for (int i = 0; i < 4; ++i) {
+            uint8* entry = mbr + 0x1BE + (i * 16);
+            uint8 type = entry[4];
+            uint32 lba_start = entry[8] | ((uint32)entry[9] << 8) | ((uint32)entry[10] << 16) | ((uint32)entry[11] << 24);
+            uint32 sectors = entry[12] | ((uint32)entry[13] << 8) | ((uint32)entry[14] << 16) | ((uint32)entry[15] << 24);
+            if (type == RAMDISK_PART_TYPE_EYNFS && sectors > 0) {
+                *out_start = lba_start;
+                return 0;
+            }
+            if (!first_nonempty_lba && sectors > 0 && lba_start > 0) {
+                first_nonempty_lba = lba_start;
+            }
+        }
+        if (first_nonempty_lba) {
+            *out_start = first_nonempty_lba;
+            return 0;
+        }
+    }
+
+    *out_start = EYNFS_SUPERBLOCK_LBA;
+    return 0;
+}
+
+static int vfs_ramdisk_load(vfs_ramdisk_ctx_t* rd) {
+    if (!rd) return -1;
+    memset(rd, 0, sizeof(*rd));
+
+    if (!g_mbi) {
+        if (!vfs_ramdisk_debug_logged) {
+            vfs_ramdisk_debug_logged = 1;
+            printf("[ramfs] load fail: g_mbi is null\n");
+        }
+        return -1;
+    }
+
+    multiboot_module_t* mod = NULL;
+    if (vfs_ramdisk_pick_module(&mod) != 0) {
+        if (!vfs_ramdisk_debug_logged) {
+            vfs_ramdisk_debug_logged = 1;
+            printf("[ramfs] load fail: no multiboot ramdisk module\n");
+        }
+        return -1;
+    }
+
+    /*
+     * SECURITY-INVARIANT: Access multiboot module bytes through the
+     * KERNEL_BASE physical alias, never through low identity virtual addrs.
+     *
+     * Why: user tasks are mapped at USER_CODE_BASE (0x00400000). If RAM:/
+     * reads use identity addresses, module bytes above 4MB can alias user
+     * mappings and return corrupted data (observed at RAM:/binaries/stats).
+     */
+    rd->base = (uint8*)((uintptr)KERNEL_BASE + (uintptr)mod->mod_start);
+    uint32 bytes = (uint32)(mod->mod_end - mod->mod_start);
+    rd->sectors = bytes / 512u;
+    if (!rd->base || rd->sectors == 0) {
+        if (!vfs_ramdisk_debug_logged) {
+            vfs_ramdisk_debug_logged = 1;
+            printf("[ramfs] load fail: invalid module range start=0x%X end=0x%X sectors=%u\n",
+                   (unsigned)mod->mod_start, (unsigned)mod->mod_end, (unsigned)rd->sectors);
+        }
+        return -1;
+    }
+
+    if (vfs_ramdisk_find_partition_start(rd, &rd->part_start_lba) != 0) {
+        if (!vfs_ramdisk_debug_logged) {
+            vfs_ramdisk_debug_logged = 1;
+            printf("[ramfs] load fail: could not find partition start\n");
+        }
+        return -1;
+    }
+    if (rd->part_start_lba >= rd->sectors) {
+        if (!vfs_ramdisk_debug_logged) {
+            vfs_ramdisk_debug_logged = 1;
+            printf("[ramfs] load fail: part_start=%u >= sectors=%u\n",
+                   (unsigned)rd->part_start_lba, (unsigned)rd->sectors);
+        }
+        return -1;
+    }
+
+    uint8 sbsec[512];
+    if (vfs_ramdisk_read_sector_raw(rd, rd->part_start_lba, sbsec) == 0) {
+        memcpy(&rd->sb, sbsec, sizeof(rd->sb));
+        if (rd->sb.magic == EYNFS_MAGIC && rd->sb.block_size == EYNFS_BLOCK_SIZE) {
+            if (!vfs_ramdisk_debug_logged) {
+                vfs_ramdisk_debug_logged = 1;
+                printf("[ramfs] load ok: start=0x%X sectors=%u part=%u magic=0x%X\n",
+                       (unsigned)mod->mod_start,
+                       (unsigned)rd->sectors,
+                       (unsigned)rd->part_start_lba,
+                       (unsigned)rd->sb.magic);
+            }
+            return 0;
+        }
+    }
+
+    // Compatibility probes for legacy/full-disk images or atypical partition metadata.
+    if (vfs_ramdisk_read_sector_raw(rd, 0, sbsec) == 0) {
+        memcpy(&rd->sb, sbsec, sizeof(rd->sb));
+        if (rd->sb.magic == EYNFS_MAGIC && rd->sb.block_size == EYNFS_BLOCK_SIZE) {
+            rd->part_start_lba = 0;
+            if (!vfs_ramdisk_debug_logged) {
+                vfs_ramdisk_debug_logged = 1;
+                printf("[ramfs] load ok via lba0 probe: magic=0x%X\n", (unsigned)rd->sb.magic);
+            }
+            return 0;
+        }
+    }
+    if (EYNFS_SUPERBLOCK_LBA < rd->sectors && vfs_ramdisk_read_sector_raw(rd, EYNFS_SUPERBLOCK_LBA, sbsec) == 0) {
+        memcpy(&rd->sb, sbsec, sizeof(rd->sb));
+        if (rd->sb.magic == EYNFS_MAGIC && rd->sb.block_size == EYNFS_BLOCK_SIZE) {
+            rd->part_start_lba = EYNFS_SUPERBLOCK_LBA;
+            if (!vfs_ramdisk_debug_logged) {
+                vfs_ramdisk_debug_logged = 1;
+                printf("[ramfs] load ok via lba2048 probe: magic=0x%X\n", (unsigned)rd->sb.magic);
+            }
+            return 0;
+        }
+    }
+
+    if (!vfs_ramdisk_debug_logged) {
+        uint32 m_part_magic = 0;
+        uint32 m_lba0_magic = 0;
+        uint32 m_lba2048_magic = 0;
+        if (vfs_ramdisk_read_sector_raw(rd, rd->part_start_lba, sbsec) == 0) {
+            m_part_magic = (uint32)sbsec[0] | ((uint32)sbsec[1] << 8) | ((uint32)sbsec[2] << 16) | ((uint32)sbsec[3] << 24);
+        }
+        if (vfs_ramdisk_read_sector_raw(rd, 0, sbsec) == 0) {
+            m_lba0_magic = (uint32)sbsec[0] | ((uint32)sbsec[1] << 8) | ((uint32)sbsec[2] << 16) | ((uint32)sbsec[3] << 24);
+        }
+        if (EYNFS_SUPERBLOCK_LBA < rd->sectors && vfs_ramdisk_read_sector_raw(rd, EYNFS_SUPERBLOCK_LBA, sbsec) == 0) {
+            m_lba2048_magic = (uint32)sbsec[0] | ((uint32)sbsec[1] << 8) | ((uint32)sbsec[2] << 16) | ((uint32)sbsec[3] << 24);
+        }
+        vfs_ramdisk_debug_logged = 1;
+        printf("[ramfs] load fail: start=0x%X sectors=%u part=%u m(part)=0x%X m(0)=0x%X m(2048)=0x%X\n",
+               (unsigned)mod->mod_start,
+               (unsigned)rd->sectors,
+               (unsigned)rd->part_start_lba,
+               (unsigned)m_part_magic,
+               (unsigned)m_lba0_magic,
+               (unsigned)m_lba2048_magic);
+    }
+
+    return -1;
+}
+
+/* Read-only fallback: installer media can boot with an empty target disk.
+ * In that case, resolve reads from the multiboot RAM module instead. */
+static int vfs_ramdisk_available(void) {
+    vfs_ramdisk_ctx_t rd;
+    return (vfs_ramdisk_load(&rd) == 0) ? 1 : 0;
+}
+
+int vfs_ramdisk_read_sector(uint32 lba, uint8 out[512]) {
+    vfs_ramdisk_ctx_t rd;
+    if (!out) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    return vfs_ramdisk_read_sector_raw(&rd, lba, out);
+}
+
+int vfs_ramdisk_write_sector(uint32 lba, const uint8 in[512]) {
+    vfs_ramdisk_ctx_t rd;
+    if (!in) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    return vfs_ramdisk_write_sector_raw(&rd, lba, in);
+}
+
+int vfs_ramdisk_total_sectors(uint32* out_total) {
+    vfs_ramdisk_ctx_t rd;
+    if (!out_total) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    *out_total = rd.sectors;
+    return 0;
+}
+
+static uint32 vfs_ramdisk_fs_block_to_lba(const vfs_ramdisk_ctx_t* rd, uint32 fs_block) {
+    return rd->part_start_lba + fs_block;
+}
+
+static int vfs_ramdisk_find_in_dir(const vfs_ramdisk_ctx_t* rd, uint32 dir_block, const char* name, eynfs_dir_entry_t* out) {
+    uint32 current = dir_block;
+    uint8 sec[512];
+    while (current) {
+        if (vfs_ramdisk_read_sector_raw(rd, vfs_ramdisk_fs_block_to_lba(rd, current), sec) != 0) return -1;
+        uint32 next = *(uint32*)sec;
+        const eynfs_dir_entry_t* entries = (const eynfs_dir_entry_t*)(sec + 4);
+        int entry_count = (int)((512 - 4) / sizeof(eynfs_dir_entry_t));
+        for (int i = 0; i < entry_count; ++i) {
+            if (entries[i].name[0] == '\0') continue;
+            if (strcmp(entries[i].name, name) == 0) {
+                if (out) *out = entries[i];
+                return 0;
+            }
+        }
+        current = next;
+    }
+    return -1;
+}
+
+static int vfs_ramdisk_traverse(const vfs_ramdisk_ctx_t* rd, const char* path, eynfs_dir_entry_t* out) {
+    if (!rd || !path || !out || path[0] != '/') return -1;
+
+    if (strcmp(path, "/") == 0) {
+        memset(out, 0, sizeof(*out));
+        out->type = EYNFS_TYPE_DIR;
+        out->first_block = rd->sb.root_dir_block;
+        return 0;
+    }
+
+    char temp[256];
+    strncpy(temp, path, sizeof(temp) - 1);
+    temp[sizeof(temp) - 1] = '\0';
+
+    uint32 current_dir = rd->sb.root_dir_block;
+    char* save = NULL;
+    char* tok = strtok_r(temp + 1, "/", &save);
+    while (tok) {
+        eynfs_dir_entry_t ent;
+        if (vfs_ramdisk_find_in_dir(rd, current_dir, tok, &ent) != 0) return -1;
+        tok = strtok_r(NULL, "/", &save);
+        if (!tok) {
+            *out = ent;
+            return 0;
+        }
+        if (ent.type != EYNFS_TYPE_DIR) return -1;
+        current_dir = ent.first_block;
+    }
+
+    return -1;
+}
+
+static int vfs_ramdisk_read_file_at_internal(const vfs_ramdisk_ctx_t* rd, const eynfs_dir_entry_t* ent, void* buf, int bufsize, uint32 offset) {
+    if (!rd || !ent || !buf || bufsize <= 0) return -1;
+    if (ent->type != EYNFS_TYPE_FILE) return -1;
+    if (offset >= ent->size) return 0;
+
+    uint32 remain_file = ent->size - offset;
+    uint32 want = (remain_file < (uint32)bufsize) ? remain_file : (uint32)bufsize;
+    uint32 copied = 0;
+    uint32 skip = offset;
+    uint32 current = ent->first_block;
+    uint8 sec[512];
+
+    while (current && skip >= (512u - 4u)) {
+        uint32 lba = vfs_ramdisk_fs_block_to_lba(rd, current);
+        if (current >= rd->sb.total_blocks || vfs_ramdisk_read_sector_raw(rd, lba, sec) != 0) {
+            return -1;
+        }
+        current = *(uint32*)sec;
+        skip -= (512u - 4u);
+    }
+
+    while (current && copied < want) {
+        uint32 lba = vfs_ramdisk_fs_block_to_lba(rd, current);
+        if (current >= rd->sb.total_blocks || vfs_ramdisk_read_sector_raw(rd, lba, sec) != 0) {
+            return -1;
+        }
+        uint32 next = *(uint32*)sec;
+        uint32 start = 4u + skip;
+        uint32 avail = 512u - start;
+        uint32 take = ((want - copied) < avail) ? (want - copied) : avail;
+        memcpy((uint8*)buf + copied, sec + start, take);
+        copied += take;
+        current = next;
+        skip = 0;
+    }
+
+    return (int)copied;
+}
+
+static int vfs_ramdisk_stat(const char* path, vfs_stat_t* st) {
+    vfs_ramdisk_ctx_t rd;
+    eynfs_dir_entry_t ent;
+    if (!path || !st) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    if (vfs_ramdisk_traverse(&rd, path, &ent) != 0) return -1;
+    st->type = (ent.type == EYNFS_TYPE_DIR) ? VFS_NODE_DIR : VFS_NODE_FILE;
+    st->size = ent.size;
+    return 0;
+}
+
+static int vfs_ramdisk_listdir_typed(const char* path, vfs_listdir_typed_cb_t cb, void* user) {
+    vfs_ramdisk_ctx_t rd;
+    eynfs_dir_entry_t dir;
+    if (!path || !cb) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    if (vfs_ramdisk_traverse(&rd, path, &dir) != 0 || dir.type != EYNFS_TYPE_DIR) return -1;
+
+    uint32 current = dir.first_block;
+    uint8 sec[512];
+    while (current) {
+        if (vfs_ramdisk_read_sector_raw(&rd, vfs_ramdisk_fs_block_to_lba(&rd, current), sec) != 0) return -1;
+        uint32 next = *(uint32*)sec;
+        const eynfs_dir_entry_t* entries = (const eynfs_dir_entry_t*)(sec + 4);
+        int entry_count = (int)((512 - 4) / sizeof(eynfs_dir_entry_t));
+        for (int i = 0; i < entry_count; ++i) {
+            if (entries[i].name[0] == '\0') continue;
+            vfs_node_type_t t = (entries[i].type == EYNFS_TYPE_DIR) ? VFS_NODE_DIR : VFS_NODE_FILE;
+            if (cb(entries[i].name, t, entries[i].size, user)) return 0;
+        }
+        current = next;
+    }
+
+    return 0;
+}
+
+static int vfs_ramdisk_read_file_at(const char* path, void* buf, int bufsize, uint32 offset) {
+    vfs_ramdisk_ctx_t rd;
+    eynfs_dir_entry_t ent;
+    if (!path || !buf || bufsize <= 0) return -1;
+    if (vfs_ramdisk_load(&rd) != 0) return -1;
+    if (vfs_ramdisk_traverse(&rd, path, &ent) != 0) return -1;
+    {
+        int rc = vfs_ramdisk_read_file_at_internal(&rd, &ent, buf, bufsize, offset);
+        if (rc < 0 && !vfs_ramdisk_read_error_logged) {
+            vfs_ramdisk_read_error_logged = 1;
+            printf("[ramfs] read fail path=%s off=%u size=%u first=%u part=%u sectors=%u total=%u\n",
+                   path,
+                   (unsigned)offset,
+                   (unsigned)ent.size,
+                   (unsigned)ent.first_block,
+                   (unsigned)rd.part_start_lba,
+                   (unsigned)rd.sectors,
+                   (unsigned)rd.sb.total_blocks);
+        }
+        return rc;
+    }
 }
 
 // Internal: FAT32 helpers for absolute path traversal (8.3 only for now)
@@ -72,19 +507,30 @@ static int fat32_path_to_entry(uint8 drive, struct fat32_bpb* bpb, const char* a
 
 // Helpers for FAT32 writes (sector I/O)
 static int fat32_read_fat_entry(uint8 drive, uint32 part_lba, struct fat32_bpb* bpb, uint32 clus, uint32* out_val) {
+    if (!bpb || !out_val) return -1;
+    if (bpb->BytsPerSec < 4 || (bpb->BytsPerSec % 4) != 0) return -1;
+    if (bpb->NumFATs == 0 || bpb->FATSz32 == 0) return -1;
+
     uint8 sector[512];
     uint32 fat_sector = bpb->RsvdSecCnt + (clus * 4) / bpb->BytsPerSec;
     if (ata_read_sector(drive, part_lba + fat_sector, sector) != 0) return -1;
     uint32* fat = (uint32*)sector;
-    uint32 idx = clus % (bpb->BytsPerSec / 4);
+    uint32 entries_per_sec = bpb->BytsPerSec / 4;
+    if (entries_per_sec == 0) return -1;
+    uint32 idx = clus % entries_per_sec;
     *out_val = fat[idx] & 0x0FFFFFFF;
     return 0;
 }
 
 static int fat32_write_fat_entry_all(uint8 drive, uint32 part_lba, struct fat32_bpb* bpb, uint32 clus, uint32 val) {
+    if (!bpb) return -1;
+    if (bpb->BytsPerSec < 4 || (bpb->BytsPerSec % 4) != 0) return -1;
+    if (bpb->NumFATs == 0 || bpb->FATSz32 == 0) return -1;
+
     // Update all FAT copies
     uint8 sector[512];
     uint32 entries_per_sec = bpb->BytsPerSec / 4;
+    if (entries_per_sec == 0) return -1;
     for (uint32 f = 0; f < bpb->NumFATs; ++f) {
         uint32 fat_sector = bpb->RsvdSecCnt + (clus * 4) / bpb->BytsPerSec + (f * bpb->FATSz32);
         if (ata_read_sector(drive, part_lba + fat_sector, sector) != 0) return -1;
@@ -110,9 +556,14 @@ static int fat32_free_chain_sector_all(uint8 drive, uint32 part_lba, struct fat3
 }
 
 static int fat32_allocate_chain_sector_all(uint8 drive, uint32 part_lba, struct fat32_bpb* bpb, uint32 clusters_needed, uint32* out_first) {
+    if (!bpb || !out_first) return -5;
+    if (bpb->BytsPerSec < 4 || (bpb->BytsPerSec % 4) != 0) return -5;
+    if (bpb->SecPerClus == 0 || bpb->NumFATs == 0 || bpb->FATSz32 == 0) return -5;
+
     if (clusters_needed == 0) { *out_first = 0; return 0; }
     uint32 byts_per_sec = bpb->BytsPerSec;
     uint32 entries_per_sec = byts_per_sec / 4;
+    if (entries_per_sec == 0) return -5;
     uint32 first = 0, prev = 0;
     uint8 sector[512];
     uint32 last_fat_sector = 0xFFFFFFFF;
@@ -145,6 +596,10 @@ fail:
 
 vfs_fs_type_t vfs_detect(uint8 drive) {
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return VFS_FS_NONE;
+    if (drive == VFS_DRIVE_RAM) {
+        vfs_ramdisk_ctx_t rd;
+        return (vfs_ramdisk_load(&rd) == 0) ? VFS_FS_EYNFS : VFS_FS_NONE;
+    }
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         return VFS_FS_EYNFS;
@@ -160,6 +615,12 @@ vfs_fs_type_t vfs_detect(uint8 drive) {
 int vfs_get_file_size(uint8 drive, const char* path, uint32* out_size) {
     if (!path || !out_size) return -1;
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+    if (drive == VFS_DRIVE_RAM) {
+        vfs_stat_t st;
+        if (vfs_ramdisk_stat(path, &st) != 0 || st.type != VFS_NODE_FILE) return -1;
+        *out_size = st.size;
+        return 0;
+    }
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; uint32_t pb, idx;
@@ -171,7 +632,16 @@ int vfs_get_file_size(uint8 drive, const char* path, uint32* out_size) {
     // FAT32
     uint32 part_lba = fat32_get_partition_lba_start(drive);
     struct fat32_bpb bpb;
-    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -3;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) {
+        if (vfs_ramdisk_available()) {
+            vfs_stat_t st;
+            if (vfs_ramdisk_stat(path, &st) == 0 && st.type == VFS_NODE_FILE) {
+                *out_size = st.size;
+                return 0;
+            }
+        }
+        return -3;
+    }
     struct fat32_dir_entry dent; uint32 cluster;
     if (fat32_path_to_entry(drive, &bpb, path, &dent, &cluster) != 0) return -4;
     if (dent.Attr & 0x10) return -5; // directory
@@ -181,6 +651,9 @@ int vfs_get_file_size(uint8 drive, const char* path, uint32* out_size) {
 int vfs_read_file(uint8 drive, const char* path, void* buf, int bufsize) {
     if (!path || !buf || bufsize <= 0) return -1;
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+    if (drive == VFS_DRIVE_RAM) {
+        return vfs_ramdisk_read_file_at(path, buf, bufsize, 0);
+    }
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; uint32_t pb, idx;
@@ -191,7 +664,12 @@ int vfs_read_file(uint8 drive, const char* path, void* buf, int bufsize) {
     // FAT32 path
     uint32 part_lba = fat32_get_partition_lba_start(drive);
     struct fat32_bpb bpb;
-    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -3;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) {
+        if (vfs_ramdisk_available()) {
+            return vfs_ramdisk_read_file_at(path, buf, bufsize, 0);
+        }
+        return -3;
+    }
     struct fat32_dir_entry dent; uint32 file_first;
     if (fat32_path_to_entry(drive, &bpb, path, &dent, &file_first) != 0) return -4;
     if (dent.Attr & 0x10) return -5;
@@ -223,6 +701,10 @@ int vfs_read_file_at(uint8 drive, const char* path, void* buf, int bufsize, uint
     if (!path || !buf || bufsize <= 0) return -1;
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
 
+    if (drive == VFS_DRIVE_RAM) {
+        return vfs_ramdisk_read_file_at(path, buf, bufsize, offset);
+    }
+
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; uint32_t pb, idx;
@@ -236,7 +718,12 @@ int vfs_read_file_at(uint8 drive, const char* path, void* buf, int bufsize, uint
     // FAT32 path
     uint32 part_lba = fat32_get_partition_lba_start(drive);
     struct fat32_bpb bpb;
-    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -3;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) {
+        if (vfs_ramdisk_available()) {
+            return vfs_ramdisk_read_file_at(path, buf, bufsize, offset);
+        }
+        return -3;
+    }
     struct fat32_dir_entry dent; uint32 file_first;
     if (fat32_path_to_entry(drive, &bpb, path, &dent, &file_first) != 0) return -4;
     if (dent.Attr & 0x10) return -5;
@@ -292,14 +779,28 @@ int vfs_read_file_at(uint8 drive, const char* path, void* buf, int bufsize, uint
 int vfs_stat(uint8 drive, const char* path, vfs_stat_t* st) {
     if (!path || !st) return -1;
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+    if (drive == VFS_DRIVE_RAM) {
+        return vfs_ramdisk_stat(path, st);
+    }
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
         eynfs_dir_entry_t ent; if (eynfs_traverse_path(drive, &sb, path, &ent, NULL, NULL) != 0) return -2;
         st->type = (ent.type == EYNFS_TYPE_DIR) ? VFS_NODE_DIR : VFS_NODE_FILE;
-        st->size = ent.size; return 0;
+        st->size = ent.size;
+        if (st->type == VFS_NODE_FILE && vfs_is_fifo_marker_file(drive, path)) {
+            st->type = VFS_NODE_FIFO;
+            st->size = 0;
+        }
+        return 0;
     }
     uint32 part_lba = fat32_get_partition_lba_start(drive);
-    struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -3;
+    struct fat32_bpb bpb;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) {
+        if (vfs_ramdisk_available()) {
+            return vfs_ramdisk_stat(path, st);
+        }
+        return -3;
+    }
     // Root directory special case
     if (strcmp(path, "/") == 0) {
         st->type = VFS_NODE_DIR;
@@ -308,28 +809,42 @@ int vfs_stat(uint8 drive, const char* path, vfs_stat_t* st) {
     }
     struct fat32_dir_entry dent; uint32 clus;
     if (fat32_path_to_entry(drive, &bpb, path, &dent, &clus) != 0) return -4;
-    if (dent.Attr & 0x10) { st->type = VFS_NODE_DIR; st->size = 0; }
-    else { st->type = VFS_NODE_FILE; st->size = dent.FileSize; }
+    if (dent.Attr & 0x10) {
+        st->type = VFS_NODE_DIR;
+        st->size = 0;
+    } else {
+        st->type = VFS_NODE_FILE;
+        st->size = dent.FileSize;
+        if (vfs_is_fifo_marker_file(drive, path)) {
+            st->type = VFS_NODE_FIFO;
+            st->size = 0;
+        }
+    }
     return 0;
 }
 
-int vfs_listdir(uint8 drive, const char* path,
-                int (*cb)(const char* name, int is_dir, uint32 size, void* user),
-                void* user) {
+int vfs_listdir_typed(uint8 drive, const char* path, vfs_listdir_typed_cb_t cb, void* user) {
     if (!path || !cb) return -1;
     if (!vfs_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
+
+    if (drive == VFS_DRIVE_RAM) {
+        return vfs_ramdisk_listdir_typed(path, cb, user);
+    }
+
     eynfs_superblock_t sb;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &sb) == 0 && sb.magic == EYNFS_MAGIC) {
-        // Resolve path to directory
-        eynfs_dir_entry_t dir; if (strcmp(path, "/") == 0) { dir.type = EYNFS_TYPE_DIR; dir.first_block = sb.root_dir_block; }
-        else if (eynfs_traverse_path(drive, &sb, path, &dir, NULL, NULL) != 0 || dir.type != EYNFS_TYPE_DIR) return -2;
+        eynfs_dir_entry_t dir;
+        if (strcmp(path, "/") == 0) {
+            dir.type = EYNFS_TYPE_DIR;
+            dir.first_block = sb.root_dir_block;
+        } else if (eynfs_traverse_path(drive, &sb, path, &dir, NULL, NULL) != 0 || dir.type != EYNFS_TYPE_DIR) {
+            return -2;
+        }
 
-        // Stream the directory table by walking the on-disk block chain.
-        // This avoids a fixed MAX_ENTRIES cap and keeps memory usage constant.
         uint32_t current_block = dir.first_block;
         uint8 buf[512];
         int block_count = 0;
-        const int max_blocks = 4096; // safety bound; still allows tens of thousands of entries
+        const int max_blocks = 4096;
 
         while (current_block && block_count < max_blocks) {
             if ((block_count & 0xF) == 0) vfs_ctx_account(SCHED_COST_FS);
@@ -346,8 +861,17 @@ int vfs_listdir(uint8 drive, const char* path,
                 memcpy(name, entries[i].name, EYNFS_NAME_MAX);
                 name[EYNFS_NAME_MAX - 1] = '\0';
 
-                int stop = cb(name, entries[i].type == EYNFS_TYPE_DIR, entries[i].size, user);
-                if (stop) return 0;
+                vfs_node_type_t type = (entries[i].type == EYNFS_TYPE_DIR) ? VFS_NODE_DIR : VFS_NODE_FILE;
+                uint32 size = entries[i].size;
+                if (type == VFS_NODE_FILE) {
+                    char child_path[256];
+                    if (vfs_join_child_path(path, name, child_path) == 0 && vfs_is_fifo_marker_file(drive, child_path)) {
+                        type = VFS_NODE_FIFO;
+                        size = 0;
+                    }
+                }
+
+                if (cb(name, type, size, user)) return 0;
             }
 
             current_block = next_block;
@@ -356,14 +880,20 @@ int vfs_listdir(uint8 drive, const char* path,
 
         return 0;
     }
-    // FAT32 dir list
+
     uint32 part_lba = fat32_get_partition_lba_start(drive);
-    struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -4;
+    struct fat32_bpb bpb;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) {
+        if (vfs_ramdisk_available()) {
+            return vfs_ramdisk_listdir_typed(path, cb, user);
+        }
+        return -4;
+    }
     struct fat32_dir_entry dent; uint32 clus;
     if (fat32_path_to_entry(drive, &bpb, path, &dent, &clus) != 0) {
-        // If path is root '/'
         if (strcmp(path, "/") == 0) clus = bpb.RootClus; else return -5;
     }
+
     uint32 byts_per_sec = bpb.BytsPerSec;
     uint32 sec_per_clus = bpb.SecPerClus;
     uint32 first_data_sec = bpb.RsvdSecCnt + (bpb.NumFATs * bpb.FATSz32);
@@ -376,26 +906,66 @@ int vfs_listdir(uint8 drive, const char* path,
             struct fat32_dir_entry* entries = (struct fat32_dir_entry*)sector;
             int per = byts_per_sec / sizeof(struct fat32_dir_entry);
             for (int i = 0; i < per; ++i) {
-                if (entries[i].Name[0] == 0x00) return 0; // end of dir
-                if ((entries[i].Attr & 0x0F) == 0x0F) continue; // skip LFN for now
-                if (entries[i].Attr & 0x08) continue; // skip volume label
-                if (entries[i].Name[0] == 0xE5) continue; // deleted
-                // Build friendly 8.3 display name
-                char name_base[9]; int bi=0; for (int j=0;j<8 && entries[i].Name[j] != ' '; ++j) name_base[bi++] = entries[i].Name[j]; name_base[bi] = '\0';
-                char ext[4]; int ei=0; for (int j=0;j<3 && entries[i].Name[8+j] != ' '; ++j) ext[ei++] = entries[i].Name[8+j]; ext[ei] = '\0';
-                char disp[13]; disp[0]='\0';
-                strncpy(disp, name_base, sizeof(disp)-1); disp[sizeof(disp)-1]='\0';
-                if (ei > 0) { strncat(disp, ".", sizeof(disp)-strlen(disp)-1); strncat(disp, ext, sizeof(disp)-strlen(disp)-1); }
-                if (disp[0] == '.' && (disp[1] == '\0' || (disp[1]=='.' && disp[2]=='\0'))) continue; // skip . and ..
-                int is_dir = (entries[i].Attr & 0x10) ? 1 : 0;
-                uint32 size = is_dir ? 0 : entries[i].FileSize;
-                int stop = cb(disp, is_dir, size, user);
-                if (stop) return 0;
+                if (entries[i].Name[0] == 0x00) return 0;
+                if ((entries[i].Attr & 0x0F) == 0x0F) continue;
+                if (entries[i].Attr & 0x08) continue;
+                if (entries[i].Name[0] == 0xE5) continue;
+
+                char name_base[9]; int bi = 0;
+                for (int j = 0; j < 8 && entries[i].Name[j] != ' '; ++j) name_base[bi++] = entries[i].Name[j];
+                name_base[bi] = '\0';
+                char ext[4]; int ei = 0;
+                for (int j = 0; j < 3 && entries[i].Name[8 + j] != ' '; ++j) ext[ei++] = entries[i].Name[8 + j];
+                ext[ei] = '\0';
+
+                char disp[13];
+                disp[0] = '\0';
+                strncpy(disp, name_base, sizeof(disp) - 1);
+                disp[sizeof(disp) - 1] = '\0';
+                if (ei > 0) {
+                    strncat(disp, ".", sizeof(disp) - strlen(disp) - 1);
+                    strncat(disp, ext, sizeof(disp) - strlen(disp) - 1);
+                }
+
+                if (disp[0] == '.' && (disp[1] == '\0' || (disp[1] == '.' && disp[2] == '\0'))) continue;
+
+                vfs_node_type_t type = (entries[i].Attr & 0x10) ? VFS_NODE_DIR : VFS_NODE_FILE;
+                uint32 size = (type == VFS_NODE_DIR) ? 0 : entries[i].FileSize;
+                if (type == VFS_NODE_FILE) {
+                    char child_path[256];
+                    if (vfs_join_child_path(path, disp, child_path) == 0 && vfs_is_fifo_marker_file(drive, child_path)) {
+                        type = VFS_NODE_FIFO;
+                        size = 0;
+                    }
+                }
+
+                if (cb(disp, type, size, user)) return 0;
             }
         }
         clus = fat32_next_cluster_sector(drive, part_lba, &bpb, clus);
     }
     return 0;
+}
+
+typedef struct {
+    int (*cb)(const char* name, int is_dir, uint32 size, void* user);
+    void* user;
+} vfs_listdir_compat_ctx_t;
+
+static int vfs_listdir_compat_cb(const char* name, vfs_node_type_t type, uint32 size, void* user) {
+    vfs_listdir_compat_ctx_t* ctx = (vfs_listdir_compat_ctx_t*)user;
+    if (!ctx || !ctx->cb) return 1;
+    return ctx->cb(name, (type == VFS_NODE_DIR) ? 1 : 0, size, ctx->user);
+}
+
+int vfs_listdir(uint8 drive, const char* path,
+                int (*cb)(const char* name, int is_dir, uint32 size, void* user),
+                void* user) {
+    if (!cb) return -1;
+    vfs_listdir_compat_ctx_t ctx;
+    ctx.cb = cb;
+    ctx.user = user;
+    return vfs_listdir_typed(drive, path, vfs_listdir_compat_cb, &ctx);
 }
 
 static void vfs_split_path(const char* abspath, char* parent_out, size_t parent_sz, char* base_out, size_t base_sz) {
@@ -426,11 +996,17 @@ int vfs_write_file(uint8 drive, const char* path, const void* buf, uint32 size) 
             if (eynfs_traverse_path(drive, &sb, path, &ent, &pb, &idx) != 0) return -4;
         }
         int written = eynfs_write_file(drive, &sb, &ent, (void*)buf, size, pb, idx);
-        return (written >= 0) ? written : -5;
+        if (written >= 0) return written;
+        if (drive == VFS_DRIVE_RAM) return -28;
+        return -5;
     }
     // FAT32 write
     uint32 part_lba = fat32_get_partition_lba_start(drive);
-    struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -10;
+    struct fat32_bpb bpb;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -10;
+    if (bpb.BytsPerSec != 512 || bpb.SecPerClus == 0 || bpb.NumFATs == 0 || bpb.FATSz32 == 0) {
+        return -10;
+    }
     char parent[256], base[128]; vfs_split_path(path, parent, sizeof(parent), base, sizeof(base));
     // Resolve parent directory cluster
     struct fat32_dir_entry parent_ent; uint32 parent_clus;
@@ -555,11 +1131,18 @@ int vfs_mkdir(uint8 drive, const char* path) {
         char parent[256], base[128]; vfs_split_path(path, parent, sizeof(parent), base, sizeof(base));
         eynfs_dir_entry_t p;
         if (eynfs_traverse_path(drive, &sb, parent, &p, NULL, NULL) != 0 || p.type != EYNFS_TYPE_DIR) return -2;
-        return (eynfs_create_entry(drive, &sb, p.first_block, base, EYNFS_TYPE_DIR) == 0) ? 0 : -3;
+        int rc = eynfs_create_entry(drive, &sb, p.first_block, base, EYNFS_TYPE_DIR);
+        if (rc == 0) return 0;
+        if (drive == VFS_DRIVE_RAM) return -28;
+        return -3;
     }
     // FAT32
     uint32 part_lba = fat32_get_partition_lba_start(drive);
-    struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -10;
+    struct fat32_bpb bpb;
+    if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -10;
+    if (bpb.BytsPerSec != 512 || bpb.SecPerClus == 0 || bpb.NumFATs == 0 || bpb.FATSz32 == 0) {
+        return -10;
+    }
     char parent[256], base[128]; vfs_split_path(path, parent, sizeof(parent), base, sizeof(base));
     // Resolve parent dir
     struct fat32_dir_entry pentry; uint32 pclus;
@@ -781,4 +1364,327 @@ int vfs_unlink(uint8 drive, const char* path) {
         cluster = fat32_next_cluster_sector(drive, part_lba, &bpb, cluster);
     }
     return -15;
+}
+
+/*
+    ALL BELOW IS MIGRATED FROM LEGACY FS_COMMANDS.C
+*/
+
+// Global variable for current drive (default 0)
+extern uint8_t g_current_drive;
+
+// Helper function prototypes (if not already declared)
+void to_fat32_83(const char* input, char* output);
+int parse_redirection(const char* input, char* cmd, char* filename);
+uint32 str_to_uint(const char* s);
+
+extern void* fat32_disk_img;
+
+static int fs_ctx_allow(uint32 caps, uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (ctx && !cap_check(ctx->caps, caps)) return 0;
+    if (ctx) {
+        scheduler_account(ctx->wo, cost);
+        scheduler_yield_if_needed(ctx->wo);
+        if (sched_det_is_enabled()) ctx->det_seq++;
+    }
+    return 1;
+}
+
+static void fs_ctx_account(uint32 cost) {
+    command_context_t* ctx = current_command_context;
+    if (!ctx) return;
+    scheduler_account(ctx->wo, cost);
+    scheduler_yield_if_needed(ctx->wo);
+    if (sched_det_is_enabled()) ctx->det_seq++;
+}
+
+void to_fat32_83(const char* input, char* output)
+{
+    // convert input like "test.txt" to "TEST    TXT" (cancerous)
+    int i = 0, j = 0;
+    // copy name part (up to dot or 8 chars)
+    while (input[i] && input[i] != '.' && j < 8) 
+	{
+        char c = input[i];
+        if (c >= 'a' && c <= 'z') c -= 32; // to upper
+        output[j++] = c;
+        i++;
+    }
+
+    // pad with spaces
+    while (j < 8) output[j++] = ' ';
+    // if dot, skip it
+    if (input[i] == '.') i++;
+    int ext = 0;
+    // copy extension (up to 3 chars)
+    while (input[i] && ext < 3) 
+	{
+        char c = input[i];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        output[j++] = c;
+        i++; ext++;
+    }
+
+    // pad extension with spaces
+    while (ext < 3) 
+	{
+		output[j++] = ' '; ext++; 
+	}
+    output[j] = '\0';
+}
+
+// Helper: resolve relative/absolute path to absolute
+void resolve_path(const char* input, const char* cwd, char* out, size_t outsz) {
+    if (!input || !input[0]) {
+        if (!out || outsz == 0) return;
+        if (!cwd) { out[0] = '\0'; return; }
+        size_t i = 0;
+        while (i + 1 < outsz && cwd[i]) {
+            out[i] = cwd[i];
+            i++;
+        }
+        out[i] = '\0';
+        return;
+    }
+    if (input[0] == '/') {
+        strncpy(out, input, outsz-1); out[outsz-1] = '\0';
+        return;
+    }
+    // Join cwd and input
+    char tmp[256];
+    size_t cwdlen = strlen(cwd);
+    if (cwdlen > 1 && cwd[cwdlen-1] == '/') cwdlen--;
+    strncpy(tmp, cwd, cwdlen); tmp[cwdlen] = '\0';
+    if (cwdlen > 0 && tmp[cwdlen-1] != '/') strncat(tmp, "/", sizeof(tmp)-strlen(tmp)-1);
+    strncat(tmp, input, sizeof(tmp)-strlen(tmp)-1);
+    // Normalize: handle ., .., //
+    char* parts[64]; int nparts = 0;
+    char* tok; char* save;
+    for (tok = strtok_r(tmp, "/", &save); tok; tok = strtok_r(NULL, "/", &save)) {
+        if (strcmp(tok, ".") == 0) continue;
+        if (strcmp(tok, "..") == 0) { if (nparts > 0) nparts--; continue; }
+        parts[nparts++] = tok;
+    }
+    out[0] = '/'; out[1] = '\0';
+    for (int i = 0; i < nparts; ++i) {
+        strncat(out, parts[i], outsz-strlen(out)-1);
+        if (i < nparts-1) strncat(out, "/", outsz-strlen(out)-1);
+    }
+    // Do NOT add a trailing slash
+}
+
+// Filesystem integrity check
+int check_filesystem_integrity(uint8_t disk) {
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
+    eynfs_superblock_t sb;
+    if (eynfs_read_superblock(disk, EYNFS_SUPERBLOCK_LBA, &sb) != 0) {
+        printf("Cannot read superblock - filesystem may be corrupted.\n");
+        return -1;
+    }
+    
+    if (sb.magic != EYNFS_MAGIC) {
+        printf("Invalid filesystem magic - filesystem is corrupted.\n");
+        return -1;
+    }
+    
+    // Try to read the root directory - count entries first
+    int entry_count = eynfs_count_dir_entries(disk, sb.root_dir_block);
+    if (entry_count < 0) {
+        printf("Cannot count root directory entries - filesystem is corrupted.\n");
+        return -1;
+    }
+    
+    size_t allocation_size = sizeof(eynfs_dir_entry_t) * entry_count;
+    
+    // Safety check: limit allocation to prevent memory exhaustion
+    if (allocation_size > 16384) { // 16KB limit for directory operations
+        printf("%cWarning: Directory allocation too large (%d bytes), limiting to 16KB\n", 255, 165, 0, allocation_size);
+        entry_count = 16384 / sizeof(eynfs_dir_entry_t);
+        allocation_size = 16384;
+    }
+    
+    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)malloc(allocation_size);
+    if (!entries) {
+        printf("Out of memory for filesystem integrity check.\n");
+        return -1;
+    }
+    int count = eynfs_read_dir_table(disk, sb.root_dir_block, entries, entry_count);
+    if (count < 0) {
+        printf("Cannot read root directory - filesystem is corrupted.\n");
+        free(entries);
+        return -1;
+    }
+    
+    free(entries);
+    printf("Filesystem integrity check passed.\n");
+    return 0;
+}
+
+
+// FAT32 repair: fix entries marked as directory that aren't real directories
+static int fatfix_dir(uint8 drive, const char* dirpath) {
+    uint32 part_lba = fat32_get_partition_lba_start(drive);
+    struct fat32_bpb bpb; if (fat32_read_bpb_sector(drive, part_lba, &bpb) != 0) return -1;
+    // Resolve directory cluster
+    struct fat32_dir_entry dent;
+    uint32 dclus = bpb.RootClus;
+    memset(&dent, 0, sizeof(dent));
+    dent.Attr = 0x10;
+    if (strcmp(dirpath, "/") == 0) { dclus = bpb.RootClus; memset(&dent,0,sizeof(dent)); dent.Attr = 0x10; }
+    else {
+        // Local FAT32 absolute path traversal (8.3)
+        char tmp[256]; strncpy(tmp, dirpath, sizeof(tmp)-1); tmp[sizeof(tmp)-1] = '\0';
+        char* p = tmp; if (*p == '/') p++;
+        uint32 cur = bpb.RootClus;
+        if (*p == '\0') { dclus = cur; dent.Attr = 0x10; }
+        else {
+            char comp[13]; struct fat32_dir_entry ent;
+            while (*p) {
+                size_t k=0; while (*p && *p != '/' && k < sizeof(comp)-1) comp[k++]=*p++;
+                comp[k]='\0'; if (*p == '/') p++;
+                char fatname[12]; to_fat32_83(comp, fatname);
+                int found = fat32_find_entry_sector(drive, &bpb, cur, fatname, &ent);
+                if (found < 0) return -2;
+                cur = (uint32)found;
+                if (*p == '\0') { dclus = cur; dent = ent; break; }
+                if (!(ent.Attr & 0x10)) return -2; // not a dir
+            }
+        }
+        if (!(dent.Attr & 0x10)) return -2;
+    }
+    uint32 first_data_sec = bpb.RsvdSecCnt + (bpb.NumFATs * bpb.FATSz32);
+    uint8 sector[512]; uint32 cluster = dclus; int fixes = 0;
+    while (cluster < 0x0FFFFFF8) {
+        fs_ctx_account(SCHED_COST_FS);
+        uint32 csec = first_data_sec + ((cluster - 2) * bpb.SecPerClus);
+        for (uint32 s=0; s<bpb.SecPerClus; ++s) {
+            if (ata_read_sector(drive, part_lba + csec + s, sector) != 0) return -3;
+            struct fat32_dir_entry* ents = (struct fat32_dir_entry*)sector; int per = bpb.BytsPerSec / sizeof(struct fat32_dir_entry);
+            int dirty = 0;
+            for (int i=0;i<per;++i) {
+                if (ents[i].Name[0] == 0x00) break; // end
+                if ((ents[i].Attr & 0x0F) == 0x0F) continue; // LFN
+                if (ents[i].Name[0] == 0xE5) continue; // deleted
+                if (ents[i].Attr & 0x08) continue; // volume label
+                // Skip dots
+                if (ents[i].Name[0] == '.') continue;
+                if (ents[i].Attr & 0x10) {
+                    // Validate directory by checking first two entries of its cluster
+                    uint32 fclus = ((uint32)ents[i].FstClusHI << 16) | ents[i].FstClusLO;
+                    int is_real_dir = 0;
+                    if (fclus >= 2) {
+                        uint8 dsec[512];
+                        if (ata_read_sector(drive, part_lba + first_data_sec + ((fclus - 2) * bpb.SecPerClus), dsec) == 0) {
+                            struct fat32_dir_entry* dents = (struct fat32_dir_entry*)dsec;
+                            // Check dot entries pattern
+                            if (dents[0].Attr & 0x10) {
+                                char n0[12]; for (int j=0;j<11;j++) n0[j]=dents[0].Name[j]; n0[11]='\0';
+                                char n1[12]; for (int j=0;j<11;j++) n1[j]=dents[1].Name[j]; n1[11]='\0';
+                                if (n0[0]=='.' && n1[0]=='.' && n1[1]=='.') is_real_dir = 1;
+                            }
+                        }
+                    }
+                    if (!is_real_dir) {
+                        ents[i].Attr = 0x20; // flip to file
+                        dirty = 1; fixes++;
+                    }
+                }
+            }
+            if (dirty) {
+                if (ata_write_sector(drive, part_lba + csec + s, sector) != 0) return -4;
+            }
+        }
+        cluster = fat32_next_cluster_sector(drive, part_lba, &bpb, cluster);
+    }
+    return fixes;
+}
+
+int fatfix_repair_path(uint8_t disk, const char* dirpath) {
+    return fatfix_dir((uint8)disk, dirpath);
+}
+
+
+int write_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
+    if (!fs_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+    int written = vfs_write_file(disk, filename, buf, (uint32)len);
+    if (written < 0) {
+        return written;
+    }
+    if (written != len) {
+        printf("Failed to write file data: expected %d, got %d\n", len, written);
+        return -1;
+    }
+    printf("Successfully wrote %d bytes to %s\n", len, filename);
+    return 0;
+}
+
+// Append output to file using EYNFS append mode
+int append_output_to_file(const char* buf, int len, const char* filename, uint8_t disk) {
+    if (!fs_ctx_allow(CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) return -1;
+    // Read existing contents if any
+    vfs_stat_t st;
+    int existing_len = 0;
+    char* existing = NULL;
+    if (vfs_stat(disk, filename, &st) == 0 && st.type == VFS_NODE_FILE && st.size > 0) {
+        existing = (char*)malloc(st.size);
+        if (!existing) return -1;
+        int n = vfs_read_file(disk, filename, existing, (int)st.size);
+        if (n < 0) { free(existing); return -1; }
+        existing_len = n;
+    }
+    // Concatenate existing + new
+    char* combined = (char*)malloc(existing_len + len);
+    if (!combined) { if (existing) free(existing); return -1; }
+    if (existing_len) memcpy(combined, existing, existing_len);
+    memcpy(combined + existing_len, buf, len);
+    int written = vfs_write_file(disk, filename, combined, (uint32)(existing_len + len));
+    free(combined);
+    if (existing) free(existing);
+    if (written != existing_len + len) {
+        printf("Failed to append to %s\n", filename);
+        return -1;
+    }
+    printf("Successfully appended %d bytes to %s\n", len, filename);
+    return 0;
+}
+
+// writefat implementation
+void writefat(string ch)
+{
+    if (!fs_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) return;
+    uint32 partition_lba_start = fat32_get_partition_lba_start(0);
+    struct fat32_bpb bpb;
+    if (fat32_read_bpb_sector(0, partition_lba_start, &bpb) != 0) {
+        printf("%cFailed to read FAT32 BPB from drive 0\n", 255, 0, 0);
+        return;
+    }
+    shell_args_t args;
+    if (shell_args_parse(&args, ch) != 0 || args.argc < 3 || !args.argv[1] || !args.argv[2]) {
+        printf("%cUsage: writefat <filename> <data>\n", 255, 255, 255);
+        return;
+    }
+
+    const char* filename = args.argv[1];
+    char fatname[12];
+    to_fat32_83(filename, fatname);
+
+    const char* data_str = shell_args_rest_raw(&args, 2);
+    if (!data_str || !data_str[0]) {
+        printf("%cUsage: writefat <filename> <data>\n", 255, 255, 255);
+        return;
+    }
+
+    char data[512];
+    uint32 data_len = (uint32)strlen(data_str);
+    if (data_len > 511) data_len = 511;
+    memcpy(data, data_str, data_len);
+    data[data_len] = '\0';
+
+    int res = fat32_write_file_sector(0, partition_lba_start, &bpb, fatname, data, (int)data_len);
+    if (res < 0) {
+        printf("%cFailed to write file to disk. Error %d\n", 255, 0, 0, res);
+    } else {
+        printf("%cFile written successfully to disk.\n", 0, 255, 0);
+    }
 }

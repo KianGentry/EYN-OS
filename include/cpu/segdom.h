@@ -1,7 +1,7 @@
 #ifndef SEGDOM_H
 #define SEGDOM_H
 
-#include <types.h>
+#include <misc/types.h>
 
 #define SEGDOM_LDT_ENTRIES 3
 
@@ -35,5 +35,6 @@ int segdom_user_range_ok(const segdom_t* dom, uint32 addr, uint32 len);
 
 extern volatile uint16 g_user_segdom_cs;
 extern volatile uint16 g_user_segdom_ds;
+extern volatile uint16 g_user_segdom_gs;
 
 #endif

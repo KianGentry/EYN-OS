@@ -1,5 +1,5 @@
 #include <eynfs.h>
-#include <types.h>
+#include <misc/types.h>
 #include <string.h>
 #include <vga.h>
 #include <util.h>
@@ -11,9 +11,10 @@
 #include <context.h>
 #include <misc/sched.h>
 #include <fs/fs_txn.h>
+#include <mm/vmm.h>
+#include <rust_eynfs.h>
 
 #define EYNFS_BLOCK_SIZE 512 // For now, fixed block size
-#define EYNFS_SUPERBLOCK_LBA 2048 // Standard superblock location
 
 // Optional integration point: when the interactive shell is linked in, it
 // exposes the current physical drive. Keep this weak so the driver can still
@@ -57,17 +58,335 @@ static inline uint32_t eynfs_block_to_lba(uint32_t fs_block) {
 }
 
 // Performance optimization: Block cache
-#define EYNFS_CACHE_SIZE 16
+// Dynamically sized to avoid a fixed baseline .bss cost on low-memory systems.
+// Eviction is true LRU with clean-first preference to avoid unnecessary writeback.
 typedef struct {
     uint32_t block_num;
-    uint8_t data[EYNFS_BLOCK_SIZE];
+    uint32_t last_use;
+    uint8_t* data;
     uint8_t dirty;
     uint8_t valid;
 } eynfs_cache_entry_t;
 
-static eynfs_cache_entry_t block_cache[EYNFS_CACHE_SIZE];
+static eynfs_cache_entry_t* g_block_cache = NULL;
+static uint8_t* g_block_cache_data = NULL;
+static uint32_t g_block_cache_capacity = 0;
+static uint32_t g_block_cache_use_clock = 0;
+
+static int g_block_cache_perma_disabled = 0;
+static int g_block_cache_corruption_reported = 0;
+
 static uint32_t cache_hits = 0;
 static uint32_t cache_misses = 0;
+
+static uint32_t eynfs_block_cache_compute_capacity(void) {
+    // Heuristic: roughly 1 cached sector per 128 physical frames, clamped.
+    // This keeps the cache small on the default 9MB target, but scales gently.
+    uint32_t frames = vmm_get_total_frames();
+    uint32_t desired = frames / 128u;
+    if (desired < 16u) desired = 16u;
+    if (desired > 128u) desired = 128u;
+    return desired;
+}
+
+static int eynfs_block_cache_is_enabled(void) {
+    if (g_block_cache_perma_disabled) return 0;
+    return g_block_cache && g_block_cache_data && g_block_cache_capacity;
+}
+
+static void eynfs_serial_write_cstr(const char* s) {
+    if (!s) return;
+    serial_write(SERIAL_COM1, s, (int)strlen(s));
+}
+
+static void eynfs_serial_write_hex32(uint32 v) {
+    static const char* hex = "0123456789ABCDEF";
+    char buf[10];
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < 8; i++) {
+        uint32 shift = (uint32)(28 - i * 4);
+        buf[2 + i] = hex[(v >> shift) & 0xFu];
+    }
+    serial_write(SERIAL_COM1, buf, (int)sizeof(buf));
+}
+
+static void eynfs_serial_write_u32(uint32 v) {
+    char buf[11];
+    int pos = 0;
+    if (v == 0) {
+        buf[pos++] = '0';
+    } else {
+        char tmp[11];
+        int tpos = 0;
+        while (v && tpos < (int)sizeof(tmp)) {
+            tmp[tpos++] = (char)('0' + (v % 10u));
+            v /= 10u;
+        }
+        while (tpos-- > 0) {
+            buf[pos++] = tmp[tpos];
+        }
+    }
+    serial_write(SERIAL_COM1, buf, pos);
+}
+
+static void eynfs_block_cache_disable_permanently(const char* why) {
+    if (g_block_cache_perma_disabled) return;
+    g_block_cache_perma_disabled = 1;
+
+    // Don't attempt to free: the heap/slab may already be corrupted.
+    // Also prevent future allocation attempts.
+    g_block_cache = NULL;
+    g_block_cache_data = NULL;
+    g_block_cache_capacity = 1;
+
+    if (!g_block_cache_corruption_reported) {
+        g_block_cache_corruption_reported = 1;
+        eynfs_serial_write_cstr("[EYNFS] block cache disabled: ");
+        eynfs_serial_write_cstr(why ? why : "(no reason)");
+        eynfs_serial_write_cstr("\n");
+    }
+}
+
+static int eynfs_block_cache_validate_or_disable(const char* where) {
+    if (!eynfs_block_cache_is_enabled()) return 0;
+
+    uint32 total_frames = vmm_get_total_frames();
+    uint32 physmap_bytes = total_frames * PAGE_SIZE;
+    uint32 physmap_start = KERNEL_BASE;
+    uint32 physmap_end = physmap_start + physmap_bytes;
+
+    uint32 cache_ptr = (uint32)g_block_cache;
+    uint32 data_ptr = (uint32)g_block_cache_data;
+
+#if CONFIG_RUST_EYNFS
+    rust_eynfs_cache_validation_result_t vr = rust_eynfs_validate_block_cache(
+        (const rust_eynfs_cache_entry_t*)g_block_cache,
+        g_block_cache_data,
+        g_block_cache_capacity,
+        (uintptr)KERNEL_BASE,
+        (uintptr)physmap_end,
+        EYNFS_BLOCK_SIZE);
+
+    if (vr != RUST_EYNFS_CACHE_VALID) {
+        if (!g_block_cache_corruption_reported) {
+            eynfs_serial_write_cstr("[EYNFS] cache corruption at ");
+            eynfs_serial_write_cstr(where ? where : "?");
+            eynfs_serial_write_cstr(": ");
+        }
+        switch (vr) {
+            case RUST_EYNFS_CACHE_BAD_TABLE_PTR:
+                if (!g_block_cache_corruption_reported) {
+                    eynfs_serial_write_cstr("g_block_cache=");
+                    eynfs_serial_write_hex32(cache_ptr);
+                    eynfs_serial_write_cstr(" physmap_end=");
+                    eynfs_serial_write_hex32(physmap_end);
+                    eynfs_serial_write_cstr("\n");
+                }
+                eynfs_block_cache_disable_permanently("corrupt g_block_cache");
+                return 0;
+            case RUST_EYNFS_CACHE_BAD_DATA_PTR:
+                if (!g_block_cache_corruption_reported) {
+                    eynfs_serial_write_cstr("g_block_cache_data=");
+                    eynfs_serial_write_hex32(data_ptr);
+                    eynfs_serial_write_cstr(" physmap_end=");
+                    eynfs_serial_write_hex32(physmap_end);
+                    eynfs_serial_write_cstr("\n");
+                }
+                eynfs_block_cache_disable_permanently("corrupt g_block_cache_data");
+                return 0;
+            case RUST_EYNFS_CACHE_BAD_CAPACITY:
+                if (!g_block_cache_corruption_reported) {
+                    eynfs_serial_write_cstr("g_block_cache_capacity=");
+                    eynfs_serial_write_u32((uint32)g_block_cache_capacity);
+                    eynfs_serial_write_cstr("\n");
+                }
+                eynfs_block_cache_disable_permanently("corrupt g_block_cache_capacity");
+                return 0;
+            case RUST_EYNFS_CACHE_BAD_ENTRY_PTR:
+                if (!g_block_cache_corruption_reported) {
+                    eynfs_serial_write_cstr("cache entry data pointer mismatch\n");
+                }
+                eynfs_block_cache_disable_permanently("corrupt cache entry data pointer");
+                return 0;
+            case RUST_EYNFS_CACHE_BAD_PHYSMAP:
+            default:
+                if (!g_block_cache_corruption_reported) {
+                    eynfs_serial_write_cstr("invalid physmap window\n");
+                }
+                eynfs_block_cache_disable_permanently("invalid cache physmap bounds");
+                return 0;
+        }
+    }
+
+    return 1;
+#else
+
+    if (cache_ptr < KERNEL_BASE || cache_ptr >= physmap_end) {
+        if (!g_block_cache_corruption_reported) {
+            eynfs_serial_write_cstr("[EYNFS] cache corruption at ");
+            eynfs_serial_write_cstr(where ? where : "?");
+            eynfs_serial_write_cstr(": g_block_cache=");
+            eynfs_serial_write_hex32(cache_ptr);
+            eynfs_serial_write_cstr(" physmap_end=");
+            eynfs_serial_write_hex32(physmap_end);
+            eynfs_serial_write_cstr("\n");
+        }
+        eynfs_block_cache_disable_permanently("corrupt g_block_cache");
+        return 0;
+    }
+    if (data_ptr < KERNEL_BASE || data_ptr >= physmap_end) {
+        if (!g_block_cache_corruption_reported) {
+            eynfs_serial_write_cstr("[EYNFS] cache corruption at ");
+            eynfs_serial_write_cstr(where ? where : "?");
+            eynfs_serial_write_cstr(": g_block_cache_data=");
+            eynfs_serial_write_hex32(data_ptr);
+            eynfs_serial_write_cstr(" physmap_end=");
+            eynfs_serial_write_hex32(physmap_end);
+            eynfs_serial_write_cstr("\n");
+        }
+        eynfs_block_cache_disable_permanently("corrupt g_block_cache_data");
+        return 0;
+    }
+    if (g_block_cache_capacity < 1u || g_block_cache_capacity > 1024u) {
+        if (!g_block_cache_corruption_reported) {
+            eynfs_serial_write_cstr("[EYNFS] cache corruption at ");
+            eynfs_serial_write_cstr(where ? where : "?");
+            eynfs_serial_write_cstr(": g_block_cache_capacity=");
+            eynfs_serial_write_u32((uint32)g_block_cache_capacity);
+            eynfs_serial_write_cstr("\n");
+        }
+        eynfs_block_cache_disable_permanently("corrupt g_block_cache_capacity");
+        return 0;
+    }
+
+    // Ensure each entry's data pointer is the expected slice into g_block_cache_data.
+    // SECURITY-INVARIANT: Cache entry pointers must stay within the kernel physmap.
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        uint8_t* expected = &g_block_cache_data[i * EYNFS_BLOCK_SIZE];
+        if (g_block_cache[i].data != expected) {
+            if (!g_block_cache_corruption_reported) {
+                eynfs_serial_write_cstr("[EYNFS] cache corruption at ");
+                eynfs_serial_write_cstr(where ? where : "?");
+                eynfs_serial_write_cstr(": entry ");
+                eynfs_serial_write_u32((uint32)i);
+                eynfs_serial_write_cstr(" data=");
+                eynfs_serial_write_hex32((uint32)g_block_cache[i].data);
+                eynfs_serial_write_cstr(" expected=");
+                eynfs_serial_write_hex32((uint32)expected);
+                eynfs_serial_write_cstr("\n");
+            }
+            eynfs_block_cache_disable_permanently("corrupt cache entry data pointer");
+            return 0;
+        }
+    }
+
+    return 1;
+#endif
+}
+
+static int eynfs_block_cache_alloc_if_needed(void) {
+    if (eynfs_block_cache_is_enabled()) return 1;
+    if (g_block_cache_perma_disabled) return 0;
+    if (g_block_cache_capacity != 0) return 0;
+
+    g_block_cache_capacity = eynfs_block_cache_compute_capacity();
+
+    g_block_cache = (eynfs_cache_entry_t*)malloc(sizeof(eynfs_cache_entry_t) * g_block_cache_capacity);
+    g_block_cache_data = (uint8_t*)malloc(EYNFS_BLOCK_SIZE * g_block_cache_capacity);
+    if (!g_block_cache || !g_block_cache_data) {
+        if (g_block_cache) free(g_block_cache);
+        if (g_block_cache_data) free(g_block_cache_data);
+        g_block_cache = NULL;
+        g_block_cache_data = NULL;
+        g_block_cache_capacity = 0;
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        g_block_cache[i].valid = 0;
+        g_block_cache[i].dirty = 0;
+        g_block_cache[i].last_use = 0;
+        g_block_cache[i].block_num = 0;
+        g_block_cache[i].data = &g_block_cache_data[i * EYNFS_BLOCK_SIZE];
+    }
+    g_block_cache_use_clock = 1;
+    return 1;
+}
+
+static int eynfs_block_cache_choose_victim_index(uint32_t* out_index, int* out_need_writeback) {
+    if (!out_index || !out_need_writeback) return 0;
+    if (!eynfs_block_cache_is_enabled()) return 0;
+
+#if CONFIG_RUST_EYNFS
+    rust_eynfs_victim_result_t vr = rust_eynfs_choose_victim_index(
+        (const rust_eynfs_cache_entry_t*)g_block_cache,
+        g_block_cache_capacity,
+        out_index);
+    switch (vr) {
+        case RUST_EYNFS_VICTIM_FOUND_INVALID:
+            *out_need_writeback = 0;
+            return 1;
+        case RUST_EYNFS_VICTIM_FOUND_CLEAN:
+            *out_need_writeback = 0;
+            return 1;
+        case RUST_EYNFS_VICTIM_FOUND_DIRTY:
+            *out_need_writeback = 1;
+            return 1;
+        case RUST_EYNFS_VICTIM_NONE:
+        default:
+            return 0;
+    }
+#else
+
+    // Prefer an invalid slot. Otherwise choose clean LRU. Only evict dirty LRU
+    // when no clean slot exists.
+    int found_clean = 0;
+    uint32_t clean_best_i = 0;
+    uint32_t clean_best_use = 0xFFFFFFFFu;
+
+    int found_dirty = 0;
+    uint32_t dirty_best_i = 0;
+    uint32_t dirty_best_use = 0xFFFFFFFFu;
+
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        if (!g_block_cache[i].valid) {
+            *out_index = i;
+            *out_need_writeback = 0;
+            return 1;
+        }
+
+        if (g_block_cache[i].dirty) {
+            if (!found_dirty || g_block_cache[i].last_use < dirty_best_use) {
+                found_dirty = 1;
+                dirty_best_use = g_block_cache[i].last_use;
+                dirty_best_i = i;
+            }
+            continue;
+        }
+
+        if (!found_clean || g_block_cache[i].last_use < clean_best_use) {
+            found_clean = 1;
+            clean_best_use = g_block_cache[i].last_use;
+            clean_best_i = i;
+        }
+    }
+
+    if (found_clean) {
+        *out_index = clean_best_i;
+        *out_need_writeback = 0;
+        return 1;
+    }
+
+    if (found_dirty) {
+        *out_index = dirty_best_i;
+        *out_need_writeback = 1;
+        return 1;
+    }
+
+    return 0;
+#endif
+}
 
 // Performance optimization: Free block tracking
 #define EYNFS_FREE_BLOCK_CACHE_SIZE 64
@@ -99,11 +418,8 @@ static int eynfs_ctx_check(uint32 cap, uint32 cost) {
 
 // Initialize caches
 static void eynfs_init_caches() {
-    // Initialize block cache
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        block_cache[i].valid = 0;
-        block_cache[i].dirty = 0;
-    }
+    // Initialize (allocate) block cache
+    (void)eynfs_block_cache_alloc_if_needed();
     
     // Initialize directory cache
     for (int i = 0; i < EYNFS_DIR_CACHE_SIZE; i++) {
@@ -120,11 +436,38 @@ static void eynfs_init_caches() {
 // Block cache functions
 int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data) {
     if (!eynfs_ctx_check(CAP_READ_FS, SCHED_COST_FS)) return -1;
+
+    if (!eynfs_block_cache_alloc_if_needed()) {
+        // Cache disabled (allocation failure). Fall back to direct I/O.
+        uint32_t lba = eynfs_block_to_lba(block_num);
+        if (ata_read_sector(drive, lba, data) != 0) {
+            static int g_eynfs_read_fail_printed = 0;
+            if (!g_eynfs_read_fail_printed) {
+                g_eynfs_read_fail_printed = 1;
+                char sbuf[160];
+                int n = snprintf(sbuf, sizeof(sbuf), "[EYNFS] read fail drive=%d fs_block=%d lba=%d\n", (int)drive, (int)block_num, (int)lba);
+                if (n > 0) serial_write(SERIAL_COM1, sbuf, n);
+            }
+            return -1;
+        }
+        cache_misses++;
+        return 0;
+    }
+
+    if (!eynfs_block_cache_validate_or_disable("eynfs_cache_get_block")) {
+        // Cache was disabled due to corruption; fall back to direct I/O.
+        uint32_t lba = eynfs_block_to_lba(block_num);
+        if (ata_read_sector(drive, lba, data) != 0) return -1;
+        cache_misses++;
+        return 0;
+    }
+
     // Look for block in cache
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        if (block_cache[i].valid && block_cache[i].block_num == block_num) {
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        if (g_block_cache[i].valid && g_block_cache[i].block_num == block_num) {
             // Cache hit - copy data
-            memcpy(data, block_cache[i].data, EYNFS_BLOCK_SIZE);
+            memcpy(data, g_block_cache[i].data, EYNFS_BLOCK_SIZE);
+            g_block_cache[i].last_use = g_block_cache_use_clock++;
             cache_hits++;
             return 0;
         }
@@ -142,33 +485,22 @@ int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data) {
         }
         return -1;
     }
-    
-    // Find least recently used cache entry
-    int lru_index = 0;
-    uint32_t oldest_time = 0xFFFFFFFF;
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        if (!block_cache[i].valid) {
-            lru_index = i;
-            break;
+
+    uint32_t victim_index = 0;
+    int need_writeback = 0;
+    if (eynfs_block_cache_choose_victim_index(&victim_index, &need_writeback)) {
+        if (need_writeback) {
+            if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+            ata_write_sector(drive, eynfs_block_to_lba(g_block_cache[victim_index].block_num), g_block_cache[victim_index].data);
         }
-        // Simple LRU: use block number as time (lower = older)
-        if (block_cache[i].block_num < oldest_time) {
-            oldest_time = block_cache[i].block_num;
-            lru_index = i;
-        }
+
+        // Cache the new block
+        g_block_cache[victim_index].block_num = block_num;
+        memcpy(g_block_cache[victim_index].data, data, EYNFS_BLOCK_SIZE);
+        g_block_cache[victim_index].valid = 1;
+        g_block_cache[victim_index].dirty = 0;
+        g_block_cache[victim_index].last_use = g_block_cache_use_clock++;
     }
-    
-    // Write dirty block if needed
-    if (block_cache[lru_index].valid && block_cache[lru_index].dirty) {
-        if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
-        ata_write_sector(drive, eynfs_block_to_lba(block_cache[lru_index].block_num), block_cache[lru_index].data);
-    }
-    
-    // Cache the new block
-    block_cache[lru_index].block_num = block_num;
-    memcpy(block_cache[lru_index].data, data, EYNFS_BLOCK_SIZE);
-    block_cache[lru_index].valid = 1;
-    block_cache[lru_index].dirty = 0;
     
     cache_misses++;
     return 0;
@@ -176,35 +508,66 @@ int eynfs_cache_get_block(uint8 drive, uint32_t block_num, uint8_t* data) {
 
 int eynfs_cache_write_block(uint8 drive, uint32_t block_num, const uint8_t* data) {
     if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return -1;
+
+    if (!eynfs_block_cache_alloc_if_needed()) {
+        // Cache disabled; preserve existing behavior.
+        return ata_write_sector(drive, eynfs_block_to_lba(block_num), data);
+    }
+
+    if (!eynfs_block_cache_validate_or_disable("eynfs_cache_write_block")) {
+        // Cache was disabled due to corruption; preserve on-disk semantics.
+        return ata_write_sector(drive, eynfs_block_to_lba(block_num), data);
+    }
+
     // Look for block in cache
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        if (block_cache[i].valid && block_cache[i].block_num == block_num) {
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        if (g_block_cache[i].valid && g_block_cache[i].block_num == block_num) {
             // Update cache
-            memcpy(block_cache[i].data, data, EYNFS_BLOCK_SIZE);
-            block_cache[i].dirty = 1;
+            memcpy(g_block_cache[i].data, data, EYNFS_BLOCK_SIZE);
+            g_block_cache[i].dirty = 1;
+            g_block_cache[i].last_use = g_block_cache_use_clock++;
             return 0;
         }
     }
-    
-    // Not in cache - write directly to disk
-    return ata_write_sector(drive, eynfs_block_to_lba(block_num), data);
+
+    // Not in cache - write directly to disk (keep on-disk semantics the same)
+    if (ata_write_sector(drive, eynfs_block_to_lba(block_num), data) != 0) return -1;
+
+    // Opportunistically cache the freshly written block as clean.
+    uint32_t victim_index = 0;
+    int need_writeback = 0;
+    if (eynfs_block_cache_choose_victim_index(&victim_index, &need_writeback)) {
+        if (need_writeback) {
+            // Avoid cascading writeback pressure; keep the just-written sector durable.
+            ata_write_sector(drive, eynfs_block_to_lba(g_block_cache[victim_index].block_num), g_block_cache[victim_index].data);
+        }
+        g_block_cache[victim_index].block_num = block_num;
+        memcpy(g_block_cache[victim_index].data, data, EYNFS_BLOCK_SIZE);
+        g_block_cache[victim_index].valid = 1;
+        g_block_cache[victim_index].dirty = 0;
+        g_block_cache[victim_index].last_use = g_block_cache_use_clock++;
+    }
+
+    return 0;
 }
 
 static void eynfs_cache_flush(uint8 drive) {
     if (!eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS)) return;
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        if (block_cache[i].valid && block_cache[i].dirty) {
-            ata_write_sector(drive, eynfs_block_to_lba(block_cache[i].block_num), block_cache[i].data);
-            block_cache[i].dirty = 0;
+    if (!eynfs_block_cache_is_enabled()) return;
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        if (g_block_cache[i].valid && g_block_cache[i].dirty) {
+            ata_write_sector(drive, eynfs_block_to_lba(g_block_cache[i].block_num), g_block_cache[i].data);
+            g_block_cache[i].dirty = 0;
         }
     }
 }
 
 static void eynfs_cache_invalidate_block(uint32_t block_num) {
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        if (block_cache[i].valid && block_cache[i].block_num == block_num) {
-            block_cache[i].valid = 0;
-            block_cache[i].dirty = 0;
+    if (!eynfs_block_cache_is_enabled()) return;
+    for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+        if (g_block_cache[i].valid && g_block_cache[i].block_num == block_num) {
+            g_block_cache[i].valid = 0;
+            g_block_cache[i].dirty = 0;
         }
     }
 }
@@ -926,50 +1289,54 @@ int eynfs_delete_entry(uint8 drive, eynfs_superblock_t *sb, uint32_t parent_bloc
         fs_txn_touch(drive, FS_TXN_TAG_DIR, (uint32)sizeof(eynfs_dir_entry_t));
         fs_txn_touch(drive, FS_TXN_TAG_FILE, 0u);
     }
-    
-    // Use stack-local buffer to avoid heap allocations
-    enum { DELETE_MAX_ENTRIES = 64 };
-    eynfs_dir_entry_t entries[DELETE_MAX_ENTRIES];
-    memset(entries, 0, sizeof(entries));
-    
-    int entry_count = eynfs_count_dir_entries(drive, parent_block);
-    if (entry_count < 0) return -1;
-    if (entry_count > DELETE_MAX_ENTRIES) entry_count = DELETE_MAX_ENTRIES;
-    
-    int count = eynfs_read_dir_table(drive, parent_block, entries, entry_count);
-    if (count < 0) return -1;
-    
-    for (int i = 0; i < count; ++i) {
-        if (entries[i].name[0] == '\0') continue;
-        if (strncmp(entries[i].name, name, EYNFS_NAME_MAX) == 0) {
-            // Free all blocks in the chain
-            uint32_t block_num = entries[i].first_block;
-            while (block_num != 0) {
-                if (current_command_context) {
-                    scheduler_account(current_command_context->wo, SCHED_COST_FS);
-                    scheduler_yield_if_needed(current_command_context->wo);
-                    if (sched_det_is_enabled()) current_command_context->det_seq++;
-                }
-                uint8 tmp[EYNFS_BLOCK_SIZE];
-                if (ata_read_sector(drive, eynfs_block_to_lba(block_num), tmp) != 0) break;
-                uint32_t next_block = *(uint32_t*)tmp;
-                eynfs_free_block(drive, sb, block_num);
-                block_num = next_block;
-            }
-            
-            // Clear the entry
-            memset(&entries[i], 0, sizeof(eynfs_dir_entry_t));
-            
-            int res = eynfs_write_dir_table(drive, parent_block, entries, count);
-            if (res < 0) return -1;
-            
-            // Clear cache to ensure deleted entries are no longer visible
-            eynfs_cache_clear();
-            
-            return 0;
-        }
+
+    eynfs_dir_entry_t victim;
+    uint32_t entry_index = 0;
+    if (eynfs_find_in_dir(drive, sb, parent_block, name, &victim, &entry_index) != 0) {
+        return -1;
     }
-    return -1; // Entry not found
+
+    // Free all blocks in the target entry's chain.
+    uint32_t block_num = victim.first_block;
+    while (block_num != 0) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
+        uint8 tmp[EYNFS_BLOCK_SIZE];
+        if (ata_read_sector(drive, eynfs_block_to_lba(block_num), tmp) != 0) break;
+        uint32_t next_block = *(uint32_t*)tmp;
+        eynfs_free_block(drive, sb, block_num);
+        block_num = next_block;
+    }
+
+    // Clear only the targeted directory slot in place. This avoids rewriting
+    // the whole directory table and preserves entries past 64 items.
+    const uint32_t entries_per_block = (uint32_t)((EYNFS_BLOCK_SIZE - 4) / sizeof(eynfs_dir_entry_t));
+    const uint32_t block_steps = entry_index / entries_per_block;
+    const uint32_t slot = entry_index % entries_per_block;
+
+    uint32_t cur = parent_block;
+    const uint32_t max_blocks = 4096;
+    for (uint32_t i = 0; i < block_steps; ++i) {
+        if (cur == 0 || i >= max_blocks) return -1;
+        uint8 dirblk[EYNFS_BLOCK_SIZE];
+        if (eynfs_cache_get_block(drive, cur, dirblk) != 0) return -1;
+        cur = *(uint32_t*)dirblk;
+    }
+    if (cur == 0) return -1;
+
+    uint8 dirblk[EYNFS_BLOCK_SIZE];
+    if (eynfs_cache_get_block(drive, cur, dirblk) != 0) return -1;
+    eynfs_dir_entry_t* entries = (eynfs_dir_entry_t*)(dirblk + 4);
+    memset(&entries[slot], 0, sizeof(eynfs_dir_entry_t));
+
+    eynfs_cache_invalidate_block(cur);
+    if (eynfs_cache_write_block(drive, cur, dirblk) != 0) return -1;
+
+    eynfs_dir_cache_invalidate(parent_block);
+    return 0;
 }
 
 // Read up to bufsize bytes from a file's data block chain, starting at offset
@@ -1035,6 +1402,133 @@ int eynfs_read_file(uint8 drive, const eynfs_superblock_t *sb, const eynfs_dir_e
         bytes_left -= chunk;
         block_num = next_block;
     }
+    return (int)total_read;
+}
+
+/*
+ * eynfs_read_file_fast -- cursor-aware file read for EYNFS.
+ *
+ * Like eynfs_read_file() but avoids re-traversing the full block chain from
+ * the beginning on every call.  A caller-supplied cursor (*p_cur_block,
+ * *p_cur_block_off) records the last block reached and the file byte offset
+ * where its data payload starts, so a subsequent read at a GREATER or EQUAL
+ * offset begins traversal from the cached block rather than first_block.
+ *
+ * For a 14 MB WAD file, the old path required O(28 000) block reads per
+ * 256-byte chunk; with the cursor a sequential read costs O(1) block reads
+ * after the initial traversal.
+ *
+ * Cursor semantics:
+ *   *p_cur_block     -- EYNFS block number.  0 = uninitialized; restart from
+ *                      first_block at file offset 0.
+ *   *p_cur_block_off -- file byte offset at which *p_cur_block's data payload
+ *                      begins (i.e., immediately after its 4-byte chain ptr).
+ *
+ * On return both fields are updated to the block reached after the skip
+ * phase, so the next call benefits even for non-contiguous forward reads.
+ *
+ * ABI-INVARIANT: Not exported to user space.  Internal kernel use only.
+ * Performance-critical: called on every SYSCALL_READ for EYNFS file FDs.
+ */
+int eynfs_read_file_fast(
+    uint8      drive,
+    uint32_t   first_block,
+    uint32_t   file_size,
+    void      *buf,
+    size_t     bufsize,
+    size_t     offset,
+    uint32_t  *p_cur_block,
+    uint32_t  *p_cur_block_off)
+{
+    if (!eynfs_ctx_check(CAP_READ_FS, SCHED_COST_FS)) return -1;
+    if (offset >= file_size) return 0;
+    if (current_command_context)
+        fs_txn_touch(drive, FS_TXN_TAG_FILE, (uint32)bufsize);
+
+    size_t   bytes_left = file_size - offset;
+    if (bufsize < bytes_left) bytes_left = bufsize;
+    size_t   total_read = 0;
+    uint8    block[EYNFS_BLOCK_SIZE];
+    uint32_t kick_ctr   = 0;
+
+    /* Choose starting point: cached cursor if it covers the target offset,
+     * otherwise restart from the beginning of the chain.               */
+    uint32_t block_num;
+    size_t   skip;
+    if (p_cur_block && *p_cur_block != 0 &&
+        p_cur_block_off && offset >= (size_t)*p_cur_block_off) {
+        block_num = *p_cur_block;
+        skip      = offset - (size_t)*p_cur_block_off;
+    } else {
+        block_num = first_block;
+        skip      = offset;
+    }
+
+    /* Advance through the chain until skip < one block's data payload. */
+    while (block_num && skip >= (EYNFS_BLOCK_SIZE - 4u)) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
+        if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-fast");
+        if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
+        block_num  = *(uint32_t *)block;
+        skip      -= (EYNFS_BLOCK_SIZE - 4u);
+    }
+
+    /* Update the cursor to the block we just landed on.
+     * *p_cur_block_off = the file byte offset at the START of this block. */
+    if (p_cur_block && p_cur_block_off) {
+        *p_cur_block     = block_num;
+        *p_cur_block_off = (uint32_t)(offset - skip);
+    }
+
+    /* Read the partial leading portion of the first data block. */
+    if (block_num && bytes_left > 0) {
+        if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-fast");
+        if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
+        uint32_t next_block = *(uint32_t *)block;
+        size_t   chunk      = (EYNFS_BLOCK_SIZE - 4u) - skip;
+        if (chunk > bytes_left) chunk = bytes_left;
+        memcpy((uint8_t *)buf, block + 4 + skip, chunk);
+        total_read += chunk;
+        bytes_left -= chunk;
+        if (p_cur_block && p_cur_block_off) {
+            *p_cur_block     = next_block;
+            /*
+             * Advance by a full block payload (508 bytes) regardless of skip.
+             * *p_cur_block_off tracks the file offset at the START of a block,
+             * so each block boundary is always +508, even if we started reading
+             * mid-block on this first chunk.
+             */
+            *p_cur_block_off += (uint32_t)(EYNFS_BLOCK_SIZE - 4u);
+        }
+        block_num = next_block;
+    }
+
+    /* Read remaining full blocks. */
+    while (block_num && bytes_left > 0) {
+        if (current_command_context) {
+            scheduler_account(current_command_context->wo, SCHED_COST_FS);
+            scheduler_yield_if_needed(current_command_context->wo);
+            if (sched_det_is_enabled()) current_command_context->det_seq++;
+        }
+        if (((kick_ctr++) & 0x3u) == 0) watchdog_kick("eynfs-fast");
+        if (eynfs_cache_get_block(drive, block_num, block) != 0) return -1;
+        uint32_t next_block = *(uint32_t *)block;
+        size_t   chunk      = (EYNFS_BLOCK_SIZE - 4u);
+        if (chunk > bytes_left) chunk = bytes_left;
+        memcpy((uint8_t *)buf + total_read, block + 4, chunk);
+        total_read += chunk;
+        bytes_left -= chunk;
+        if (p_cur_block && p_cur_block_off) {
+            *p_cur_block_off += (uint32_t)(EYNFS_BLOCK_SIZE - 4u);
+            *p_cur_block      = next_block;
+        }
+        block_num = next_block;
+    }
+
     return (int)total_read;
 }
 
@@ -1286,6 +1780,48 @@ int open(const char* path, int mode) {
     return eynfs_open(path, mode);
 }
 
+static int eynfs_write_file_at(uint8 drive, eynfs_superblock_t *sb, eynfs_dir_entry_t *entry,
+                              const void *buf, size_t size, uint32_t offset,
+                              uint32_t parent_block, uint32_t entry_index) {
+    if (!entry || entry->type != EYNFS_TYPE_FILE) return -1;
+    if (!buf && size > 0) return -1;
+
+    if (size == 0) return 0;
+
+    uint32_t old_size = entry->size;
+    uint32_t size_u32 = (uint32_t)size;
+    uint32_t end = offset + size_u32;
+    if (end < offset) return -1;
+
+    uint32_t new_size = (end > old_size) ? end : old_size;
+    if (offset == 0 && new_size == size_u32) {
+        int rc = eynfs_write_file(drive, sb, entry, buf, size, parent_block, entry_index);
+        return (rc < 0) ? -1 : (int)size;
+    }
+
+    uint8_t* merged = (uint8_t*)malloc(new_size);
+    if (!merged) return -1;
+
+    if (old_size > 0) {
+        int existing_read = eynfs_read_file(drive, sb, entry, merged, old_size, 0);
+        if (existing_read != (int)old_size) {
+            free(merged);
+            return -1;
+        }
+    }
+
+    if (new_size > old_size) {
+        memset(merged + old_size, 0, new_size - old_size);
+    }
+
+    memcpy(merged + offset, buf, size);
+
+    int rc = eynfs_write_file(drive, sb, entry, merged, new_size, parent_block, entry_index);
+    free(merged);
+    if (rc < 0) return -1;
+    return (int)size;
+}
+
 // Close a file descriptor
 int close(int fd) {
     if (fd < 0 || fd >= EYNFS_MAX_OPEN_FILES || !eynfs_files[fd].used)
@@ -1346,53 +1882,21 @@ int write(int fd, const void* buf, int size) {
     eynfs_file_t* f = &eynfs_files[fd];
     if (f->mode != 1 && f->mode != 2)
         return -1;
+    if (size < 0)
+        return -1;
+    if (size == 0)
+        return 0;
     
     // Can't write to directories
     if (f->entry.type == EYNFS_TYPE_DIR) return -1;
-    
-    // For append mode, we need to read existing data first
-    if (f->mode == 2 && f->offset > 0) {
-        // Read existing data
-        uint8_t* existing_data = (uint8_t*)malloc(f->entry.size);
-        if (!existing_data) return -1;
-        
-        int existing_read = eynfs_read_file(f->drive, &f->sb, &f->entry, existing_data, f->entry.size, 0);
-        if (existing_read < 0) {
-            free(existing_data);
-            return -1;
-        }
-        
-        // Combine existing data with new data
-        uint8_t* combined_data = (uint8_t*)malloc(existing_read + size);
-        if (!combined_data) {
-            free(existing_data);
-            return -1;
-        }
-        
-        memcpy(combined_data, existing_data, existing_read);
-        memcpy(combined_data + existing_read, buf, size);
-        
-        // Write combined data
-        int n = eynfs_write_file(f->drive, &f->sb, &f->entry, combined_data, existing_read + size, 
-                                f->parent_block, f->entry_index);
-        
-        free(existing_data);
-        free(combined_data);
-        
-        if (n > 0) {
-            f->offset = n;
-            f->entry.size = n;
-        }
-        return n;
-    } else {
-        // Regular write (overwrite or new file)
-        int n = eynfs_write_file(f->drive, &f->sb, &f->entry, buf, size, f->parent_block, f->entry_index);
-        if (n > 0) {
-            f->offset = n;
-            f->entry.size = n;
-        }
-        return n;
+
+    uint32_t write_off = (f->mode == 2) ? f->entry.size : f->offset;
+    int n = eynfs_write_file_at(f->drive, &f->sb, &f->entry, buf, (size_t)size,
+                                write_off, f->parent_block, f->entry_index);
+    if (n > 0) {
+        f->offset = write_off + (uint32_t)n;
     }
+    return n;
 } 
 
 // Performance monitoring functions
@@ -1407,10 +1911,21 @@ void eynfs_reset_cache_stats() {
 }
 
 void eynfs_cache_clear() {
-    eynfs_cache_flush(0); // Flush all dirty blocks
-    for (int i = 0; i < EYNFS_CACHE_SIZE; i++) {
-        block_cache[i].valid = 0;
-        block_cache[i].dirty = 0;
+    int can_write = eynfs_ctx_check(CAP_WRITE_FS, SCHED_COST_FS);
+    if (can_write) {
+        eynfs_cache_flush(0); // Flush all dirty blocks
+    }
+
+    if (eynfs_block_cache_is_enabled()) {
+        for (uint32_t i = 0; i < g_block_cache_capacity; i++) {
+            if (!can_write && g_block_cache[i].dirty) {
+                // Refuse to drop dirty data if we cannot write it back.
+                continue;
+            }
+            g_block_cache[i].valid = 0;
+            g_block_cache[i].dirty = 0;
+            g_block_cache[i].last_use = 0;
+        }
     }
     
     // Clear directory cache
@@ -1444,7 +1959,15 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
     s->drive = drive;
     if (eynfs_read_superblock(drive, EYNFS_SUPERBLOCK_LBA, &s->sb) != 0) {
         if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] read_superblock failed\n");
-        return -1;
+        return -101;
+    }
+    if (s->sb.magic != EYNFS_MAGIC || s->sb.block_size != EYNFS_BLOCK_SIZE) {
+        if (EYNFS_STREAM_DEBUG) {
+            printf("[EYNFS:stream_begin] invalid superblock magic=0x%X block=%u\n",
+                   (unsigned)s->sb.magic,
+                   (unsigned)s->sb.block_size);
+        }
+        return -102;
     }
     // Determine parent dir and file name
     char parent_path[256];
@@ -1453,7 +1976,7 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
         size_t plen = filename - path;
         if (plen >= sizeof(parent_path)) {
             if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] parent path too long\n");
-            return -1;
+            return -103;
         }
         memcpy(parent_path, path, plen);
         parent_path[plen] = '\0';
@@ -1467,11 +1990,11 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
     uint32_t parent_block, entry_idx;
     if (eynfs_traverse_path(drive, &s->sb, parent_path, &parent_entry, &parent_block, NULL) != 0) {
         if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] traverse parent failed: '%s'\n", parent_path);
-        return -1;
+        return -104;
     }
     if (parent_entry.type != EYNFS_TYPE_DIR) {
         if (EYNFS_STREAM_DEBUG) printf("[EYNFS:stream_begin] parent not dir: '%s'\n", parent_path);
-        return -1;
+        return -105;
     }
     // If file exists, delete it to simplify streaming overwrite
     eynfs_dir_entry_t tmp;
@@ -1486,13 +2009,13 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
         if (EYNFS_STREAM_DEBUG) {
             printf("[EYNFS:stream_begin] create_entry failed parent='%s' name='%s' rc=%d\n", parent_path, filename, cr);
         }
-        return -1;
+        return -106;
     }
     if (eynfs_find_in_dir(drive, &s->sb, parent_entry.first_block, filename, &s->entry, &s->entry_index) != 0) {
         if (EYNFS_STREAM_DEBUG) {
             printf("[EYNFS:stream_begin] find-after-create failed parent='%s' name='%s'\n", parent_path, filename);
         }
-        return -1;
+        return -107;
     }
     s->parent_block = parent_entry.first_block;
     // `eynfs_create_entry()` allocates a data block for files. Reuse it as the
@@ -1507,7 +2030,7 @@ int eynfs_stream_begin(uint8 drive, const char* path, eynfs_stream_t* s) {
         uint8 block[EYNFS_BLOCK_SIZE] = {0};
         *(uint32_t*)block = 0;
         eynfs_cache_invalidate_block(s->curr_block);
-        if (eynfs_cache_write_block(s->drive, s->curr_block, block) != 0) return -1;
+        if (eynfs_cache_write_block(s->drive, s->curr_block, block) != 0) return -108;
     }
     return 0;
 }

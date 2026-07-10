@@ -52,9 +52,11 @@ typedef struct heap_block {
 
 ---
 
-### Paging (`src/cpu/paging.c`, `src/mm/vmm.c`)
+### Paging (`src/mm/vmm.c`, `src/mm/paging_compat.c`)
 
-**Implementation**: Optional page-based virtual memory
+**Implementation**: Page-based virtual memory via the VMM.
+
+Note: `src/cpu/paging.c` contains an older paging implementation kept for historical reference and is intentionally not built.
 
 **Key Structures**:
 ```c
@@ -328,31 +330,45 @@ See [network/network-stack.md](../network/network-stack.md) for protocol details
 
 ## Tiling Manager
 
-### Implementation (`src/utilities/tui/tiling_manager.c`)
+### Implementation (`src/gui/`)
 
-**Tile System**: Fixed grid of tiles for windows/applications
+The GUI compositor is split across several files in `src/gui/`, compiled as a single unity build via `src/gui/tiling_manager.c`. See [ui/tiling-manager.md](../ui/tiling-manager.md) for the full API.
+
+**Sub-modules**:
+
+| File | Responsibility |
+|---|---|
+| `gui_state.c` | Shared globals, constants, types, inline helpers |
+| `gui_wm.c` | Floating window manager (chrome, drag/resize, `wm_*` API) |
+| `gui_tiles.c` | Tile layout, decoration, lifecycle |
+| `gui_taskbar.c` | Taskbar and start menu |
+| `gui_input.c` | Tile public API and ring-3 input pump |
 
 **Key Structures**:
 ```c
 typedef struct {
+    tile_type_t type;
+    const char* title;
+    int x, y, width, height; // pixel coords
+    int term_idx;             // associated virtual terminal
     int active;
-    int x, y, width, height;
-    uint8_t* framebuffer;
-    // ... callbacks for input/rendering
+    int minimized, maximized;
+    int prev_x, prev_y, prev_w, prev_h; // saved before maximize
+    int desktop;              // virtual desktop index
+    // ... callback state, redraw caches
 } tile_t;
 ```
 
 **Debugging**:
-- Tile not drawing: Check `invalidate` flag
-- Input not working: Verify callback registered
-- Crash during render: Check framebuffer bounds
+- Tile not drawing: check `invalidate` flag and `static_drawn` cache
+- Input not working: verify callback registered with `tile_register_gui_client2`
+- Drag/resize not responding: check `tile_drag_active` / `tile_border_resize_active` state vars in `gui_wm.c`
+- Crash during render: check framebuffer bounds and content rect
 
 **Common Issues**:
-- **Tile overlap**: Incorrect x/y/width/height
-- **Memory leak**: Framebuffer not freed on close
-- **Render flicker**: Not using double buffering
-
-See [ui/tiling-manager.md](../ui/tiling-manager.md) for API details.
+- **Tile overlap**: incorrect `x/y/width/height`; `layout_tiles()` only recalculates tiles that haven't been manually positioned
+- **Memory leak**: framebuffer or background image not freed on close
+- **Render flicker**: not using dirty-rect invalidation
 
 ---
 

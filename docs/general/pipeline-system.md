@@ -1,20 +1,29 @@
 # Pipeline and Redirection System - EYN-OS
 
-EYN-OS includes a Unix-like pipeline and redirection system that enables command chaining and I/O manipulation. **Note: This system is currently in development and not all features are fully functional yet.**
+EYN-OS includes a Unix-like pipeline and redirection system that enables command chaining and I/O manipulation.
 
 ## Current Status
 
 ### **Working Features**
 - **Basic Output Redirection**: Write to files with `>` operator
 - **Append Redirection**: Append to files with `>>` operator  
-- **Simple Command Piping**: Basic `|` operator for 2-command pipelines
+- **Kernel Pipe Chaining**: `|` uses kernel pipe FDs for multi-stage command composition
+- **Bounded Spool Fallback**: Pipeline-created pipes enable bounded temporary spool memory when the ring buffer fills
+- **Spawn-Compatible Stage Launch**: Pipeline stage runner uses the spawn/wait task API for `/binaries` commands
 - **Universal Search Command**: Enhanced `search` command that works in multiple modes
 
 ### **In Development**
-- **Complex Pipelines**: Multi-command pipelines (3+ commands)
 - **Input Redirection**: Read from files with `<` operator
 - **Background Execution**: Run commands in background with `&`
-- **Advanced File Descriptor Management**: Full Unix file descriptor support
+- **Expanded FD Ops**: Additional `dup`/`poll`-style primitives
+- **True Concurrent Spawn**: Run pipeline stages concurrently with independent ring3 task contexts
+
+Current implementation note:
+The spawn/wait ABI is now in place and pipeline uses it for userland stage launch. The underlying ring3 runtime is still single-active-task, so stage execution remains serialized until per-task address-space/lifecycle scheduling is introduced.
+
+Scheduler note:
+Spawned stages participate in the kernel's 3-level MLFQ policy. Interactive/wakeup-heavy stages tend to stay in higher queues, while CPU-heavy stages are demoted over time.
+Use the shell command `schedstat` to print the current scheduler snapshot (tick rate, queue quanta, queue depths, and MLFQ counters) during pipeline debugging.
 
 ### **Planned Features**
 - **Process Substitution**: `<()` and `>()` operators
@@ -25,7 +34,7 @@ EYN-OS includes a Unix-like pipeline and redirection system that enables command
 ## Overview
 
 The current pipeline system provides:
-- **Command Piping**: Chain commands with `|` operator (2 commands max)
+- **Command Piping**: Chain commands with `|` operator across multiple stages
 - **Output Redirection**: Write to files with `>` operator
 - **Append Redirection**: Append to files with `>>` operator
 - **Universal Search**: Enhanced search command for filtering and filesystem search

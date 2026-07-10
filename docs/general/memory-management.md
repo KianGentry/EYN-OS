@@ -11,6 +11,10 @@ The paging system implements:
 - **Demand Paging**: Pages allocated on-demand when accessed
 - **Frame Management**: Efficient physical frame allocation and tracking
 
+Low-RAM notes:
+- Boot-time RAM pressure is heavily influenced by the kernel's **in-memory** footprint (not ISO size).
+- Large zero-initialized globals in **`.bss` consume RAM at boot**; prefer on-demand allocations for infrequently-used large buffers.
+
 ## Architecture
 
 ### Memory Layout
@@ -101,9 +105,86 @@ void* kmalloc_ap(uint32 size, uint32* physical);
 void kfree(void* ptr);
 ```
 
+## Rust Allocator Integration
+
+EYN-OS supports an incremental Rust migration path for allocator and mapped-buffer safety logic.
+
+### Build Toggle
+
+- `CONFIG_RUST_ALLOCATOR=0` (default): allocator logic uses C-only paths.
+- `CONFIG_RUST_ALLOCATOR=1`: allocator and zero-copy paths call Rust FFI helpers for checked arithmetic and validation.
+
+Important behavior:
+
+- The C allocator now has compile-time fallback logic for all Rust helper call sites.
+- This prevents unresolved-symbol link failures in non-Rust builds.
+
+### C/Rust FFI Boundary
+
+Rust helper declarations live in:
+
+- `include/utilities/rust_alloc.h`
+
+Rust implementations live in:
+
+- `src/rust/rust_alloc.rs`
+
+Current Rust-owned responsibilities:
+
+- Zero-copy buffer create/destroy/read/write bounds safety.
+- Heap block metadata validation checks.
+- Allocation size/alignment math.
+- Split/coalesce planning math with overflow checks.
+- Pointer-to-block-offset conversion checks for free/realloc.
+- Best-fit candidate update decision.
+- Realloc copy-size/reallocate decision math.
+
+Current C-owned responsibilities:
+
+- Heap metadata mutation (`block->next`, `block->used`, final writebacks).
+- Capability/context policy checks.
+- User-visible diagnostics/log formatting.
+
+### Testing the Rust Allocator Path
+
+Run the dedicated smoke target:
+
+```bash
+make test-rust-allocator
+```
+
+This validates:
+
+- util build with Rust path OFF.
+- Rust helper object build.
+- util/zero-copy build with Rust path ON.
+- Full kernel link with Rust path ON.
+
+### Troubleshooting Undefined Rust Symbols
+
+If you see linker errors like undefined reference to `rust_*` symbols:
+
+1. Ensure objects were built consistently with the same `CONFIG_RUST_ALLOCATOR` value.
+2. Rebuild with explicit mode (or clean rebuild):
+
+```bash
+make clean
+make all ARCH=i386 CONFIG_RUST_ALLOCATOR=1
+```
+
+3. Verify Rust target availability:
+
+```bash
+rustup target add i686-unknown-linux-gnu
+```
+
 ## Page Fault Handling
 
 The system includes intelligent page fault handling:
+
+EYN-OS-specific notes:
+- Many user-mode not-present faults are expected under demand paging/swap and can be recoverable.
+- For performance (especially under low RAM), recoverable user-mode faults may be handled without printing verbose diagnostics.
 
 ### Page Fault Types
 - **Not Present**: Page not mapped in virtual memory
@@ -229,6 +310,9 @@ memory protect
 
 # Monitor page faults
 error details
+
+# Intentionally trigger a fault (for testing)
+pf yes 0x0 r
 ```
 
 ## Conclusion

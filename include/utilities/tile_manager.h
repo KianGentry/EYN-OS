@@ -1,7 +1,7 @@
 #ifndef TILE_MANAGER_H
 #define TILE_MANAGER_H
 
-#include <types.h>
+#include <misc/types.h>
 #include <mouse.h>
 #include <rei.h>
 
@@ -20,6 +20,9 @@ void tile_close(int tile_idx);
 
 // Get the currently focused tile index (0..tile_count-1)
 int tile_get_focused();
+
+// Get the vterm index attached to the currently focused tile, or -1 if none.
+int tile_get_focused_term();
 
 // Find the tile index that is backed by a given vterm index.
 // Returns -1 if not found.
@@ -83,17 +86,64 @@ void wm_register_gui_client2(int win_id,
 	void* userdata);
 void wm_unregister_gui_client(int win_id);
 
+/*
+ * Register an optional close-request callback for a floating window.
+ * If the callback returns 0, the close is vetoed (the user program should
+ * call exit() when ready). If it returns non-zero (or is NULL), the window
+ * closes immediately. Mirrors tile_register_gui_close_cb semantics.
+ */
+void wm_register_gui_close_cb(int win_id, tile_gui_close_cb close_cb);
+
 // Update window title/status
 void wm_set_title_status(int win_id, const char* title, const char* status_left, const char* status_right);
 
 // Mark window content dirty to force redraw next frame
 void wm_invalidate_window(int win_id);
 
+// Get the content rectangle (inside decoration chrome) for a floating window.
+// Output coordinates are in screen pixels; all outputs default to 0 on invalid win_id.
+void wm_get_content_rect(int win_id, int* cx, int* cy, int* cw, int* ch);
+
 // When enabled, the tiler will redraw this window every frame (subject to global FPS cap).
 void wm_set_continuous_redraw(int win_id, int enabled);
 
 // Close the window
 void wm_close_window(int win_id);
+
+// Force-close the window, bypassing close-veto callbacks.
+void wm_force_close_window(int win_id);
+
+// --- Display profile (workspace resolution + aspect) ---
+// Aspect mode values are stable for settings/syscall integration.
+#define TILER_ASPECT_NATIVE 0
+#define TILER_ASPECT_4_3 1
+#define TILER_ASPECT_16_10 2
+#define TILER_ASPECT_16_9 3
+#define TILER_ASPECT_21_9 4
+#define TILER_ASPECT_1_1 5
+
+typedef struct {
+	int fb_w;
+	int fb_h;
+	int workspace_w;
+	int workspace_h;
+	int scale_pct;
+	int aspect_mode;
+} tiler_display_profile_t;
+
+typedef struct {
+	int width;
+	int height;
+	int bpp;
+	int can_switch;
+} tiler_display_mode_t;
+
+// scale_pct is clamped to [50,100], aspect uses TILER_ASPECT_* constants.
+// If persist != 0, the profile is saved to /config/ui.cfg.
+int tiler_set_display_profile(int scale_pct, int aspect_mode, int persist);
+void tiler_get_display_profile(tiler_display_profile_t* out);
+int tiler_set_display_mode(int width, int height, int bpp, int persist);
+void tiler_get_display_mode(tiler_display_mode_t* out);
 
 //  Runtime GUI tuning (low-spec controls) 
 // Mode: 0=high (full features), 1=low (wireframe drag, simplified decor), 2=auto (based on RAM)
@@ -113,8 +163,33 @@ void tiler_gui_print_status(void);
 // Returns 0 on success (prompt shown or background applied), -1 on failure (tiler inactive or bad params).
 int tile_begin_set_background_from_rei(int tile_idx, rei_image_t* image);
 
+// Apply a background image directly using an explicit mode.
+// mode uses BG_TILE/BG_SCALE/BG_CENTER. The function takes ownership of image.
+int tile_set_background_from_image(int tile_idx, rei_image_t* image, int mode);
+
 // Clear any configured background image for the given tile (no-op if none).
 void tile_clear_background(int tile_idx);
+
+// Track which tile background should also be used for the compositor desktop backdrop.
+void tile_desktop_background_set(int tile_idx);
+void tile_desktop_background_clear(int tile_idx);
+void tile_desktop_background_remap(int old_idx, int new_idx);
+
+/*
+ * Draw a file-type icon by name at pixel position (x, y).
+ *
+ * icon_name: base name of the icon, e.g. "file_c", "dir_empty", "file_none".
+ * Icons are loaded from /icons16/ (or /icons/ as fallback) and cached.
+ * If the icon is not found, nothing is drawn.
+ */
+void tile_draw_file_icon(const char* icon_name, int x, int y);
+
+// Post a non-blocking desktop notification toast from kernel/user syscall paths.
+// level: 0=info, 1=warning, 2=error. timeout_ms is clamped to a sane range.
+int tile_notify_post(const char* title, const char* message, int level, uint32 timeout_ms);
+
+// Dismiss all active taskbar toasts immediately. Returns number dismissed.
+int tile_notify_dismiss_all(void);
 
 // --- Theme (window/tile chrome) ---
 typedef struct {
@@ -124,7 +199,7 @@ typedef struct {
 	uint8 status_text_r, status_text_g, status_text_b;
 } wm_theme_t;
 
-// Get/set runtime theme colors used by the tiler/window manager.
+// Get/set runtime theme colours used by the tiler/window manager.
 void wm_theme_get(wm_theme_t* out);
 void wm_theme_set(const wm_theme_t* in);
 void wm_theme_reset_defaults(void);

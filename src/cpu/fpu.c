@@ -1,4 +1,5 @@
 #include <cpu/fpu.h>
+#include <cpu/cpuid.h>
 
 static inline uint32 read_cr0(void) {
     uint32 cr0;
@@ -21,6 +22,8 @@ static inline void write_cr4(uint32 cr4) {
 }
 
 void fpu_init(void) {
+    const cpu_features_t* features = cpu_features_detect();
+
     // CR0 bits (relevant):
     //  - EM (bit 2): if set, x87 instructions raise #UD.
     //  - TS (bit 3): if set, x87/SSE instructions raise #NM until CLTS.
@@ -34,14 +37,14 @@ void fpu_init(void) {
     cr0 |=  (1u << 5); // NE=1
     write_cr0(cr0);
 
-    // Enable SSE instructions and FXSAVE/FXRSTOR support.
-    // Without CR4.OSFXSR, many SSE opcodes will #UD even if CR0.EM=0.
-    // GCC may emit SSE moves for struct copies at -O2, so this must be set
-    // even if the kernel doesn't explicitly use SIMD.
-    uint32 cr4 = read_cr4();
-    cr4 |= (1u << 9);  // OSFXSR
-    cr4 |= (1u << 10); // OSXMMEXCPT
-    write_cr4(cr4);
+    if (features && features->has_fxsr) {
+        uint32 cr4 = read_cr4();
+        cr4 |= (1u << 9);  // OSFXSR
+        if (features->has_sse) {
+            cr4 |= (1u << 10); // OSXMMEXCPT
+        }
+        write_cr4(cr4);
+    }
 
     // Initialize x87 state.
     __asm__ __volatile__("fninit");

@@ -8,7 +8,7 @@ The EYN-OS help system provides interactive documentation for all commands. It f
 
 ### Visual Indicators
 - **Asterisk (*)** marks commands with sub-commands
-- **Color-coded** interface for easy navigation
+- **Colour-coded** interface for easy navigation
 - **Status bar** with navigation instructions
 
 ### Tiling Integration
@@ -159,7 +159,7 @@ When you press **Enter** on a command with an asterisk (*), the sub-commands app
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Color Scheme
+## Colour Scheme
 
 - **Yellow**: Selected items and titles
 - **White**: Normal text and main commands
@@ -176,7 +176,7 @@ When you press **Enter** on a command with an asterisk (*), the sub-commands app
 ### Sub-Command Display
 - **Inline expansion**: Sub-commands appear directly below parent
 - **Indented display**: Sub-commands are indented with spaces
-- **Gray color**: Sub-commands use gray text to distinguish them
+- **Gray colour**: Sub-commands use gray text to distinguish them
 - **Cursor support**: Sub-commands can be selected with arrow keys
 - **Descriptions**: Sub-command descriptions appear in the right pane when selected
 - **Toggle functionality**: Press Enter again to collapse
@@ -218,7 +218,7 @@ if (has_subcommands(sorted_cmds[selected]->name)) {
 - Commands with sub-commands are marked with `" *"`
 - Asterisk is appended to command names in the display
 - Description area shows expansion state
-- Sub-commands are indented and colored gray
+- Sub-commands are indented and coloured gray
 
 ## Benefits
 
@@ -235,7 +235,7 @@ if (has_subcommands(sorted_cmds[selected]->name)) {
 ### 3. **User Experience**
 - Familiar tree-like expansion
 - Toggle functionality for easy exploration
-- Visual feedback with colors and indentation
+- Visual feedback with colours and indentation
 
 ### 4. **Extensibility**
 - Easy to add new sub-command categories

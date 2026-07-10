@@ -1,0 +1,6 @@
+name=bmp
+kind=image
+extensions=.bmp
+magic16=0x424d
+protocol=frame-v1
+exec=/binaries/view_backend_bmp

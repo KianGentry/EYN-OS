@@ -1,7 +1,7 @@
 #ifndef SCHED_H
 #define SCHED_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // simple cooperative scheduler stubs
 
@@ -29,19 +29,28 @@ void sched_on_timeslice_end(void);
 // Object-centric scheduler support
 #define SCHED_WORK_CPU_ANY 0xFFFFFFFFu
 
+// 3-level multilevel feedback queue (MLFQ) policy surface.
+#define SCHED_MLFQ_LEVELS 3u
+#define SCHED_MLFQ_LEVEL_LOW 0u
+#define SCHED_MLFQ_LEVEL_MEDIUM 1u
+#define SCHED_MLFQ_LEVEL_HIGH 2u
+
 typedef struct sched_work sched_work_t;
 struct sched_work {
 	uint32 id;
 	uint32 priority;
+	int next;
+	uint8 in_queue;
+	uint8 mlfq_level;
+	uint16 _pad0;
+	void (*run)(sched_work_t* w);
+	void* userdata;
 	uint32 affinity_mask;
 	uint32 budget_ticks;
 	uint32 budget_left;
 	uint32 cache_hint;
-	void (*run)(sched_work_t* w);
-	void* userdata;
-	int next;
-	uint8 in_queue;
-	uint8 _pad[3];
+	uint32 mlfq_slice_left;
+	uint32 mlfq_last_boost_tick;
 };
 
 void sched_work_init(void);
@@ -52,6 +61,29 @@ int sched_work_set_ready(uint32 id);
 int sched_work_unready(uint32 id);
 int sched_work_update_budget(uint32 id, uint32 budget_ticks);
 int sched_work_on_timeslice_end(void);
+
+int sched_mlfq_is_enabled(void);
+int sched_mlfq_irq_preempt_enabled(void);
+uint32 sched_mlfq_level_quantum_ticks(uint32 level);
+uint32 sched_mlfq_boost_interval_ticks(void);
+
+typedef struct sched_debug_snapshot {
+	uint32 ticks;
+	uint32 tick_hz;
+	uint32 timeslice_ticks;
+	uint32 current_slice;
+	uint32 mlfq_enabled;
+	uint32 mlfq_irq_preempt_enabled;
+	uint32 mlfq_boost_interval_ticks;
+	uint32 mlfq_quantum_ticks[SCHED_MLFQ_LEVELS];
+	uint32 runq_depth[SCHED_MLFQ_LEVELS];
+	uint32 work_runs;
+	uint32 work_demotions;
+	uint32 work_boosts;
+} sched_debug_snapshot_t;
+
+void sched_debug_get_snapshot(sched_debug_snapshot_t* out);
+void sched_debug_print(void);
 
 // Deterministic execution mode
 void sched_det_enable(int enabled);

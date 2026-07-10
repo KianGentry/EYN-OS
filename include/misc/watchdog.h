@@ -1,7 +1,7 @@
 #ifndef WATCHDOG_H
 #define WATCHDOG_H
 
-#include <types.h>
+#include <misc/types.h>
 
 // Initialize watchdog with a timeout in ticks (0 disables watchdog)
 void watchdog_init(uint32 timeout_ticks);

@@ -13,6 +13,33 @@
 
 static uint8_t g_heap[USERLAND_HEAP_SIZE];
 static size_t g_heap_used = 0;
+static uint32_t g_rand_state = 1u;
+static int g_rand_seeded = 0;
+char** environ = NULL;
+static int g_libc_argc = 0;
+static char** g_libc_argv = NULL;
+
+static uint32_t mix32(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+static uint32_t entropy_seed(void) {
+    uint32_t t_lo = 0;
+    uint32_t t_hi = 0;
+#if (defined(__i386__) || defined(__x86_64__)) && !defined(__chibicc__)
+    __asm__ __volatile__("rdtsc" : "=a"(t_lo), "=d"(t_hi));
+#endif
+    uint32_t addr_mix = (uint32_t)(uintptr_t)&g_heap_used ^ (uint32_t)(uintptr_t)&t_lo;
+    uint32_t seed = t_lo ^ (t_hi * 1664525u) ^ addr_mix ^ 0x9e3779b9u;
+    seed = mix32(seed);
+    if (seed == 0) seed = 1u;
+    return seed;
+}
 
 static size_t align_up(size_t v, size_t a) {
     return (v + (a - 1)) & ~(a - 1);
@@ -74,8 +101,24 @@ int atexit(void (*fn)(void)) {
     return 0;
 }
 
+void _eyn_libc_init(int argc, char** argv, char** envp) {
+    g_libc_argc = argc;
+    g_libc_argv = argv;
+    environ = envp;
+    (void)g_libc_argc;
+    (void)g_libc_argv;
+}
+
 char* getenv(const char* name) {
-    (void)name;
+    if (!name || !environ) return NULL;
+
+    size_t name_len = strlen(name);
+    for (int i = 0; environ[i]; ++i) {
+        char* entry = environ[i];
+        if (strncmp(entry, name, name_len) == 0 && entry[name_len] == '=') {
+            return entry + name_len + 1;
+        }
+    }
     return NULL;
 }
 
@@ -85,6 +128,20 @@ void abort(void) {
 
 void exit(int code) {
     _exit(code);
+}
+
+void srand(unsigned int seed) {
+    g_rand_state = (uint32_t)seed;
+    if (g_rand_state == 0) g_rand_state = 1u;
+    g_rand_seeded = 1;
+}
+
+int rand(void) {
+    if (!g_rand_seeded) {
+        srand(entropy_seed());
+    }
+    g_rand_state = g_rand_state * 1103515245u + 12345u;
+    return (int)((g_rand_state >> 16) & RAND_MAX);
 }
 
 unsigned long strtoul(const char* nptr, char** endptr, int base) {
@@ -132,11 +189,22 @@ static int hex_digit(char c) {
     return -1;
 }
 
-long double strtold(const char* nptr, char** endptr) {
+/*
+ * chibicc i386: long double storage not supported in codegen; define strtold
+ * type as double via preprocessor. On i386, long double and double are both
+ * 64-bit in practice for chibicc, so this is ABI-compatible.
+ */
+#ifdef __chibicc__
+#define long_double double
+#else
+#define long_double long double
+#endif
+
+long_double strtold(const char* nptr, char** endptr) {
     const char* p = nptr;
     if (!p) {
         if (endptr) *endptr = (char*)nptr;
-        return 0.0L;
+        return 0.0;
     }
 
     while (is_space_char(*p)) p++;
@@ -155,7 +223,7 @@ long double strtold(const char* nptr, char** endptr) {
     if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
         p += 2;
 
-        long double mant = 0.0L;
+        long_double mant = 0.0;
         int frac_digits = 0;
         int saw_digit = 0;
 
@@ -163,7 +231,7 @@ long double strtold(const char* nptr, char** endptr) {
             int d = hex_digit(*p);
             if (d < 0) break;
             saw_digit = 1;
-            mant = mant * 16.0L + (long double)d;
+            mant = mant * 16.0 + (long_double)d;
             p++;
         }
 
@@ -173,7 +241,7 @@ long double strtold(const char* nptr, char** endptr) {
                 int d = hex_digit(*p);
                 if (d < 0) break;
                 saw_digit = 1;
-                mant = mant * 16.0L + (long double)d;
+                mant = mant * 16.0 + (long_double)d;
                 frac_digits++;
                 p++;
             }
@@ -181,12 +249,12 @@ long double strtold(const char* nptr, char** endptr) {
 
         if (!saw_digit) {
             if (endptr) *endptr = (char*)nptr;
-            return 0.0L;
+            return 0.0;
         }
 
         // Scale down by 16^frac_digits.
         for (int i = 0; i < frac_digits && i < 1024; i++)
-            mant /= 16.0L;
+            mant /= 16.0;
 
         int exp2 = 0;
         if (*p == 'p' || *p == 'P') {
@@ -212,23 +280,23 @@ long double strtold(const char* nptr, char** endptr) {
 
         if (exp2 > 0) {
             for (int i = 0; i < exp2 && i < 1024; i++)
-                mant *= 2.0L;
+                mant *= 2.0;
         } else if (exp2 < 0) {
             for (int i = 0; i < -exp2 && i < 1024; i++)
-                mant /= 2.0L;
+                mant /= 2.0;
         }
 
         if (endptr) *endptr = (char*)p;
-        return (long double)sign * mant;
+        return (long_double)sign * mant;
     }
 
     // Decimal float.
-    long double val = 0.0L;
+    long_double val = 0.0;
     int saw_digit = 0;
 
     while (*p >= '0' && *p <= '9') {
         saw_digit = 1;
-        val = val * 10.0L + (long double)(*p - '0');
+        val = val * 10.0 + (long_double)(*p - '0');
         p++;
     }
 
@@ -237,7 +305,7 @@ long double strtold(const char* nptr, char** endptr) {
         p++;
         while (*p >= '0' && *p <= '9') {
             saw_digit = 1;
-            val = val * 10.0L + (long double)(*p - '0');
+            val = val * 10.0 + (long_double)(*p - '0');
             frac++;
             p++;
             if (frac > 1024) frac = 1024;
@@ -246,11 +314,11 @@ long double strtold(const char* nptr, char** endptr) {
 
     if (!saw_digit) {
         if (endptr) *endptr = (char*)nptr;
-        return 0.0L;
+        return 0.0;
     }
 
     for (int i = 0; i < frac; i++)
-        val /= 10.0L;
+        val /= 10.0;
 
     int exp10 = 0;
     if (*p == 'e' || *p == 'E') {
@@ -276,13 +344,44 @@ long double strtold(const char* nptr, char** endptr) {
 
     if (exp10 > 0) {
         for (int i = 0; i < exp10 && i < 1024; i++)
-            val *= 10.0L;
+            val *= 10.0;
     } else if (exp10 < 0) {
         for (int i = 0; i < -exp10 && i < 1024; i++)
-            val /= 10.0L;
+            val /= 10.0;
     }
 
     if (endptr) *endptr = (char*)p;
     (void)start;
-    return (long double)sign * val;
+    return (long_double)sign * val;
+}
+
+int atoi(const char* s) {
+    if (!s) return 0;
+    while (*s == ' ' || *s == '\t' || *s == '\n') s++;
+    int neg = 0;
+    if (*s == '-') { neg = 1; s++; }
+    else if (*s == '+') s++;
+    int val = 0;
+    while (*s >= '0' && *s <= '9') { val = val * 10 + (*s - '0'); s++; }
+    return neg ? -val : val;
+}
+
+long atol(const char* s) {
+    return (long)atoi(s);
+}
+
+int abs(int x) {
+    return x < 0 ? -x : x;
+}
+
+long labs(long x) {
+    return x < 0 ? -x : x;
+}
+
+long strtol(const char* nptr, char** endptr, int base) {
+    return (long)strtoul(nptr, endptr, base);
+}
+
+double strtod(const char* nptr, char** endptr) {
+    return (double)strtold(nptr, endptr);
 }

@@ -8,7 +8,18 @@
 #ifndef VMM_H
 #define VMM_H
 
-#include <types.h>
+#include <misc/types.h>
+#include <stddef.h>
+
+/*
+ * TLB invalidation notes (80386 compatibility):
+ * - INVLPG is a 486+ instruction. A strict 80386 build must not emit it.
+ * - When INVLPG is unavailable, the only architecturally-correct invalidation
+ *   mechanism is a full TLB flush via CR3 reload.
+ */
+#ifndef CONFIG_CPU_HAS_INVLPG
+#define CONFIG_CPU_HAS_INVLPG 0
+#endif
 
 /*
  * i386 PAGING MODEL - BIT DEFINITIONS
@@ -229,6 +240,7 @@ void vmm_init(uint32 total_ram_bytes);
  */
 uint32 vmm_get_boot_alloc_end(void);
 void vmm_enable_paging(void);
+void vmm_mark_paging_enabled(void);
 
 /* Frame allocator */
 uint32 frame_alloc(void);                    /* Returns physical address or 0 */
@@ -248,6 +260,19 @@ pte_t* vmm_walk_page_tables(address_space_t* as, uint32 va, int create);
 void invalidate_tlb_entry(uint32 va);
 void invalidate_tlb_all(void);
 
+/* Preferred invalidation API (used by the 386/486+ compat layer). */
+void vm_invalidate_page(void* addr);
+void vm_invalidate_range(void* start, size_t len);
+
+/*
+ * Strict-80386 performance helper:
+ * When INVLPG is unavailable, vm_invalidate_* falls back to a full CR3 reload.
+ * Some teardown paths unmap many pages in a loop; deferring lets us collapse
+ * those into a single CR3 reload at the end of the batch.
+ */
+void vm_tlb_defer_begin(void);
+void vm_tlb_defer_end(void);
+
 /* Address space management */
 address_space_t* create_address_space(void);
 void destroy_address_space(address_space_t* as);
@@ -261,6 +286,18 @@ int vmm_munmap(address_space_t* as, uint32 va, uint32 size);
 
 /* Page fault handling (called from ISR 14) */
 void vmm_page_fault_handler(uint32 error_code, uint32 fault_addr, uint32 eip);
+
+/*
+ * vmm_fault_in_user_write -- pre-fault user pages before a kernel copyout.
+ *
+ * Allocates any demand-zero, swap-backed, or un-faulted stack/heap pages
+ * in [va_start, va_start+len) so that user_access_ok() can confirm they
+ * are present and writable.  Must be called before copyout() when the
+ * destination might be a freshly alloca'd or brk-grown buffer.
+ *
+ * Returns 0 if all pages were resolved successfully, -1 otherwise.
+ */
+int vmm_fault_in_user_write(uint32 va_start, size_t len);
 
 /* Swap operations */
 uint32 swap_out_page(pte_t* pte, uint32 va, address_space_t* as);
