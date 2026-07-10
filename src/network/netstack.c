@@ -1,5 +1,6 @@
 #include <network/netstack.h>
 
+#include <drivers/e100.h>
 #include <drivers/e1000.h>
 #include <string.h>
 #include <vga.h>
@@ -101,7 +102,17 @@ typedef enum tcp_state {
     TCP_FIN_WAIT
 } tcp_state;
 
-typedef struct tcp_conn {
+    typedef struct tcp_rx_slot {
+        uint8 valid;
+        net_tcp_rx_packet pkt;
+    } tcp_rx_slot;
+
+// Fixed-size accept backlog per listening socket. Small on purpose: this
+// kernel supports at most NET_TCP_MAX_SOCKETS(8) total TCP endpoints, so a
+// listener can never usefully queue more pending connections than that.
+#define NET_TCP_ACCEPT_BACKLOG 4u
+
+    typedef struct tcp_socket {
     tcp_state state;
     uint8 local_ip[4];
     uint16 local_port;
@@ -120,12 +131,18 @@ typedef struct tcp_conn {
     uint32 last_end_seq;
     uint32 last_payload_len;
     uint8 last_payload[NET_TCP_MAX_PAYLOAD];
-} tcp_conn;
+        tcp_rx_slot rxq[8];
+        uint32 rxq_head;
+        uint32 rxq_tail;
+        uint8 in_use;
+        // Populated only for listening sockets: IDs of new connections
+        // accepted via passive open that are waiting for accept() to claim
+        // them. The legacy socket (id 0) never uses this; it self-accepts
+        // in place for backward compatibility.
+        int accept_backlog[NET_TCP_ACCEPT_BACKLOG];
+        uint32 accept_backlog_count;
+    } tcp_socket;
 
-typedef struct tcp_rx_slot {
-    uint8 valid;
-    net_tcp_rx_packet pkt;
-} tcp_rx_slot;
 
 typedef struct net_timer_slot {
     uint8 active;
@@ -204,6 +221,24 @@ typedef struct net_timer_slot {
  * Security-critical: Yes (limits protocol expectations).
  */
 #define NET_DNS_PORT 53u
+#define NET_DHCP_CLIENT_PORT 68u
+#define NET_DHCP_SERVER_PORT 67u
+#define NET_DHCP_MAGIC_COOKIE 0x63825363u
+
+#define DHCP_OPT_PAD 0u
+#define DHCP_OPT_SUBNET_MASK 1u
+#define DHCP_OPT_ROUTER 3u
+#define DHCP_OPT_DNS 6u
+#define DHCP_OPT_REQUESTED_IP 50u
+#define DHCP_OPT_MSG_TYPE 53u
+#define DHCP_OPT_SERVER_ID 54u
+#define DHCP_OPT_PARAM_REQ_LIST 55u
+#define DHCP_OPT_END 255u
+
+#define DHCP_MSG_DISCOVER 1u
+#define DHCP_MSG_OFFER 2u
+#define DHCP_MSG_REQUEST 3u
+#define DHCP_MSG_ACK 5u
 
 typedef struct udp_socket {
     uint8 bound;
@@ -229,9 +264,8 @@ static struct {
     icmp_echo_reply_slot icmp_rxq[4];
     net_icmp_stats icmp_stats;
 
-    tcp_conn tcp;
+    tcp_socket tcp_sockets[NET_TCP_MAX_SOCKETS];
     net_tcp_stats tcp_stats;
-    tcp_rx_slot tcp_rxq[8];
 
     udp_socket sockets[MAX_SOCKETS];
 
@@ -258,6 +292,43 @@ static void net_log(const char* msg);
 static int dns_get_server_ip(uint8 out_ip[4]);
 static int dns_encode_name(const char* name, uint8* out, uint32 out_cap, uint32* out_len);
 static int dns_skip_name(const uint8* msg, uint32 len, uint32* io_off);
+static void tcp_socket_meta_clear(int socket_id);
+static int tcp_socket_meta_is_legacy_in_use(void);
+static void tcp_socket_meta_fill_legacy(net_tcp_socket_info* out);
+
+static void tcp_socket_meta_clear(int socket_id)
+{
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    memset(&g_net.tcp_sockets[socket_id], 0, sizeof(g_net.tcp_sockets[socket_id]));
+}
+
+// Forward declarations for per-socket RX queue helpers
+static int tcp_socket_rxq_enqueue(int socket_id, const uint8 src_ip[4], uint16 src_port,
+                                  const uint8 dst_ip[4], uint16 dst_port,
+                                  const uint8* payload, uint32 payload_len);
+static void tcp_socket_rxq_clear(int socket_id);
+
+static int tcp_socket_meta_is_legacy_in_use(void)
+{
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    if (sock->listening) return 1;
+    if (sock->state != TCP_CLOSED) return 1;
+    if (sock->local_port != 0 || sock->remote_port != 0) return 1;
+    return 0;
+}
+
+static void tcp_socket_meta_fill_legacy(net_tcp_socket_info* out)
+{
+    if (!out) return;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    memset(out, 0, sizeof(*out));
+    out->in_use = tcp_socket_meta_is_legacy_in_use() ? 1u : 0u;
+    out->listening = sock->listening;
+    out->state = (uint8)sock->state;
+    out->local_port = sock->local_port;
+    for (int i = 0; i < 4; i++) out->remote_ip[i] = sock->remote_ip[i];
+    out->remote_port = sock->remote_port;
+}
 
 void net_config_get(net_config* out)
 {
@@ -306,75 +377,89 @@ static uint16 tcp_checksum16(const uint8 src_ip[4], const uint8 dst_ip[4], const
 
 // Retransmit helpers (minimal reliability for SYN/SYN-ACK/DATA/FIN).
 // Stores the last outbound segment and retries it a few times on timeout.
-static void tcp_retx_cancel(void)
+static void tcp_socket_retx_cancel(int socket_id)
 {
-    if (g_net.tcp.retx_timer_id >= 0) {
-        net_timer_cancel(g_net.tcp.retx_timer_id);
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    if (sock->retx_timer_id >= 0) {
+        net_timer_cancel(sock->retx_timer_id);
     }
-    g_net.tcp.retx_timer_id = -1;
-    g_net.tcp.retx_active = 0;
-    g_net.tcp.retx_count = 0;
-    g_net.tcp.last_flags = 0;
-    g_net.tcp.last_payload_len = 0;
+    sock->retx_timer_id = -1;
+    sock->retx_active = 0;
+    sock->retx_count = 0;
+    sock->last_flags = 0;
+    sock->last_payload_len = 0;
 }
 
-static void tcp_retx_arm(uint8 flags, uint32 seq, uint32 ack, const uint8* payload, uint32 payload_len)
+static void tcp_socket_retx_arm(int socket_id, uint8 flags, uint32 seq, uint32 ack, const uint8* payload, uint32 payload_len)
 {
     if (payload_len > NET_TCP_MAX_PAYLOAD) return;
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
 
-    tcp_retx_cancel();
+    tcp_socket_retx_cancel(socket_id);
 
-    g_net.tcp.last_flags = flags;
-    g_net.tcp.last_seq = seq;
-    g_net.tcp.last_ack = ack;
-    g_net.tcp.last_payload_len = payload_len;
-    g_net.tcp.last_end_seq = seq + payload_len;
-    if (flags & TCP_FLAG_SYN) g_net.tcp.last_end_seq += 1u;
-    if (flags & TCP_FLAG_FIN) g_net.tcp.last_end_seq += 1u;
+    sock->last_flags = flags;
+    sock->last_seq = seq;
+    sock->last_ack = ack;
+    sock->last_payload_len = payload_len;
+    sock->last_end_seq = seq + payload_len;
+    if (flags & TCP_FLAG_SYN) sock->last_end_seq += 1u;
+    if (flags & TCP_FLAG_FIN) sock->last_end_seq += 1u;
 
     if (payload_len > 0) {
-        memcpy(g_net.tcp.last_payload, payload, payload_len);
+        memcpy(sock->last_payload, payload, payload_len);
     }
 
-    g_net.tcp.retx_count = 0;
-    g_net.tcp.retx_active = 1;
-    g_net.tcp.retx_timer_id = net_timer_start(net_timer_ticks_from_ms(TCP_RETX_INTERVAL_MS),
+    sock->retx_count = 0;
+    sock->retx_active = 1;
+    sock->retx_timer_id = net_timer_start(net_timer_ticks_from_ms(TCP_RETX_INTERVAL_MS),
                                              net_timer_ticks_from_ms(TCP_RETX_INTERVAL_MS),
-                                             tcp_retx_timer_cb, NULL);
+                                         tcp_retx_timer_cb, (void*)(uintptr_t)socket_id);
 }
 
-static void tcp_retx_ack_received(uint32 ack)
+static void tcp_socket_retx_ack_received(int socket_id, uint32 ack)
 {
-    if (!g_net.tcp.retx_active) return;
-    if (ack >= g_net.tcp.last_end_seq) {
-        tcp_retx_cancel();
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    if (!sock->retx_active) return;
+    if (ack >= sock->last_end_seq) {
+        tcp_socket_retx_cancel(socket_id);
     }
+}
+
+static void tcp_retx_cancel(void)
+{
+    tcp_socket_retx_cancel(NET_TCP_LEGACY_SOCKET_ID);
 }
 
 static void tcp_retx_timer_cb(void* ctx)
 {
-    (void)ctx;
-    if (!g_net.tcp.retx_active) return;
-    if (g_net.tcp.state == TCP_CLOSED) {
-        tcp_retx_cancel();
+    int socket_id = (int)(uintptr_t)ctx;
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    
+    if (!sock->retx_active) return;
+    if (sock->state == TCP_CLOSED) {
+        tcp_socket_retx_cancel(socket_id);
         return;
     }
-    if (g_net.tcp.retx_count >= TCP_RETX_MAX_ATTEMPTS) {
+    if (sock->retx_count >= TCP_RETX_MAX_ATTEMPTS) {
         net_log("[NETSTACK] TCP retransmit limit reached\n");
-        tcp_retx_cancel();
-        g_net.tcp.state = TCP_CLOSED;
+        tcp_socket_retx_cancel(socket_id);
+        sock->state = TCP_CLOSED;
         return;
     }
 
-    if (g_net.tcp.local_port == 0 || g_net.tcp.remote_port == 0) return;
+    if (sock->local_port == 0 || sock->remote_port == 0) return;
 
-    (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                           g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                           g_net.tcp.last_seq, g_net.tcp.last_ack,
-                           g_net.tcp.last_flags,
-                           g_net.tcp.last_payload_len ? g_net.tcp.last_payload : NULL,
-                           g_net.tcp.last_payload_len, 800000);
-    g_net.tcp.retx_count++;
+    (void)tcp_send_segment(sock->local_ip, sock->local_port,
+                           sock->remote_ip, sock->remote_port,
+                           sock->last_seq, sock->last_ack,
+                           sock->last_flags,
+                           sock->last_payload_len ? sock->last_payload : NULL,
+                           sock->last_payload_len, 800000);
+    sock->retx_count++;
 }
 
 int net_config_set(const net_config* in)
@@ -676,6 +761,11 @@ static int ipv4_is_zero(const uint8 ip[4])
     return ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0;
 }
 
+static int ipv4_is_broadcast(const uint8 ip[4])
+{
+    return ip[0] == 255 && ip[1] == 255 && ip[2] == 255 && ip[3] == 255;
+}
+
 static int ipv4_is_same_subnet(const uint8 a[4], const uint8 b[4], const uint8 mask[4])
 {
     uint32 au = ipv4_to_u32(a);
@@ -835,7 +925,7 @@ static int dns_skip_name(const uint8* msg, uint32 len, uint32* io_off)
 int net_dns_resolve(const char* name, uint8 out_ip[4], int timeout_spins)
 {
     if (!name || !out_ip) return -1;
-    if (net_init_e1000_default() != 0) return -2;
+    if (net_init_default() != 0) return -2;
 
     uint8 dns_ip[4];
     if (dns_get_server_ip(dns_ip) != 0) return -3;
@@ -875,9 +965,16 @@ int net_dns_resolve(const char* name, uint8 out_ip[4], int timeout_spins)
     rc = net_udp_send_socket(socket_id, local_ip, dns_ip, (uint16)NET_DNS_PORT, msg, off, 800000);
     if (rc != 0) { net_udp_close(socket_id); return -7; }
 
-    if (timeout_spins <= 0) timeout_spins = 8000000;
+    if (timeout_spins <= 0) timeout_spins = 2000000;
+    uint32 ui_ticks = 0;
     for (int spin = 0; spin < timeout_spins; spin++) {
-        if ((spin & 0x1FFF) == 0) watchdog_kick("net-dns-wait");
+        if ((spin & 0x1FFF) == 0) {
+            watchdog_kick("net-dns-wait");
+            // Keep the GUI alive while resolver waits in a blocking syscall.
+            if (tile_is_tiling_active() && (++ui_ticks & 0x1F) == 0) {
+                tile_render_once();
+            }
+        }
         (void)net_poll(local_ip, 32);
 
         net_udp_rx_packet pkt;
@@ -928,6 +1025,225 @@ int net_dns_resolve(const char* name, uint8 out_ip[4], int timeout_spins)
     return -12;
 }
 
+int net_dhcp_request(int timeout_spins, int arp_spins, int persist_cfg)
+{
+    (void)persist_cfg;
+    if (net_init_default() != 0) return -1;
+
+    uint8 mac[6];
+    if (net_get_mac(mac) != 0) return -2;
+
+    int socket_id = net_udp_bind((uint16)NET_DHCP_CLIENT_PORT);
+    if (socket_id < 0) return -3;
+
+    uint8 zero_ip[4] = {0, 0, 0, 0};
+    uint8 bcast_ip[4] = {255, 255, 255, 255};
+    uint8 req[548];
+    memset(req, 0, sizeof(req));
+
+    uint32 xid = net_get_ticks() ^ 0x45594E4Fu;
+    req[0] = 1;  // BOOTREQUEST
+    req[1] = 1;  // Ethernet
+    req[2] = 6;  // MAC len
+    req[3] = 0;
+    req[4] = (uint8)((xid >> 24) & 0xFFu);
+    req[5] = (uint8)((xid >> 16) & 0xFFu);
+    req[6] = (uint8)((xid >> 8) & 0xFFu);
+    req[7] = (uint8)(xid & 0xFFu);
+    req[10] = 0x80; // broadcast flag
+    req[11] = 0x00;
+    for (int i = 0; i < 6; i++) req[28 + i] = mac[i];
+
+    req[236] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 24) & 0xFFu);
+    req[237] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 16) & 0xFFu);
+    req[238] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 8) & 0xFFu);
+    req[239] = (uint8)(NET_DHCP_MAGIC_COOKIE & 0xFFu);
+
+    uint32 off = 240u;
+    req[off++] = DHCP_OPT_MSG_TYPE;
+    req[off++] = 1;
+    req[off++] = DHCP_MSG_DISCOVER;
+    req[off++] = DHCP_OPT_PARAM_REQ_LIST;
+    req[off++] = 3;
+    req[off++] = DHCP_OPT_SUBNET_MASK;
+    req[off++] = DHCP_OPT_ROUTER;
+    req[off++] = DHCP_OPT_DNS;
+    req[off++] = DHCP_OPT_END;
+
+    if (net_udp_send_socket(socket_id, zero_ip, bcast_ip, (uint16)NET_DHCP_SERVER_PORT,
+                            req, off, arp_spins) != 0) {
+        net_udp_close(socket_id);
+        return -4;
+    }
+
+    if (timeout_spins <= 0) timeout_spins = 3000000;
+
+    uint8 offered_ip[4] = {0, 0, 0, 0};
+    uint8 server_id[4] = {0, 0, 0, 0};
+    uint8 netmask[4] = {255, 255, 255, 0};
+    uint8 gateway[4] = {0, 0, 0, 0};
+    uint8 dns[4] = {0, 0, 0, 0};
+    int have_offer = 0;
+
+    for (int spin = 0; spin < timeout_spins; spin++) {
+        if ((spin & 0x1FFF) == 0) watchdog_kick("net-dhcp-offer");
+        (void)net_poll(zero_ip, 32);
+
+        net_udp_rx_packet pkt;
+        if (net_udp_recv_socket(socket_id, &pkt) <= 0) continue;
+        if (pkt.payload_len < 240u) continue;
+
+        const uint8* rx = pkt.payload;
+        uint32 rx_xid = ((uint32)rx[4] << 24) | ((uint32)rx[5] << 16) | ((uint32)rx[6] << 8) | (uint32)rx[7];
+        if (rx[0] != 2 || rx_xid != xid) continue;
+
+        uint32 cookie = ((uint32)rx[236] << 24) | ((uint32)rx[237] << 16) | ((uint32)rx[238] << 8) | (uint32)rx[239];
+        if (cookie != NET_DHCP_MAGIC_COOKIE) continue;
+
+        uint8 msg_type = 0;
+        uint32 roff = 240u;
+        while (roff < pkt.payload_len) {
+            uint8 opt = rx[roff++];
+            if (opt == DHCP_OPT_END) break;
+            if (opt == DHCP_OPT_PAD) continue;
+            if (roff >= pkt.payload_len) break;
+            uint8 opt_len = rx[roff++];
+            if (roff + (uint32)opt_len > pkt.payload_len) break;
+
+            if (opt == DHCP_OPT_MSG_TYPE && opt_len == 1u) {
+                msg_type = rx[roff];
+            } else if (opt == DHCP_OPT_SUBNET_MASK && opt_len == 4u) {
+                for (int i = 0; i < 4; i++) netmask[i] = rx[roff + (uint32)i];
+            } else if (opt == DHCP_OPT_ROUTER && opt_len >= 4u) {
+                for (int i = 0; i < 4; i++) gateway[i] = rx[roff + (uint32)i];
+            } else if (opt == DHCP_OPT_DNS && opt_len >= 4u) {
+                for (int i = 0; i < 4; i++) dns[i] = rx[roff + (uint32)i];
+            } else if (opt == DHCP_OPT_SERVER_ID && opt_len == 4u) {
+                for (int i = 0; i < 4; i++) server_id[i] = rx[roff + (uint32)i];
+            }
+
+            roff += (uint32)opt_len;
+        }
+
+        if (msg_type != DHCP_MSG_OFFER) continue;
+        for (int i = 0; i < 4; i++) offered_ip[i] = rx[16 + (uint32)i];
+        have_offer = 1;
+        break;
+    }
+
+    if (!have_offer) {
+        net_udp_close(socket_id);
+        return -5;
+    }
+
+    memset(req, 0, sizeof(req));
+    req[0] = 1;
+    req[1] = 1;
+    req[2] = 6;
+    req[3] = 0;
+    req[4] = (uint8)((xid >> 24) & 0xFFu);
+    req[5] = (uint8)((xid >> 16) & 0xFFu);
+    req[6] = (uint8)((xid >> 8) & 0xFFu);
+    req[7] = (uint8)(xid & 0xFFu);
+    req[10] = 0x80;
+    req[11] = 0x00;
+    for (int i = 0; i < 6; i++) req[28 + i] = mac[i];
+
+    req[236] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 24) & 0xFFu);
+    req[237] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 16) & 0xFFu);
+    req[238] = (uint8)((NET_DHCP_MAGIC_COOKIE >> 8) & 0xFFu);
+    req[239] = (uint8)(NET_DHCP_MAGIC_COOKIE & 0xFFu);
+
+    off = 240u;
+    req[off++] = DHCP_OPT_MSG_TYPE;
+    req[off++] = 1;
+    req[off++] = DHCP_MSG_REQUEST;
+    req[off++] = DHCP_OPT_REQUESTED_IP;
+    req[off++] = 4;
+    for (int i = 0; i < 4; i++) req[off++] = offered_ip[i];
+    if (!ipv4_is_zero(server_id)) {
+        req[off++] = DHCP_OPT_SERVER_ID;
+        req[off++] = 4;
+        for (int i = 0; i < 4; i++) req[off++] = server_id[i];
+    }
+    req[off++] = DHCP_OPT_PARAM_REQ_LIST;
+    req[off++] = 3;
+    req[off++] = DHCP_OPT_SUBNET_MASK;
+    req[off++] = DHCP_OPT_ROUTER;
+    req[off++] = DHCP_OPT_DNS;
+    req[off++] = DHCP_OPT_END;
+
+    if (net_udp_send_socket(socket_id, zero_ip, bcast_ip, (uint16)NET_DHCP_SERVER_PORT,
+                            req, off, arp_spins) != 0) {
+        net_udp_close(socket_id);
+        return -6;
+    }
+
+    int got_ack = 0;
+    for (int spin = 0; spin < timeout_spins; spin++) {
+        if ((spin & 0x1FFF) == 0) watchdog_kick("net-dhcp-ack");
+        (void)net_poll(zero_ip, 32);
+
+        net_udp_rx_packet pkt;
+        if (net_udp_recv_socket(socket_id, &pkt) <= 0) continue;
+        if (pkt.payload_len < 240u) continue;
+
+        const uint8* rx = pkt.payload;
+        uint32 rx_xid = ((uint32)rx[4] << 24) | ((uint32)rx[5] << 16) | ((uint32)rx[6] << 8) | (uint32)rx[7];
+        if (rx[0] != 2 || rx_xid != xid) continue;
+
+        uint32 cookie = ((uint32)rx[236] << 24) | ((uint32)rx[237] << 16) | ((uint32)rx[238] << 8) | (uint32)rx[239];
+        if (cookie != NET_DHCP_MAGIC_COOKIE) continue;
+
+        uint8 msg_type = 0;
+        uint32 roff = 240u;
+        while (roff < pkt.payload_len) {
+            uint8 opt = rx[roff++];
+            if (opt == DHCP_OPT_END) break;
+            if (opt == DHCP_OPT_PAD) continue;
+            if (roff >= pkt.payload_len) break;
+            uint8 opt_len = rx[roff++];
+            if (roff + (uint32)opt_len > pkt.payload_len) break;
+
+            if (opt == DHCP_OPT_MSG_TYPE && opt_len == 1u) {
+                msg_type = rx[roff];
+            } else if (opt == DHCP_OPT_SUBNET_MASK && opt_len == 4u) {
+                for (int i = 0; i < 4; i++) netmask[i] = rx[roff + (uint32)i];
+            } else if (opt == DHCP_OPT_ROUTER && opt_len >= 4u) {
+                for (int i = 0; i < 4; i++) gateway[i] = rx[roff + (uint32)i];
+            } else if (opt == DHCP_OPT_DNS && opt_len >= 4u) {
+                for (int i = 0; i < 4; i++) dns[i] = rx[roff + (uint32)i];
+            }
+
+            roff += (uint32)opt_len;
+        }
+
+        if (msg_type != DHCP_MSG_ACK) continue;
+
+        net_config cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        for (int i = 0; i < 4; i++) {
+            cfg.local_ip[i] = rx[16 + (uint32)i];
+            cfg.gateway_ip[i] = gateway[i];
+            cfg.netmask[i] = netmask[i];
+            cfg.dns_ip[i] = dns[i];
+        }
+        if (ipv4_is_zero(cfg.dns_ip) && !ipv4_is_zero(cfg.gateway_ip)) {
+            for (int i = 0; i < 4; i++) cfg.dns_ip[i] = cfg.gateway_ip[i];
+        }
+
+        if (net_config_set(&cfg) != 0) {
+            net_udp_close(socket_id);
+            return -7;
+        }
+        got_ack = 1;
+        break;
+    }
+
+    net_udp_close(socket_id);
+    return got_ack ? 0 : -8;
+}
+
 static void udp_rxq_clear(void)
 {
     for (int i = 0; i < (int)(sizeof(g_net.udp_rxq) / sizeof(g_net.udp_rxq[0])); i++) {
@@ -940,10 +1256,13 @@ static void udp_rxq_clear(void)
     g_net.udp_stats.udp_tx_checksums = 0;
 }
 
-static int tcp_rxq_enqueue(const uint8 src_ip[4], uint16 src_port,
-                           const uint8 dst_ip[4], uint16 dst_port,
-                           const uint8* payload, uint32 payload_len)
+static int tcp_socket_rxq_enqueue(int socket_id, const uint8 src_ip[4], uint16 src_port,
+                                  const uint8 dst_ip[4], uint16 dst_port,
+                                  const uint8* payload, uint32 payload_len)
 {
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    
     if (payload_len > NET_TCP_MAX_PAYLOAD) {
         // Never truncate TCP payloads; caller keeps ACK unchanged on enqueue
         // failure so the peer retransmits a segment we can fully buffer.
@@ -951,26 +1270,27 @@ static int tcp_rxq_enqueue(const uint8 src_ip[4], uint16 src_port,
         return -1;
     }
 
-    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
-        if (!g_net.tcp_rxq[i].valid) {
-            tcp_rx_slot* s = &g_net.tcp_rxq[i];
-            s->valid = 1;
-            for (int j = 0; j < 4; j++) s->pkt.src_ip[j] = src_ip[j];
-            for (int j = 0; j < 4; j++) s->pkt.dst_ip[j] = dst_ip[j];
-            s->pkt.src_port = src_port;
-            s->pkt.dst_port = dst_port;
-
-            s->pkt.payload_len = payload_len;
-            if (payload_len != 0u) {
-                memcpy(s->pkt.payload, payload, payload_len);
-            }
-            g_net.tcp_stats.tcp_rx_enqueued++;
-            return 0;
-        }
+    uint32 cap = 8u;
+    tcp_rx_slot* s = &sock->rxq[sock->rxq_tail];
+    if (s->valid) {
+        g_net.tcp_stats.tcp_rx_dropped++;
+        return -1;
     }
 
-    g_net.tcp_stats.tcp_rx_dropped++;
-    return -1;
+    s->valid = 1;
+    for (int j = 0; j < 4; j++) s->pkt.src_ip[j] = src_ip[j];
+    for (int j = 0; j < 4; j++) s->pkt.dst_ip[j] = dst_ip[j];
+    s->pkt.src_port = src_port;
+    s->pkt.dst_port = dst_port;
+
+    s->pkt.payload_len = payload_len;
+    if (payload_len != 0u) {
+        memcpy(s->pkt.payload, payload, payload_len);
+    }
+
+    sock->rxq_tail = (sock->rxq_tail + 1u) % cap;
+    g_net.tcp_stats.tcp_rx_enqueued++;
+    return 0;
 }
 
 static void icmp_rxq_clear(void)
@@ -989,9 +1309,19 @@ static void icmp_rxq_clear(void)
 
 static void tcp_rxq_clear(void)
 {
-    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
-        g_net.tcp_rxq[i].valid = 0;
+    tcp_socket_rxq_clear(NET_TCP_LEGACY_SOCKET_ID);
+}
+
+static void tcp_socket_rxq_clear(int socket_id)
+{
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    
+    for (int i = 0; i < 8; i++) {
+        sock->rxq[i].valid = 0;
     }
+    sock->rxq_head = 0u;
+    sock->rxq_tail = 0u;
     g_net.tcp_stats.tcp_rx_enqueued = 0;
     g_net.tcp_stats.tcp_rx_dropped = 0;
 }
@@ -1105,6 +1435,21 @@ int net_init_e1000_default(void)
     return net_init(&e1000_dev);
 }
 
+int net_init_default(void)
+{
+    static netdev e100_dev;
+
+    e100_dev.send_frame = e100_send_frame;
+    e100_dev.rx_poll_frame = e100_rx_poll_frame;
+    e100_dev.get_mac = e100_get_mac;
+
+    if (e100_init() == 0) {
+        return net_init(&e100_dev);
+    }
+
+    return net_init_e1000_default();
+}
+
 int net_init(const netdev* dev)
 {
     if (g_net.inited) return 0;
@@ -1118,9 +1463,10 @@ int net_init(const netdev* dev)
     tcp_rxq_clear();
     g_net.ip_stats.ipv4_rx_fragments = 0;
     g_net.ip_stats.ipv4_rx_frag_dropped = 0;
-    memset(&g_net.tcp, 0, sizeof(g_net.tcp));
-    g_net.tcp.retx_timer_id = -1;
-    memset(&g_net.tcp_stats, 0, sizeof(g_net.tcp_stats));
+    for (int i = 0; i < (int)NET_TCP_MAX_SOCKETS; i++) {
+        memset(&g_net.tcp_sockets[i], 0, sizeof(g_net.tcp_sockets[i]));
+        g_net.tcp_sockets[i].retx_timer_id = -1;
+    }
     memset(g_net.timers, 0, sizeof(g_net.timers));
     g_net.last_timer_tick = 0;
     (void)net_timer_start(net_ticks_from_ms(1000), net_ticks_from_ms(1000), arp_age_timer_cb, NULL);
@@ -1153,14 +1499,80 @@ net_tcp_stats net_tcp_get_stats(void)
     return g_net.tcp_stats;
 }
 
+int net_tcp_socket_open(void)
+{
+    for (int i = 1; i < (int)NET_TCP_MAX_SOCKETS; i++) {
+        if (!g_net.tcp_sockets[i].in_use) {
+            tcp_socket_meta_clear(i);
+            g_net.tcp_sockets[i].in_use = 1;
+            g_net.tcp_sockets[i].state = TCP_CLOSED;
+            g_net.tcp_sockets[i].retx_timer_id = -1;
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Shared close logic for any socket (legacy or pool). Sends a FIN when the
+// connection is established (mirrors historical net_tcp_close() behavior);
+// otherwise cancels any pending retransmit timer to avoid leaving a stale
+// timer registered against a socket that's about to be cleared/reused.
+static int tcp_socket_close_impl(int socket_id)
+{
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+
+    if (sock->state == TCP_ESTABLISHED) {
+        uint8 src_ip[4];
+        net_get_local_ip(src_ip);
+        (void)tcp_send_segment(src_ip, sock->local_port,
+                               sock->remote_ip, sock->remote_port,
+                               sock->seq, sock->ack,
+                               TCP_FLAG_FIN | TCP_FLAG_ACK,
+                               NULL, 0, 800000);
+        tcp_socket_retx_arm(socket_id, (uint8)(TCP_FLAG_FIN | TCP_FLAG_ACK), sock->seq, sock->ack, NULL, 0);
+        sock->seq += 1;
+        g_net.tcp_stats.tcp_fin_tx++;
+        sock->state = TCP_FIN_WAIT;
+        sock->listening = 0;
+        return 0;
+    }
+
+    tcp_socket_retx_cancel(socket_id);
+    if (socket_id == NET_TCP_LEGACY_SOCKET_ID) {
+        sock->listening = 0;
+        sock->state = TCP_CLOSED;
+    } else {
+        // Reclaim any not-yet-accepted connections queued in this listener's
+        // backlog so closing it can't leak socket slots.
+        for (uint32 k = 0; k < sock->accept_backlog_count; k++) {
+            int cand = sock->accept_backlog[k];
+            if (cand >= 0 && cand < (int)NET_TCP_MAX_SOCKETS) {
+                tcp_socket_retx_cancel(cand);
+                tcp_socket_meta_clear(cand);
+            }
+        }
+        tcp_socket_meta_clear(socket_id);
+    }
+    return 0;
+}
+
+int net_tcp_socket_close_id(int socket_id)
+{
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
+    if (socket_id != NET_TCP_LEGACY_SOCKET_ID && !g_net.tcp_sockets[socket_id].in_use) return -1;
+    return tcp_socket_close_impl(socket_id);
+}
+
 int net_tcp_listen(uint16 local_port)
 {
     if (local_port == 0) return -1;
-    if (net_init_e1000_default() != 0) return -2;
+    if (net_init_default() != 0) return -2;
 
-    g_net.tcp.listening = 1;
-    g_net.tcp.listen_port = local_port;
-    g_net.tcp.state = TCP_CLOSED;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    sock->listening = 1;
+    sock->listen_port = local_port;
+    sock->state = TCP_CLOSED;
     tcp_retx_cancel();
     tcp_rxq_clear();
     return 0;
@@ -1168,57 +1580,115 @@ int net_tcp_listen(uint16 local_port)
 
 int net_tcp_close(void)
 {
-    if (g_net.tcp.state == TCP_ESTABLISHED) {
-        uint8 src_ip[4];
-        net_get_local_ip(src_ip);
-        (void)tcp_send_segment(src_ip, g_net.tcp.local_port,
-                               g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                               g_net.tcp.seq, g_net.tcp.ack,
-                               TCP_FLAG_FIN | TCP_FLAG_ACK,
-                               NULL, 0, 800000);
-        tcp_retx_arm((uint8)(TCP_FLAG_FIN | TCP_FLAG_ACK), g_net.tcp.seq, g_net.tcp.ack, NULL, 0);
-        g_net.tcp.seq += 1;
-        g_net.tcp_stats.tcp_fin_tx++;
-        g_net.tcp.state = TCP_FIN_WAIT;
-    }
-    g_net.tcp.listening = 0;
-    return 0;
+    return tcp_socket_close_impl(NET_TCP_LEGACY_SOCKET_ID);
 }
 
 int net_tcp_is_closed(void)
 {
-    return (g_net.tcp.state == TCP_CLOSED) ? 1 : 0;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    return (sock->state == TCP_CLOSED) ? 1 : 0;
 }
 
-int net_tcp_recv(net_tcp_rx_packet* out)
+static int tcp_socket_recv_impl(int socket_id, net_tcp_rx_packet* out)
 {
     if (!out) return -1;
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
 
-    // Make a quick poll pass so callers can receive data even if the system
-    // isn't running a background net_poll loop at this moment.
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    uint32 cap = 8u;
+    for (uint32 n = 0; n < cap; n++) {
+        uint32 idx = (sock->rxq_head + n) % cap;
+        if (sock->rxq[idx].valid) {
+            *out = sock->rxq[idx].pkt;
+            sock->rxq[idx].valid = 0;
+            sock->rxq_head = (idx + 1u) % cap;
+            return 1;
+        }
+    }
+
+    // Queue is empty: perform one poll pass and try once more.
+    // This avoids enqueueing bursts before draining already-queued packets.
     if (g_net.inited) {
         uint8 local_ip[4];
         net_get_local_ip(local_ip);
         (void)net_poll(local_ip, 8);
-    }
 
-    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
-        if (g_net.tcp_rxq[i].valid) {
-            *out = g_net.tcp_rxq[i].pkt;
-            g_net.tcp_rxq[i].valid = 0;
-            return 1;
+        for (uint32 n = 0; n < cap; n++) {
+            uint32 idx = (sock->rxq_head + n) % cap;
+            if (sock->rxq[idx].valid) {
+                *out = sock->rxq[idx].pkt;
+                sock->rxq[idx].valid = 0;
+                sock->rxq_head = (idx + 1u) % cap;
+                return 1;
+            }
         }
     }
+
     return 0;
+}
+
+int net_tcp_recv(net_tcp_rx_packet* out)
+{
+    return tcp_socket_recv_impl(NET_TCP_LEGACY_SOCKET_ID, out);
+}
+
+int net_tcp_socket_recv(int socket_id, net_tcp_rx_packet* out)
+{
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
+    if (socket_id != NET_TCP_LEGACY_SOCKET_ID && !g_net.tcp_sockets[socket_id].in_use) return -1;
+    return tcp_socket_recv_impl(socket_id, out);
 }
 
 uint32 net_tcp_queue_count(void)
 {
     uint32 count = 0;
-    for (int i = 0; i < (int)(sizeof(g_net.tcp_rxq) / sizeof(g_net.tcp_rxq[0])); i++) {
-        if (g_net.tcp_rxq[i].valid) count++;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    for (int i = 0; i < 8; i++) {
+        if (sock->rxq[i].valid) count++;
     }
     return count;
+}
+
+uint32 net_tcp_socket_queue_count(int socket_id)
+{
+    if (socket_id == NET_TCP_LEGACY_SOCKET_ID) {
+        return net_tcp_queue_count();
+    }
+    if (socket_id <= 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return 0;
+    if (!g_net.tcp_sockets[socket_id].in_use) return 0;
+    uint32 count = 0;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    for (int i = 0; i < 8; i++) {
+        if (sock->rxq[i].valid) count++;
+    }
+    return count;
+}
+
+uint32 net_tcp_get_sockets(net_tcp_socket_info* out, uint32 out_cap)
+{
+    if (!out || out_cap == 0u) return 0;
+
+    uint32 written = 0;
+    if (written < out_cap && tcp_socket_meta_is_legacy_in_use()) {
+        tcp_socket_meta_fill_legacy(&out[written]);
+        out[written].queued = net_tcp_queue_count();
+        written++;
+    }
+
+    for (int i = 1; i < (int)NET_TCP_MAX_SOCKETS && written < out_cap; i++) {
+        if (!g_net.tcp_sockets[i].in_use) continue;
+        memset(&out[written], 0, sizeof(out[written]));
+        out[written].in_use = 1;
+        out[written].listening = g_net.tcp_sockets[i].listening;
+        out[written].state = (uint8)g_net.tcp_sockets[i].state;
+        out[written].local_port = g_net.tcp_sockets[i].local_port;
+        for (int j = 0; j < 4; j++) out[written].remote_ip[j] = g_net.tcp_sockets[i].remote_ip[j];
+        out[written].remote_port = g_net.tcp_sockets[i].remote_port;
+        out[written].queued = net_tcp_socket_queue_count(i);
+        written++;
+    }
+
+    return written;
 }
 
 int net_get_mac(uint8 out_mac[6])
@@ -1509,7 +1979,7 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
 {
     if (!local_ip) return -1;
     if (!g_net.inited || !g_net.dev) {
-        if (net_init_e1000_default() != 0) return -2;
+        if (net_init_default() != 0) return -2;
     }
 
     net_timer_run();
@@ -1564,12 +2034,15 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
             net_log("[NETSTACK] Dropping IPv4 fragment\n");
             continue;
         }
-        if (!ipv4_eq(ip->dst, local_ip)) continue;
+        int dst_is_local = ipv4_eq(ip->dst, local_ip);
+        int dst_is_broadcast = ipv4_is_broadcast(ip->dst);
+        if (!dst_is_local && !dst_is_broadcast) continue;
 
         // Opportunistically learn IP->MAC mapping from IPv4 frames.
         arp_cache_update(ip->src, eh->src);
 
         if (ip->proto == 1) {
+            if (!dst_is_local) continue;
             // ICMP echo support for debugging (ping).
             if (len < (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(icmp_echo_hdr)) continue;
 
@@ -1616,6 +2089,7 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
 
         // TCP handling (minimal client state machine).
         if (ip->proto == 6) {
+            if (!dst_is_local) continue;
             if (len < (uint32)sizeof(eth_hdr) + ip_hdr_len + (uint32)sizeof(tcp_hdr)) continue;
 
             tcp_hdr* tcp = (tcp_hdr*)(frame + sizeof(eth_hdr) + ip_hdr_len);
@@ -1648,75 +2122,118 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
                 }
             }
 
-            // Passive listen: SYN on listen port.
-            if (g_net.tcp.listening && g_net.tcp.state == TCP_CLOSED &&
-                dst_port == g_net.tcp.listen_port && (tcp->flags & TCP_FLAG_SYN)) {
-                g_net.tcp_stats.tcp_listen_syn_rx++;
-                for (int i = 0; i < 4; i++) g_net.tcp.local_ip[i] = ip->dst[i];
-                for (int i = 0; i < 4; i++) g_net.tcp.remote_ip[i] = ip->src[i];
-                g_net.tcp.local_port = dst_port;
-                g_net.tcp.remote_port = src_port;
-                g_net.tcp.seq = net_get_ticks();
-                g_net.tcp.ack = be32(tcp->seq_be) + 1;
-                g_net.tcp.state = TCP_SYN_RECEIVED;
+            // Match against any socket with an active (non-CLOSED) connection
+            // first, so continuations of existing connections always take
+            // priority over treating a stray SYN as a new passive-open
+            // attempt. Legacy socket 0 is checked first (index order),
+            // preserving its historical priority.
+            int sockid = -1;
+            for (int si = 0; si < (int)NET_TCP_MAX_SOCKETS; si++) {
+                tcp_socket* s = &g_net.tcp_sockets[si];
+                if (si != NET_TCP_LEGACY_SOCKET_ID && !s->in_use) continue;
+                if (s->state != TCP_CLOSED &&
+                    dst_port == s->local_port &&
+                    src_port == s->remote_port &&
+                    ipv4_eq(ip->src, s->remote_ip)) {
+                    sockid = si;
+                    break;
+                }
+            }
 
-                (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                                       g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                                       g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_SYN | TCP_FLAG_ACK,
+            if (sockid < 0) {
+                // No existing connection matched: consider passive listen (new SYN).
+                if (!(tcp->flags & TCP_FLAG_SYN)) continue;
+
+                tcp_socket* legacy = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+                if (legacy->listening && legacy->state == TCP_CLOSED && dst_port == legacy->listen_port) {
+                    sockid = NET_TCP_LEGACY_SOCKET_ID;
+                } else {
+                    for (int si = 1; si < (int)NET_TCP_MAX_SOCKETS; si++) {
+                        tcp_socket* s = &g_net.tcp_sockets[si];
+                        if (!s->in_use || !s->listening || s->listen_port != dst_port) continue;
+                        if (s->accept_backlog_count >= NET_TCP_ACCEPT_BACKLOG) break; // Backlog full; drop SYN.
+
+                        int newid = -1;
+                        for (int j = 1; j < (int)NET_TCP_MAX_SOCKETS; j++) {
+                            if (!g_net.tcp_sockets[j].in_use) { newid = j; break; }
+                        }
+                        if (newid < 0) break; // No free sockets; drop SYN, peer will retry.
+
+                        tcp_socket_meta_clear(newid);
+                        g_net.tcp_sockets[newid].in_use = 1;
+                        g_net.tcp_sockets[newid].retx_timer_id = -1;
+                        s->accept_backlog[s->accept_backlog_count++] = newid;
+                        sockid = newid;
+                        break;
+                    }
+                }
+
+                if (sockid < 0) continue; // No listener for this port; ignore stray SYN.
+
+                tcp_socket* tcp_sock = &g_net.tcp_sockets[sockid];
+                g_net.tcp_stats.tcp_listen_syn_rx++;
+                for (int k = 0; k < 4; k++) tcp_sock->local_ip[k] = ip->dst[k];
+                for (int k = 0; k < 4; k++) tcp_sock->remote_ip[k] = ip->src[k];
+                tcp_sock->local_port = dst_port;
+                tcp_sock->remote_port = src_port;
+                tcp_sock->seq = net_get_ticks();
+                tcp_sock->ack = be32(tcp->seq_be) + 1;
+                tcp_sock->state = TCP_SYN_RECEIVED;
+
+                (void)tcp_send_segment(tcp_sock->local_ip, tcp_sock->local_port,
+                                       tcp_sock->remote_ip, tcp_sock->remote_port,
+                                       tcp_sock->seq, tcp_sock->ack, TCP_FLAG_SYN | TCP_FLAG_ACK,
                                        NULL, 0, 800000);
-                tcp_retx_arm((uint8)(TCP_FLAG_SYN | TCP_FLAG_ACK), g_net.tcp.seq, g_net.tcp.ack, NULL, 0);
+                tcp_socket_retx_arm(sockid, (uint8)(TCP_FLAG_SYN | TCP_FLAG_ACK), tcp_sock->seq, tcp_sock->ack, NULL, 0);
                 g_net.tcp_stats.tcp_syn_sent++;
                 continue;
             }
 
-            // Match against current connection only.
-            if (g_net.tcp.state != TCP_CLOSED &&
-                dst_port == g_net.tcp.local_port &&
-                src_port == g_net.tcp.remote_port &&
-                ipv4_eq(ip->src, g_net.tcp.remote_ip)) {
-
+            // sockid >= 0: matched an existing (non-CLOSED) connection.
+            {
+                tcp_socket* tcp_sock = &g_net.tcp_sockets[sockid];
                 uint32 seq = be32(tcp->seq_be);
                 uint32 ack = be32(tcp->ack_be);
                 uint8 flags = tcp->flags;
 
                 if (flags & TCP_FLAG_RST) {
                     g_net.tcp_stats.tcp_rst_rx++;
-                    g_net.tcp.state = TCP_CLOSED;
-                    tcp_retx_cancel();
+                    tcp_sock->state = TCP_CLOSED;
+                    tcp_socket_retx_cancel(sockid);
                     continue;
                 }
 
-                if (g_net.tcp.state == TCP_SYN_SENT) {
+                if (tcp_sock->state == TCP_SYN_SENT) {
                     if ((flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK) &&
-                        ack == g_net.tcp.seq + 1) {
+                        ack == tcp_sock->seq + 1) {
                         g_net.tcp_stats.tcp_synack_rx++;
-                        tcp_retx_cancel();
-                        g_net.tcp.seq += 1;
-                        g_net.tcp.ack = seq + 1;
-                        (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                                               g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                                               g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                        tcp_socket_retx_cancel(sockid);
+                        tcp_sock->seq += 1;
+                        tcp_sock->ack = seq + 1;
+                        (void)tcp_send_segment(tcp_sock->local_ip, tcp_sock->local_port,
+                                               tcp_sock->remote_ip, tcp_sock->remote_port,
+                                               tcp_sock->seq, tcp_sock->ack, TCP_FLAG_ACK,
                                                NULL, 0, 800000);
                         g_net.tcp_stats.tcp_ack_tx++;
-                        g_net.tcp.state = TCP_ESTABLISHED;
+                        tcp_sock->state = TCP_ESTABLISHED;
                         g_net.tcp_stats.tcp_conn_established++;
                     }
                     continue;
                 }
 
-                if (g_net.tcp.state == TCP_SYN_RECEIVED) {
-                    if ((flags & TCP_FLAG_ACK) && ack == g_net.tcp.seq + 1) {
-                        tcp_retx_cancel();
-                        g_net.tcp.seq += 1;
-                        g_net.tcp.state = TCP_ESTABLISHED;
+                if (tcp_sock->state == TCP_SYN_RECEIVED) {
+                    if ((flags & TCP_FLAG_ACK) && ack == tcp_sock->seq + 1) {
+                        tcp_socket_retx_cancel(sockid);
+                        tcp_sock->seq += 1;
+                        tcp_sock->state = TCP_ESTABLISHED;
                         g_net.tcp_stats.tcp_conn_established++;
                     }
                     continue;
                 }
 
-                if (g_net.tcp.state == TCP_ESTABLISHED || g_net.tcp.state == TCP_FIN_WAIT) {
+                if (tcp_sock->state == TCP_ESTABLISHED || tcp_sock->state == TCP_FIN_WAIT) {
                     if (flags & TCP_FLAG_ACK) {
-                        tcp_retx_ack_received(ack);
+                        tcp_socket_retx_ack_received(sockid, ack);
                     }
                     if (payload_len > 0) {
                         g_net.tcp_stats.tcp_data_rx++;
@@ -1724,17 +2241,17 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
                         // Reliability invariant: only advance ACK for payload that is
                         // in-order and successfully enqueued. If RX queue is full,
                         // keep ACK unchanged so the peer retransmits.
-                        if (seq == g_net.tcp.ack) {
-                            int enq_rc = tcp_rxq_enqueue(ip->src, src_port, ip->dst, dst_port,
+                        if (seq == tcp_sock->ack) {
+                            int enq_rc = tcp_socket_rxq_enqueue(sockid, ip->src, src_port, ip->dst, dst_port,
                                                          frame + payload_off, payload_len);
                             if (enq_rc == 0) {
-                                g_net.tcp.ack += payload_len;
+                                tcp_sock->ack += payload_len;
                             }
                         }
 
-                        (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                                               g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                                               g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                        (void)tcp_send_segment(tcp_sock->local_ip, tcp_sock->local_port,
+                                               tcp_sock->remote_ip, tcp_sock->remote_port,
+                                               tcp_sock->seq, tcp_sock->ack, TCP_FLAG_ACK,
                                                NULL, 0, 800000);
                         g_net.tcp_stats.tcp_ack_tx++;
                     }
@@ -1742,27 +2259,27 @@ int net_poll(const uint8 local_ip[4], uint32 budget_frames)
                     if (flags & TCP_FLAG_FIN) {
                         // Accept FIN only when it is in-order relative to current ACK.
                         uint32 fin_seq = seq + payload_len;
-                        if (fin_seq == g_net.tcp.ack) {
+                        if (fin_seq == tcp_sock->ack) {
                             g_net.tcp_stats.tcp_fin_rx++;
-                            g_net.tcp.ack += 1u;
-                            (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                                                   g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                                                   g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                            tcp_sock->ack += 1u;
+                            (void)tcp_send_segment(tcp_sock->local_ip, tcp_sock->local_port,
+                                                   tcp_sock->remote_ip, tcp_sock->remote_port,
+                                                   tcp_sock->seq, tcp_sock->ack, TCP_FLAG_ACK,
                                                    NULL, 0, 800000);
                             g_net.tcp_stats.tcp_ack_tx++;
-                            g_net.tcp.state = TCP_CLOSED;
-                            tcp_retx_cancel();
+                            tcp_sock->state = TCP_CLOSED;
+                            tcp_socket_retx_cancel(sockid);
                         } else {
                             // Duplicate/out-of-order FIN: send current ACK only.
-                            (void)tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                                                   g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                                                   g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_ACK,
+                            (void)tcp_send_segment(tcp_sock->local_ip, tcp_sock->local_port,
+                                                   tcp_sock->remote_ip, tcp_sock->remote_port,
+                                                   tcp_sock->seq, tcp_sock->ack, TCP_FLAG_ACK,
                                                    NULL, 0, 800000);
                             g_net.tcp_stats.tcp_ack_tx++;
                         }
-                    } else if (g_net.tcp.state == TCP_FIN_WAIT && (flags & TCP_FLAG_ACK)) {
-                        g_net.tcp.state = TCP_CLOSED;
-                        tcp_retx_cancel();
+                    } else if (tcp_sock->state == TCP_FIN_WAIT && (flags & TCP_FLAG_ACK)) {
+                        tcp_sock->state = TCP_CLOSED;
+                        tcp_socket_retx_cancel(sockid);
                     }
                 }
             }
@@ -1813,7 +2330,7 @@ int net_icmp_ping(const uint8 local_ip[4], const uint8 dst_ip[4], int count, int
     if (count <= 0) count = 4;
     if (timeout_spins <= 0) timeout_spins = 8000000;
 
-    if (net_init_e1000_default() != 0) return -2;
+    if (net_init_default() != 0) return -2;
 
     // Stable ID so we can match replies.
     const uint16 id = 0xE100;
@@ -2016,7 +2533,7 @@ static int arp_send_reply_silent(const uint8 target_mac[6],
 int net_arp_test_send(const uint8 sender_ip[4], const uint8 target_ip[4], int rx_spins)
 {
     if (!sender_ip || !target_ip) return -1;
-    if (net_init_e1000_default() != 0) return -2;
+    if (net_init_default() != 0) return -2;
 
     int rc = arp_send_request_silent(sender_ip, target_ip);
     if (rc != 0) return rc;
@@ -2110,7 +2627,7 @@ int net_tcp_send(const uint8 local_ip[4], uint16 local_port,
     if (!local_ip || !dst_ip) return -1;
     if (payload_len != 0u && !payload) return -1;
     if (dst_port == 0) return -2;
-    if (net_init_e1000_default() != 0) return -3;
+    if (net_init_default() != 0) return -3;
 
     if (payload_len > NET_TCP_MAX_PAYLOAD) return -4;
 
@@ -2119,19 +2636,21 @@ int net_tcp_send(const uint8 local_ip[4], uint16 local_port,
     }
 
     // Initialize connection state.
-    memset(&g_net.tcp, 0, sizeof(g_net.tcp));
-    for (int i = 0; i < 4; i++) g_net.tcp.local_ip[i] = local_ip[i];
-    for (int i = 0; i < 4; i++) g_net.tcp.remote_ip[i] = dst_ip[i];
-    g_net.tcp.local_port = local_port;
-    g_net.tcp.remote_port = dst_port;
-    g_net.tcp.seq = net_get_ticks();
-    g_net.tcp.ack = 0;
-    g_net.tcp.state = TCP_SYN_SENT;
+    tcp_socket* sock = &g_net.tcp_sockets[NET_TCP_LEGACY_SOCKET_ID];
+    memset(sock, 0, sizeof(*sock));
+    sock->retx_timer_id = -1;
+    for (int i = 0; i < 4; i++) sock->local_ip[i] = local_ip[i];
+    for (int i = 0; i < 4; i++) sock->remote_ip[i] = dst_ip[i];
+    sock->local_port = local_port;
+    sock->remote_port = dst_port;
+    sock->seq = net_get_ticks();
+    sock->ack = 0;
+    sock->state = TCP_SYN_SENT;
 
     g_net.tcp_stats.tcp_syn_sent++;
     int rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
-                              g_net.tcp.seq, 0, TCP_FLAG_SYN, NULL, 0, timeout_spins);
-    tcp_retx_arm(TCP_FLAG_SYN, g_net.tcp.seq, 0, NULL, 0);
+                              sock->seq, 0, TCP_FLAG_SYN, NULL, 0, timeout_spins);
+    tcp_socket_retx_arm(NET_TCP_LEGACY_SOCKET_ID, TCP_FLAG_SYN, sock->seq, 0, NULL, 0);
     if (rc != 0) return rc;
 
     // Wait for SYN-ACK
@@ -2139,99 +2658,241 @@ int net_tcp_send(const uint8 local_ip[4], uint16 local_port,
     for (int spin = 0; spin < timeout_spins; spin++) {
         if ((spin & 0x1FFF) == 0) watchdog_kick("net-tcp-wait");
         (void)net_poll(local_ip, 16);
-        if (g_net.tcp.state == TCP_ESTABLISHED) break;
+        if (sock->state == TCP_ESTABLISHED) break;
     }
-    if (g_net.tcp.state != TCP_ESTABLISHED) return -5;
+    if (sock->state != TCP_ESTABLISHED) return -5;
 
     // Send payload if any.
     if (payload_len > 0) {
         rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
-                              g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_PSH | TCP_FLAG_ACK,
+                              sock->seq, sock->ack, TCP_FLAG_PSH | TCP_FLAG_ACK,
                               payload, payload_len, timeout_spins);
-        tcp_retx_arm((uint8)(TCP_FLAG_PSH | TCP_FLAG_ACK), g_net.tcp.seq, g_net.tcp.ack,
+        tcp_socket_retx_arm(NET_TCP_LEGACY_SOCKET_ID, (uint8)(TCP_FLAG_PSH | TCP_FLAG_ACK), sock->seq, sock->ack,
                      payload, payload_len);
         if (rc != 0) return rc;
-        g_net.tcp.seq += payload_len;
+        sock->seq += payload_len;
         g_net.tcp_stats.tcp_data_tx++;
     }
 
     // Send FIN
     rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
-                          g_net.tcp.seq, g_net.tcp.ack, TCP_FLAG_FIN | TCP_FLAG_ACK,
+                          sock->seq, sock->ack, TCP_FLAG_FIN | TCP_FLAG_ACK,
                           NULL, 0, timeout_spins);
-    tcp_retx_arm((uint8)(TCP_FLAG_FIN | TCP_FLAG_ACK), g_net.tcp.seq, g_net.tcp.ack, NULL, 0);
+    tcp_socket_retx_arm(NET_TCP_LEGACY_SOCKET_ID, (uint8)(TCP_FLAG_FIN | TCP_FLAG_ACK), sock->seq, sock->ack, NULL, 0);
     if (rc != 0) return rc;
-    g_net.tcp.seq += 1;
-    g_net.tcp.state = TCP_FIN_WAIT;
+    sock->seq += 1;
+    sock->state = TCP_FIN_WAIT;
     g_net.tcp_stats.tcp_fin_tx++;
 
     return (int)payload_len;
 }
 
-int net_tcp_connect(const uint8 local_ip[4], uint16 local_port,
-                    const uint8 dst_ip[4], uint16 dst_port,
-                    int timeout_spins)
+static int tcp_socket_connect_impl(int socket_id, const uint8 local_ip[4], uint16 local_port,
+                                   const uint8 dst_ip[4], uint16 dst_port,
+                                   int timeout_spins)
 {
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
     if (!local_ip || !dst_ip) return -1;
     if (dst_port == 0) return -2;
-    if (net_init_e1000_default() != 0) return -3;
+    if (net_init_default() != 0) return -3;
 
     if (local_port == 0) {
         local_port = (uint16)(40000u + (net_get_ticks() % 20000u));
     }
 
     // Initialize connection state.
-    memset(&g_net.tcp, 0, sizeof(g_net.tcp));
-    for (int i = 0; i < 4; i++) g_net.tcp.local_ip[i] = local_ip[i];
-    for (int i = 0; i < 4; i++) g_net.tcp.remote_ip[i] = dst_ip[i];
-    g_net.tcp.local_port = local_port;
-    g_net.tcp.remote_port = dst_port;
-    g_net.tcp.seq = net_get_ticks();
-    g_net.tcp.ack = 0;
-    g_net.tcp.state = TCP_SYN_SENT;
-    g_net.tcp.listening = 0;
-    tcp_retx_cancel();
-    tcp_rxq_clear();
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    memset(sock, 0, sizeof(*sock));
+    sock->retx_timer_id = -1;
+    sock->in_use = 1;
+    for (int i = 0; i < 4; i++) sock->local_ip[i] = local_ip[i];
+    for (int i = 0; i < 4; i++) sock->remote_ip[i] = dst_ip[i];
+    sock->local_port = local_port;
+    sock->remote_port = dst_port;
+    sock->seq = net_get_ticks();
+    sock->ack = 0;
+    sock->state = TCP_SYN_SENT;
+    sock->listening = 0;
+    tcp_socket_retx_cancel(socket_id);
+    tcp_socket_rxq_clear(socket_id);
 
     g_net.tcp_stats.tcp_syn_sent++;
     int rc = tcp_send_segment(local_ip, local_port, dst_ip, dst_port,
-                              g_net.tcp.seq, 0, TCP_FLAG_SYN, NULL, 0, timeout_spins);
-    tcp_retx_arm(TCP_FLAG_SYN, g_net.tcp.seq, 0, NULL, 0);
+                              sock->seq, 0, TCP_FLAG_SYN, NULL, 0, timeout_spins);
+    tcp_socket_retx_arm(socket_id, TCP_FLAG_SYN, sock->seq, 0, NULL, 0);
     if (rc != 0) return rc;
 
-    if (timeout_spins <= 0) timeout_spins = 12000000;
+    if (timeout_spins <= 0) timeout_spins = 2000000;
+    uint32 ui_ticks = 0;
     for (int spin = 0; spin < timeout_spins; spin++) {
-        if ((spin & 0x1FFF) == 0) watchdog_kick("net-tcp-connect");
+        if ((spin & 0x1FFF) == 0) {
+            watchdog_kick("net-tcp-connect");
+            // Keep the GUI alive while connect waits in a blocking syscall.
+            if (tile_is_tiling_active() && (++ui_ticks & 0x1F) == 0) {
+                tile_render_once();
+            }
+        }
         (void)net_poll(local_ip, 16);
-        if (g_net.tcp.state == TCP_ESTABLISHED) break;
+        if (sock->state == TCP_ESTABLISHED) break;
     }
-    if (g_net.tcp.state != TCP_ESTABLISHED) return -5;
+    if (sock->state != TCP_ESTABLISHED) return -5;
 
     return 0;
 }
 
-int net_tcp_send_current(const uint8* payload, uint32 payload_len)
+int net_tcp_connect(const uint8 local_ip[4], uint16 local_port,
+                    const uint8 dst_ip[4], uint16 dst_port,
+                    int timeout_spins)
+{
+    return tcp_socket_connect_impl(NET_TCP_LEGACY_SOCKET_ID, local_ip, local_port, dst_ip, dst_port, timeout_spins);
+}
+
+// Per-socket connect for pool sockets (id 1..NET_TCP_MAX_SOCKETS-1) obtained
+// via net_tcp_socket_open(). local_ip is always auto-filled (matches the
+// legacy syscall convention); local_port==0 auto-assigns an ephemeral port.
+int net_tcp_socket_connect(int socket_id, const uint8 dst_ip[4], uint16 dst_port,
+                          uint16 local_port, int timeout_spins)
+{
+    if (socket_id <= 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
+    if (!g_net.tcp_sockets[socket_id].in_use) return -1;
+    if (!dst_ip) return -1;
+
+    uint8 local_ip[4];
+    net_get_local_ip(local_ip);
+    return tcp_socket_connect_impl(socket_id, local_ip, local_port, dst_ip, dst_port, timeout_spins);
+}
+
+static int tcp_socket_send_impl(int socket_id, const uint8* payload, uint32 payload_len)
 {
     if (payload_len != 0u && !payload) return -1;
+    if (socket_id < 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
     if (!g_net.inited || !g_net.dev) return -2;
-    if (g_net.tcp.state != TCP_ESTABLISHED) return -3;
-    if (g_net.tcp.local_port == 0 || g_net.tcp.remote_port == 0) return -4;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    if (sock->state != TCP_ESTABLISHED) return -3;
+    if (sock->local_port == 0 || sock->remote_port == 0) return -4;
 
     if (payload_len > NET_TCP_MAX_PAYLOAD) return -5;
 
     if (payload_len == 0u) return 0;
 
-    int rc = tcp_send_segment(g_net.tcp.local_ip, g_net.tcp.local_port,
-                              g_net.tcp.remote_ip, g_net.tcp.remote_port,
-                              g_net.tcp.seq, g_net.tcp.ack,
+    int rc = tcp_send_segment(sock->local_ip, sock->local_port,
+                              sock->remote_ip, sock->remote_port,
+                              sock->seq, sock->ack,
                               TCP_FLAG_PSH | TCP_FLAG_ACK,
                               payload, payload_len, 800000);
-    tcp_retx_arm((uint8)(TCP_FLAG_PSH | TCP_FLAG_ACK), g_net.tcp.seq, g_net.tcp.ack,
+    tcp_socket_retx_arm(socket_id, (uint8)(TCP_FLAG_PSH | TCP_FLAG_ACK), sock->seq, sock->ack,
                  payload, payload_len);
     if (rc != 0) return rc;
-    g_net.tcp.seq += payload_len;
+    sock->seq += payload_len;
     g_net.tcp_stats.tcp_data_tx++;
     return (int)payload_len;
+}
+
+int net_tcp_send_current(const uint8* payload, uint32 payload_len)
+{
+    return tcp_socket_send_impl(NET_TCP_LEGACY_SOCKET_ID, payload, payload_len);
+}
+
+int net_tcp_socket_send(int socket_id, const uint8* payload, uint32 payload_len)
+{
+    if (socket_id <= 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
+    if (!g_net.tcp_sockets[socket_id].in_use) return -1;
+    return tcp_socket_send_impl(socket_id, payload, payload_len);
+}
+
+// Bind a local port to a pool socket ahead of listen(). Rejects the port if
+// another in-use socket is already listening on it (best-effort collision
+// check; this stack has no SO_REUSEADDR equivalent).
+int net_tcp_socket_bind(int socket_id, uint16 local_port)
+{
+    if (socket_id <= 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
+    if (local_port == 0) return -2;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    if (!sock->in_use) return -1;
+
+    for (int i = 0; i < (int)NET_TCP_MAX_SOCKETS; i++) {
+        if (i == socket_id) continue;
+        tcp_socket* other = &g_net.tcp_sockets[i];
+        if (i != NET_TCP_LEGACY_SOCKET_ID && !other->in_use) continue;
+        if (other->listening && other->listen_port == local_port) return -3;
+    }
+
+    sock->listen_port = local_port;
+    return 0;
+}
+
+// Mark a bound pool socket as a passive listener. The accept backlog depth
+// is a fixed NET_TCP_ACCEPT_BACKLOG; the caller's backlog hint is accepted
+// but not otherwise honored (kept simple; this stack targets a handful of
+// simultaneous connections, not a general-purpose server).
+int net_tcp_socket_listen(int socket_id, int backlog)
+{
+    (void)backlog;
+    if (socket_id <= 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
+    tcp_socket* sock = &g_net.tcp_sockets[socket_id];
+    if (!sock->in_use) return -1;
+    if (sock->listen_port == 0) return -2;
+    if (net_init_default() != 0) return -3;
+
+    sock->listening = 1;
+    sock->state = TCP_CLOSED;
+    sock->accept_backlog_count = 0;
+    tcp_socket_retx_cancel(socket_id);
+    tcp_socket_rxq_clear(socket_id);
+    return 0;
+}
+
+// Accept a pending connection queued by net_poll()'s passive-open handling.
+// Blocks (polling, like connect()) until a fully-established connection is
+// available, the timeout elapses, or an error occurs. Returns the new
+// socket_id (>= 1) on success.
+int net_tcp_socket_accept(int socket_id, int timeout_spins)
+{
+    if (socket_id <= 0 || socket_id >= (int)NET_TCP_MAX_SOCKETS) return -1;
+    tcp_socket* listener = &g_net.tcp_sockets[socket_id];
+    if (!listener->in_use || !listener->listening) return -1;
+    if (net_init_default() != 0) return -2;
+
+    uint8 local_ip[4];
+    net_get_local_ip(local_ip);
+
+    if (timeout_spins <= 0) timeout_spins = 2000000;
+    uint32 ui_ticks = 0;
+    for (int spin = 0; spin < timeout_spins; spin++) {
+        uint32 k = 0;
+        while (k < listener->accept_backlog_count) {
+            int cand = listener->accept_backlog[k];
+            tcp_state st = (cand >= 0 && cand < (int)NET_TCP_MAX_SOCKETS)
+                          ? g_net.tcp_sockets[cand].state : TCP_CLOSED;
+            if (st == TCP_ESTABLISHED) {
+                for (uint32 m = k + 1; m < listener->accept_backlog_count; m++) {
+                    listener->accept_backlog[m - 1] = listener->accept_backlog[m];
+                }
+                listener->accept_backlog_count--;
+                return cand;
+            }
+            if (st == TCP_CLOSED) {
+                // Half-open connection died (RST/reset) before being
+                // accepted; reclaim the socket slot instead of leaking it.
+                tcp_socket_meta_clear(cand);
+                for (uint32 m = k + 1; m < listener->accept_backlog_count; m++) {
+                    listener->accept_backlog[m - 1] = listener->accept_backlog[m];
+                }
+                listener->accept_backlog_count--;
+                continue;
+            }
+            k++;
+        }
+
+        if ((spin & 0x1FFF) == 0) {
+            watchdog_kick("net-tcp-accept");
+            if (tile_is_tiling_active() && (++ui_ticks & 0x1F) == 0) {
+                tile_render_once();
+            }
+        }
+        (void)net_poll(local_ip, 16);
+    }
+    return -3;
 }
 
 int net_udp_send(const uint8 src_ip[4], uint16 src_port,
@@ -2244,13 +2905,18 @@ int net_udp_send(const uint8 src_ip[4], uint16 src_port,
     if (payload_len > 1400u) return -2;
     if (src_port == 0 || dst_port == 0) return -3;
 
-    if (net_init_e1000_default() != 0) return -4;
+    if (net_init_default() != 0) return -4;
 
     uint8 dst_mac[6];
-    uint8 next_hop_ip[4];
-    ipv4_choose_next_hop(src_ip, dst_ip, next_hop_ip);
-    int rc = arp_resolve(src_ip, next_hop_ip, dst_mac, arp_spins);
-    if (rc != 0) return rc;
+    int rc = 0;
+    if (ipv4_is_broadcast(dst_ip)) {
+        for (int i = 0; i < 6; i++) dst_mac[i] = 0xFFu;
+    } else {
+        uint8 next_hop_ip[4];
+        ipv4_choose_next_hop(src_ip, dst_ip, next_hop_ip);
+        rc = arp_resolve(src_ip, next_hop_ip, dst_mac, arp_spins);
+        if (rc != 0) return rc;
+    }
 
     uint8 frame[1600];
     uint32 off = 0;
@@ -2316,7 +2982,7 @@ int net_udp_listen(const uint8 local_ip[4], uint16 local_port, int max_packets, 
     if (max_packets < 0) max_packets = 1;
     if (spin_limit < 0) spin_limit = 12000000;
 
-    if (net_init_e1000_default() != 0) return -3;
+    if (net_init_default() != 0) return -3;
 
     int printed = 0;
 
@@ -2417,7 +3083,7 @@ int net_udp_echo(const uint8 local_ip[4], uint16 local_port, int max_packets, in
     if (max_packets < 0) max_packets = 1;
     if (spin_limit < 0) spin_limit = 12000000;
 
-    if (net_init_e1000_default() != 0) return -3;
+    if (net_init_default() != 0) return -3;
 
     int printed = 0;
 

@@ -52,31 +52,31 @@ def scan_binary_commands(binaries_dir: Path) -> List[Tuple[str, str]]:
     return sorted(commands.items(), key=lambda item: item[0].lower())
 
 
-def scan_userland_metadata(code_dir: Path) -> Dict[str, Tuple[str, str, str]]:
+def scan_userland_metadata(repo_root: Path) -> Dict[str, Tuple[str, str, str]]:
     metadata: Dict[str, Tuple[str, str, str]] = {}
-    if not code_dir.exists():
-        return metadata
 
-    for src in sorted(code_dir.glob("*_uelf.c"), key=lambda p: p.name.lower()):
-        cmd_name = src.stem
-        if cmd_name.endswith("_uelf"):
-            cmd_name = cmd_name[:-5]
+    packages_dir = repo_root / "EYN-packages" / "packages"
+    if packages_dir.exists():
+        for src in sorted(packages_dir.glob("*/*_uelf.c"), key=lambda p: p.name.lower()):
+            cmd_name = src.stem
+            if cmd_name.endswith("_uelf"):
+                cmd_name = cmd_name[:-5]
 
-        text = src.read_text(encoding="utf-8", errors="ignore")
-        match = CMDMETA_RE.search(text)
-        if not match:
-            continue
+            text = src.read_text(encoding="utf-8", errors="ignore")
+            match = CMDMETA_RE.search(text)
+            if not match:
+                continue
 
-        desc = _unescape_c_string(match.group(1)).strip()
-        example = _unescape_c_string(match.group(2)).strip()
-        metadata[cmd_name] = (desc, example, src.name)
+            desc = _unescape_c_string(match.group(1)).strip()
+            example = _unescape_c_string(match.group(2)).strip()
+            source_ref = src.relative_to(repo_root).as_posix()
+            metadata[cmd_name] = (desc, example, source_ref)
 
     return metadata
 
 
-def build_command_list(binaries_dir: Path, code_dir: Path) -> List[CommandInfo]:
+def build_command_list(binaries_dir: Path, metadata: Dict[str, Tuple[str, str, str]]) -> List[CommandInfo]:
     binaries = scan_binary_commands(binaries_dir)
-    metadata = scan_userland_metadata(code_dir)
 
     commands: List[CommandInfo] = []
     for cmd_name, binary_file in binaries:
@@ -163,7 +163,7 @@ def generate_markdown(commands: List[CommandInfo], output_file: Path) -> None:
             for cmd in cmd_list:
                 f.write(f"### {cmd.name}\n\n")
                 f.write(f"**Binary:** `testdir/binaries/{cmd.binary_file}`\n\n")
-                f.write(f"**Metadata Source:** `testdir/code/{cmd.source_file}`\n\n")
+                f.write(f"**Metadata Source:** `{cmd.source_file}`\n\n")
                 f.write(f"**Description:**\n{cmd.description}\n\n")
                 f.write(f"**Example:**\n```bash\n{cmd.example}\n```\n\n")
                 f.write("---\n\n")
@@ -208,14 +208,14 @@ def main() -> None:
                 repo_root = resolved.parent
 
     binaries_dir = repo_root / "testdir" / "binaries"
-    code_dir = repo_root / "testdir" / "code"
+    metadata = scan_userland_metadata(repo_root)
 
     if not binaries_dir.exists():
         print(f"Error: binaries directory not found: {binaries_dir}")
         sys.exit(1)
 
     print(f"Scanning binaries in {binaries_dir} ...")
-    commands = build_command_list(binaries_dir, code_dir)
+    commands = build_command_list(binaries_dir, metadata)
 
     if not commands:
         print("No commands found in testdir/binaries")

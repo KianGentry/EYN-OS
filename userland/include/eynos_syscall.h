@@ -142,6 +142,7 @@ enum {
     EYN_SYSCALL_SETBG_PATH = 92,
     EYN_SYSCALL_CLEARBG_FOCUSED = 93,
     EYN_SYSCALL_SETFONT_PATH = 94,
+    EYN_SYSCALL_NET_DHCP_REQUEST = 157,
 
     EYN_SYSCALL_CHDIR = 95,
     EYN_SYSCALL_RUN = 96,
@@ -268,6 +269,19 @@ enum {
     EYN_SYSCALL_SPAWN = 131,
     // Wait for a spawned PID: args (int pid, int* out_status, int flags)
     EYN_SYSCALL_WAITPID = 132,
+    // Spawn with explicit stdio/inherit snapshot: args (spawn_ex_req_t* req)
+    EYN_SYSCALL_SPAWN_EX = 150,
+    // Send a signal to a PID: args (int pid, int sig)
+    EYN_SYSCALL_KILL = 200,
+    // Restore user signal frame (no args)
+    EYN_SYSCALL_SIGRETURN = 201,
+    // Install a signal handler: args (int sig, void* handler)
+    EYN_SYSCALL_SIGNAL = 202,
+
+    /* New POSIX-oriented syscall numbers — EXECVE maps to kernel SYSCALL_EXECVE (97) */
+    EYN_SYSCALL_EXECVE = 97,
+    EYN_SYSCALL_FORK = 211,
+    EYN_SYSCALL_VFORK = 212,
 
     // Installer disk management syscalls
     EYN_SYSCALL_INSTALLER_PREPARE_DRIVE = 133,
@@ -282,7 +296,55 @@ enum {
     EYN_SYSCALL_GUI_DRAW_TEXT_FONT = 138,
     // draw char with a specific loaded font id (0 = window default)
     EYN_SYSCALL_GUI_DRAW_CHAR_FONT = 139,
+    // Set/get compositor workspace display profile (scale + aspect).
+    EYN_SYSCALL_SET_DISPLAY_PROFILE = 140,
+    EYN_SYSCALL_GET_DISPLAY_PROFILE = 141,
+    // Runtime hardware display mode switch/query.
+    EYN_SYSCALL_SET_DISPLAY_MODE = 142,
+    EYN_SYSCALL_GET_DISPLAY_MODE = 143,
+
+    // Post a kernel-rendered desktop notification toast.
+    EYN_SYSCALL_NOTIFY_POST = 144,
+
+    // Minimal TTY/PTY control for interactive clients.
+    // set mode: args (int mode_flags) -> previous mode flags
+    EYN_SYSCALL_TTY_SET_MODE = 145,
+    // get mode: args () -> current mode flags
+    EYN_SYSCALL_TTY_GET_MODE = 146,
+    // set winsize: args (uint16 rows, uint16 cols)
+    EYN_SYSCALL_TTY_SET_WINSIZE = 147,
+    // get winsize: args (eyn_tty_winsize_t* out)
+    EYN_SYSCALL_TTY_GET_WINSIZE = 148,
+    // allocate PTY endpoints: args (int out_fds[2]) -> 0 or -1
+    EYN_SYSCALL_PTY_OPEN = 149,
+    EYN_SYSCALL_NET_TCP_SOCKET_OPEN = 161,
+    EYN_SYSCALL_NET_TCP_SOCKET_CLOSE = 162,
+    EYN_SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT = 163,
+    EYN_SYSCALL_NET_TCP_GET_SOCKETS = 164,
+    EYN_SYSCALL_NET_TCP_SOCKET_BIND = 165,
+    EYN_SYSCALL_NET_TCP_SOCKET_LISTEN = 166,
+    EYN_SYSCALL_NET_TCP_SOCKET_ACCEPT = 167,
+    EYN_SYSCALL_NET_TCP_SOCKET_CONNECT = 168,
+    EYN_SYSCALL_NET_TCP_SOCKET_SEND = 169,
+    EYN_SYSCALL_NET_TCP_SOCKET_RECV = 170,
 };
+
+#define EYN_TTY_MODE_RAW 0x0001
+
+typedef struct {
+    uint16_t rows;
+    uint16_t cols;
+} eyn_tty_winsize_t;
+
+typedef struct {
+    const char* path;
+    const char* const* argv;
+    int argc;
+    int stdin_fd;
+    int stdout_fd;
+    int stderr_fd;
+    int inherit_mode;
+} eyn_spawn_ex_req_t;
 
 typedef struct {
     uint8_t bus;
@@ -349,6 +411,16 @@ typedef struct {
 } eyn_net_socket_info_t;
 
 typedef struct {
+    uint8_t in_use;
+    uint8_t listening;
+    uint8_t state;
+    uint16_t local_port;
+    uint8_t remote_ip[4];
+    uint16_t remote_port;
+    uint32_t queued;
+} eyn_net_tcp_socket_info_t;
+
+typedef struct {
     int32_t pid;
     int32_t status;
     int32_t active;
@@ -370,6 +442,36 @@ typedef struct {
     uint32_t partition_count;
     eyn_installer_partition_t partitions[4];
 } eyn_installer_partitions_t;
+
+typedef struct {
+    int32_t fb_w;
+    int32_t fb_h;
+    int32_t workspace_w;
+    int32_t workspace_h;
+    int32_t scale_pct;
+    int32_t aspect_mode;
+} eyn_display_profile_t;
+
+typedef struct {
+    int32_t width;
+    int32_t height;
+    int32_t bpp;
+    int32_t persist;
+} eyn_display_mode_set_t;
+
+typedef struct {
+    int32_t width;
+    int32_t height;
+    int32_t bpp;
+    int32_t can_switch;
+} eyn_display_mode_t;
+
+#define EYN_ASPECT_NATIVE 0
+#define EYN_ASPECT_4_3 1
+#define EYN_ASPECT_16_10 2
+#define EYN_ASPECT_16_9 3
+#define EYN_ASPECT_21_9 4
+#define EYN_ASPECT_1_1 5
 
 typedef struct {
     uint32_t obj_type;
@@ -697,6 +799,11 @@ static inline int eyn_sys_net_dns_resolve(const char* name, uint8_t out_ip[4]) {
     return eyn_syscall3_ppi(EYN_SYSCALL_NET_DNS_RESOLVE, name, out_ip, 0);
 }
 
+// Request IPv4 configuration via DHCP.
+static inline int eyn_sys_net_dhcp_request(int timeout_spins, int arp_spins, int persist_cfg) {
+    return eyn_syscall3_iii(EYN_SYSCALL_NET_DHCP_REQUEST, timeout_spins, arp_spins, persist_cfg);
+}
+
 // Establish a TCP connection to dst_ip:dst_port (local_port=0 for ephemeral).
 static inline int eyn_sys_net_tcp_connect(const uint8_t dst_ip[4], uint16_t dst_port, uint16_t local_port) {
     return eyn_syscall3_pii(EYN_SYSCALL_NET_TCP_CONNECT, dst_ip, (int)dst_port, (int)local_port);
@@ -716,6 +823,58 @@ static inline int eyn_sys_net_tcp_recv(void* buf, uint32_t buflen) {
 // Close the current TCP connection.
 static inline int eyn_sys_net_tcp_close(void) {
     return eyn_syscall1(EYN_SYSCALL_NET_TCP_CLOSE, 0);
+}
+
+// Allocate a TCP socket ID for the multi-session socket API.
+static inline int eyn_sys_net_tcp_socket_open(void) {
+    return eyn_syscall0(EYN_SYSCALL_NET_TCP_SOCKET_OPEN);
+}
+
+// Close a TCP socket allocation by ID.
+static inline int eyn_sys_net_tcp_socket_close(int socket_id) {
+    return eyn_syscall1(EYN_SYSCALL_NET_TCP_SOCKET_CLOSE, socket_id);
+}
+
+// Query queued TCP RX packets for a specific socket ID.
+static inline int eyn_sys_net_tcp_socket_queue_count(int socket_id) {
+    return eyn_syscall1(EYN_SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT, socket_id);
+}
+
+// Query active TCP socket allocations.
+static inline int eyn_sys_net_tcp_get_sockets(eyn_net_tcp_socket_info_t* out, int out_cap) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_TCP_GET_SOCKETS, out_cap, 0, out);
+}
+
+// Bind a local port to a pool socket (id 1..7) ahead of listen().
+static inline int eyn_sys_net_tcp_socket_bind(int socket_id, uint16_t local_port) {
+    return eyn_syscall3_iii(EYN_SYSCALL_NET_TCP_SOCKET_BIND, socket_id, local_port, 0);
+}
+
+// Mark a bound pool socket as a passive listener.
+static inline int eyn_sys_net_tcp_socket_listen(int socket_id, int backlog) {
+    return eyn_syscall3_iii(EYN_SYSCALL_NET_TCP_SOCKET_LISTEN, socket_id, backlog, 0);
+}
+
+// Block until an inbound connection is accepted or timeout_spins elapses
+// (0 selects a default timeout). Returns the new socket_id (>= 1) on success.
+static inline int eyn_sys_net_tcp_socket_accept(int socket_id, int timeout_spins) {
+    return eyn_syscall3_iii(EYN_SYSCALL_NET_TCP_SOCKET_ACCEPT, socket_id, timeout_spins, 0);
+}
+
+// Actively connect a pool socket to a remote endpoint. Local port is
+// auto-assigned and the connect timeout uses the kernel default.
+static inline int eyn_sys_net_tcp_socket_connect(int socket_id, uint16_t dst_port, const uint8_t dst_ip[4]) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_TCP_SOCKET_CONNECT, socket_id, dst_port, dst_ip);
+}
+
+// Send on an established pool socket. Returns bytes sent (>=0) or <0 on error.
+static inline int eyn_sys_net_tcp_socket_send(int socket_id, const void* buf, uint32_t len) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_TCP_SOCKET_SEND, socket_id, (int)len, buf);
+}
+
+// Receive from a pool socket. Returns bytes received, 0 if none, <0 on error.
+static inline int eyn_sys_net_tcp_socket_recv(int socket_id, void* buf, uint32_t buflen) {
+    return eyn_syscall3_iip(EYN_SYSCALL_NET_TCP_SOCKET_RECV, socket_id, (int)buflen, buf);
 }
 
 static inline int eyn_sys_fs_check_integrity(void) {
@@ -758,12 +917,68 @@ static inline int eyn_sys_setbg_path(const char* path) {
     return eyn_syscall1(EYN_SYSCALL_SETBG_PATH, (int)(uintptr_t)path);
 }
 
+static inline int eyn_sys_setbg_path_mode(const char* path, int mode) {
+    return eyn_syscall3_pii(EYN_SYSCALL_SETBG_PATH, path, mode, 0);
+}
+
 static inline int eyn_sys_clearbg_focused(void) {
     return eyn_syscall0(EYN_SYSCALL_CLEARBG_FOCUSED);
 }
 
 static inline int eyn_sys_setfont_path(const char* path) {
     return eyn_syscall1(EYN_SYSCALL_SETFONT_PATH, (int)(uintptr_t)path);
+}
+
+static inline int eyn_sys_set_display_profile(int scale_pct, int aspect_mode, int persist) {
+    return eyn_syscall3_iii(EYN_SYSCALL_SET_DISPLAY_PROFILE, scale_pct, aspect_mode, persist ? 1 : 0);
+}
+
+static inline int eyn_sys_get_display_profile(eyn_display_profile_t* out) {
+    return eyn_syscall1(EYN_SYSCALL_GET_DISPLAY_PROFILE, (int)(uintptr_t)out);
+}
+
+static inline int eyn_sys_set_display_mode(const eyn_display_mode_set_t* req) {
+    return eyn_syscall1(EYN_SYSCALL_SET_DISPLAY_MODE, (int)(uintptr_t)req);
+}
+
+static inline int eyn_sys_get_display_mode(eyn_display_mode_t* out) {
+    return eyn_syscall1(EYN_SYSCALL_GET_DISPLAY_MODE, (int)(uintptr_t)out);
+}
+
+static inline int eyn_sys_notify_post(const char* title,
+                                      const char* message,
+                                      int level,
+                                      uint32_t timeout_ms) {
+    if (level < 0) level = 0;
+    if (level > 2) level = 2;
+    if (timeout_ms > 0x00FFFFFFu) timeout_ms = 0x00FFFFFFu;
+
+    uint32_t packed = (timeout_ms << 8) | ((uint32_t)level & 0xFFu);
+    return eyn_syscall3_ppi(EYN_SYSCALL_NOTIFY_POST, title, message, (int)packed);
+}
+
+static inline int eyn_sys_tty_set_mode(int mode_flags) {
+    return eyn_syscall1(EYN_SYSCALL_TTY_SET_MODE, mode_flags);
+}
+
+static inline int eyn_sys_tty_get_mode(void) {
+    return eyn_syscall0(EYN_SYSCALL_TTY_GET_MODE);
+}
+
+static inline int eyn_sys_tty_set_winsize(uint16_t rows, uint16_t cols) {
+    return eyn_syscall3_iii(EYN_SYSCALL_TTY_SET_WINSIZE, (int)rows, (int)cols, 0);
+}
+
+static inline int eyn_sys_tty_get_winsize(eyn_tty_winsize_t* out) {
+    return eyn_syscall1(EYN_SYSCALL_TTY_GET_WINSIZE, (int)(uintptr_t)out);
+}
+
+static inline int eyn_sys_pty_open(int out_fds[2]) {
+    return eyn_syscall1(EYN_SYSCALL_PTY_OPEN, (int)(uintptr_t)out_fds);
+}
+
+static inline int eyn_sys_spawn_ex(const eyn_spawn_ex_req_t* req) {
+    return eyn_syscall1(EYN_SYSCALL_SPAWN_EX, (int)(uintptr_t)req);
 }
 
 static inline int eyn_sys_chdir(const char* path) {

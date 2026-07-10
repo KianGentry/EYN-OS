@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <sys/types.h>  /* mode_t, off_t */
+#include <signal.h>
 
 typedef long ssize_t;
 
@@ -27,9 +28,18 @@ int fd_set_inherit(int enabled);
 int fd_set_stdio(int stdin_fd, int stdout_fd, int stderr_fd);
 int fd_set_nonblock(int fd, int enabled);
 
+/* Restricted NOMMU-style compat layer: child may only exec or _exit. */
+pid_t vfork(void);
+pid_t fork(void);
+
 #define WNOHANG 1
 int spawn(const char* path, const char* const* argv, int argc);
+int wait(int* status);
 int waitpid(int pid, int* status, int options);
+
+/* Signal primitives */
+int kill(int pid, int sig);
+int sigreturn(void);
 
 // Create/overwrite a file with given contents.
 int writefile(const char* path, const void* buf, size_t len);
@@ -64,6 +74,12 @@ int getcwd(char* buf, size_t size);
 // Returns 0 on success, -1 on error.
 int chdir(const char* path);
 
+/* Exec wrappers. Returns -1 on error; on success does not return. */
+int execv(const char* path, char* const argv[]);
+int execve(const char* path, char* const argv[], char* const envp[]);
+int execvp(const char* file, char* const argv[]);
+int execlp(const char* file, const char* arg, ...);
+
 /*
  * ABI-INVARIANT: SEEK_* values match POSIX and SYSCALL_LSEEK whence (110).
  */
@@ -75,6 +91,10 @@ int chdir(const char* path);
 
 /* Reposition the offset of an open file descriptor. */
 long lseek(int fd, long offset, int whence);
+
+/* Standard POSIX mmap/munmap wrappers backed by EYN-OS int 0x80 syscalls. */
+void* mmap(void* addr, size_t length, int prot, int flags, int fd, long offset);
+int munmap(void* addr, size_t length);
 
 // Low-memory streaming file writer (EYNFS only today).
 int eynfs_stream_begin(const char* path);

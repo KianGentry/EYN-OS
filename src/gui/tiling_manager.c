@@ -86,6 +86,136 @@ static int tm_disk_has_installer_binary(void) {
     return 0;
 }
 
+static void tm_aspect_ratio_for_mode(int mode, int* out_num, int* out_den) {
+    int num = 1;
+    int den = 1;
+    switch (mode) {
+        case TILER_ASPECT_4_3:
+            num = 4; den = 3;
+            break;
+        case TILER_ASPECT_16_10:
+            num = 16; den = 10;
+            break;
+        case TILER_ASPECT_16_9:
+            num = 16; den = 9;
+            break;
+        case TILER_ASPECT_21_9:
+            num = 21; den = 9;
+            break;
+        case TILER_ASPECT_1_1:
+            num = 1; den = 1;
+            break;
+        case TILER_ASPECT_NATIVE:
+        default:
+            num = 0; den = 0;
+            break;
+    }
+    if (out_num) *out_num = num;
+    if (out_den) *out_den = den;
+}
+
+static void tm_compute_workspace_dims(int fb_w, int fb_h, int scale_pct, int aspect_mode, int* out_w, int* out_h) {
+    if (fb_w < 1) fb_w = 640;
+    if (fb_h < 1) fb_h = 480;
+
+    if (scale_pct < 50) scale_pct = 50;
+    if (scale_pct > 100) scale_pct = 100;
+    if (aspect_mode < TILER_ASPECT_NATIVE || aspect_mode > TILER_ASPECT_1_1) aspect_mode = TILER_ASPECT_NATIVE;
+
+    int w = (fb_w * scale_pct) / 100;
+    int h = (fb_h * scale_pct) / 100;
+    if (w < 320) w = 320;
+    if (h < 200) h = 200;
+    if (w > fb_w) w = fb_w;
+    if (h > fb_h) h = fb_h;
+
+    int ratio_num = 0;
+    int ratio_den = 0;
+    tm_aspect_ratio_for_mode(aspect_mode, &ratio_num, &ratio_den);
+    if (ratio_num > 0 && ratio_den > 0) {
+        if ((w * ratio_den) > (h * ratio_num)) {
+            w = (h * ratio_num) / ratio_den;
+        } else {
+            h = (w * ratio_den) / ratio_num;
+        }
+        if (w < 160) w = 160;
+        if (h < 120) h = 120;
+    }
+
+    if (out_w) *out_w = w;
+    if (out_h) *out_h = h;
+}
+
+static void tm_apply_workspace_profile(int relayout) {
+    int fbw = g_fb_w > 0 ? g_fb_w : screen_w;
+    int fbh = g_fb_h > 0 ? g_fb_h : screen_h;
+
+    int new_w = screen_w;
+    int new_h = screen_h;
+    tm_compute_workspace_dims(
+        fbw,
+        fbh,
+        ui_prefs_get_workspace_scale_pct(),
+        ui_prefs_get_workspace_aspect_mode(),
+        &new_w,
+        &new_h
+    );
+
+    if (new_w == screen_w && new_h == screen_h) {
+        if (relayout) {
+            mouse_set_bounds(0, 0, screen_w - 1, screen_h - 1);
+        }
+        return;
+    }
+
+    screen_w = new_w;
+    screen_h = new_h;
+
+    if (screen_w < 1) screen_w = 1;
+    if (screen_h < 1) screen_h = 1;
+
+    mouse_set_bounds(0, 0, screen_w - 1, screen_h - 1);
+
+    // Keep areas outside the logical workspace black when using non-native profiles.
+    drawRect(0, 0, fbw, fbh, 0, 0, 0);
+    vga_mark_dirty_rect(0, 0, fbw, fbh);
+
+    if (relayout) {
+        layout_tiles();
+        g_force_full_redraw = 1;
+        g_tiles_full_content_redraw = 1;
+    }
+}
+
+static char g_tm_status_buf[64];
+
+static void tm_refresh_status_text(void) {
+    snprintf(g_tm_status_buf, sizeof(g_tm_status_buf), "Fb: %dx%d UI:%dx%d", g_fb_w, g_fb_h, screen_w, screen_h);
+}
+
+static void tm_apply_saved_display_mode(void) {
+    int req_w = ui_prefs_get_display_width();
+    int req_h = ui_prefs_get_display_height();
+    int req_bpp = ui_prefs_get_display_bpp();
+
+    if (req_w < 320 || req_h < 200) return;
+    if (req_bpp != 16 && req_bpp != 24 && req_bpp != 32) req_bpp = 32;
+
+    int cur_w = (g_mbi && g_mbi->framebuffer_width > 0) ? (int)g_mbi->framebuffer_width : g_fb_w;
+    int cur_h = (g_mbi && g_mbi->framebuffer_height > 0) ? (int)g_mbi->framebuffer_height : g_fb_h;
+    int cur_bpp = (g_mbi && g_mbi->framebuffer_bpp > 0) ? (int)g_mbi->framebuffer_bpp : 32;
+
+    if (cur_w == req_w && cur_h == req_h && cur_bpp == req_bpp) {
+        return;
+    }
+
+    if (vga_set_mode(req_w, req_h, req_bpp) == 0) {
+        printf("[display] switched to %dx%dx%d from ui.cfg\n", req_w, req_h, req_bpp);
+    } else {
+        printf("%c[display] runtime mode switch unsupported; keeping boot mode\n", 255, 165, 0);
+    }
+}
+
 /* -- Main compositor loop and runtime configuration -------------------- */
 
 void start_tiling_manager() {
@@ -116,11 +246,20 @@ void start_tiling_manager() {
             printf("[installer] disk /binaries/installer present; skipping RAM auto-fallback\n");
         }
 
-        // initialize screen dimensions from global framebuffer if available
-        if (g_mbi) {
-            screen_w = g_mbi->framebuffer_width;
-            screen_h = g_mbi->framebuffer_height;
+        // Initialize physical framebuffer dimensions from global multiboot info.
+        if (g_mbi && g_mbi->framebuffer_width > 0 && g_mbi->framebuffer_height > 0) {
+            g_fb_w = g_mbi->framebuffer_width;
+            g_fb_h = g_mbi->framebuffer_height;
         }
+        // Apply persisted runtime mode request (e.g. 1024x768) before UI sizing.
+        tm_apply_saved_display_mode();
+        if (g_mbi && g_mbi->framebuffer_width > 0 && g_mbi->framebuffer_height > 0) {
+            g_fb_w = g_mbi->framebuffer_width;
+            g_fb_h = g_mbi->framebuffer_height;
+        }
+        screen_w = g_fb_w;
+        screen_h = g_fb_h;
+        tm_apply_workspace_profile(0);
         // Decide low-memory/slow-CPU mode early so we can avoid loading heavy assets
         if (g_mbi && (g_mbi->flags & MULTIBOOT_INFO_MEMORY)) {
             uint32 total_kb = g_mbi->mem_lower + g_mbi->mem_upper; // in KB
@@ -198,9 +337,8 @@ void start_tiling_manager() {
         tiles[0].type = TILE_SHELL;
         tiles[0].title = "EYN-OS Shell";
         tiles[0].desktop = 0;
-        static char status_buf[64];
-        snprintf(status_buf, sizeof(status_buf), "Fb: %dx%d", screen_w, screen_h);
-        tiles[0].status_left = status_buf; // show framebuffer size for debug
+        tm_refresh_status_text();
+        tiles[0].status_left = g_tm_status_buf; // show framebuffer/workspace size for debug
         tiles[0].active = 1;
         vterm_set_active(0, 1);
         // Print initial prompt into vterm 0
@@ -233,8 +371,9 @@ void start_tiling_manager() {
                 installer_stat == 0 &&
                 st.type == VFS_NODE_FILE) {
                 printf("[installer] launching RAM:/binaries/installer\n");
-                int installer_rc = user_elf_run_argv(VFS_DRIVE_RAM, "/binaries/installer", 0, NULL);
-                printf("[installer] launcher returned rc=%d\n", installer_rc);
+                /* Spawn asynchronously to prevent UI blocking during installer load */
+                int installer_pid = user_task_spawn_argv(VFS_DRIVE_RAM, "/binaries/installer", 0, NULL);
+                printf("[installer] spawned installer pid=%d\n", installer_pid);
             }
 
             if (tm_launch_ctx_pushed) {
@@ -344,7 +483,7 @@ void start_tiling_manager() {
     g_any_tile_content_redrew = 0;
     // On full redraws, paint the desktop background so exposed areas are not garbage.
     if (g_force_full_redraw) {
-        drawRect(0, 0, screen_w, screen_h, 38, 38, 38);
+        draw_desktop_background(0, 0, screen_w, screen_h);
         vga_mark_dirty_rect(0, 0, screen_w, screen_h);
     }
     // draw all tiles
@@ -458,18 +597,20 @@ void start_tiling_manager() {
                 window_t* w = &g_windows[wi];
                 if (!w->used) continue;
                 if (w->desktop != g_current_desktop) continue;
-                int is_focused_win = (wi == g_win_focused);
-                // Redraw decorations if first time, focus changed, forced, or underlying tiles changed
-                if (!w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw || g_any_tile_content_redrew) {
-                    wm_draw_decor(w, is_focused_win);
-                    wm_mark_decor_dirty(w);
-                    w->static_drawn = 1;
-                    w->last_focused = is_focused_win;
-                }
                 // Redraw content if requested
                 if (w->needs_redraw || w->continuous_redraw || g_force_full_redraw || g_any_tile_content_redrew) {
                     wm_draw_content(w);
                     if (!w->continuous_redraw) w->needs_redraw = 0;
+                }
+
+                int is_focused_win = (wi == g_win_focused);
+                // Redraw decorations if first time, focus changed, forced, or underlying tiles changed
+                int need_decor = (!g_gui_low_mode) || !w->static_drawn || w->last_focused != is_focused_win || g_force_full_redraw || g_any_tile_content_redrew;
+                if (need_decor) {
+                    wm_draw_decor(w, is_focused_win);
+                    wm_mark_decor_dirty(w);
+                    w->static_drawn = 1;
+                    w->last_focused = is_focused_win;
                 }
 
                 // Draw status overlay on top of window content.
@@ -481,9 +622,17 @@ void start_tiling_manager() {
         // If a modal is active, draw it now on top of everything
         if (g_bg_modal.active) { draw_bg_modal(); }
         if (g_ctx_active) { draw_ctx_menu(); }
+
+        // Track which redraw flags were consumed by this frame so requests
+        // raised during draw_taskbar (for example, toast expiry) can persist
+        // into the next frame.
+        int clear_force_full_redraw = g_force_full_redraw ? 1 : 0;
+        int clear_tiles_full_content_redraw = g_tiles_full_content_redraw ? 1 : 0;
+
         draw_taskbar();
-    if (g_force_full_redraw) g_force_full_redraw = 0;
-    if (g_tiles_full_content_redraw) g_tiles_full_content_redraw = 0;
+
+        if (clear_force_full_redraw) g_force_full_redraw = 0;
+        if (clear_tiles_full_content_redraw) g_tiles_full_content_redraw = 0;
         tui_refresh();
         // Build swap exclusion to preserve overlays (cursor and live-drag)
         int ex_x = -1, ex_y = -1, ex_w = 0, ex_h = 0;
@@ -749,7 +898,8 @@ void start_tiling_manager() {
                                 g_force_full_redraw = 1;
                                 layout_tiles();
                             } else if (g_ctx_kind == 1 && g_ctx_index >= 0 && g_ctx_index < MAX_WINDOWS && g_windows[g_ctx_index].used) {
-                                wm_close_window(g_ctx_index);
+                                wm_force_close_window(g_ctx_index);
+                                if (g_user_task_active) g_user_interrupt = 1;
                                 g_force_full_redraw = 1;
                                 g_tiles_full_content_redraw = 1;
                             }
@@ -934,17 +1084,18 @@ void start_tiling_manager() {
                             me.y >= sub_top2 && me.y < sub_top2 + sub_h2) {
                             int rel_y = me.y - sub_top2 - 2;
                             if (need_scroll2) {
-                                /* Click on scroll-up arrow */
+                                /* Click on scroll-up arrow (reversed): move view down */
                                 if (rel_y < item_h2) {
-                                    if (g_programs_scroll > 0) g_programs_scroll--;
+                                    int max_scroll2 = g_program_count - max_vis2;
+                                    if (max_scroll2 < 0) max_scroll2 = 0;
+                                    if (g_programs_scroll < max_scroll2) g_programs_scroll++;
                                     g_force_full_redraw = 1;
                                     goto after_mouse_handling;
                                 }
                                 rel_y -= item_h2;
-                                /* Click on scroll-down arrow (after items) */
+                                /* Click on scroll-down arrow (after items, reversed): move view up */
                                 if (rel_y >= max_vis2 * item_h2) {
-                                    int max_scroll2 = g_program_count - max_vis2;
-                                    if (g_programs_scroll < max_scroll2) g_programs_scroll++;
+                                    if (g_programs_scroll > 0) g_programs_scroll--;
                                     g_force_full_redraw = 1;
                                     goto after_mouse_handling;
                                 }
@@ -986,9 +1137,11 @@ void start_tiling_manager() {
                                 g_force_full_redraw = 1;
                                 launch_program("files");
                             } else if (idx2 == 3) {
-                                /* Settings: close menu (placeholder) */
+                                /* Settings: run userland settings app */
                                 g_start_active = 0;
+                                g_programs_active = 0;
                                 g_force_full_redraw = 1;
+                                launch_program("settings");
                             } else if (idx2 == 4) {
                                 /* Reboot: triple-fault via keyboard controller reset */
                                 g_start_active = 0;
@@ -1065,51 +1218,26 @@ void start_tiling_manager() {
                         }
                     }
                     int did_action = 0;
-                    // Close
-                    {
-                        int bx, by, bw, bh; wm_get_close_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
+                    int bx, by, bw, bh;
+                    wm_get_close_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
+                    if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
+                        g_windows[w_hit].pressed_button = 1;
+                        g_windows[w_hit].static_drawn = 0;
+                        did_action = 1;
+                    }
+                    if (!did_action) {
+                        wm_get_max_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
                         if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
-                            wm_close_window(w_hit);
-                            g_force_full_redraw = 1; g_tiles_full_content_redraw = 1;
-                            drag_active = 0; drag_win = -1;
+                            g_windows[w_hit].pressed_button = 2;
+                            g_windows[w_hit].static_drawn = 0;
                             did_action = 1;
                         }
                     }
-                    // Maximize toggle
                     if (!did_action) {
-                        int bx, by, bw, bh; wm_get_max_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
+                        wm_get_min_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
                         if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
-                            window_t* w = &g_windows[w_hit];
-                            int taskbar_h_win = vga_text_cell_h() + 6;
-                            if (taskbar_h_win < 0) taskbar_h_win = 0;
-                            if (taskbar_h_win > screen_h - 32) taskbar_h_win = screen_h - 32;
-                            if (!w->maximized) {
-                                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
-                                w->prev_x = w->x; w->prev_y = w->y; w->prev_w = w->w; w->prev_h = w->h;
-                                w->x = 0; w->y = taskbar_h_win; w->w = screen_w; w->h = screen_h - taskbar_h_win;
-                                w->maximized = 1; w->minimized = 0;
-                                w->static_drawn = 0; w->needs_redraw = 1;
-                                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
-                                g_tiles_full_content_redraw = 1;
-                            } else {
-                                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
-                                w->x = w->prev_x; w->y = w->prev_y; w->w = w->prev_w; w->h = w->prev_h;
-                                w->maximized = 0; w->static_drawn = 0; w->needs_redraw = 1;
-                                vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
-                                g_tiles_full_content_redraw = 1;
-                            }
-                            did_action = 1;
-                        }
-                    }
-                    // Minimize toggle
-                    if (!did_action) {
-                        int bx, by, bw, bh; wm_get_min_rect(&g_windows[w_hit], &bx, &by, &bw, &bh);
-                        if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
-                            window_t* w = &g_windows[w_hit];
-                            w->minimized = !w->minimized; w->needs_redraw = 1; w->static_drawn = 0;
-                            int th2 = win_title_height(w); int sh2 = win_status_height(w);
-                            int cx2 = w->x + 1; int cy2 = w->y + th2 + sh2 + 1; int cw2 = w->w - 2; int ch2 = w->h - (th2 + sh2) - 2;
-                            if (cw2 > 0 && ch2 > 0) vga_mark_dirty_rect(cx2, cy2, cw2, ch2);
+                            g_windows[w_hit].pressed_button = 3;
+                            g_windows[w_hit].static_drawn = 0;
                             did_action = 1;
                         }
                     }
@@ -1164,51 +1292,24 @@ void start_tiling_manager() {
                             int t_max_by   = t_close_by;
                             int t_min_bx   = t_max_bx - t_btn_side - t_btn_gap;
                             int t_min_by   = t_close_by;
-                            /* Close button */
                             if (point_in_rect(me.x, me.y, t_close_bx, t_close_by, t_btn_side, t_btn_side)) {
-                                tile_close(hit);
-                                g_force_full_redraw = 1;
-                                layout_tiles();
-                                goto after_mouse_handling;
-                            }
-                            /* Maximize button: toggle fullscreen */
-                            if (point_in_rect(me.x, me.y, t_max_bx, t_max_by, t_btn_side, t_btn_side)) {
-                                fullscreen_tile = -1;
-                                int taskbar_h_tile = vga_text_cell_h() + 6;
-                                if (taskbar_h_tile < 0) taskbar_h_tile = 0;
-                                if (taskbar_h_tile > screen_h - 32) taskbar_h_tile = screen_h - 32;
-                                if (!tiles[hit].maximized) {
-                                    tiles[hit].prev_x = tiles[hit].x;
-                                    tiles[hit].prev_y = tiles[hit].y;
-                                    tiles[hit].prev_w = tiles[hit].width;
-                                    tiles[hit].prev_h = tiles[hit].height;
-                                    tiles[hit].x = 0;
-                                    tiles[hit].y = taskbar_h_tile;
-                                    tiles[hit].width = screen_w;
-                                    tiles[hit].height = screen_h - taskbar_h_tile;
-                                    tiles[hit].maximized = 1;
-                                    tiles[hit].minimized = 0;
-                                } else {
-                                    if (tiles[hit].prev_w > 0 && tiles[hit].prev_h > 0) {
-                                        tiles[hit].x = tiles[hit].prev_x;
-                                        tiles[hit].y = tiles[hit].prev_y;
-                                        tiles[hit].width = tiles[hit].prev_w;
-                                        tiles[hit].height = tiles[hit].prev_h;
-                                    }
-                                    tiles[hit].maximized = 0;
-                                }
+                                tiles[hit].pressed_button = 1;
                                 tiles[hit].static_drawn = 0;
                                 focused = hit;
                                 g_force_full_redraw = 1;
                                 goto after_mouse_handling;
                             }
-                            /* Minimize button: hide tile (collapse to just a taskbar entry) */
-                            if (point_in_rect(me.x, me.y, t_min_bx, t_min_by, t_btn_side, t_btn_side)) {
-                                fullscreen_tile = -1;
-                                tiles[hit].minimized = 1;
-                                tiles[hit].maximized = 0;
+                            if (point_in_rect(me.x, me.y, t_max_bx, t_max_by, t_btn_side, t_btn_side)) {
+                                tiles[hit].pressed_button = 2;
                                 tiles[hit].static_drawn = 0;
-                                tile_ensure_valid_focus();
+                                focused = hit;
+                                g_force_full_redraw = 1;
+                                goto after_mouse_handling;
+                            }
+                            if (point_in_rect(me.x, me.y, t_min_bx, t_min_by, t_btn_side, t_btn_side)) {
+                                tiles[hit].pressed_button = 3;
+                                tiles[hit].static_drawn = 0;
+                                focused = hit;
                                 g_force_full_redraw = 1;
                                 goto after_mouse_handling;
                             }
@@ -1269,6 +1370,135 @@ void start_tiling_manager() {
                 }
             }
             if (release_edge) { 
+                int release_hit = wm_hit_test(me.x, me.y);
+                if (release_hit >= 0 && release_hit < MAX_WINDOWS && g_windows[release_hit].used) {
+                    window_t* wrel = &g_windows[release_hit];
+                    if (wrel->pressed_button == 1) {
+                        int bx, by, bw, bh; wm_get_close_rect(wrel, &bx, &by, &bw, &bh);
+                        if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
+                            if (!wrel->close_cb || wrel->close_cb(release_hit, wrel->userdata)) {
+                                wm_close_window(release_hit);
+                                if (g_user_task_active) {
+                                    g_user_interrupt = 1;
+                                    g_force_full_redraw = 1;
+                                }
+                                layout_tiles();
+                                g_force_full_redraw = 1;
+                            }
+                        }
+                    } else if (wrel->pressed_button == 2) {
+                        int bx, by, bw, bh; wm_get_max_rect(wrel, &bx, &by, &bw, &bh);
+                        if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
+                            fullscreen_tile = -1;
+                            int taskbar_h_win = vga_text_cell_h() + 6;
+                            if (taskbar_h_win < 0) taskbar_h_win = 0;
+                            if (taskbar_h_win > screen_h - 32) taskbar_h_win = screen_h - 32;
+                            if (!wrel->maximized) {
+                                vga_mark_dirty_rect(wrel->x, wrel->y, wrel->w, wrel->h);
+                                wrel->prev_x = wrel->x; wrel->prev_y = wrel->y; wrel->prev_w = wrel->w; wrel->prev_h = wrel->h;
+                                wrel->x = 0; wrel->y = taskbar_h_win; wrel->w = screen_w; wrel->h = screen_h - taskbar_h_win;
+                                wrel->maximized = 1; wrel->minimized = 0;
+                                wrel->static_drawn = 0; wrel->needs_redraw = 1;
+                                vga_mark_dirty_rect(wrel->x, wrel->y, wrel->w, wrel->h);
+                                g_tiles_full_content_redraw = 1;
+                            } else {
+                                vga_mark_dirty_rect(wrel->x, wrel->y, wrel->w, wrel->h);
+                                wrel->x = wrel->prev_x; wrel->y = wrel->prev_y; wrel->w = wrel->prev_w; wrel->h = wrel->prev_h;
+                                wrel->maximized = 0; wrel->static_drawn = 0; wrel->needs_redraw = 1;
+                                vga_mark_dirty_rect(wrel->x, wrel->y, wrel->w, wrel->h);
+                                g_tiles_full_content_redraw = 1;
+                            }
+                        }
+                    } else if (wrel->pressed_button == 3) {
+                        int bx, by, bw, bh; wm_get_min_rect(wrel, &bx, &by, &bw, &bh);
+                        if (point_in_rect(me.x, me.y, bx, by, bw, bh)) {
+                            wrel->minimized = !wrel->minimized;
+                            wrel->needs_redraw = 1;
+                            wrel->static_drawn = 0;
+                            if (wrel->minimized) g_win_focused = -1;
+                            int th2 = win_title_height(wrel); int sh2 = win_status_height(wrel);
+                            int cx2 = wrel->x + 1; int cy2 = wrel->y + th2 + sh2 + 1; int cw2 = wrel->w - 2; int ch2 = wrel->h - (th2 + sh2) - 2;
+                            if (cw2 > 0 && ch2 > 0) vga_mark_dirty_rect(cx2, cy2, cw2, ch2);
+                        }
+                    }
+                }
+
+                for (int wi = 0; wi < MAX_WINDOWS; ++wi) {
+                    if (g_windows[wi].used && g_windows[wi].pressed_button) {
+                        g_windows[wi].pressed_button = 0;
+                        g_windows[wi].static_drawn = 0;
+                    }
+                }
+
+                for (int ti = 0; ti < tile_count; ++ti) {
+                    if (tiles[ti].pressed_button == 1 || tiles[ti].pressed_button == 2 || tiles[ti].pressed_button == 3) {
+                        int t_th = get_title_height(&tiles[ti]);
+                        int t_btn_side = 12;
+                        if (g_close_icon_loaded) {
+                            int iw2 = g_close_icon.header.width;
+                            int ih2 = g_close_icon.header.height;
+                            int m2 = (iw2 > ih2) ? iw2 : ih2;
+                            if (m2 > t_btn_side) t_btn_side = m2;
+                        }
+                        if (t_btn_side > t_th) t_btn_side = t_th;
+                        int t_btn_margin = 2, t_btn_gap = 2;
+                        int t_btn_pad_y = (t_th - t_btn_side) / 2;
+                        int t_close_bx = tiles[ti].x + tiles[ti].width - t_btn_side - t_btn_margin;
+                        int t_close_by = tiles[ti].y + t_btn_pad_y;
+                        int t_max_bx = t_close_bx - t_btn_side - t_btn_gap;
+                        int t_max_by = t_close_by;
+                        int t_min_bx = t_max_bx - t_btn_side - t_btn_gap;
+                        int t_min_by = t_close_by;
+
+                        int fire = 0;
+                        if (tiles[ti].pressed_button == 1 && point_in_rect(me.x, me.y, t_close_bx, t_close_by, t_btn_side, t_btn_side)) {
+                            tile_close(ti);
+                            layout_tiles();
+                            g_force_full_redraw = 1;
+                            fire = 1;
+                        } else if (tiles[ti].pressed_button == 2 && point_in_rect(me.x, me.y, t_max_bx, t_max_by, t_btn_side, t_btn_side)) {
+                            fullscreen_tile = -1;
+                            int taskbar_h_tile = vga_text_cell_h() + 6;
+                            if (taskbar_h_tile < 0) taskbar_h_tile = 0;
+                            if (taskbar_h_tile > screen_h - 32) taskbar_h_tile = screen_h - 32;
+                            if (!tiles[ti].maximized) {
+                                tiles[ti].prev_x = tiles[ti].x;
+                                tiles[ti].prev_y = tiles[ti].y;
+                                tiles[ti].prev_w = tiles[ti].width;
+                                tiles[ti].prev_h = tiles[ti].height;
+                                tiles[ti].x = 0;
+                                tiles[ti].y = taskbar_h_tile;
+                                tiles[ti].width = screen_w;
+                                tiles[ti].height = screen_h - taskbar_h_tile;
+                                tiles[ti].maximized = 1;
+                                tiles[ti].minimized = 0;
+                            } else {
+                                if (tiles[ti].prev_w > 0 && tiles[ti].prev_h > 0) {
+                                    tiles[ti].x = tiles[ti].prev_x;
+                                    tiles[ti].y = tiles[ti].prev_y;
+                                    tiles[ti].width = tiles[ti].prev_w;
+                                    tiles[ti].height = tiles[ti].prev_h;
+                                }
+                                tiles[ti].maximized = 0;
+                            }
+                            focused = ti;
+                            g_force_full_redraw = 1;
+                            fire = 1;
+                        } else if (tiles[ti].pressed_button == 3 && point_in_rect(me.x, me.y, t_min_bx, t_min_by, t_btn_side, t_btn_side)) {
+                            fullscreen_tile = -1;
+                            tiles[ti].minimized = 1;
+                            tiles[ti].maximized = 0;
+                            tile_ensure_valid_focus();
+                            g_force_full_redraw = 1;
+                            fire = 1;
+                        }
+
+                        tiles[ti].pressed_button = 0;
+                        tiles[ti].static_drawn = 0;
+                        if (fire) break;
+                    }
+                }
+
                 drag_active = 0; drag_win = -1;
                 resize_active = 0; resize_win = -1; resize_edges = 0;
                 tile_resize_active = 0; tile_resize_mode = 0;
@@ -1333,14 +1563,16 @@ void start_tiling_manager() {
                     if (resize_edges & RESIZE_EDGE_T) new_y -= (minh - new_h);
                     new_h = minh;
                 }
+                int taskbar_h_resize = vga_text_cell_h() + 6;
+                int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
+                int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : taskbar_h_resize;
+                if (max_anchor_y < taskbar_h_resize) max_anchor_y = taskbar_h_resize;
                 if (new_x < 0) { if (resize_edges & RESIZE_EDGE_L) { new_w += new_x; } new_x = 0; }
-                if (new_y < 0) { if (resize_edges & RESIZE_EDGE_T) { new_h += new_y; } new_y = 0; }
-                if (new_x + new_w > screen_w) new_w = screen_w - new_x;
-                if (new_y + new_h > screen_h) new_h = screen_h - new_y;
+                if (new_y < taskbar_h_resize) { if (resize_edges & RESIZE_EDGE_T) { new_h += (new_y - taskbar_h_resize); } new_y = taskbar_h_resize; }
+                if (new_x > max_anchor_x) new_x = max_anchor_x;
+                if (new_y > max_anchor_y) new_y = max_anchor_y;
                 if (new_w < minw) new_w = minw;
                 if (new_h < minh) new_h = minh;
-                if (new_x + new_w > screen_w) new_x = screen_w - new_w;
-                if (new_y + new_h > screen_h) new_y = screen_h - new_h;
 
                 if (!g_gui_low_mode) {
                     vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
@@ -1380,8 +1612,11 @@ void start_tiling_manager() {
                     } else {
                         g_last_drag_tick = nowt;
                         int tb_h_drag = vga_text_cell_h() + 6;
-                        w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
-                        w->y = clampi(me.y - drag_off_y, tb_h_drag, screen_h - w->h);
+                        int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
+                        int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tb_h_drag;
+                        if (max_anchor_y < tb_h_drag) max_anchor_y = tb_h_drag;
+                        w->x = clampi(me.x - drag_off_x, 0, max_anchor_x);
+                        w->y = clampi(me.y - drag_off_y, tb_h_drag, max_anchor_y);
                     }
                     // Do not mark tiles/windows dirty per-move; wireframe overlay handles visuals
                     w->static_drawn = 0; // so final commit repaints decor at new spot
@@ -1390,8 +1625,11 @@ void start_tiling_manager() {
                     vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
                     int old_x = w->x, old_y = w->y, old_w = w->w, old_h = w->h;
                     int tb_h_drag2 = vga_text_cell_h() + 6;
-                    w->x = clampi(me.x - drag_off_x, 0, screen_w - w->w);
-                    w->y = clampi(me.y - drag_off_y, tb_h_drag2, screen_h - w->h);
+                    int max_anchor_x = (screen_w > 0) ? (screen_w - 1) : 0;
+                    int max_anchor_y = (screen_h > 0) ? (screen_h - 1) : tb_h_drag2;
+                    if (max_anchor_y < tb_h_drag2) max_anchor_y = tb_h_drag2;
+                    w->x = clampi(me.x - drag_off_x, 0, max_anchor_x);
+                    w->y = clampi(me.y - drag_off_y, tb_h_drag2, max_anchor_y);
                     vga_mark_dirty_rect(w->x, w->y, w->w, w->h);
                     w->static_drawn = 0;
                     w->needs_redraw = 1;
@@ -1425,10 +1663,15 @@ void start_tiling_manager() {
                 if (new_w < t_minw) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_x -= (t_minw - new_w); new_w = t_minw; }
                 if (new_h < t_minh) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_y -= (t_minh - new_h); new_h = t_minh; }
                 int tbh_tbr = vga_text_cell_h() + 6;
+                int title_h = get_title_height(&tiles[tile_border_resize_idx]);
+                int title_visible_w = titlebar_min_visible_width_px(title_h);
+                int max_anchor_x = (screen_w > title_visible_w) ? (screen_w - title_visible_w) : 0;
+                int max_anchor_y = (screen_h > title_h) ? (screen_h - title_h) : tbh_tbr;
+                if (max_anchor_y < tbh_tbr) max_anchor_y = tbh_tbr;
                 if (new_x < 0) { if (tile_border_resize_edges & RESIZE_EDGE_L) new_w += new_x; new_x = 0; }
                 if (new_y < tbh_tbr) { if (tile_border_resize_edges & RESIZE_EDGE_T) new_h += (new_y - tbh_tbr); new_y = tbh_tbr; }
-                if (new_x + new_w > screen_w) new_w = screen_w - new_x;
-                if (new_y + new_h > screen_h) new_h = screen_h - new_y;
+                if (new_x > max_anchor_x) new_x = max_anchor_x;
+                if (new_y > max_anchor_y) new_y = max_anchor_y;
                 if (new_w < t_minw) new_w = t_minw;
                 if (new_h < t_minh) new_h = t_minh;
                 t->x = new_x; t->y = new_y; t->width = new_w; t->height = new_h;
@@ -1440,8 +1683,13 @@ void start_tiling_manager() {
             if (tile_drag_active && tile_drag_idx >= 0 && tile_drag_idx < tile_count) {
                 tile_t* t = &tiles[tile_drag_idx];
                 int tbh_td = vga_text_cell_h() + 6;
-                t->x = clampi(me.x - tile_drag_off_x, 0, screen_w - t->width);
-                t->y = clampi(me.y - tile_drag_off_y, tbh_td, screen_h - t->height);
+                int title_h = get_title_height(t);
+                int title_visible_w = titlebar_min_visible_width_px(title_h);
+                int max_anchor_x = (screen_w > title_visible_w) ? (screen_w - title_visible_w) : 0;
+                int max_anchor_y = (screen_h > title_h) ? (screen_h - title_h) : tbh_td;
+                if (max_anchor_y < tbh_td) max_anchor_y = tbh_td;
+                t->x = clampi(me.x - tile_drag_off_x, 0, max_anchor_x);
+                t->y = clampi(me.y - tile_drag_off_y, tbh_td, max_anchor_y);
                 t->static_drawn = 0;
                 g_force_full_redraw = 1;
                 g_tiles_full_content_redraw = 1;
@@ -1452,8 +1700,16 @@ void start_tiling_manager() {
                 int sub_w_sc = 160;
                 int taskbar_h_sc = vga_text_cell_h() + 6;
                 if (me.x >= sub_x_sc && me.x < sub_x_sc + sub_w_sc && me.y >= taskbar_h_sc) {
-                    g_programs_scroll -= me.wheel_delta;
+                    int item_h_sc = vga_text_cell_h() + 6;
+                    int avail_h_sc = screen_h - taskbar_h_sc;
+                    int max_vis_sc = (avail_h_sc - 4) / item_h_sc;
+                    if (max_vis_sc < 1) max_vis_sc = 1;
+                    if (max_vis_sc > g_program_count) max_vis_sc = g_program_count;
+                    int max_scroll_sc = g_program_count - max_vis_sc;
+                    if (max_scroll_sc < 0) max_scroll_sc = 0;
+                    g_programs_scroll += me.wheel_delta;
                     if (g_programs_scroll < 0) g_programs_scroll = 0;
+                    if (g_programs_scroll > max_scroll_sc) g_programs_scroll = max_scroll_sc;
                     g_force_full_redraw = 1;
                 }
             }
@@ -1620,6 +1876,10 @@ after_mouse_handling:
     int key = tui_read_key();
     if (key) { watchdog_kick("wm-key"); }
 
+        if (g_win_focused >= 0 && g_windows[g_win_focused].used && g_windows[g_win_focused].minimized) {
+            g_win_focused = -1;
+        }
+
         // Shift+Alt toggles pinned status overlay (persisted in ui.cfg).
         // Note: modifier scancodes return 0 from tui_read_key(), so this must run even when key==0.
         {
@@ -1674,7 +1934,16 @@ after_mouse_handling:
             if (base_nav == 0x1001) { /* Up */
                 if (g_programs_active && g_programs_hover >= 0) {
                     if (g_programs_hover > 0) g_programs_hover--;
-                    else if (g_programs_scroll > 0) g_programs_scroll--;
+                    else {
+                        int item_h_nav = vga_text_cell_h() + 6;
+                        int avail_h_nav = screen_h - (vga_text_cell_h() + 6);
+                        int max_vis_nav = (avail_h_nav - 4) / item_h_nav;
+                        if (max_vis_nav < 1) max_vis_nav = 1;
+                        if (max_vis_nav > g_program_count) max_vis_nav = g_program_count;
+                        int max_scroll_nav = g_program_count - max_vis_nav;
+                        if (max_scroll_nav < 0) max_scroll_nav = 0;
+                        if (g_programs_scroll < max_scroll_nav) g_programs_scroll++;
+                    }
                 } else {
                     if (g_start_hover <= 0) g_start_hover = 5;
                     else g_start_hover--;
@@ -1691,7 +1960,7 @@ after_mouse_handling:
                     else {
                         int max_scroll_nav = g_program_count - max_vis_nav;
                         if (max_scroll_nav < 0) max_scroll_nav = 0;
-                        if (g_programs_scroll < max_scroll_nav) g_programs_scroll++;
+                        if (g_programs_scroll > 0) g_programs_scroll--;
                     }
                 } else {
                     if (g_start_hover >= 5) g_start_hover = 0;
@@ -1979,6 +2248,71 @@ after_mouse_handling:
             g_last_frame_tick = sched_get_tick_count();
         }
     }
+}
+
+int tiler_set_display_profile(int scale_pct, int aspect_mode, int persist) {
+    ui_prefs_set_workspace_scale_pct(scale_pct);
+    ui_prefs_set_workspace_aspect_mode(aspect_mode);
+
+    if (persist) {
+        (void)ui_prefs_save((uint8)g_current_drive);
+    }
+
+    if (g_tm_initialized) {
+        tm_apply_workspace_profile(1);
+    }
+
+    tm_refresh_status_text();
+
+    return 0;
+}
+
+int tiler_set_display_mode(int mode_w, int mode_h, int bpp, int persist) {
+    if (mode_w < 320 || mode_h < 200) return -1;
+    if (bpp != 16 && bpp != 24 && bpp != 32) return -1;
+    if (vga_set_mode(mode_w, mode_h, bpp) != 0) return -1;
+
+    if (g_mbi && g_mbi->framebuffer_width > 0 && g_mbi->framebuffer_height > 0) {
+        g_fb_w = (int)g_mbi->framebuffer_width;
+        g_fb_h = (int)g_mbi->framebuffer_height;
+    } else {
+        g_fb_w = mode_w;
+        g_fb_h = mode_h;
+    }
+
+    screen_w = g_fb_w;
+    screen_h = g_fb_h;
+
+    ui_prefs_set_display_width(g_fb_w);
+    ui_prefs_set_display_height(g_fb_h);
+    ui_prefs_set_display_bpp((g_mbi && g_mbi->framebuffer_bpp) ? (int)g_mbi->framebuffer_bpp : bpp);
+
+    tm_apply_workspace_profile(1);
+    tm_refresh_status_text();
+
+    if (persist) {
+        (void)ui_prefs_save((uint8)g_current_drive);
+    }
+
+    return 0;
+}
+
+void tiler_get_display_profile(tiler_display_profile_t* out) {
+    if (!out) return;
+    out->fb_w = g_fb_w;
+    out->fb_h = g_fb_h;
+    out->workspace_w = screen_w;
+    out->workspace_h = screen_h;
+    out->scale_pct = ui_prefs_get_workspace_scale_pct();
+    out->aspect_mode = ui_prefs_get_workspace_aspect_mode();
+}
+
+void tiler_get_display_mode(tiler_display_mode_t* out) {
+    if (!out) return;
+    out->width = g_fb_w;
+    out->height = g_fb_h;
+    out->bpp = (g_mbi && g_mbi->framebuffer_bpp > 0) ? (int)g_mbi->framebuffer_bpp : 32;
+    out->can_switch = vga_can_set_mode();
 }
 
 // - Runtime GUI tuning (low-spec controls) -

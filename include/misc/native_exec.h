@@ -5,6 +5,8 @@
 #include <eyn_exe_format.h>
 
 // Process execution context
+typedef struct address_space address_space_t;  // Forward declare
+
 typedef struct {
     uint32 pid;                 // Process ID
     uint8 active;               // Process active flag
@@ -30,6 +32,12 @@ typedef struct {
     uint32 elf_vaddr_max;       // If loaded from ELF: highest virtual address mapped (exclusive)
     void*  linux_fd_table;      // optional per-process Linux-like fd table
     uint32 brk_end;             // simple brk end pointer for malloc
+    address_space_t* address_space;  // optional VMM address space for mmap/dynamic linking
+    uint32 tls_base;            // TLS base address (set by set_thread_area syscall)
+    uint8 linux_compat_mode;    // Non-zero: route syscalls using Linux i386 ABI
+    uint8 linux_execve_pending; // Non-zero: emulator must restart from replaced image entry
+    uint8 _pad1[2];
+    char interpreter[256];      // PT_INTERP path for ET_DYN executables (dynamic linker)
 
     // Per-segment mapping for ELF PT_LOAD segments
     struct {
@@ -40,7 +48,16 @@ typedef struct {
         uint32 flags;   // PF_* flags from program header
     } segments[8];
     char name[64];              // Process name
+    
+    // Linux signal handling state (per-process)
+    uint32 sig_handlers[64];    // Handler addresses or SIG_DFL(0)/SIG_IGN(1) for each signal
+    uint32 sig_mask;            // Current signal mask (blocked signals)
+    uint32 sig_pending;         // Pending signals bitmask
 } native_process_t;
+
+#define LINUX_SIG_DFL 0u
+#define LINUX_SIG_IGN 1u
+#define LINUX_SA_RESTART 0x10000000u
 
 // Execution result
 typedef enum {
@@ -63,6 +80,7 @@ void native_cleanup_process(native_process_t* process);
 native_process_t* native_get_current_process(void);
 void native_set_current_process(native_process_t* process);
 int native_get_process_count(void);
+int native_process_is_active(uint32 pid);
 
 // Process lifecycle APIs for scheduler integration
 exec_result_t native_spawn(const char* filename, uint32* out_pid);

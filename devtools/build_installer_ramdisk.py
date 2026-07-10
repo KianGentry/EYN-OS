@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
+import json
 import os
-import struct
 import shutil
 import subprocess
 import sys
@@ -9,10 +9,6 @@ import tempfile
 from create_partitioned_disk import create_partitioned_disk
 
 KERNEL_RAW_LBA = 1024
-PAYLOAD_MAGIC = b"EYNPKG1\0"
-PAYLOAD_TYPE_FILE = 1
-PAYLOAD_TYPE_DIR = 2
-PAYLOAD_FLAG_RLE = 1
 
 MB = 1024 * 1024
 
@@ -84,140 +80,96 @@ def build_grub_core_image(repo_root: str, out_core: str, kernel_bin: str) -> boo
     return os.path.isfile(out_core)
 
 
-def copy_tree(src: str, dst: str, prune_dev: bool = True) -> None:
+def copy_required_file(src: str, dst: str, label: str) -> None:
+    if not os.path.isfile(src):
+        raise RuntimeError(f"Missing required {label}: {src}")
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, dst)
+
+
+def copy_required_tree(src: str, dst: str, label: str) -> None:
     if not os.path.isdir(src):
-        return
-
-    prune_extra = os.environ.get("EYN_INSTALLER_RAMDISK_PRUNE_EXTRA", "1") != "0"
-    pruned_top_dirs = {"code"} if prune_dev else set()
-    if prune_dev and prune_extra:
-        pruned_top_dirs.update({"programs", "images"})
-
-    for root, dirs, files in os.walk(src):
-        if prune_dev:
-            rel = os.path.relpath(root, src)
-            if rel == ".":
-                dirs[:] = [d for d in dirs if d not in pruned_top_dirs]
-
-        rel = os.path.relpath(root, src)
-        out_root = dst if rel == "." else os.path.join(dst, rel)
-        os.makedirs(out_root, exist_ok=True)
-        for d in dirs:
-            os.makedirs(os.path.join(out_root, d), exist_ok=True)
-        for f in files:
-            shutil.copy2(os.path.join(root, f), os.path.join(out_root, f))
+        raise RuntimeError(f"Missing required {label}: {src}")
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copytree(src, dst, dirs_exist_ok=True)
 
 
-def copy_tree_into_prefix(src: str, dst_root: str, dst_prefix: str) -> None:
+def copy_optional_tree(src: str, dst: str, label: str) -> bool:
     if not os.path.isdir(src):
-        return
-    for root, dirs, files in os.walk(src):
-        rel = os.path.relpath(root, src)
-        if rel == ".":
-            out_root = os.path.join(dst_root, dst_prefix)
-        else:
-            out_root = os.path.join(dst_root, dst_prefix, rel)
-        os.makedirs(out_root, exist_ok=True)
-        for d in dirs:
-            os.makedirs(os.path.join(out_root, d), exist_ok=True)
-        for f in files:
-            shutil.copy2(os.path.join(root, f), os.path.join(out_root, f))
+        print(f"Warning: optional {label} missing: {src}")
+        return False
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    return True
 
 
-def copy_fonts_subset(src_fonts_dir: str, dst_root: str) -> None:
-    os.makedirs(dst_root, exist_ok=True)
-    profile = os.environ.get("EYN_INSTALLER_RAMDISK_FONT_PROFILE", "minimal")
-    if profile == "none":
-        return
-
-    if profile == "full":
-        copy_tree_into_prefix(src_fonts_dir, dst_root, "fonts")
-        return
-
-    # minimal profile: keep only one default runtime font.
-    os.makedirs(os.path.join(dst_root, "fonts"), exist_ok=True)
-    src_file = os.path.join(src_fonts_dir, "unscii-8.hex")
-    if os.path.isfile(src_file):
-        shutil.copy2(src_file, os.path.join(dst_root, "fonts", "unscii-8.hex"))
+def copy_optional_file(src: str, dst: str, label: str) -> bool:
+    if not os.path.isfile(src):
+        print(f"Warning: optional {label} missing: {src}")
+        return False
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, dst)
+    return True
 
 
-def rle_packbits_encode(data: bytes) -> bytes:
-    out = bytearray()
-    i = 0
-    n = len(data)
-    while i < n:
-        run_len = 1
-        while i + run_len < n and run_len < 128 and data[i + run_len] == data[i]:
-            run_len += 1
-
-        if run_len >= 3:
-            out.append(127 + run_len)
-            out.append(data[i])
-            i += run_len
-            continue
-
-        lit_start = i
-        lit_len = 0
-        while i < n and lit_len < 128:
-            run_probe = 1
-            while i + run_probe < n and run_probe < 128 and data[i + run_probe] == data[i]:
-                run_probe += 1
-            if run_probe >= 3:
-                break
-            i += 1
-            lit_len += 1
-
-        out.append(lit_len - 1)
-        out.extend(data[lit_start:lit_start + lit_len])
-
-    return bytes(out)
-
-
-def create_payload_archive(src_root: str, out_file: str) -> None:
-    os.makedirs(os.path.dirname(out_file), exist_ok=True)
-
-    entries = []
-    for root, dirs, files in os.walk(src_root):
-        dirs.sort()
-        files.sort()
-        rel_root = os.path.relpath(root, src_root)
-        rel_root = "" if rel_root == "." else rel_root.replace("\\", "/")
-
-        if rel_root:
-            entries.append((PAYLOAD_TYPE_DIR, "/" + rel_root, None))
-
-        for name in files:
-            rel = (name if not rel_root else (rel_root + "/" + name)).replace("\\", "/")
-            entries.append((PAYLOAD_TYPE_FILE, "/" + rel, os.path.join(root, name)))
-
-    with open(out_file, "wb") as out:
-        out.write(PAYLOAD_MAGIC)
-
-        for etype, path, fpath in entries:
-            p = path.encode("utf-8")
-            if len(p) > 0xFFFF:
-                raise RuntimeError(f"payload path too long: {path}")
-
-            if etype == PAYLOAD_TYPE_DIR:
-                out.write(struct.pack("<HBBII", len(p), etype, 0, 0, 0))
-                out.write(p)
+def read_manifest_packages(manifest_path: str) -> list[str]:
+    packages: list[str] = []
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
                 continue
+            token = line.split()[0]
+            packages.append(token)
+    return packages
 
-            with open(fpath, "rb") as f:
-                raw = f.read()
-            comp = rle_packbits_encode(raw)
-            if len(comp) < len(raw):
-                flags = PAYLOAD_FLAG_RLE
-                payload = comp
-            else:
-                flags = 0
-                payload = raw
 
-            out.write(struct.pack("<HBBII", len(p), etype, flags, len(raw), len(payload)))
-            out.write(p)
-            out.write(payload)
+def resolve_manifest_archive_sources(index_json_path: str, manifest_packages: list[str]) -> dict[str, str]:
+    with open(index_json_path, "r", encoding="utf-8") as f:
+        index_data = json.load(f)
 
-        out.write(struct.pack("<HBBII", 0, 0, 0, 0, 0))
+    packages = index_data.get("packages")
+    if not isinstance(packages, dict):
+        raise RuntimeError(f"Invalid package index format: {index_json_path}")
+
+    archive_sources: dict[str, str] = {}
+    for package_name in manifest_packages:
+        package_entry = packages.get(package_name)
+        if not isinstance(package_entry, dict):
+            raise RuntimeError(f"Package '{package_name}' missing in index.json")
+
+        latest_version = package_entry.get("latest")
+        versions = package_entry.get("versions")
+        if not isinstance(latest_version, str) or not latest_version:
+            raise RuntimeError(f"Package '{package_name}' missing latest version")
+        if not isinstance(versions, dict) or latest_version not in versions:
+            raise RuntimeError(f"Package '{package_name}' latest version not found in versions table")
+
+        version_entry = versions[latest_version]
+        if not isinstance(version_entry, dict):
+            raise RuntimeError(f"Package '{package_name}' version entry is malformed")
+
+        url = version_entry.get("url")
+        if not isinstance(url, str) or "/" not in url:
+            raise RuntimeError(f"Package '{package_name}' has invalid URL in index.json")
+
+        archive_name = url.rsplit("/", 1)[1]
+        if not archive_name:
+            raise RuntimeError(f"Package '{package_name}' resolved to an empty archive name")
+
+        archive_sources[package_name] = archive_name
+
+    return archive_sources
+
+
+def cache_archive_name_for_package(package_name: str) -> str:
+    # EYNFS stores names in a 32-byte field including NUL; keep <= 31 chars.
+    candidate = f"{package_name}.pkg"
+    if len(candidate) > 31:
+        raise RuntimeError(
+            f"Package name '{package_name}' is too long for EYNFS cache archive naming"
+        )
+    return candidate
 
 
 def compute_tree_stats(root: str) -> tuple[int, int, int]:
@@ -263,39 +215,101 @@ def main() -> int:
     testdir = os.path.join(repo_root, "testdir")
     kernel_bin = os.path.join(repo_root, "tmp_user", "boot", "kernel.bin")
 
-    prune_dev = os.environ.get("EYN_INSTALLER_RAMDISK_PRUNE", "1") != "0"
-    full_stage = os.environ.get("EYN_INSTALLER_RAMDISK_FULL", "0") == "1"
-    if prune_dev:
-        print("Installer ramdisk: pruning dev-only payload")
+    print("Installer ramdisk: using package-based workflow")
 
-    with tempfile.TemporaryDirectory(prefix="installer_ramdisk_src_") as stage, tempfile.TemporaryDirectory(prefix="installer_payload_src_") as payload_src:
-        copy_tree(testdir, payload_src, prune_dev=prune_dev)
+    with tempfile.TemporaryDirectory(prefix="installer_ramdisk_src_") as stage:
+        os.makedirs(os.path.join(stage, "binaries"), exist_ok=True)
+        copy_required_file(
+            os.path.join(testdir, "binaries", "installer"),
+            os.path.join(stage, "binaries", "installer"),
+            "installer binary",
+        )
+        copy_required_file(
+            os.path.join(testdir, "binaries", "install"),
+            os.path.join(stage, "binaries", "install"),
+            "install binary",
+        )
+        copy_required_file(
+            os.path.join(testdir, "binaries", "extract"),
+            os.path.join(stage, "binaries", "extract"),
+            "extract binary",
+        )
 
-        include_fonts = os.environ.get("EYN_INSTALLER_RAMDISK_INCLUDE_FONTS", "0") != "0"
-        fonts_dir = os.path.join(repo_root, "fonts")
-        if include_fonts and os.path.isdir(fonts_dir):
-            copy_fonts_subset(fonts_dir, payload_src)
+        copy_required_file(
+            os.path.join(testdir, "etc", "resolv.conf"),
+            os.path.join(stage, "etc", "resolv.conf"),
+            "resolver config",
+        )
+        copy_required_tree(
+            os.path.join(testdir, "config"),
+            os.path.join(stage, "config"),
+            "config directory",
+        )
+        copy_required_tree(
+            os.path.join(testdir, "icons"),
+            os.path.join(stage, "icons"),
+            "icons directory",
+        )
+        copy_required_tree(
+            os.path.join(testdir, "icons16"),
+            os.path.join(stage, "icons16"),
+            "icons16 directory",
+        )
+        copy_required_tree(
+            os.path.join(testdir, ".view"),
+            os.path.join(stage, ".view"),
+            "view backend directory",
+        )
 
-        userland_include = os.path.join(repo_root, "userland", "include")
-        include_headers = os.environ.get("EYN_INSTALLER_RAMDISK_INCLUDE_HEADERS", "0") != "0"
-        if include_headers and os.path.isdir(userland_include):
-            copy_tree_into_prefix(userland_include, payload_src, "include")
+        copy_optional_tree(
+            os.path.join(testdir, "fonts"),
+            os.path.join(stage, "fonts"),
+            "fonts directory",
+        )
+        copy_optional_file(
+            os.path.join(testdir, "programs", "chibicc"),
+            os.path.join(stage, "programs", "chibicc"),
+            "chibicc program",
+        )
 
-        if full_stage:
-            copy_tree(payload_src, stage, prune_dev=False)
-        else:
-            os.makedirs(os.path.join(stage, "binaries"), exist_ok=True)
-            installer_bin = os.path.join(testdir, "binaries", "installer")
-            if os.path.isfile(installer_bin):
-                shutil.copy2(installer_bin, os.path.join(stage, "binaries", "installer"))
+        copy_required_file(
+            kernel_bin,
+            os.path.join(stage, "boot", "kernel.bin"),
+            "kernel image",
+        )
 
-        # Ensure installer payload includes kernel for installed target.
-        if os.path.isfile(kernel_bin):
-            payload_boot_dir = os.path.join(payload_src, "boot")
-            os.makedirs(payload_boot_dir, exist_ok=True)
-            shutil.copy2(kernel_bin, os.path.join(payload_boot_dir, "kernel.bin"))
+        packages_root = os.path.join(repo_root, "EYN-packages")
+        copy_required_file(
+            os.path.join(packages_root, "index.json"),
+            os.path.join(stage, "installer", "index.json"),
+            "local package index",
+        )
+        copy_required_file(
+            os.path.join(packages_root, "www", "base.manifest"),
+            os.path.join(stage, "installer", "base.manifest"),
+            "base package manifest",
+        )
+        copy_required_file(
+            os.path.join(packages_root, "www", "base.pkg"),
+            os.path.join(stage, "installer", "base.pkg"),
+            "base package archive",
+        )
 
-        # Optional GRUB boot sector payload for MBR write step.
+        manifest_packages = read_manifest_packages(os.path.join(packages_root, "www", "base.manifest"))
+        archive_sources = resolve_manifest_archive_sources(
+            os.path.join(packages_root, "index.json"),
+            manifest_packages,
+        )
+        for package_name in sorted(archive_sources.keys()):
+            archive_name = archive_sources[package_name]
+            cache_name = cache_archive_name_for_package(package_name)
+            copy_required_file(
+                os.path.join(packages_root, "www", "releases", archive_name),
+                os.path.join(stage, "installer", "pkg", cache_name),
+                f"package archive {package_name}",
+            )
+
+        # Optional GRUB boot sector assets for MBR write step.
         bootimg = find_grub_bootimg()
         coreimg = ""
         if bootimg:
@@ -304,9 +318,6 @@ def main() -> int:
             shutil.copy2(bootimg, os.path.join(grub_dir, "boot.img"))
             coreimg = os.path.join(grub_dir, "core.img")
             build_grub_core_image(repo_root, coreimg, kernel_bin)
-
-        payload_archive = os.path.join(stage, "installer", "payload.eynpkg")
-        create_payload_archive(payload_src, payload_archive)
 
         total_sectors, part1_sectors, part2_sectors, part1_start_sector = pick_partition_sizes(stage)
         print(

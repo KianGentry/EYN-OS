@@ -7,6 +7,7 @@
 #include <watchdog.h>
 #include <misc/sched.h>
 #include <cpu/user_elf.h>
+#include <terminals.h>
 
 extern void poll_keyboard_for_ctrl_c();
 
@@ -26,6 +27,54 @@ extern void poll_keyboard_for_ctrl_c();
 
 // store handlers
 static irq_handler_t g_irq_handlers[16];
+
+#if defined(EYNOS_ARCH_AMD64)
+typedef struct irq_saved_frame_amd64_t {
+    uint64 rax;
+    uint64 rcx;
+    uint64 rdx;
+    uint64 rbx;
+    uint64 rbp;
+    uint64 rsi;
+    uint64 rdi;
+    uint64 r8;
+    uint64 r9;
+    uint64 r10;
+    uint64 r11;
+    uint64 r12;
+    uint64 r13;
+    uint64 r14;
+    uint64 r15;
+    uint64 rip;
+    uint64 cs;
+    uint64 rflags;
+} irq_saved_frame_amd64_t;
+#else
+typedef struct irq_saved_frame_i386_t {
+    uint32 edi;
+    uint32 esi;
+    uint32 ebp;
+    uint32 esp;
+    uint32 ebx;
+    uint32 edx;
+    uint32 ecx;
+    uint32 eax;
+    uint32 eip;
+    uint32 cs;
+    uint32 eflags;
+} irq_saved_frame_i386_t;
+#endif
+
+static int irq_frame_from_user_mode(void* frame_ptr) {
+    if (!frame_ptr) return 0;
+#if defined(EYNOS_ARCH_AMD64)
+    const irq_saved_frame_amd64_t* frame = (const irq_saved_frame_amd64_t*)frame_ptr;
+    return ((uint16)frame->cs & 3u) == 3u;
+#else
+    const irq_saved_frame_i386_t* frame = (const irq_saved_frame_i386_t*)frame_ptr;
+    return ((uint16)frame->cs & 3u) == 3u;
+#endif
+}
 
 // assembly stubs to route to C handlers
 extern void irq0();
@@ -81,22 +130,22 @@ void irq_init(void) {
     pic_remap();
 
     // install IDT gates for IRQs 0..15 at 0x20..0x2F
-    set_idt_gate(32, (uint32)irq0);
-    set_idt_gate(33, (uint32)irq1);
-    set_idt_gate(34, (uint32)irq2);
-    set_idt_gate(35, (uint32)irq3);
-    set_idt_gate(36, (uint32)irq4);
-    set_idt_gate(37, (uint32)irq5);
-    set_idt_gate(38, (uint32)irq6);
-    set_idt_gate(39, (uint32)irq7);
-    set_idt_gate(40, (uint32)irq8);
-    set_idt_gate(41, (uint32)irq9);
-    set_idt_gate(42, (uint32)irq10);
-    set_idt_gate(43, (uint32)irq11);
-    set_idt_gate(44, (uint32)irq12);
-    set_idt_gate(45, (uint32)irq13);
-    set_idt_gate(46, (uint32)irq14);
-    set_idt_gate(47, (uint32)irq15);
+    set_idt_gate(32, (uintptr)irq0);
+    set_idt_gate(33, (uintptr)irq1);
+    set_idt_gate(34, (uintptr)irq2);
+    set_idt_gate(35, (uintptr)irq3);
+    set_idt_gate(36, (uintptr)irq4);
+    set_idt_gate(37, (uintptr)irq5);
+    set_idt_gate(38, (uintptr)irq6);
+    set_idt_gate(39, (uintptr)irq7);
+    set_idt_gate(40, (uintptr)irq8);
+    set_idt_gate(41, (uintptr)irq9);
+    set_idt_gate(42, (uintptr)irq10);
+    set_idt_gate(43, (uintptr)irq11);
+    set_idt_gate(44, (uintptr)irq12);
+    set_idt_gate(45, (uintptr)irq13);
+    set_idt_gate(46, (uintptr)irq14);
+    set_idt_gate(47, (uintptr)irq15);
 
     // unmask PIT on PIC (IRQ0)
     uint8 mask1 = inportb(PIC1_DATA);
@@ -112,7 +161,6 @@ void irq_init(void) {
      * Overhead: ~1 µs ISR × 1000/s = 1 ms/s CPU cost -- negligible.
      */
     pit_init(1000);
-    extern void sched_set_tick_hz(uint32);
     sched_set_tick_hz(1000);
 }
 
@@ -128,10 +176,12 @@ void pic_send_eoi(int irq) {
     outportb(PIC1_COMMAND, PIC_EOI);
 }
 
-static void irq_dispatch_core(int irq_number, int send_eoi) {
+static void irq_dispatch_core(int irq_number, int send_eoi, void* frame_ptr) {
     if (irq_number < 0 || irq_number >= 16) {
         return;
     }
+
+    int interrupted_user_mode = irq_frame_from_user_mode(frame_ptr);
 
     if (irq_number == 0 && g_user_task_active) {
         // Ring3 tasks can run for long periods without calling into the kernel.
@@ -154,54 +204,81 @@ static void irq_dispatch_core(int irq_number, int send_eoi) {
         }
 
         if (g_user_interrupt) {
-            g_user_interrupt = 0;
-            user_task_notify_exit(-130);
-            g_user_task_active = 0;
-            g_user_task_term = -1;
-            g_user_task_ui_dirty = 0;
-            g_abort_to_shell = 1;
+            // Deliver SIGINT to the active ring3 task even if it is currently
+            // inside a long-running syscall in kernel mode.
+            (void)user_task_signal_current(2);
+
+            // Mirror ^C into the spawning terminal so feedback is visible even
+            // when shell redirect/capture state is active.
+            if (g_user_task_term >= 0) {
+                vterm_write_char(g_user_task_term, '^');
+                vterm_write_char(g_user_task_term, 'C');
+                vterm_write_char(g_user_task_term, '\n');
+                g_user_task_ui_dirty = 1;
+            }
             printf("^C\n");
+
+            if (interrupted_user_mode) {
+                // We were about to return directly to user mode. Terminate the
+                // running task now so scheduler/UI state is consistent before
+                // we unwind through the abort-to-shell path.
+                if (g_user_task_active) {
+                    user_task_notify_exit(-2);
+                }
+                g_user_interrupt = 0;
+                g_abort_to_shell = 1;
+            }
             if (send_eoi) {
                 pic_send_eoi(irq_number);
             }
             return;
         }
 
-        // Throttle renders (PIT is 50Hz). Only render when something changed.
+        // Throttle renders (PIT is 50Hz). Keep repainting while a user task is active
+        // so the desktop stays responsive even when the program emits no output.
         if (tile_is_tiling_active()) {
             static uint32 ui_div = 0;
             if (++ui_div >= 3) { // ~16 FPS max while user task active
                 ui_div = 0;
+                // Keep the compositor advancing even if the active task is silent.
+                // Some UI state only becomes visible after an actual frame swap,
+                // so waiting for stdout or menu activity makes the desktop look frozen.
                 if (g_user_task_ui_dirty) {
                     g_user_task_ui_dirty = 0;
-                    tile_render_once();
                 }
+                tile_render_once();
             }
         }
+
     }
 
     irq_handler_t h = g_irq_handlers[irq_number];
     if (h) {
         h();
     }
+
+    if (irq_number == 0 && g_user_task_active && interrupted_user_mode && sched_mlfq_irq_preempt_enabled()) {
+        (void)user_task_try_preempt_from_irq(frame_ptr);
+    }
+
     if (send_eoi) {
         pic_send_eoi(irq_number);
     }
 }
 
 // common C-level IRQ dispatcher called from assembly stubs
-void irq_dispatch_c(int irq_number) {
+void irq_dispatch_c(int irq_number, void* frame_ptr) {
     if (sched_det_is_enabled()) {
         if (sched_det_queue_irq(irq_number) == 0) {
             pic_send_eoi(irq_number);
             return;
         }
     }
-    irq_dispatch_core(irq_number, 1);
+    irq_dispatch_core(irq_number, 1, frame_ptr);
 }
 
-void irq_dispatch_deferred(int irq_number) {
-    irq_dispatch_core(irq_number, 0);
+void irq_dispatch_deferred(int irq_number, void* frame_ptr) {
+    irq_dispatch_core(irq_number, 0, frame_ptr);
 }
 
 

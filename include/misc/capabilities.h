@@ -25,6 +25,19 @@ enum {
 };
 
 typedef struct cap_t {
+    /*
+     * ABI-INVARIANT: User-visible object handle payload.
+     *
+     * Why: Capability tokens are copied between kernel and userland as a fixed
+     * 24-byte structure; `obj` remains 32-bit to keep this ABI stable across
+     * i386 and amd64 builds.
+     * Invariant: Kernel object pointers must be representable in 32 bits before
+     * minting/validating a capability token.
+     * Breakage if changed: Widening changes syscall payload layout and breaks
+     * existing binaries compiled against the current capability ABI.
+     * ABI-sensitive: Yes.
+     * Security-critical: Yes (prevents forged/truncated object references).
+     */
     uint32 obj;
     uint32 type;
     uint32 rights;

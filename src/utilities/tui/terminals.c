@@ -72,6 +72,9 @@ typedef struct {
     char stdin_buf[256];
     volatile int stdin_len;        // current bytes in stdin_buf
     volatile int stdin_ready;      // 1 when line is complete (Enter pressed), 0 otherwise
+    volatile int stdin_raw_mode;   // 1 for byte-stream mode, 0 for canonical line mode
+    uint16_t tty_rows;
+    uint16_t tty_cols;
 } vterm_t;
 
 static vterm_t vterms[4];
@@ -96,6 +99,22 @@ static void vterm_clear_line_icons(vterm_t* t, int row) {
         t->line_icon_anchor_col[row][i] = 0;
     }
     t->line_indent_px[row] = 0;
+}
+
+static int vterm_input_is_clear_command(const char* input) {
+    if (!input) return 0;
+
+    while (*input == ' ' || *input == '\t' || *input == '\r' || *input == '\n') {
+        input++;
+    }
+    if (input[0] != 'c' || input[1] != 'l' || input[2] != 'e' || input[3] != 'a' || input[4] != 'r') {
+        return 0;
+    }
+    input += 5;
+    while (*input == ' ' || *input == '\t' || *input == '\r' || *input == '\n') {
+        input++;
+    }
+    return *input == '\0';
 }
 
 const char* vterm_get_cwd(int idx) {
@@ -149,6 +168,9 @@ void vterm_init_all() {
         vterms[i].stdin_buf[0] = '\0';
         vterms[i].stdin_len = 0;
         vterms[i].stdin_ready = 0;
+        vterms[i].stdin_raw_mode = 0;
+        vterms[i].tty_rows = TERM_ROWS;
+        vterms[i].tty_cols = TERM_COLS;
     }
 }
 
@@ -254,7 +276,13 @@ void vterm_write_char(int idx, char ch) {
         t->version++;
     }
 
-    if (ch == '\r') return;
+    // Carriage return: move to column 0 on the current row so callers can
+    // update in-place status/progress lines.
+    if (ch == '\r') {
+        t->cur_x = 0;
+        t->version++;
+        return;
+    }
 
     // Explicit newline
     if (ch == '\n') {
@@ -605,6 +633,11 @@ void vterm_handle_key(int idx, int key) {
     }
     // Enter - execute command in this vterm
     if (key == '\n' || key == 10) {
+        // End any active history-browsing session before command execution.
+        // This guarantees the next Up starts from the newest history entry.
+        t->history_idx = -1;
+        t->saved_input[0] = '\0';
+
         // append newline visually
         vterm_write_char(idx, '\n');
         // handle command: use existing handle_shell_command, but capture output via shell redirect
@@ -621,14 +654,25 @@ void vterm_handle_key(int idx, int key) {
             // in command handlers cannot alter what Up/Down navigation recalls.
             add_to_history(&g_command_history, raw_input);
 
+            if (vterm_input_is_clear_command(raw_input)) {
+                vterm_clear(idx);
+                vterm_print_prompt(idx);
+                t->history_idx = -1;
+                t->sel_active = 0;
+                t->version++;
+                return;
+            }
+
             // temporarily redirect shell output to vterm buffer by using start_shell_redirect / shell_redirect_buf
             // Swap global shell_current_path into this vterm's cwd so commands (like cd) operate per-vterm
             char saved_global_cwd[128];
+            int saved_user_task_term = g_user_task_term;
             strncpy(saved_global_cwd, shell_current_path, sizeof(saved_global_cwd)-1);
             saved_global_cwd[sizeof(saved_global_cwd)-1] = '\0';
             // set global to this vterm's cwd for command execution
             strncpy(shell_current_path, t->cwd, 127);
             shell_current_path[127] = '\0';
+            g_user_task_term = idx;
 
             start_shell_redirect();
                 handle_shell_command(t->input_buf);
@@ -645,6 +689,7 @@ void vterm_handle_key(int idx, int key) {
             // restore previous global cwd
             strncpy(shell_current_path, saved_global_cwd, sizeof(saved_global_cwd)-1);
             shell_current_path[sizeof(saved_global_cwd)-1] = '\0';
+            g_user_task_term = saved_user_task_term;
         // append redirected output to vterm
                 if (shell_redirect_buf[0]) {
                     // The redirect buffer may contain multiple lines; append each line separately
@@ -877,6 +922,9 @@ void vterm_move_state(int dst_idx, int src_idx) {
     src->stdin_buf[0] = '\0';
     src->stdin_len = 0;
     src->stdin_ready = 0;
+    src->stdin_raw_mode = 0;
+    src->tty_rows = TERM_ROWS;
+    src->tty_cols = TERM_COLS;
 }
 
 int vterm_get_cursor_row(int idx) {
@@ -939,6 +987,16 @@ void vterm_stdin_clear(int idx) {
 int vterm_stdin_putchar(int idx, char ch) {
     if (idx < 0 || idx >= 4) return 0;
     vterm_t* t = &vterms[idx];
+
+    if (t->stdin_raw_mode) {
+        if (t->stdin_len < (int)sizeof(t->stdin_buf) - 1) {
+            t->stdin_buf[t->stdin_len++] = ch;
+            t->stdin_buf[t->stdin_len] = '\0';
+            t->stdin_ready = 1;
+            return 1;
+        }
+        return 0;
+    }
     
     // Handle backspace
     if (ch == '\b' || ch == 127) {
@@ -992,5 +1050,57 @@ void vterm_stdin_consume(int idx) {
     t->stdin_buf[0] = '\0';
     t->stdin_len = 0;
     t->stdin_ready = 0;
+}
+
+void vterm_stdin_consume_bytes(int idx, int count) {
+    if (idx < 0 || idx >= 4) return;
+    if (count <= 0) return;
+
+    vterm_t* t = &vterms[idx];
+    if (count >= t->stdin_len) {
+        vterm_stdin_consume(idx);
+        return;
+    }
+
+    int remain = t->stdin_len - count;
+    memmove(t->stdin_buf, t->stdin_buf + count, (size_t)remain);
+    t->stdin_len = remain;
+    t->stdin_buf[remain] = '\0';
+    t->stdin_ready = t->stdin_raw_mode ? (remain > 0 ? 1 : 0) : 0;
+}
+
+void vterm_stdin_set_raw(int idx, int enabled) {
+    if (idx < 0 || idx >= 4) return;
+    vterm_t* t = &vterms[idx];
+    t->stdin_raw_mode = enabled ? 1 : 0;
+    if (!t->stdin_raw_mode) {
+        // Canonical mode expects complete lines.
+        t->stdin_ready = 0;
+    } else if (t->stdin_len > 0) {
+        t->stdin_ready = 1;
+    }
+}
+
+int vterm_stdin_is_raw(int idx) {
+    if (idx < 0 || idx >= 4) return 0;
+    return vterms[idx].stdin_raw_mode;
+}
+
+void vterm_stdin_set_winsize(int idx, uint16_t rows, uint16_t cols) {
+    if (idx < 0 || idx >= 4) return;
+    if (rows == 0 || cols == 0) return;
+    vterm_t* t = &vterms[idx];
+    t->tty_rows = rows;
+    t->tty_cols = cols;
+}
+
+void vterm_stdin_get_winsize(int idx, uint16_t* out_rows, uint16_t* out_cols) {
+    if (out_rows) *out_rows = (uint16_t)TERM_ROWS;
+    if (out_cols) *out_cols = (uint16_t)TERM_COLS;
+    if (idx < 0 || idx >= 4) return;
+
+    vterm_t* t = &vterms[idx];
+    if (out_rows) *out_rows = t->tty_rows;
+    if (out_cols) *out_cols = t->tty_cols;
 }
 

@@ -1,6 +1,8 @@
 #ifndef TERMINALS_H
 #define TERMINALS_H
 
+#include <stdint.h>
+
 void vterm_init_all();
 void vterm_write_char(int idx, char ch);
 // Erase a single previously echoed output character (used for interactive stdin echo).
@@ -88,5 +90,15 @@ const char* vterm_stdin_data(int idx);
 int vterm_stdin_len(int idx);
 // Consume/clear the stdin buffer after the syscall has read the data
 void vterm_stdin_consume(int idx);
+// Consume a specific number of bytes from the head of stdin buffer.
+void vterm_stdin_consume_bytes(int idx, int count);
+
+// TTY mode controls for user-task stdin routing.
+void vterm_stdin_set_raw(int idx, int enabled);
+int vterm_stdin_is_raw(int idx);
+
+// TTY winsize state stored per-vterm.
+void vterm_stdin_set_winsize(int idx, uint16_t rows, uint16_t cols);
+void vterm_stdin_get_winsize(int idx, uint16_t* out_rows, uint16_t* out_cols);
 
 #endif // TERMINALS_H

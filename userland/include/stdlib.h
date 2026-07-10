@@ -13,6 +13,10 @@ void* realloc(void* p, size_t n);
 
 int atexit(void (*fn)(void));
 char* getenv(const char* name);
+extern char** environ;
+
+/* Runtime startup hook used by crt0 to publish argc/argv/envp to libc. */
+void _eyn_libc_init(int argc, char** argv, char** envp);
 
 void abort(void);
 void exit(int code);

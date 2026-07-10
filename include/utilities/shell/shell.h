@@ -25,6 +25,8 @@ void add_to_history(command_history_t* history, const char* command);
 void clear_history(command_history_t* history);
 void show_history(command_history_t* history);
 
+extern int g_boot_text_mode;
+
 // Command lookup function
 typedef void (*shell_cmd_handler_t)(const shell_args_t* args);
 shell_cmd_handler_t find_command(const char* name);
@@ -32,6 +34,8 @@ shell_cmd_handler_t find_command(const char* name);
 // Drive context helpers used by shell GUIs and filesystem code
 uint8 get_current_physical_drive(void);
 uint8 get_current_logical_drive(void);
+uint8 shell_get_binary_lookup_drive(void);
+const char* shell_get_binary_lookup_base(void);
 
 // Global history instance
 extern command_history_t g_command_history;

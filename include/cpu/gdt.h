@@ -10,10 +10,13 @@
 #define GDT_USER_DS   0x23
 #define GDT_TSS_SEL   0x28
 #define GDT_LDT_SEL   0x30
+#define GDT_TLS_SEL   0x3B   /* GDT entry 7, RPL=3, DPL=3 user TLS */
+#define GDT_TLS_ENTRY 7
 
 void gdt_init(void);
 void tss_set_kernel_stack(uint32 esp0);
 void gdt_set_ldt_descriptor(uint32 base, uint32 limit);
+void gdt_set_tls_descriptor(uint32 base, uint32 limit);
 
 /* Enters ring 3 at `entry` with stack pointer `user_stack_top`. Does not return. */
 void enter_user_mode(uint32 entry, uint32 user_stack_top);

@@ -27,13 +27,18 @@ irq%1:
     jmp .do_abort_%1
 .stack_ok_%1:
 
+    mov eax, esp
+    push eax
     push dword %1
     call irq_dispatch_c
-    add esp, 4
+    add esp, 8
 
     ; If requested, abandon return-to-user and jump back into the shell.
     cmp dword [g_abort_to_shell], 0
     je .no_abort_%1
+    mov ax, [esp + 36]
+    test ax, 3
+    jz .clear_abort_%1
 .do_abort_%1:
     mov dword [g_abort_to_shell], 0
     mov ax, 0x10
@@ -48,6 +53,8 @@ irq%1:
 .halt_%1:
     hlt
     jmp .halt_%1
+.clear_abort_%1:
+    mov dword [g_abort_to_shell], 0
 .no_abort_%1:
     popad
     iretd

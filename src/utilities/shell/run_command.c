@@ -64,31 +64,34 @@ void run_command(string arg) {
     // Resolve relative paths against current shell directory so subdirectories work
     char abspath[128];
     resolve_path(filename, shell_current_path, abspath, sizeof(abspath));
+
+    /* ELF detection takes priority so dynamically linked binaries can be
+     * launched through the normal run path regardless of extension. */
+    uint8 magic[4] = {0, 0, 0, 0};
+    int magic_read = vfs_read_file(g_current_drive, abspath, magic, 4);
+    int is_elf = (magic_read >= 4 && magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F');
+
+    if (is_elf) {
+        (void)user_task_spawn_argv(g_current_drive, abspath, argc, argv);
+        return;
+    }
     
     if (ext && strcmp(ext, ".shell") == 0) {
         // execute as shell script via the script interpreter
         (void)shell_script_run(g_current_drive, abspath, argc, argv);
         return;
     } else if (ext && strcmp(ext, ".uelf") == 0) {
-        // execute as ring3 ELF using the EYN-OS syscall ABI
-        (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
+        // execute as ring3 ELF using the EYN-OS syscall ABI (asynchronously)
+        (void)user_task_spawn_argv(g_current_drive, abspath, argc, argv);
         return;
     } else if ((ext && strcmp(ext, ".eyn") == 0) || (ext && strcmp(ext, ".bin") == 0) || (ext && strcmp(ext, ".flat") == 0)) {
         // execute as native program (explicit native extension)
         result = native_execute_program(abspath);
     } else if (!ext) {
         /*
-         * No extension: auto-detect by reading the first 4 bytes.
-         * Most /binaries entries are extensionless UELFs.  If the file starts
-         * with "\x7fELF", run as ring3 UELF; if it starts with '#' (script
-         * comment/shebang), run as a shell script; otherwise fall back to native.
+         * No extension: if it was not ELF above, treat as shell script or
+         * fall back to native.  This keeps the legacy extensionless flow.
          */
-        uint8 magic[4] = {0, 0, 0, 0};
-        vfs_read_file(g_current_drive, abspath, magic, 4);
-        if (magic[0] == 0x7F && magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F') {
-            (void)user_elf_run_argv(g_current_drive, abspath, argc, argv);
-            return;
-        }
         if (magic[0] == '#') {
             (void)shell_script_run(g_current_drive, abspath, argc, argv);
             return;

@@ -7,6 +7,7 @@ extern syscall_dispatch
 extern g_abort_to_shell
 extern g_user_task_active
 extern g_user_segdom_ds
+extern g_user_segdom_gs
 extern stack_space
 extern stack_bottom
 extern isr_abort_stack_top
@@ -15,6 +16,10 @@ extern user_task_abort_continue
 
 section .text
 syscall_entry:
+    ; Save user GS *before* clobbering segment registers.
+    ; Linux i386 TLS uses GS (set via set_thread_area), and it must survive syscalls.
+    push gs
+
     ; Ensure kernel data segments while running the handler.
     ; Preserve EAX: user passes syscall number in EAX.
     push eax
@@ -26,27 +31,37 @@ syscall_entry:
     pop eax
 
     ; Build a regs_t compatible frame (see include/cpu/isr.h)
-    ; Layout from &EDI: edi..eax, int_no, err_code, then CPU iret frame.
+    ; Stack layout (low→high after pusha):
+    ;   [esp+0..31]  pusha frame (EDI..EAX); [esp+28]=EAX=syscall#
+    ;   [esp+32]     int_no (0x80)
+    ;   [esp+36]     err_code (0)
+    ;   [esp+40]     user_gs  (our push gs above)
+    ;   [esp+44+]    CPU iret frame: EIP, CS, EFLAGS, user_ESP, SS
     push dword 0            ; err_code
     push dword 0x80         ; int_no
     pusha
 
     ; Stack overflow tripwire: if the kernel C call stack underflowed (ESP below
     ; stack_bottom), bail out to a known-good stack.
-    ; NOTE: isr_abort_stack_top is only used as the re-entry point in the abort
-    ; path below; the overflow check must guard the MAIN kernel stack which runs
-    ; between stack_bottom (low) and stack_space (high, = TSS.esp0).
     cmp esp, stack_bottom
     jae .stack_ok
     mov dword [g_abort_to_shell], 1
     jmp .do_abort
 .stack_ok:
+    ; Preserve original syscall number (saved EAX in pusha frame) across C call.
+    mov edx, [esp + 28]
+    push edx
 
     ; pass &regs_t (starts at saved EDI)
-    mov eax, esp
+    lea eax, [esp + 4]
     push eax
     call syscall_dispatch
     add esp, 4
+    pop edx
+
+    ; SYSCALL_EXIT (eax=2) must never return to user mode.
+    cmp edx, 2
+    je .do_abort
 
     ; If requested, abandon return-to-user and jump back into the shell.
     cmp dword [g_abort_to_shell], 0
@@ -74,33 +89,34 @@ syscall_entry:
     ; Restore registers
     popa
 
-    ; Discard int_no and err_code
+    ; Discard int_no and err_code; stack now: [esp+0]=user_gs, [esp+4+]=iret frame
     add esp, 8
 
-    ; Restore data segments appropriate for the return privilege level.
-    ; After the add above, the iret frame starts at [esp]: eip, cs, eflags, useresp, ss
-    ; Preserve EAX: holds syscall return value.
+    ; Restore user DS/ES/FS from global (flat user data segment).
+    ; GS is restored from the value saved on entry, preserving TLS.
     push eax
-    mov ax, [esp + 8]
-    test ax, 3
-    jz .ret_kernel
     mov ax, [g_user_segdom_ds]
     test ax, ax
-    jnz .ret_user_seg
+    jnz .has_ds
     mov ax, 0x23
-.ret_user_seg:
+.has_ds:
     mov ds, ax
     mov es, ax
     mov fs, ax
-    mov gs, ax
-    jmp .seg_done
-.ret_kernel:
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov fs, ax
-    mov gs, ax
-.seg_done:
     pop eax
+
+    ; Discard saved user GS from entry frame and restore GS from the tracked
+    ; selector. This lets set_thread_area updates persist across syscalls.
+    add esp, 4
+    push eax
+    mov ax, [g_user_segdom_gs]
+    test ax, ax
+    jnz .has_gs
+    mov ax, [g_user_segdom_ds]
+.has_gs:
+    mov gs, ax
+    pop eax
+
     iretd
+
 

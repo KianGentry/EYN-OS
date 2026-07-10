@@ -36,6 +36,7 @@ int ata_drive_present(uint8 drive);
 
 drive_info_t* ata_get_drive_info(uint8 drive);
 void ata_list_drives(void);
+int ata_get_drive_status(uint8 drive, char* status_buffer, int buffer_size);
 
 // Compatibility helper used by some shell tooling.
 void ata_identify_drive(uint8 drive, char* model, uint32* sectors);

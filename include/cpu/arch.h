@@ -16,7 +16,7 @@
 
 #include <misc/types.h>
 
-typedef uint32 arch_irq_state_t;
+typedef uintptr arch_irq_state_t;
 
 /* Interrupt state management */
 void arch_disable_interrupts(void);

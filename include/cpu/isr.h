@@ -80,6 +80,7 @@ int syscall_get_user_fd_inherit_mode(void);
 // Configure fd numbers backing user stdin/stdout/stderr for the next/active task.
 void syscall_set_user_stdio_fds(int stdin_fd, int stdout_fd, int stderr_fd);
 void syscall_reset_user_stdio_fds(void);
+void syscall_get_user_stdio_fds(int* stdin_fd, int* stdout_fd, int* stderr_fd);
 
 // Kernel-side helpers for creating/closing user FD entries for shell plumbing.
 int syscall_kernel_pipe_create(int* out_read_fd, int* out_write_fd);
@@ -95,5 +96,33 @@ void syscall_reset_user_guis(void);
 
 // CPU exception C dispatcher (called from src/cpu/isr.asm)
 void isr_dispatch(regs_t* regs);
+
+#if defined(EYNOS_ARCH_AMD64)
+/* amd64 native trap-frame views produced by assembly entry stubs. */
+typedef struct amd64_interrupt_frame_t {
+    uint64 vector;
+    uint64 error_code;
+    uint64 rip;
+    uint64 cs;
+    uint64 rflags;
+} amd64_interrupt_frame_t;
+
+typedef struct amd64_syscall_frame_t {
+    uint64 syscall_no;
+    uint64 arg1;
+    uint64 arg2;
+    uint64 arg3;
+    uint64 arg4;
+    uint64 arg5;
+    uint64 rip;
+    uint64 cs;
+    uint64 rflags;
+    uint64 user_rsp;
+    uint64 user_ss;
+} amd64_syscall_frame_t;
+
+void isr_amd64_dispatch_frame(const amd64_interrupt_frame_t* frame);
+uint64 syscall_dispatch_amd64_frame(const amd64_syscall_frame_t* frame);
+#endif
 
 #endif

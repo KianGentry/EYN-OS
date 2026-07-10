@@ -70,6 +70,7 @@ New wrappers:
 
 `make build` now generates installer boot media with a RAM module:
 - Builds userland installer binary: `testdir/binaries/installer`
+- Builds userland install binary: `testdir/binaries/install`
 - Builds RAM EYNFS image: `tmp_user/boot/installer_ramdisk.img`
 - Adds GRUB module line in ISO config:
   - `module /boot/installer_ramdisk.img ramdisk`
@@ -85,20 +86,44 @@ Auto-start policy:
 ## Installer Program
 
 Source:
-- `testdir/code/installer_uelf.c`
+- `EYN-packages/packages/installer/installer_uelf.c`
+
+Build workflow note:
+- Installer app development now lives under `EYN-packages/packages/*`.
+- `make installer_userland` builds `installer`, `install`, and `extract` from
+  those package sources via `EYN-packages/devtools/build_user_c.sh`.
 
 Current flow:
 1. GUI drive selection
-2. Partition + EYNFS format via `INSTALLER_PREPARE_DRIVE`
-3. Apply packaged payload archive from `RAM:/installer/payload.eynpkg`
-4. Fallback to recursive `RAM:/` copy only if archive is missing
-4. Write `/boot/grub/grub.cfg`
-5. Embed GRUB BIOS bootloader to disk
+2. GUI install-options screen (menuconfig-like toggles):
+  - Select exact base packages from `base.manifest`
+  - Toggle icon payload (`/icons`, `/icons16`)
+  - Toggle font payload and choose per-font files from `RAM:/fonts`
+  - Toggle optional compiler payload (`/binaries/chibicc` from `RAM:/programs/chibicc`)
+3. Partition + EYNFS format via `INSTALLER_PREPARE_DRIVE`
+4. Run package workflow (requires `RAM:/installer/base.manifest`):
+  - Seed `/binaries/install`, `/binaries/extract`, `/binaries/installer`, and `/boot/kernel.bin`
+  - Seed required system content from RAM media:
+    - `/etc/resolv.conf`
+    - `/config/*`
+    - `/.view/*`
+    - Optional by installer selection: `/icons/*`, `/icons16/*`, `/fonts/*`, `/binaries/chibicc`
+   - Seed cache files from RAM media:
+     - `/cache/index.json`
+     - `/cache/base.pkg`
+     - `/cache/base.manifest`
+    - Optional per-package fallback cache: `RAM:/installer/pkg/<package>.pkg`
+   - Install packages listed in manifest using the in-process install engine
+     (same resolver/package logic as `install`, without per-package spawn/wait)
+    - Installer runs package installs in auto-confirm mode for destination prompts
+      (non-interactive install path)
+5. Write `/boot/grub/grub.cfg`
+6. Embed GRUB BIOS bootloader to disk
 
 Installer UX progress reporting:
 - During install phases, the GUI now repaints continuously from the worker path
   (no "frozen" look while copy/write is in progress).
-- A progress bar is shown during payload apply/copy and bootloader stages.
+- A progress bar is shown during package install and bootloader stages.
 - Live status text below the bar shows the current file/directory/action.
 
 Note:
@@ -115,11 +140,22 @@ Note:
 
 ## RAM Media Size
 
-Installer ramdisk build now prunes dev-only payload by default:
-- Excludes `testdir/code` from RAM media staging.
-- Toggle with environment variable:
-  - `EYN_INSTALLER_RAMDISK_PRUNE=1` (default): prune dev-only content
-  - `EYN_INSTALLER_RAMDISK_PRUNE=0`: include full `testdir/`
+Installer ramdisk build now always stages a minimal package-installation medium:
+- `RAM:/binaries/install`
+- `RAM:/binaries/extract`
+- `RAM:/binaries/installer`
+- `RAM:/etc/resolv.conf`
+- `RAM:/config/*`
+- `RAM:/.view/*`
+- `RAM:/icons/*`
+- `RAM:/icons16/*`
+- `RAM:/fonts/*` (optional)
+- `RAM:/programs/chibicc` (optional)
+- `RAM:/installer/index.json`
+- `RAM:/installer/base.manifest`
+- `RAM:/installer/base.pkg`
+- `RAM:/installer/pkg/<package>.pkg`
+- `RAM:/boot/kernel.bin`
 
 Installer ramdisk image sizing is now dynamic:
 - The builder sizes EYNFS and swap partitions from staged installer content,
@@ -134,27 +170,45 @@ Size tuning environment variables:
 - `EYN_INSTALLER_RAMDISK_SWAP_MB` (default `0`): swap partition size in MB.
 - `EYN_INSTALLER_RAMDISK_PART1_START_SECTOR` (default `1`): partition start
   LBA in the installer ramdisk image (reduces module file bytes vs 2048).
-- `EYN_INSTALLER_RAMDISK_PRUNE_EXTRA` (default `1`): additionally prunes
-  heavy optional content (`testdir/programs`, `testdir/images`) from installer
-  payload to improve low-RAM boot success.
-- `EYN_INSTALLER_RAMDISK_INCLUDE_HEADERS` (default `0`): include
-  `userland/include` in payload.
-- `EYN_INSTALLER_RAMDISK_INCLUDE_FONTS` (default `0`): include fonts in
-  payload (`EYN_INSTALLER_RAMDISK_FONT_PROFILE=none|minimal|full`, default
-  `minimal` when enabled).
 
 Build integration note:
 - Installer ramdisk build explicitly disables `copy_testdir_to_eynfs.py`
   repo-level auto-injection of `/fonts` and `/include` (`EYNFS_COPY_FONTS=0`,
   `EYNFS_COPY_HEADERS=0`) to keep module size bounded.
 
-Installer media now supports a two-stage payload model:
-- Host build creates `installer/payload.eynpkg` from staged payload content.
-- Payload archive supports file/dir entries and optional RLE compression.
-- Installer applies archive entries via EYNFS stream writes on target.
+## Host Build Menu Configuration
 
-Minimal-vs-full stage toggle:
-- `EYN_INSTALLER_RAMDISK_FULL=0` (default): keep stage minimal (installer +
-  required boot assets + packaged payload)
-- `EYN_INSTALLER_RAMDISK_FULL=1`: also copy full staged payload tree into RAM
-  media (legacy-heavy mode)
+EYN-OS host builds now support a Linux-style text configuration screen:
+
+- `make menuconfig`
+
+This writes `.eynosconfig` at the repository root. The Makefile auto-loads
+that file and applies options to both kernel build and installer ramdisk build.
+
+Current keys:
+- `ARCH`: target architecture (`i386` or `amd64`)
+
+Note:
+- Legacy menuconfig installer payload toggles may still appear in some local
+  trees, but they are ignored by the current package-manifest-only installer
+  media pipeline.
+
+Package workflow media (default and only mode):
+- Carries a minimal runtime package medium:
+  - `RAM:/binaries/install`
+  - `RAM:/binaries/extract`
+  - `RAM:/binaries/installer`
+  - `RAM:/installer/index.json`
+  - `RAM:/installer/base.manifest`
+  - `RAM:/installer/base.pkg`
+  - `RAM:/installer/pkg/<package>.pkg`
+  - `RAM:/boot/kernel.bin`
+- `install` first seeds `/cache/pkg/<package>.pkg` directly from
+  `RAM:/installer/pkg` for each requested package.
+- In installer builds, package extraction uses the embedded extractor path
+  (no per-package child spawn), preventing scheduler stalls between packages.
+- When `RAM:/installer/pkg` is present (installer media), `install` does not
+  unpack `base.pkg`; it uses per-package media cache and then network fetch.
+- `base.pkg` remains a compatibility fallback only for environments that do not
+  provide `RAM:/installer/pkg`.
+

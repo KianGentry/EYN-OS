@@ -151,6 +151,7 @@ file testdir/program.uelf  # On host
 ```bash
 init              # Initialize system
 memory stats      # Heap status
+schedstat         # Scheduler MLFQ snapshot
 e1000 init        # Start network
 e1000 regs        # NIC registers
 e1000 udp-stats   # Network stats

@@ -21,7 +21,11 @@
 #include <stdint.h>
 #include <utilities/shell/shell_script.h>
 #include <ata.h>
+#include <system_config.h>
 #define COMMAND_HASH_SIZE 256
+
+extern uint8 g_current_drive;
+
 typedef struct {
     const char* name;                 // command name key
     shell_cmd_handler_t handler;      // command handler value
@@ -30,6 +34,8 @@ static command_hash_entry_t g_command_hash_table[COMMAND_HASH_SIZE];
 static int g_command_hash_initialized = 0;
 static int g_command_hash_disabled = 0; // Fallback to linear search when table would be full
 static int g_boot_installer_autorun_done = 0;
+static int g_boot_package_update_check_done = 0;
+int g_boot_text_mode = 0;
 
 static int shell_disk_has_installer_binary(void) {
     uint8 logical_count = ata_get_num_logical_drives();
@@ -45,6 +51,65 @@ static int shell_disk_has_installer_binary(void) {
         }
     }
     return 0;
+}
+
+typedef struct shell_list_entry_t {
+    char name[56];
+    uint8 is_dir;
+} shell_list_entry_t;
+
+typedef struct shell_list_ctx_t {
+    shell_list_entry_t entries[256];
+    int count;
+} shell_list_ctx_t;
+
+static int shell_list_cb(const char* name, vfs_node_type_t type, uint32 size, void* user) {
+    (void)size;
+    shell_list_ctx_t* ctx = (shell_list_ctx_t*)user;
+    if (!ctx || !name || !name[0]) return 0;
+    if (ctx->count >= 256) return 0;
+
+    int idx = ctx->count;
+    int i = 0;
+    for (; i < (int)sizeof(ctx->entries[idx].name) - 1 && name[i]; ++i) {
+        ctx->entries[idx].name[i] = name[i];
+    }
+    ctx->entries[idx].name[i] = '\0';
+    ctx->entries[idx].is_dir = (type == VFS_NODE_DIR) ? 1 : 0;
+    ctx->count++;
+    return 0;
+}
+
+static void shell_cmd_list(const char* path) {
+    shell_list_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    const char* target = path;
+    if (!target || !target[0]) target = shell_current_path;
+    if (!target || !target[0]) target = "/";
+
+    if (vfs_listdir_typed(g_current_drive, target, shell_list_cb, &ctx) != 0) {
+        printf("%c list: failed to open: %s\n", 255, target);
+        return;
+    }
+
+    for (int i = 1; i < ctx.count; ++i) {
+        shell_list_entry_t key = ctx.entries[i];
+        int j = i - 1;
+        while (j >= 0 && strcmp(ctx.entries[j].name, key.name) > 0) {
+            ctx.entries[j + 1] = ctx.entries[j];
+            --j;
+        }
+        ctx.entries[j + 1] = key;
+    }
+
+    for (int i = 0; i < ctx.count; ++i) {
+        if (ctx.entries[i].is_dir) {
+            printf("  %s/\n", ctx.entries[i].name);
+        } else {
+            printf("  %s\n", ctx.entries[i].name);
+        }
+    }
 }
 
 static size_t shell_command_count(void) {
@@ -70,6 +135,14 @@ uint8_t get_current_physical_drive(void) {
 // get current logical drive number
 uint8_t get_current_logical_drive(void) {
     return ata_physical_to_logical(g_current_drive);
+}
+
+uint8 shell_get_binary_lookup_drive(void) {
+    return system_config_get_install_drive_physical();
+}
+
+const char* shell_get_binary_lookup_base(void) {
+    return system_config_get_install_bin_path();
 }
 
 // Add a global variable for the current directory path (for now, always root)
@@ -111,7 +184,8 @@ static int try_run_uelf_at_path(uint8 drive, const char* abspath, int argc, cons
             (void)shell_script_run(drive, abspath, argc, argv);
             return 1;
         }
-        (void)user_elf_run_argv(drive, abspath, argc, argv);
+        /* Spawn program asynchronously instead of blocking */
+        (void)user_task_spawn_argv(drive, abspath, argc, argv);
         return 1;
     }
     return 0;
@@ -249,13 +323,17 @@ static int try_run_unknown_as_uelf(const shell_args_t* args) {
         return 0;
     }
 
-    // Prefer /binaries first (like /bin). This avoids surprising "current directory" shadowing
-    // and makes command resolution deterministic.
-    // Note: keep path resolution simple; /binaries is always absolute.
-    snprintf(abspath, sizeof(abspath), "/binaries/%s", target_plain);
-    if (try_run_uelf_at_path(g_current_drive, abspath, argc, argv)) return 1;
-    snprintf(abspath, sizeof(abspath), "/binaries/%s", target_uelf);
-    if (try_run_uelf_at_path(g_current_drive, abspath, argc, argv)) return 1;
+    // Unknown command lookup always resolves from persisted install location.
+    {
+        uint8 exec_drive = shell_get_binary_lookup_drive();
+        const char* base = shell_get_binary_lookup_base();
+        if (!base || !base[0]) base = "/binaries";
+
+        snprintf(abspath, sizeof(abspath), "%s/%s", base, target_plain);
+        if (try_run_uelf_at_path(exec_drive, abspath, argc, argv)) return 1;
+        snprintf(abspath, sizeof(abspath), "%s/%s", base, target_uelf);
+        if (try_run_uelf_at_path(exec_drive, abspath, argc, argv)) return 1;
+    }
 
     // Binaries-only policy: no current-directory or recursive fallback for unknown commands.
     return 0;
@@ -322,16 +400,48 @@ void handle_shell_command(string input) {
         goto cleanup;
     }
 
+    shell_args_t diag_args;
+    if (shell_args_parse(&diag_args, current) == 0 &&
+        diag_args.argc > 0 &&
+        diag_args.argv[0] &&
+        strcmp(diag_args.argv[0], "clear") == 0) {
+        clearScreen();
+        goto cleanup;
+    }
+
+    if (shell_args_parse(&diag_args, current) == 0 &&
+        diag_args.argc > 0 &&
+        diag_args.argv[0] &&
+        strcmp(diag_args.argv[0], "list") == 0) {
+        const char* path = NULL;
+        if (diag_args.argc >= 2 && diag_args.argv[1] && diag_args.argv[1][0]) {
+            path = diag_args.argv[1];
+        }
+        shell_cmd_list(path);
+        goto cleanup;
+    }
+
+    if (shell_args_parse(&diag_args, current) == 0 &&
+        diag_args.argc > 0 &&
+        diag_args.argv[0] &&
+        strcmp(diag_args.argv[0], "schedstat") == 0) {
+        sched_debug_print();
+        goto cleanup;
+    }
+
     // Resolve and execute userland binaries only.
     shell_args_t unknown_args;
-    if (shell_args_parse(&unknown_args, current) == 0 && try_run_unknown_as_uelf(&unknown_args))
+    if (shell_args_parse(&unknown_args, current) == 0 && try_run_unknown_as_uelf(&unknown_args)) {
+        /* Yield to scheduler to allow spawned programs to start running */
+        (void)user_task_poll_scheduler();
         goto cleanup;
+    }
 
     // Command not found
     if (unknown_args.argc > 0 && unknown_args.argv[0])
-        printf("%cCommand not found in /binaries: %s\n", 255, 0, 0, unknown_args.argv[0]);
+        printf("%cCommand not found in %s: %s\n", 255, 0, 0, shell_get_binary_lookup_base(), unknown_args.argv[0]);
     else
-        printf("%cCommand not found in /binaries\n", 255, 0, 0);
+        printf("%cCommand not found in %s\n", 255, 0, 0, shell_get_binary_lookup_base());
 cleanup:
     if (ctx_pushed) {
         command_context_pop();
@@ -367,12 +477,32 @@ void launch_shell(int n) {
         printf("%c[installer] defaulting shell drive to RAM:/\n", 140, 220, 255);
     }
 
-    if (!disk_has_installer && !g_boot_installer_autorun_done) {
+    if (!g_boot_text_mode && !disk_has_installer && !g_boot_installer_autorun_done) {
         vfs_stat_t st;
         if (vfs_stat(VFS_DRIVE_RAM, "/binaries/installer", &st) == 0 && st.type == VFS_NODE_FILE) {
             g_boot_installer_autorun_done = 1;
             printf("%c[installer] launching RAM:/binaries/installer\n", 140, 220, 255);
-            (void)user_elf_run_argv(VFS_DRIVE_RAM, "/binaries/installer", 0, NULL);
+            /* Spawn asynchronously to prevent UI blocking during installer load */
+            (void)user_task_spawn_argv(VFS_DRIVE_RAM, "/binaries/installer", 0, NULL);
+        }
+    }
+
+    if (!g_boot_text_mode && disk_has_installer && !g_boot_package_update_check_done) {
+        uint8 exec_drive = shell_get_binary_lookup_drive();
+        const char* base = shell_get_binary_lookup_base();
+        char install_path[128];
+        if (!base || !base[0]) base = "/binaries";
+        snprintf(install_path, sizeof(install_path), "%s/install", base);
+        vfs_stat_t install_st;
+        if (vfs_stat(exec_drive, install_path, &install_st) == 0
+            && install_st.type == VFS_NODE_FILE) {
+            const char* check_argv[3];
+            check_argv[0] = "--check-updates";
+            check_argv[1] = "--notify";
+            check_argv[2] = "--quiet";
+            g_boot_package_update_check_done = 1;
+            /* Spawn asynchronously to prevent UI blocking during update check */
+            (void)user_task_spawn_argv(exec_drive, install_path, 3, check_argv);
         }
     }
     
@@ -399,7 +529,9 @@ void launch_shell(int n) {
         } else {
             uint8 logical_drive = ata_physical_to_logical(g_current_drive);
             if (logical_drive == 0xFF) logical_drive = 0;  // fallback to 0 if mapping fails
-            printf("%c%d:%s", 200, 200, 200, logical_drive, shell_current_path); // white for drive:path
+            const char* label = system_config_get_drive_label_ptr(logical_drive);
+            if (label && label[0]) printf("%c%s:%s", 200, 200, 200, label, shell_current_path);
+            else printf("%c%d:%s", 200, 200, 200, logical_drive, shell_current_path); // white for drive:path
         }
         printf("%c! ", 255, 255, 0); // yellow for !
         string ch = readStr_with_history(&g_command_history);
@@ -502,6 +634,8 @@ void launch_shell(int n) {
                 int res = write_output_to_file(shell_redirect_buf, strlen(shell_redirect_buf), filename, g_current_drive);
                 if (res == 0)
                     printf("%cOutput redirected to '%s' successfully.\n", 0, 255, 0, filename);
+                else if (res == -28)
+                    printf("%cRAM disk is full. Move files to a hard drive or delete files on RAM:.\n", 255, 80, 80);
                 else
                     printf("%cFailed to write file '%s' (error code: %d).\n", 255, 0, 0, filename, res);
                 stop_shell_redirect();

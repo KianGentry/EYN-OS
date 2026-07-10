@@ -21,6 +21,10 @@ EYN-OS includes a Unix-like pipeline and redirection system that enables command
 Current implementation note:
 The spawn/wait ABI is now in place and pipeline uses it for userland stage launch. The underlying ring3 runtime is still single-active-task, so stage execution remains serialized until per-task address-space/lifecycle scheduling is introduced.
 
+Scheduler note:
+Spawned stages participate in the kernel's 3-level MLFQ policy. Interactive/wakeup-heavy stages tend to stay in higher queues, while CPU-heavy stages are demoted over time.
+Use the shell command `schedstat` to print the current scheduler snapshot (tick rate, queue quanta, queue depths, and MLFQ counters) during pipeline debugging.
+
 ### **Planned Features**
 - **Process Substitution**: `<()` and `>()` operators
 - **Here Documents**: `<<` operator

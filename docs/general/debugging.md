@@ -417,7 +417,7 @@ printf("Rate: %d packets/sec\n", packets * HZ / elapsed);
 2. Use `memory stats` frequently
 3. Valgrind-like techniques (EYN-OS-friendly)
     - Use heap guard/check features already present in the kernel allocator (see memory management docs).
-    - Prefer “small reproducer” programs under `testdir/` and bisect with `make eynfsimg`.
+    - Prefer "small reproducer" programs under `testdir/` and bisect with `make eynfsimg`.
     - Add targeted assertions around invariants to catch the first bad write.
 4. Binary search: disable features until crash stops
 

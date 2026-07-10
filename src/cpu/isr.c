@@ -5,6 +5,8 @@
 #include <shell.h>
 #include <util.h>
 #include <string.h>
+#include <stdint.h>
+#include <stddef.h>
 #include <kb.h>
 #include <panic.h>
 #include <watchdog.h>
@@ -30,18 +32,59 @@
 #include <predictive_memory.h>
 #include <run_command.h>
 #include <paging.h>
+#include <mm/vmm.h>
+#include <misc/native_exec.h>
 #include <drivers/mouse.h>
 #include <cpu/user_elf.h>
+#include <cpu/gdt.h>
+#include <cpu/segdom.h>
+#include <system_config.h>
 #include <partition.h>
+
+// Forward declarations for Linux syscall dispatch
+extern int linux_syscall_dispatch(native_process_t* proc, uint32 regs[8]);
 
 extern background_process_t g_background_processes[MAX_BACKGROUND_PROCESSES];
 
 extern multiboot_info_t *g_mbi;
+extern const char* g_os_version;
+extern const char* g_kernel_version;
 
 // Global error tracking
 static volatile int system_error_count = 0;
 static volatile int last_error_code = 0;
 static volatile uint32 last_error_eip = 0;
+
+static uint32 g_next_fd_mmap_va = USER_SHARED_BASE;
+
+typedef struct linux_user_desc_t {
+    uint32 entry_number;
+    uint32 base_addr;
+    uint32 limit;
+    uint32 flags;
+} linux_user_desc_t;
+
+static seg_desc_t g_linux_compat_ldt[SEGDOM_LDT_ENTRIES];
+
+static seg_desc_t linux_make_data_desc(uint32 base, uint32 limit_bytes) {
+    if (limit_bytes == 0) limit_bytes = 1;
+    uint32 limit = limit_bytes - 1;
+    uint8 gran = 0x40; /* byte granularity */
+    if (limit_bytes > 0xFFFFFu) {
+        limit = (limit_bytes - 1) >> 12;
+        gran = 0xCF;   /* 4K granularity */
+    }
+
+    seg_desc_t d;
+    d.limit_low = (uint16)(limit & 0xFFFFu);
+    d.base_low = (uint16)(base & 0xFFFFu);
+    d.base_mid = (uint8)((base >> 16) & 0xFFu);
+    d.access = 0xF2; /* present, ring3 data rw */
+    d.gran = (uint8)((limit >> 16) & 0x0Fu);
+    d.gran |= (gran & 0xF0u);
+    d.base_high = (uint8)((base >> 24) & 0xFFu);
+    return d;
+}
 
 // Error severity levels
 #define ERROR_FATAL 0
@@ -62,47 +105,56 @@ static void handle_error(int isr_num, error_context_t* ctx);
 static int is_recoverable_error(int isr_num);
 static void log_error(int isr_num, error_context_t* ctx);
 static void attempt_recovery(error_context_t* ctx);
+extern void fpu_handle_nm(void);
+static uint32 syscall_dispatch_core(regs_t* regs,
+                                    uint32 syscall_num,
+                                    uintptr arg1,
+                                    uintptr arg2,
+                                    uintptr arg3,
+                                    uintptr arg4,
+                                    uintptr arg5);
 
 extern void isr_install() 
 {
-    set_idt_gate(0, (uint32)isr0);
-    set_idt_gate(1, (uint32)isr1);
-    set_idt_gate(2, (uint32)isr2);
-    set_idt_gate(3, (uint32)isr3);
-    set_idt_gate(4, (uint32)isr4);
-    set_idt_gate(5, (uint32)isr5);
-    set_idt_gate(6, (uint32)isr6);
-    set_idt_gate(7, (uint32)isr7);
-    set_idt_gate(8, (uint32)isr8);
-    set_idt_gate(9, (uint32)isr9);
-    set_idt_gate(10, (uint32)isr10);
-    set_idt_gate(11, (uint32)isr11);
-    set_idt_gate(12, (uint32)isr12);
-    set_idt_gate(13, (uint32)isr13);
-    set_idt_gate(14, (uint32)isr14);
-    set_idt_gate(15, (uint32)isr15);
-    set_idt_gate(16, (uint32)isr16);
-    set_idt_gate(17, (uint32)isr17);
-    set_idt_gate(18, (uint32)isr18);
-    set_idt_gate(19, (uint32)isr19);
-    set_idt_gate(20, (uint32)isr20);
-    set_idt_gate(21, (uint32)isr21);
-    set_idt_gate(22, (uint32)isr22);
-    set_idt_gate(23, (uint32)isr23);
-    set_idt_gate(24, (uint32)isr24);
-    set_idt_gate(25, (uint32)isr25);
-    set_idt_gate(26, (uint32)isr26);
-    set_idt_gate(27, (uint32)isr27);
-    set_idt_gate(28, (uint32)isr28);
-    set_idt_gate(29, (uint32)isr29);
-    set_idt_gate(30, (uint32)isr30);
-    set_idt_gate(31, (uint32)isr31);
+    set_idt_gate(0, (uintptr)isr0);
+    set_idt_gate(1, (uintptr)isr1);
+    set_idt_gate(2, (uintptr)isr2);
+    set_idt_gate(3, (uintptr)isr3);
+    set_idt_gate(4, (uintptr)isr4);
+    set_idt_gate(5, (uintptr)isr5);
+    set_idt_gate(6, (uintptr)isr6);
+    set_idt_gate(7, (uintptr)isr7);
+    set_idt_gate(8, (uintptr)isr8);
+    set_idt_gate(9, (uintptr)isr9);
+    set_idt_gate(10, (uintptr)isr10);
+    set_idt_gate(11, (uintptr)isr11);
+    set_idt_gate(12, (uintptr)isr12);
+    set_idt_gate(13, (uintptr)isr13);
+    set_idt_gate(14, (uintptr)isr14);
+    set_idt_gate(15, (uintptr)isr15);
+    set_idt_gate(16, (uintptr)isr16);
+    set_idt_gate(17, (uintptr)isr17);
+    set_idt_gate(18, (uintptr)isr18);
+    set_idt_gate(19, (uintptr)isr19);
+    set_idt_gate(20, (uintptr)isr20);
+    set_idt_gate(21, (uintptr)isr21);
+    set_idt_gate(22, (uintptr)isr22);
+    set_idt_gate(23, (uintptr)isr23);
+    set_idt_gate(24, (uintptr)isr24);
+    set_idt_gate(25, (uintptr)isr25);
+    set_idt_gate(26, (uintptr)isr26);
+    set_idt_gate(27, (uintptr)isr27);
+    set_idt_gate(28, (uintptr)isr28);
+    set_idt_gate(29, (uintptr)isr29);
+    set_idt_gate(30, (uintptr)isr30);
+    set_idt_gate(31, (uintptr)isr31);
     
     // Set up syscall handler (interrupt 0x80) to the assembly stub
     extern void syscall_entry();
-    set_syscall_gate(0x80, (uint32)syscall_entry);
+    set_syscall_gate(0x80, (uintptr)syscall_entry);
 
     set_idt(); // Load with ASM
+        /* TODO: Add handlers for fork/vfork/exec/select/poll here. */
 }
 
 // Generic ISR handler that captures context and attempts recovery
@@ -240,24 +292,170 @@ void isr_dispatch(regs_t* regs) {
         return;
     }
 
+    if (regs->int_no == 13 && (regs->cs & 3u) == 3u) {
+        printf("\n%c*** General Protection Fault (user) ***\n", 255, 0, 0);
+        printf("EIP: 0x%08X  ERR: 0x%08X\n",
+               (unsigned)regs->eip,
+               (unsigned)regs->err_code);
+        printf("Terminating user process\n");
+        user_task_notify_exit(-13);
+        g_user_task_active = 0;
+        g_user_task_term = -1;
+        g_user_interrupt = 0;
+        g_abort_to_shell = 1;
+        return;
+    }
+
     // ISR 7: #NM (Device Not Available). Used for lazy x87 enabling (CR0.TS).
     // Even if we don't use lazy switching yet, handling this avoids spurious
     // fatal errors if firmware/boot code left TS set.
     if (regs->int_no == 7) {
-        extern void fpu_handle_nm(void);
         fpu_handle_nm();
         return;
     }
 
     /* Page faults should be handled by the VMM (demand paging / COW / swap). */
     if (regs->int_no == 14) {
-        extern void page_fault_handler(regs_t* r);
         page_fault_handler(regs);
         return;
     }
 
     generic_isr_handler(regs);
 }
+
+#if defined(EYNOS_ARCH_AMD64)
+/*
+ * ABI-INVARIANT: amd64 entry stubs bridge into 32-bit-compatible core paths.
+ *
+ * Why: Current paging/syscall core APIs and saved-reg compatibility structs are
+ * 32-bit shaped.
+ * Invariant: Values copied from 64-bit frames must round-trip through uint32
+ * before entering those paths.
+ * Breakage if violated: Silent truncation can misroute page-fault handling or
+ * syscall dispatch state.
+ */
+static int isr_amd64_u32_from_uintptr(uintptr value, uint32* out) {
+    if (!out) return -1;
+    uint32 narrowed = (uint32)value;
+    if ((uintptr)narrowed != value) return -1;
+    *out = narrowed;
+    return 0;
+}
+
+void isr_amd64_dispatch_frame(const amd64_interrupt_frame_t* frame) {
+    if (!frame) {
+        return;
+    }
+
+    if (frame->vector == 13u && (frame->cs & 3u) == 3u) {
+        printf("\n%c*** General Protection Fault (user) ***\n", 255, 0, 0);
+        printf("RIP: 0x%08X  ERR: 0x%08X\n",
+               (unsigned)((uint32)frame->rip),
+               (unsigned)((uint32)frame->error_code));
+        printf("Terminating user process\n");
+        user_task_notify_exit(-13);
+        g_user_task_active = 0;
+        g_user_task_term = -1;
+        g_user_interrupt = 0;
+        g_abort_to_shell = 1;
+        return;
+    }
+
+    if (frame->vector == 7u) {
+        fpu_handle_nm();
+        return;
+    }
+
+    if (frame->vector == 14u) {
+        uintptr fault_addr;
+        asm volatile("mov %%cr2, %0" : "=r"(fault_addr));
+
+        uint32 fault_addr32 = 0;
+        uint32 rip32 = 0;
+        if (isr_amd64_u32_from_uintptr(fault_addr, &fault_addr32) != 0 ||
+            isr_amd64_u32_from_uintptr((uintptr)frame->rip, &rip32) != 0) {
+            PANIC("amd64 page-fault frame exceeds 32-bit VMM contract");
+        }
+
+        if ((frame->cs & 3u) != 3u) {
+            PANICF("PAGE FAULT (kernel): addr=0x%08X rip=0x%08X err=0x%08X cs=0x%08X",
+                   (unsigned)fault_addr32,
+                   (unsigned)rip32,
+                   (unsigned)((uint32)frame->error_code),
+                   (unsigned)((uint32)frame->cs));
+        }
+
+        vmm_page_fault_handler((uint32)frame->error_code,
+                               fault_addr32,
+                               rip32);
+        return;
+    }
+
+    regs_t synthetic_regs;
+    memset(&synthetic_regs, 0, sizeof(synthetic_regs));
+
+    uint32 frame_vector32 = 0;
+    uint32 frame_error32 = 0;
+    uint32 frame_rip32 = 0;
+    if (isr_amd64_u32_from_uintptr((uintptr)frame->vector, &frame_vector32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->error_code, &frame_error32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->rip, &frame_rip32) != 0) {
+        PANIC("amd64 interrupt frame exceeds 32-bit register bridge contract");
+    }
+
+    synthetic_regs.int_no = frame_vector32;
+    synthetic_regs.err_code = frame_error32;
+    synthetic_regs.eip = frame_rip32;
+    synthetic_regs.cs = (uint32)frame->cs;
+    synthetic_regs.eflags = (uint32)frame->rflags;
+
+    generic_isr_handler(&synthetic_regs);
+}
+
+uint64 syscall_dispatch_amd64_frame(const amd64_syscall_frame_t* frame) {
+    if (!frame) {
+        return (uint64)-1;
+    }
+
+    regs_t synthetic_regs;
+    memset(&synthetic_regs, 0, sizeof(synthetic_regs));
+
+    uint32 syscall_no32 = 0;
+    uint32 arg1_32 = 0;
+    uint32 arg2_32 = 0;
+    uint32 arg3_32 = 0;
+    uint32 rip32 = 0;
+    uint32 useresp32 = 0;
+    uint32 ss32 = 0;
+    if (isr_amd64_u32_from_uintptr((uintptr)frame->syscall_no, &syscall_no32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->arg1, &arg1_32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->arg2, &arg2_32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->arg3, &arg3_32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->rip, &rip32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->user_rsp, &useresp32) != 0 ||
+        isr_amd64_u32_from_uintptr((uintptr)frame->user_ss, &ss32) != 0) {
+        return (uint64)-1;
+    }
+
+    synthetic_regs.eax = syscall_no32;
+    synthetic_regs.ebx = arg1_32;
+    synthetic_regs.ecx = arg2_32;
+    synthetic_regs.edx = arg3_32;
+    synthetic_regs.eip = rip32;
+    synthetic_regs.cs = (uint32)frame->cs;
+    synthetic_regs.eflags = (uint32)frame->rflags;
+    synthetic_regs.useresp = useresp32;
+    synthetic_regs.ss = ss32;
+
+    return (uint64)syscall_dispatch_core(&synthetic_regs,
+                                         syscall_no32,
+                                         (uintptr)frame->arg1,
+                                         (uintptr)frame->arg2,
+                                         (uintptr)frame->arg3,
+                                         (uintptr)frame->arg4,
+                                         (uintptr)frame->arg5);
+}
+#endif
 
 // Error status functions for shell commands
 int get_system_error_count() {
@@ -349,6 +547,7 @@ uint32 get_last_error_eip() {
 #define SYSCALL_SETFONT_PATH 94
 #define SYSCALL_CHDIR 95
 #define SYSCALL_RUN 96
+#define SYSCALL_EXECVE 97
 #define SYSCALL_MMAP 98
 #define SYSCALL_MUNMAP 99
 #define SYSCALL_MSYNC 100
@@ -434,6 +633,28 @@ uint32 get_last_error_eip() {
 #define SYSCALL_GUI_LOAD_FONT 137
 #define SYSCALL_GUI_DRAW_TEXT_FONT 138
 #define SYSCALL_GUI_DRAW_CHAR_FONT 139
+#define SYSCALL_SET_DISPLAY_PROFILE 140
+#define SYSCALL_GET_DISPLAY_PROFILE 141
+#define SYSCALL_SET_DISPLAY_MODE 142
+#define SYSCALL_GET_DISPLAY_MODE 143
+#define SYSCALL_NOTIFY_POST 144
+#define SYSCALL_TTY_SET_MODE 145
+#define SYSCALL_TTY_GET_MODE 146
+#define SYSCALL_TTY_SET_WINSIZE 147
+#define SYSCALL_TTY_GET_WINSIZE 148
+#define SYSCALL_PTY_OPEN 149
+#define SYSCALL_SPAWN_EX 150
+#define SYSCALL_FD_GET_STDIO 151
+
+/* System information syscalls */
+#define SYSCALL_GET_SYSINFO 152
+#define SYSCALL_SYSTEMCFG_SET_INSTALL_DRIVE 153
+#define SYSCALL_SYSTEMCFG_SET_DRIVE_LABEL 154
+#define SYSCALL_SYSTEMCFG_GET_DRIVE_LABEL 155
+#define SYSCALL_SYSTEMCFG_GET_INSTALL_DRIVE 156
+#define SYSCALL_NET_DHCP_REQUEST 157
+
+#define TTY_MODE_RAW 0x0001
 
 /*
  * SYSCALL_AUDIO_PROBE (113): Detect whether an AC97 audio controller is
@@ -519,6 +740,16 @@ uint32 get_last_error_eip() {
 #define SYSCALL_NET_TCP_SEND 121
 #define SYSCALL_NET_TCP_RECV 122
 #define SYSCALL_NET_TCP_CLOSE 123
+#define SYSCALL_NET_TCP_SOCKET_OPEN 161
+#define SYSCALL_NET_TCP_SOCKET_CLOSE 162
+#define SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT 163
+#define SYSCALL_NET_TCP_GET_SOCKETS 164
+#define SYSCALL_NET_TCP_SOCKET_BIND 165
+#define SYSCALL_NET_TCP_SOCKET_LISTEN 166
+#define SYSCALL_NET_TCP_SOCKET_ACCEPT 167
+#define SYSCALL_NET_TCP_SOCKET_CONNECT 168
+#define SYSCALL_NET_TCP_SOCKET_SEND 169
+#define SYSCALL_NET_TCP_SOCKET_RECV 170
 
 /* IPC primitives */
 #define SYSCALL_PIPE 124
@@ -530,6 +761,9 @@ uint32 get_last_error_eip() {
 #define SYSCALL_FD_SET_NONBLOCK 130
 #define SYSCALL_SPAWN 131
 #define SYSCALL_WAITPID 132
+#define SYSCALL_KILL 200
+#define SYSCALL_SIGRETURN 201
+#define SYSCALL_SIGNAL 202
 #define SYSCALL_INSTALLER_PREPARE_DRIVE 133
 #define SYSCALL_INSTALLER_FORMAT_EYNFS_PARTITION 134
 #define SYSCALL_INSTALLER_WRITE_SECTOR 135
@@ -640,6 +874,44 @@ typedef struct {
     char text[64];
 } user_gui_cmd_t;
 
+typedef struct {
+    int fb_w;
+    int fb_h;
+    int workspace_w;
+    int workspace_h;
+    int scale_pct;
+    int aspect_mode;
+} syscall_display_profile_t;
+
+typedef struct {
+    int width;
+    int height;
+    int bpp;
+    int persist;
+} syscall_display_mode_set_t;
+
+typedef struct {
+    int width;
+    int height;
+    int bpp;
+    int can_switch;
+} syscall_display_mode_t;
+
+/*
+ * SECURITY-INVARIANT: Per-GUI command buffer slot count.
+ *
+ * Why: Bounds kernel memory per user GUI while allowing text-heavy clients
+ * (notably syntax-highlighting editors) to emit a full frame without dropping
+ * draw commands.
+ * Invariant: cmd_count must stay within [0, USER_GUI_CMD_MAX].
+ * Breakage if changed:
+ *   - Increasing raises per-handle kernel memory linearly.
+ *   - Decreasing can reintroduce silent draw drops/flicker in rich UIs.
+ * ABI-sensitive: Yes (user-visible per-frame draw throughput ceiling).
+ * Security-critical: Yes (resource exhaustion boundary).
+ */
+#define USER_GUI_CMD_MAX 512
+
 enum {
     USER_GUI_CMD_CLEAR = 1,
     USER_GUI_CMD_FILL_RECT = 2,
@@ -653,12 +925,18 @@ enum {
 typedef enum {
     USER_FD_KIND_FILE = 0,
     USER_FD_KIND_PIPE = 1,
+    USER_FD_KIND_PTY = 2,
 } user_fd_kind_t;
 
 typedef enum {
     USER_PIPE_END_READ = 0,
     USER_PIPE_END_WRITE = 1,
 } user_pipe_end_t;
+
+typedef enum {
+    USER_PTY_END_MASTER = 0,
+    USER_PTY_END_SLAVE = 1,
+} user_pty_end_t;
 
 /*
  * SECURITY-INVARIANT: Maximum concurrent kernel IPC pipe objects.
@@ -686,6 +964,9 @@ typedef enum {
  */
 #define USER_PIPE_BUFFER_BYTES 4096
 
+#define USER_PTY_MAX 8
+#define USER_PTY_BUFFER_BYTES 4096
+
 typedef struct {
     int used;
     int persistent_fifo;
@@ -706,11 +987,29 @@ typedef struct {
 
 typedef struct {
     int used;
+    int master_refs;
+    int slave_refs;
+
+    uint32 m2s_read_pos;
+    uint32 m2s_write_pos;
+    uint32 m2s_bytes_used;
+    uint8 m2s_buf[USER_PTY_BUFFER_BYTES];
+
+    uint32 s2m_read_pos;
+    uint32 s2m_write_pos;
+    uint32 s2m_bytes_used;
+    uint8 s2m_buf[USER_PTY_BUFFER_BYTES];
+} user_pty_t;
+
+typedef struct {
+    int used;
     int is_dir;
     int nonblock;
     int kind;
     int pipe_id;
     int pipe_end;
+    int pty_id;
+    int pty_end;
     uint32 offset;
     uint32 dir_pos;
     uint32 size;
@@ -763,6 +1062,7 @@ typedef struct {
 #define USER_FD_MAX 16
 static user_fd_t g_user_fds[USER_FD_MAX];
 static user_pipe_t g_user_pipes[USER_PIPE_MAX];
+static user_pty_t g_user_ptys[USER_PTY_MAX];
 
 static int g_user_fd_inherit_mode = 0;
 static int g_user_stdio_stdin_fd = 0;
@@ -882,6 +1182,42 @@ static int user_pipe_set_spool(int pipe_id, int enabled) {
     return 0;
 }
 
+static int user_pipe_copyout_bytes(const uint8* src, uint32 src_cap, uint32* src_pos,
+                                   uint32* src_used, void* user_dst, int maxlen) {
+    int copied = 0;
+    while (copied < maxlen && *src_used > 0) {
+        uint32 contiguous = src_cap - *src_pos;
+        if (contiguous > *src_used) contiguous = *src_used;
+        int chunk = maxlen - copied;
+        if ((uint32)chunk > contiguous) chunk = (int)contiguous;
+        if (chunk <= 0) break;
+        if (copyout((uint8*)user_dst + copied, src + *src_pos, (size_t)chunk) != 0) return -1;
+        *src_pos = (*src_pos + (uint32)chunk) % src_cap;
+        *src_used -= (uint32)chunk;
+        copied += chunk;
+    }
+    return copied;
+}
+
+static int user_pipe_copyin_bytes(uint8* dst, uint32 dst_cap, uint32* dst_pos,
+                                  uint32* dst_used, const void* user_src, int len) {
+    int copied = 0;
+    while (copied < len) {
+        uint32 free_space = dst_cap - *dst_used;
+        if (free_space == 0) break;
+        uint32 contiguous = dst_cap - *dst_pos;
+        if (contiguous > free_space) contiguous = free_space;
+        int chunk = len - copied;
+        if ((uint32)chunk > contiguous) chunk = (int)contiguous;
+        if (chunk <= 0) break;
+        if (copyin(dst + *dst_pos, (const uint8*)user_src + copied, (size_t)chunk) != 0) return -1;
+        *dst_pos = (*dst_pos + (uint32)chunk) % dst_cap;
+        *dst_used += (uint32)chunk;
+        copied += chunk;
+    }
+    return copied;
+}
+
 static int user_pipe_read(int pipe_id, void* user_dst, int maxlen, int nonblock) {
     if (pipe_id < 0 || pipe_id >= USER_PIPE_MAX || maxlen < 0 || !user_dst) return -1;
     user_pipe_t* p = &g_user_pipes[pipe_id];
@@ -902,23 +1238,15 @@ static int user_pipe_read(int pipe_id, void* user_dst, int maxlen, int nonblock)
         __asm__ __volatile__("hlt");
     }
 
-    int n = 0;
-    while (n < maxlen && p->bytes_used > 0) {
-        uint8 b = p->buffer[p->read_pos];
-        if (copyout((uint8*)user_dst + n, &b, 1) != 0) return -1;
-        p->read_pos = (p->read_pos + 1u) % USER_PIPE_BUFFER_BYTES;
-        p->bytes_used--;
-        n++;
-    }
+    int n = user_pipe_copyout_bytes(p->buffer, USER_PIPE_BUFFER_BYTES, &p->read_pos,
+                                    &p->bytes_used, user_dst, maxlen);
+    if (n < 0) return -1;
+    if (n >= maxlen || p->spool_bytes == 0) return n;
 
-    while (n < maxlen && p->spool_bytes > 0) {
-        uint8 b = p->spool_buf[p->spool_read_pos];
-        if (copyout((uint8*)user_dst + n, &b, 1) != 0) return -1;
-        p->spool_read_pos = (p->spool_read_pos + 1u) % p->spool_cap;
-        p->spool_bytes--;
-        n++;
-    }
-    return n;
+    int n2 = user_pipe_copyout_bytes(p->spool_buf, p->spool_cap, &p->spool_read_pos,
+                                     &p->spool_bytes, (uint8*)user_dst + n, maxlen - n);
+    if (n2 < 0) return -1;
+    return n + n2;
 }
 
 static int user_pipe_write(int pipe_id, const void* user_src, int len, int nonblock) {
@@ -949,21 +1277,128 @@ static int user_pipe_write(int pipe_id, const void* user_src, int len, int nonbl
             __asm__ __volatile__("hlt");
         }
 
-        uint8 b = 0;
-        if (copyin(&b, (const uint8*)user_src + n, 1) != 0) return -1;
         if (p->bytes_used < USER_PIPE_BUFFER_BYTES) {
-            p->buffer[p->write_pos] = b;
-            p->write_pos = (p->write_pos + 1u) % USER_PIPE_BUFFER_BYTES;
-            p->bytes_used++;
-        } else if (p->spool_enabled && p->spool_buf && p->spool_bytes < p->spool_cap) {
-            p->spool_buf[p->spool_write_pos] = b;
-            p->spool_write_pos = (p->spool_write_pos + 1u) % p->spool_cap;
-            p->spool_bytes++;
-        } else {
-            if (nonblock) return (n > 0) ? n : -1;
+            int wrote = user_pipe_copyin_bytes(p->buffer, USER_PIPE_BUFFER_BYTES, &p->write_pos,
+                                               &p->bytes_used, (const uint8*)user_src + n, len - n);
+            if (wrote < 0) return -1;
+            n += wrote;
             continue;
         }
-        n++;
+
+        if (p->spool_enabled && p->spool_buf && p->spool_bytes < p->spool_cap) {
+            int wrote = user_pipe_copyin_bytes(p->spool_buf, p->spool_cap, &p->spool_write_pos,
+                                               &p->spool_bytes, (const uint8*)user_src + n, len - n);
+            if (wrote < 0) return -1;
+            n += wrote;
+            continue;
+        }
+
+        if (nonblock) return (n > 0) ? n : -1;
+    }
+    return n;
+}
+
+static void user_pty_maybe_destroy(int pty_id) {
+    if (pty_id < 0 || pty_id >= USER_PTY_MAX) return;
+    user_pty_t* p = &g_user_ptys[pty_id];
+    if (!p->used) return;
+    if (p->master_refs == 0 && p->slave_refs == 0) {
+        memset(p, 0, sizeof(*p));
+    }
+}
+
+static int user_pty_alloc(void) {
+    for (int i = 0; i < USER_PTY_MAX; ++i) {
+        if (g_user_ptys[i].used) continue;
+        memset(&g_user_ptys[i], 0, sizeof(g_user_ptys[i]));
+        g_user_ptys[i].used = 1;
+        return i;
+    }
+    return -1;
+}
+
+static int user_pty_read(int pty_id, int end, void* user_dst, int maxlen, int nonblock) {
+    if (pty_id < 0 || pty_id >= USER_PTY_MAX || maxlen < 0 || !user_dst) return -1;
+    user_pty_t* p = &g_user_ptys[pty_id];
+    if (!p->used) return -1;
+    if (maxlen == 0) return 0;
+
+    uint8* src_buf = NULL;
+    uint32* src_read = NULL;
+    uint32* src_used = NULL;
+    int peer_refs = 0;
+
+    if (end == USER_PTY_END_MASTER) {
+        src_buf = p->s2m_buf;
+        src_read = &p->s2m_read_pos;
+        src_used = &p->s2m_bytes_used;
+        peer_refs = p->slave_refs;
+    } else if (end == USER_PTY_END_SLAVE) {
+        src_buf = p->m2s_buf;
+        src_read = &p->m2s_read_pos;
+        src_used = &p->m2s_bytes_used;
+        peer_refs = p->master_refs;
+    } else {
+        return -1;
+    }
+
+    while (*src_used == 0) {
+        if (peer_refs == 0) return 0;
+        if (nonblock) return -1;
+        if (g_user_interrupt) return -1;
+        watchdog_kick("pty-read");
+        __asm__ __volatile__("sti");
+        __asm__ __volatile__("hlt");
+        peer_refs = (end == USER_PTY_END_MASTER) ? p->slave_refs : p->master_refs;
+    }
+
+    return user_pipe_copyout_bytes(src_buf, USER_PTY_BUFFER_BYTES, src_read, src_used,
+                                   user_dst, maxlen);
+}
+
+static int user_pty_write(int pty_id, int end, const void* user_src, int len, int nonblock) {
+    if (pty_id < 0 || pty_id >= USER_PTY_MAX || len < 0 || !user_src) return -1;
+    user_pty_t* p = &g_user_ptys[pty_id];
+    if (!p->used) return -1;
+    if (len == 0) return 0;
+
+    uint8* dst_buf = NULL;
+    uint32* dst_write = NULL;
+    uint32* dst_used = NULL;
+    int peer_refs = 0;
+
+    if (end == USER_PTY_END_MASTER) {
+        dst_buf = p->m2s_buf;
+        dst_write = &p->m2s_write_pos;
+        dst_used = &p->m2s_bytes_used;
+        peer_refs = p->slave_refs;
+    } else if (end == USER_PTY_END_SLAVE) {
+        dst_buf = p->s2m_buf;
+        dst_write = &p->s2m_write_pos;
+        dst_used = &p->s2m_bytes_used;
+        peer_refs = p->master_refs;
+    } else {
+        return -1;
+    }
+
+    if (peer_refs == 0) return -1;
+
+    int n = 0;
+    while (n < len) {
+        while (*dst_used >= USER_PTY_BUFFER_BYTES) {
+            if (peer_refs == 0) return (n > 0) ? n : -1;
+            if (nonblock) return (n > 0) ? n : -1;
+            if (g_user_interrupt) return (n > 0) ? n : -1;
+            watchdog_kick("pty-write");
+            __asm__ __volatile__("sti");
+            __asm__ __volatile__("hlt");
+            peer_refs = (end == USER_PTY_END_MASTER) ? p->slave_refs : p->master_refs;
+        }
+
+        int wrote = user_pipe_copyin_bytes(dst_buf, USER_PTY_BUFFER_BYTES, dst_write, dst_used,
+                                           (const uint8*)user_src + n, len - n);
+        if (wrote < 0) return -1;
+        n += wrote;
     }
     return n;
 }
@@ -985,6 +1420,17 @@ static int user_fd_release(int fd) {
             user_pipe_maybe_destroy(ufd->pipe_id);
         }
     }
+    if (ufd->kind == USER_FD_KIND_PTY && ufd->pty_id >= 0 && ufd->pty_id < USER_PTY_MAX) {
+        user_pty_t* p = &g_user_ptys[ufd->pty_id];
+        if (p->used) {
+            if (ufd->pty_end == USER_PTY_END_MASTER) {
+                if (p->master_refs > 0) p->master_refs--;
+            } else if (ufd->pty_end == USER_PTY_END_SLAVE) {
+                if (p->slave_refs > 0) p->slave_refs--;
+            }
+            user_pty_maybe_destroy(ufd->pty_id);
+        }
+    }
 
     if (ufd->kbuf) {
         free(ufd->kbuf);
@@ -997,6 +1443,8 @@ static int user_fd_release(int fd) {
     ufd->kind = USER_FD_KIND_FILE;
     ufd->pipe_id = -1;
     ufd->pipe_end = -1;
+    ufd->pty_id = -1;
+    ufd->pty_end = -1;
     ufd->offset = 0;
     ufd->dir_pos = 0;
     ufd->size = 0;
@@ -1028,6 +1476,8 @@ static int user_fd_duplicate_into(int oldfd, int newfd) {
     dst->kind = src->kind;
     dst->pipe_id = src->pipe_id;
     dst->pipe_end = src->pipe_end;
+    dst->pty_id = src->pty_id;
+    dst->pty_end = src->pty_end;
     dst->offset = src->offset;
     dst->dir_pos = src->dir_pos;
     dst->size = src->size;
@@ -1048,6 +1498,15 @@ static int user_fd_duplicate_into(int oldfd, int newfd) {
         }
         if (dst->pipe_end == USER_PIPE_END_READ) p->reader_refs++;
         else if (dst->pipe_end == USER_PIPE_END_WRITE) p->writer_refs++;
+    }
+    if (dst->kind == USER_FD_KIND_PTY && dst->pty_id >= 0 && dst->pty_id < USER_PTY_MAX) {
+        user_pty_t* p = &g_user_ptys[dst->pty_id];
+        if (!p->used) {
+            memset(dst, 0, sizeof(*dst));
+            return -1;
+        }
+        if (dst->pty_end == USER_PTY_END_MASTER) p->master_refs++;
+        else if (dst->pty_end == USER_PTY_END_SLAVE) p->slave_refs++;
     }
 
     return newfd;
@@ -1083,6 +1542,12 @@ void syscall_reset_user_stdio_fds(void) {
     g_user_stdio_stdin_fd = 0;
     g_user_stdio_stdout_fd = 1;
     g_user_stdio_stderr_fd = 2;
+}
+
+void syscall_get_user_stdio_fds(int* stdin_fd, int* stdout_fd, int* stderr_fd) {
+    if (stdin_fd) *stdin_fd = g_user_stdio_stdin_fd;
+    if (stdout_fd) *stdout_fd = g_user_stdio_stdout_fd;
+    if (stderr_fd) *stderr_fd = g_user_stdio_stderr_fd;
 }
 
 int syscall_kernel_close_user_fd(int fd) {
@@ -1148,12 +1613,61 @@ int syscall_kernel_pipe_create(int* out_read_fd, int* out_write_fd) {
     return 0;
 }
 
+static int syscall_kernel_pty_create(int* out_master_fd, int* out_slave_fd) {
+    if (!out_master_fd || !out_slave_fd) return -1;
+    int pty_id = user_pty_alloc();
+    if (pty_id < 0) return -1;
+
+    int master_fd = -1;
+    int slave_fd = -1;
+    for (int i = 3; i < USER_FD_MAX; ++i) {
+        if (!g_user_fds[i].used) { master_fd = i; break; }
+    }
+    if (master_fd < 0) {
+        memset(&g_user_ptys[pty_id], 0, sizeof(g_user_ptys[pty_id]));
+        return -1;
+    }
+    for (int i = master_fd + 1; i < USER_FD_MAX; ++i) {
+        if (!g_user_fds[i].used) { slave_fd = i; break; }
+    }
+    if (slave_fd < 0) {
+        memset(&g_user_ptys[pty_id], 0, sizeof(g_user_ptys[pty_id]));
+        return -1;
+    }
+
+    memset(&g_user_fds[master_fd], 0, sizeof(g_user_fds[master_fd]));
+    g_user_fds[master_fd].used = 1;
+    g_user_fds[master_fd].kind = USER_FD_KIND_PTY;
+    g_user_fds[master_fd].pipe_id = -1;
+    g_user_fds[master_fd].pipe_end = -1;
+    g_user_fds[master_fd].pty_id = pty_id;
+    g_user_fds[master_fd].pty_end = USER_PTY_END_MASTER;
+
+    memset(&g_user_fds[slave_fd], 0, sizeof(g_user_fds[slave_fd]));
+    g_user_fds[slave_fd].used = 1;
+    g_user_fds[slave_fd].kind = USER_FD_KIND_PTY;
+    g_user_fds[slave_fd].pipe_id = -1;
+    g_user_fds[slave_fd].pipe_end = -1;
+    g_user_fds[slave_fd].pty_id = pty_id;
+    g_user_fds[slave_fd].pty_end = USER_PTY_END_SLAVE;
+
+    g_user_ptys[pty_id].master_refs = 1;
+    g_user_ptys[pty_id].slave_refs = 1;
+
+    *out_master_fd = master_fd;
+    *out_slave_fd = slave_fd;
+    return 0;
+}
+
 void syscall_reset_user_fds(void) {
     for (int i = 0; i < USER_FD_MAX; ++i) {
         (void)user_fd_release(i);
     }
     for (int i = 0; i < USER_PIPE_MAX; ++i) {
         memset(&g_user_pipes[i], 0, sizeof(g_user_pipes[i]));
+    }
+    for (int i = 0; i < USER_PTY_MAX; ++i) {
+        memset(&g_user_ptys[i], 0, sizeof(g_user_ptys[i]));
     }
 }
 
@@ -1200,14 +1714,13 @@ typedef struct {
      * Invariant: User programs that exceed this limit silently lose draw commands
      *            (syscall returns -1). Callers should minimise per-frame commands.
      * Breakage if changed:
-     *   - Increasing: linearly grows per-user-GUI kernel memory (~96 bytes/slot).
-     *     256 slots ≈ 24 KB -- acceptable on 9 MB target. Needed for text-heavy
-     *     applications (e.g. text editors drawing 30+ lines per frame).
+    *   - Increasing: linearly grows per-user-GUI kernel memory (~96 bytes/slot).
+    *     512 slots ≈ 48 KB -- acceptable on 9 MB target for current GUI load.
      *   - Decreasing: existing GUI programs may silently lose draw calls.
      * ABI-sensitive: Yes (user-visible limit on draw throughput per frame).
      */
     int cmd_count;
-    user_gui_cmd_t cmds[256];
+    user_gui_cmd_t cmds[USER_GUI_CMD_MAX];
     uint8 frame_pending;
 
     // Input event ring buffer.
@@ -1350,6 +1863,17 @@ static void user_gui_push_event(user_gui_t* e, const user_gui_event_t* ev) {
     e->ev[head] = *ev;
     e->ev_head = next;
     __asm__ __volatile__("sti");
+
+    int handle = -1;
+    for (int i = 0; i < USER_GUI_MAX; ++i) {
+        if (&g_user_guis[i] == e) {
+            handle = i;
+            break;
+        }
+    }
+    if (handle >= 0) {
+        user_task_wake_gui_waiters(handle);
+    }
 }
 
 static int user_gui_pop_event(user_gui_t* e, user_gui_event_t* out) {
@@ -1367,8 +1891,85 @@ static int user_gui_pop_event(user_gui_t* e, user_gui_event_t* out) {
     return 1;
 }
 
+static int user_gui_clip_fill_rect(int* x, int* y, int* w, int* h, int l, int t, int r, int b) {
+    if (!x || !y || !w || !h) return 0;
+    int nx = *x, ny = *y, nw = *w, nh = *h;
+    if (nw <= 0 || nh <= 0) return 0;
+    if (nx < l) { nw -= (l - nx); nx = l; }
+    if (ny < t) { nh -= (t - ny); ny = t; }
+    if (nx + nw > r) nw = r - nx;
+    if (ny + nh > b) nh = b - ny;
+    if (nw <= 0 || nh <= 0) return 0;
+    *x = nx; *y = ny; *w = nw; *h = nh;
+    return 1;
+}
+
+enum {
+    USER_GUI_CS_LEFT = 1,
+    USER_GUI_CS_RIGHT = 2,
+    USER_GUI_CS_TOP = 4,
+    USER_GUI_CS_BOTTOM = 8,
+};
+
+static int user_gui_clip_line_outcode(int x, int y, int l, int t, int r, int b) {
+    int code = 0;
+    if (x < l) code |= USER_GUI_CS_LEFT;
+    else if (x >= r) code |= USER_GUI_CS_RIGHT;
+    if (y < t) code |= USER_GUI_CS_TOP;
+    else if (y >= b) code |= USER_GUI_CS_BOTTOM;
+    return code;
+}
+
+static int user_gui_clip_line(int* x1, int* y1, int* x2, int* y2, int l, int t, int r, int b) {
+    if (!x1 || !y1 || !x2 || !y2) return 0;
+    if (l >= r || t >= b) return 0;
+
+    int ax = *x1, ay = *y1, bx = *x2, by = *y2;
+    int code_a = user_gui_clip_line_outcode(ax, ay, l, t, r, b);
+    int code_b = user_gui_clip_line_outcode(bx, by, l, t, r, b);
+
+    while (1) {
+        if ((code_a | code_b) == 0) {
+            *x1 = ax; *y1 = ay; *x2 = bx; *y2 = by;
+            return 1;
+        }
+        if (code_a & code_b) {
+            return 0;
+        }
+
+        int code_out = code_a ? code_a : code_b;
+        int x = 0, y = 0;
+
+        if (code_out & USER_GUI_CS_TOP) {
+            if (by == ay) return 0;
+            x = ax + ((bx - ax) * (t - ay)) / (by - ay);
+            y = t;
+        } else if (code_out & USER_GUI_CS_BOTTOM) {
+            if (by == ay) return 0;
+            x = ax + ((bx - ax) * ((b - 1) - ay)) / (by - ay);
+            y = b - 1;
+        } else if (code_out & USER_GUI_CS_RIGHT) {
+            if (bx == ax) return 0;
+            y = ay + ((by - ay) * ((r - 1) - ax)) / (bx - ax);
+            x = r - 1;
+        } else {
+            if (bx == ax) return 0;
+            y = ay + ((by - ay) * (l - ax)) / (bx - ax);
+            x = l;
+        }
+
+        if (code_out == code_a) {
+            ax = x; ay = y;
+            code_a = user_gui_clip_line_outcode(ax, ay, l, t, r, b);
+        } else {
+            bx = x; by = y;
+            code_b = user_gui_clip_line_outcode(bx, by, l, t, r, b);
+        }
+    }
+}
+
 static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int content_w, int content_h, void* userdata) {
-    int handle = (int)(uint32)userdata;
+    int handle = (int)(uintptr)userdata;
     user_gui_t* e = user_gui_get(handle);
     /* tile_idx carries win_id when called from the floating window manager */
     if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return;
@@ -1406,6 +2007,7 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
             int w = c->w;
             int h = c->h;
             if (w <= 0 || h <= 0) continue;
+            if (!user_gui_clip_fill_rect(&x, &y, &w, &h, clip_l, clip_t, clip_r, clip_b)) continue;
             drawRect(x, y, w, h, c->r, c->g, c->b);
             continue;
         }
@@ -1437,6 +2039,7 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
             int y1 = content_y + c->y;
             int x2 = content_x + c->x2;
             int y2 = content_y + c->y2;
+            if (!user_gui_clip_line(&x1, &y1, &x2, &y2, clip_l, clip_t, clip_r, clip_b)) continue;
             drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
             continue;
         }
@@ -1446,10 +2049,15 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
             int w = c->w;
             int h = c->h;
             if (w > 0 && h > 0) {
-                drawLine(x, y, x + w - 1, y, c->r, c->g, c->b);             /* top    */
-                drawLine(x, y + h - 1, x + w - 1, y + h - 1, c->r, c->g, c->b); /* bottom */
-                drawLine(x, y, x, y + h - 1, c->r, c->g, c->b);             /* left   */
-                drawLine(x + w - 1, y, x + w - 1, y + h - 1, c->r, c->g, c->b); /* right  */
+                int x1, y1, x2, y2;
+                x1 = x; y1 = y; x2 = x + w - 1; y2 = y;
+                if (user_gui_clip_line(&x1, &y1, &x2, &y2, clip_l, clip_t, clip_r, clip_b)) drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
+                x1 = x; y1 = y + h - 1; x2 = x + w - 1; y2 = y + h - 1;
+                if (user_gui_clip_line(&x1, &y1, &x2, &y2, clip_l, clip_t, clip_r, clip_b)) drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
+                x1 = x; y1 = y; x2 = x; y2 = y + h - 1;
+                if (user_gui_clip_line(&x1, &y1, &x2, &y2, clip_l, clip_t, clip_r, clip_b)) drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
+                x1 = x + w - 1; y1 = y; x2 = x + w - 1; y2 = y + h - 1;
+                if (user_gui_clip_line(&x1, &y1, &x2, &y2, clip_l, clip_t, clip_r, clip_b)) drawLine(x1, y1, x2, y2, c->r, c->g, c->b);
             }
             continue;
         }
@@ -1470,6 +2078,8 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
             /* Render a named file icon from the kernel-side icon cache. */
             int x = content_x + c->x;
             int y = content_y + c->y;
+            int icon_px = (vga_text_cell_h() >= 16) ? 16 : 8;
+            if (x < clip_l || y < clip_t || x + icon_px > clip_r || y + icon_px > clip_b) continue;
             tile_draw_file_icon(c->text, x, y);
             continue;
         }
@@ -1477,7 +2087,7 @@ static void user_gui_draw_cb(int tile_idx, int content_x, int content_y, int con
 }
 
 static void user_gui_key_cb(int tile_idx, int key, void* userdata) {
-    int handle = (int)(uint32)userdata;
+    int handle = (int)(uintptr)userdata;
     user_gui_t* e = user_gui_get(handle);
     if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return;
     user_gui_event_t ev;
@@ -1506,7 +2116,7 @@ static void user_gui_key_cb(int tile_idx, int key, void* userdata) {
  * the user program is expected to call exit() when ready.
  */
 static int user_gui_close_cb(int tile_idx, void* userdata) {
-    int handle = (int)(uint32)userdata;
+    int handle = (int)(uintptr)userdata;
     user_gui_t* e = user_gui_get(handle);
     if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return 1; /* not ours -- allow close */
     user_gui_event_t ev;
@@ -1521,7 +2131,7 @@ static int user_gui_close_cb(int tile_idx, void* userdata) {
 
 static void user_gui_mouse_cb(int tile_idx, const mouse_event_t* me, void* userdata) {
     if (!me) return;
-    int handle = (int)(uint32)userdata;
+    int handle = (int)(uintptr)userdata;
     user_gui_t* e = user_gui_get(handle);
     if (!e || (e->is_floating ? e->win_id != tile_idx : e->tile_idx != tile_idx)) return;
 
@@ -1561,8 +2171,10 @@ static inline int user_gui_active(const user_gui_t* e) {
 }
 
 void syscall_reset_user_guis(void) {
+    watchdog_kick("user-task-guis");
     // Close/free any created GUI tiles
     for (int i = 1; i < USER_GUI_MAX; ++i) {
+        if ((i & 0x7u) == 0u) watchdog_kick("user-task-guis");
         if (g_user_guis[i].used) {
             user_gui_free_entry(&g_user_guis[i]);
         }
@@ -1571,6 +2183,7 @@ void syscall_reset_user_guis(void) {
     // Reset handle 0 "attached" GUI state too.
     // Important: unregister the GUI client so the tile returns to normal vterm rendering.
     if (g_user_guis[0].used) {
+        watchdog_kick("user-task-guis");
         int tile_idx0 = g_user_guis[0].tile_idx;
         if (tile_is_tiling_active() && tile_idx0 >= 0) {
             tile_unregister_gui_client(tile_idx0);
@@ -1598,10 +2211,12 @@ void syscall_reset_user_guis(void) {
     }
     // Restore the current tile title if the user task changed it.
     if (g_user_self_title) {
+        watchdog_kick("user-task-guis");
         free(g_user_self_title);
         g_user_self_title = NULL;
     }
     if (tile_is_tiling_active() && g_user_self_tile_idx >= 0) {
+        watchdog_kick("user-task-guis");
         tile_set_title_status(g_user_self_tile_idx, "EYN-OS Shell", NULL, NULL);
         tile_invalidate_decorations(g_user_self_tile_idx);
     }
@@ -1784,6 +2399,23 @@ static void trim_trailing_crlf(char* s) {
     }
 }
 
+/*
+ * ABI-INVARIANT: User syscall address values are 32-bit virtual addresses.
+ *
+ * Why: Userland ABI remains i386-sized even when the kernel is built amd64.
+ * Invariant: Any pointer returned to or consumed from user syscall arguments
+ * must round-trip through uint32 without loss.
+ * Breakage if violated: Silent truncation can retarget memory operations to
+ * the wrong object/address.
+ */
+static int syscall_addr_to_u32(uintptr addr, uint32* out) {
+    if (!out) return -1;
+    uint32 narrowed = (uint32)addr;
+    if ((uintptr)narrowed != addr) return -1;
+    *out = narrowed;
+    return 0;
+}
+
 static char* kstrdup_bounded(const char* s, size_t max_len) {
     if (!s) return NULL;
     size_t n = 0;
@@ -1809,11 +2441,16 @@ static int user_fd_alloc(void) {
             g_user_fds[i].kind = USER_FD_KIND_FILE;
             g_user_fds[i].pipe_id = -1;
             g_user_fds[i].pipe_end = -1;
+            g_user_fds[i].pty_id = -1;
+            g_user_fds[i].pty_end = -1;
             g_user_fds[i].offset = 0;
             g_user_fds[i].dir_pos = 0;
             g_user_fds[i].size = 0;
             g_user_fds[i].drive = 0;
             g_user_fds[i].path[0] = '\0';
+            g_user_fds[i].eynfs_first_block = 0;
+            g_user_fds[i].cur_block = 0;
+            g_user_fds[i].cur_block_off = 0;
             return i;
         }
     }
@@ -1828,11 +2465,11 @@ static user_fd_t* user_fd_get(int fd) {
 
 static int user_fd_index_from_ptr(const user_fd_t* ptr) {
     if (!ptr) return -1;
-    uint32 base = (uint32)(uint32)&g_user_fds[0];
-    uint32 end = (uint32)(uint32)&g_user_fds[USER_FD_MAX];
-    uint32 p = (uint32)(uint32)ptr;
+    uintptr base = (uintptr)&g_user_fds[0];
+    uintptr end = (uintptr)&g_user_fds[USER_FD_MAX];
+    uintptr p = (uintptr)ptr;
     if (p < base || p >= end) return -1;
-    uint32 off = p - base;
+    uintptr off = p - base;
     if (off % sizeof(user_fd_t) != 0) return -1;
     int idx = (int)(off / sizeof(user_fd_t));
     if (idx < 0 || idx >= USER_FD_MAX) return -1;
@@ -1847,7 +2484,7 @@ static int syscall_cap_copyin(const void* user_cap_ptr, cap_t* out) {
 
 static user_fd_t* user_fd_from_cap(const cap_t* cap, uint32 required_rights, int* out_fd) {
     if (!cap) return NULL;
-    user_fd_t* ufd = (user_fd_t*)(uint32)cap->obj;
+    user_fd_t* ufd = (user_fd_t*)(uintptr)cap->obj;
     int idx = user_fd_index_from_ptr(ufd);
     if (idx < 0) return NULL;
     if (!g_user_fds[idx].used) return NULL;
@@ -1858,11 +2495,11 @@ static user_fd_t* user_fd_from_cap(const cap_t* cap, uint32 required_rights, int
 
 static int user_gui_index_from_ptr(const user_gui_t* ptr) {
     if (!ptr) return -1;
-    uint32 base = (uint32)(uint32)&g_user_guis[0];
-    uint32 end = (uint32)(uint32)&g_user_guis[USER_GUI_MAX];
-    uint32 p = (uint32)(uint32)ptr;
+    uintptr base = (uintptr)&g_user_guis[0];
+    uintptr end = (uintptr)&g_user_guis[USER_GUI_MAX];
+    uintptr p = (uintptr)ptr;
     if (p < base || p >= end) return -1;
-    uint32 off = p - base;
+    uintptr off = p - base;
     if (off % sizeof(user_gui_t) != 0) return -1;
     int idx = (int)(off / sizeof(user_gui_t));
     if (idx < 0 || idx >= USER_GUI_MAX) return -1;
@@ -1872,7 +2509,7 @@ static int user_gui_index_from_ptr(const user_gui_t* ptr) {
 
 static user_gui_t* user_gui_from_cap(const cap_t* cap, uint32 required_rights, int* out_handle) {
     if (!cap) return NULL;
-    user_gui_t* e = (user_gui_t*)(uint32)cap->obj;
+    user_gui_t* e = (user_gui_t*)(uintptr)cap->obj;
     int idx = user_gui_index_from_ptr(e);
     if (idx < 0) return NULL;
     if (!g_user_guis[idx].used) return NULL;
@@ -1944,9 +2581,6 @@ static void syscall_console_write(const char* buf, int len) {
     extern volatile uint8 g_user_task_colour_bytes[3];
     extern volatile uint8 g_user_task_icon_state;
     extern volatile uint8 g_user_task_icon_bytes[16];
-    extern int shell_redirect_colour_r;
-    extern int shell_redirect_colour_g;
-    extern int shell_redirect_colour_b;
 
     int prev_r = shell_redirect_colour_r;
     int prev_g = shell_redirect_colour_g;
@@ -1965,7 +2599,8 @@ static void syscall_console_write(const char* buf, int len) {
     if (tile_is_tiling_active()) {
         int term = tile_get_focused();
         if (g_user_task_active) {
-            term = g_user_task_term;
+            int output_term = user_task_get_output_vterm();
+            if (output_term >= 0) term = output_term;
         }
         if (term < 0) term = 0;
         for (int i = 0; i < len; ++i) {
@@ -2232,11 +2867,112 @@ static int syscall_write_file_from_fd(user_fd_t* ufd, const void* user_src, int 
 
     int written = vfs_write_file(ufd->drive, ufd->path, kbuf, (uint32)len);
     free(kbuf);
-    if (written < 0) return -1;
+    if (written < 0) {
+        if (written == -28) {
+            printf("%cRAM disk is full. Move files to a hard drive or delete files on RAM:.\n", 255, 80, 80);
+        }
+        return -1;
+    }
 
     ufd->offset = (uint32)written;
     ufd->size = (uint32)written;
     return written;
+}
+
+#define BMP_MAGIC_B0 0x42u
+#define BMP_MAGIC_B1 0x4Du
+#define BMP_BI_RGB 0u
+#define BMP_BI_BITFIELDS 3u
+#define BMP_FILEHEADER_SIZE 14u
+#define BMP_INFOHEADER_MIN 40u
+
+static uint16_t syscall_rgb565(uint8_t r, uint8_t g, uint8_t b) {
+    return (uint16_t)(((r & 0xF8u) << 8) | ((g & 0xFCu) << 3) | ((b & 0xF8u) >> 3));
+}
+
+static int syscall_parse_bmp_image(const uint8_t* buf, size_t size, rei_image_t* out) {
+    if (!buf || !out || size < BMP_FILEHEADER_SIZE + BMP_INFOHEADER_MIN) return -1;
+    if (buf[0] != BMP_MAGIC_B0 || buf[1] != BMP_MAGIC_B1) return -1;
+
+    uint32_t bf_off_bits = (uint32_t)buf[10] | ((uint32_t)buf[11] << 8) |
+                           ((uint32_t)buf[12] << 16) | ((uint32_t)buf[13] << 24);
+
+    if (size < BMP_FILEHEADER_SIZE + 4u) return -1;
+    uint32_t hdr_size = (uint32_t)buf[14] | ((uint32_t)buf[15] << 8) |
+                        ((uint32_t)buf[16] << 16) | ((uint32_t)buf[17] << 24);
+    if (hdr_size < BMP_INFOHEADER_MIN || (BMP_FILEHEADER_SIZE + hdr_size) > size) return -1;
+
+    const uint8_t* ih = buf + BMP_FILEHEADER_SIZE;
+    int32_t bi_width = (int32_t)((uint32_t)ih[4] | ((uint32_t)ih[5] << 8) |
+                                 ((uint32_t)ih[6] << 16) | ((uint32_t)ih[7] << 24));
+    int32_t bi_height = (int32_t)((uint32_t)ih[8] | ((uint32_t)ih[9] << 8) |
+                                  ((uint32_t)ih[10] << 16) | ((uint32_t)ih[11] << 24));
+    uint16_t bi_bit_count = (uint16_t)((uint16_t)ih[14] | ((uint16_t)ih[15] << 8));
+    uint32_t bi_compression = (uint32_t)ih[16] | ((uint32_t)ih[17] << 8) |
+                              ((uint32_t)ih[18] << 16) | ((uint32_t)ih[19] << 24);
+
+    if (bi_width <= 0 || bi_width > 4096) return -1;
+    int top_down = 0;
+    int height;
+    if (bi_height < 0) {
+        top_down = 1;
+        height = -bi_height;
+    } else {
+        height = bi_height;
+    }
+    if (height <= 0 || height > 4096) return -1;
+
+    int bytes_per_pixel;
+    if (bi_bit_count == 24 && bi_compression == BMP_BI_RGB) {
+        bytes_per_pixel = 3;
+    } else if (bi_bit_count == 32 && (bi_compression == BMP_BI_RGB || bi_compression == BMP_BI_BITFIELDS)) {
+        bytes_per_pixel = 4;
+    } else {
+        return -1;
+    }
+
+    int width = (int)bi_width;
+    size_t row_bytes_raw = (size_t)width * (size_t)bytes_per_pixel;
+    size_t row_stride = (row_bytes_raw + 3u) & ~(size_t)3u;
+    if (bf_off_bits >= size) return -1;
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    size_t out_size = pixel_count * 3u;
+    uint8_t* out_data = (uint8_t*)malloc(out_size);
+    if (!out_data) return -1;
+
+    for (int row = 0; row < height; ++row) {
+        size_t src_off = (size_t)bf_off_bits + (size_t)row * row_stride;
+        if (src_off + row_stride > size) {
+            free(out_data);
+            return -1;
+        }
+        const uint8_t* row_buf = buf + src_off;
+        int dest_row = top_down ? row : (height - 1 - row);
+        uint8_t* dst_row = out_data + (size_t)dest_row * (size_t)width * 3u;
+
+        for (int col = 0; col < width; ++col) {
+            size_t off = (size_t)col * (size_t)bytes_per_pixel;
+            uint8_t b = row_buf[off + 0];
+            uint8_t g = row_buf[off + 1];
+            uint8_t r = row_buf[off + 2];
+            uint16_t c = syscall_rgb565(r, g, b);
+            dst_row[(size_t)col * 3u + 0] = (uint8_t)((c >> 11) << 3);
+            dst_row[(size_t)col * 3u + 1] = (uint8_t)(((c >> 5) & 0x3F) << 2);
+            dst_row[(size_t)col * 3u + 2] = (uint8_t)((c & 0x1F) << 3);
+        }
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->header.magic = REI_MAGIC;
+    out->header.width = (uint16_t)width;
+    out->header.height = (uint16_t)height;
+    out->header.depth = REI_DEPTH_RGB;
+    out->header.reserved1 = 0;
+    out->header.reserved2 = 0;
+    out->data = out_data;
+    out->data_size = out_size;
+    return 0;
 }
 
 static int syscall_seek_fd(user_fd_t* ufd, int32 offset, int whence) {
@@ -2424,15 +3160,21 @@ typedef struct {
 extern uint8 g_current_drive;
 
 // C dispatcher called by the assembly stub. Returns value in EAX to user.
-uint32 syscall_dispatch(regs_t* regs) {
-    uint32 syscall_num = regs->eax;
-    uint32 arg1 = regs->ebx;
-    uint32 arg2 = regs->ecx;
-    uint32 arg3 = regs->edx;
+static uint32 syscall_dispatch_core(regs_t* regs,
+                                    uint32 syscall_num,
+                                    uintptr arg1,
+                                    uintptr arg2,
+                                    uintptr arg3,
+                                    uintptr arg4,
+                                    uintptr arg5) {
+    (void)arg4;
+    (void)arg5;
 
     if (g_user_task_active) {
         user_task_capture_syscall_frame(regs);
     }
+
+    native_process_t* linux_proc = native_get_current_process();
 
     switch (syscall_num) {
         case SYSCALL_EYNFS_STREAM_BEGIN: {
@@ -2547,6 +3289,11 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             uint8 logical = (uint8)arg1;
             regs->eax = (uint32)syscall_installer_prepare_drive(logical);
+            if ((int)regs->eax == 0) {
+                if (system_config_set_install_drive_logical(logical) == 0) {
+                    (void)system_config_save();
+                }
+            }
             break;
         }
         case SYSCALL_INSTALLER_FORMAT_EYNFS_PARTITION: {
@@ -2600,28 +3347,88 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = 0;
             break;
         }
+        case SYSCALL_SYSTEMCFG_SET_INSTALL_DRIVE: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint8 logical = (uint8)arg1;
+            if (system_config_set_install_drive_logical(logical) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (system_config_save() == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_SYSTEMCFG_SET_DRIVE_LABEL: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint8 logical = (uint8)arg1;
+            const char* user_label = (const char*)arg2;
+            char label[SYS_CFG_LABEL_MAX + 1];
+            if (!user_label) { regs->eax = (uint32)-1; break; }
+            if (copyin_cstr(label, sizeof(label), user_label) != 0) { regs->eax = (uint32)-1; break; }
+            if (!ata_logical_drive_present(logical)) { regs->eax = (uint32)-1; break; }
+            if (system_config_set_drive_label(logical, label) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (system_config_save() == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_SYSTEMCFG_GET_DRIVE_LABEL: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            uint8 logical = (uint8)arg1;
+            char* user_out = (char*)arg2;
+            int out_cap = (int)arg3;
+            char label[SYS_CFG_LABEL_MAX + 1];
+            int n;
+            if (!user_out || out_cap <= 0) { regs->eax = (uint32)-1; break; }
+            if (system_config_get_drive_label(logical, label, sizeof(label)) != 0) {
+                if (copyout(user_out, "\0", 1) != 0) { regs->eax = (uint32)-1; break; }
+                regs->eax = 0;
+                break;
+            }
+            n = (int)strlen(label);
+            if (n >= out_cap) n = out_cap - 1;
+            if (n < 0) n = 0;
+            if (copyout(user_out, label, (size_t)n) != 0) { regs->eax = (uint32)-1; break; }
+            if (copyout(user_out + n, "\0", 1) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)n;
+            break;
+        }
+        case SYSCALL_SYSTEMCFG_GET_INSTALL_DRIVE: {
+            if (!syscall_ctx_allow(CAP_DEV_DISK | CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)system_config_get_install_drive_logical();
+            break;
+        }
         case SYSCALL_DRIVE_SET_LOGICAL: {
             if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             uint8 logical = (uint8)arg1;
-            uint8 physical = ata_logical_to_physical(logical);
-            if (physical == 0xFFu) { regs->eax = (uint32)-1; break; }
-            g_current_drive = physical;
+            uint8 ata_count = ata_get_num_logical_drives();
+            if (logical == ata_count) {
+                g_current_drive = VFS_DRIVE_RAM;
+            } else {
+                uint8 physical = ata_logical_to_physical(logical);
+                if (physical == 0xFFu) { regs->eax = (uint32)-1; break; }
+                g_current_drive = physical;
+            }
             regs->eax = (uint32)logical;
             break;
         }
         case SYSCALL_DRIVE_GET_LOGICAL: {
             if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
-            regs->eax = (uint32)ata_physical_to_logical(g_current_drive);
+            if (g_current_drive == VFS_DRIVE_RAM) {
+                regs->eax = (uint32)ata_get_num_logical_drives();
+            } else {
+                regs->eax = (uint32)ata_physical_to_logical(g_current_drive);
+            }
             break;
         }
         case SYSCALL_DRIVE_GET_COUNT: {
             if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
-            regs->eax = (uint32)ata_get_num_logical_drives();
+            regs->eax = (uint32)(ata_get_num_logical_drives() + 1u);
             break;
         }
         case SYSCALL_DRIVE_IS_PRESENT: {
             if (!syscall_ctx_allow(CAP_DEV_DISK, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
-            regs->eax = ata_logical_drive_present((uint8)arg1) ? 1u : 0u;
+            uint8 logical = (uint8)arg1;
+            uint8 ata_count = ata_get_num_logical_drives();
+            if (logical == ata_count) {
+                regs->eax = 1u;
+            } else {
+                regs->eax = ata_logical_drive_present(logical) ? 1u : 0u;
+            }
             break;
         }
         case SYSCALL_INIT_SERVICES: {
@@ -2913,6 +3720,14 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = 0;
             break;
         }
+        case SYSCALL_NET_DHCP_REQUEST: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int timeout_spins = (int)arg1;
+            int arp_spins = (int)arg2;
+            int persist_cfg = (int)arg3;
+            regs->eax = (uint32)net_dhcp_request(timeout_spins, arp_spins, persist_cfg);
+            break;
+        }
         case SYSCALL_NET_TCP_CONNECT: {
             if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             const void* user_dst = (const void*)arg1;
@@ -2961,8 +3776,139 @@ uint32 syscall_dispatch(regs_t* regs) {
             break;
         }
         case SYSCALL_NET_TCP_CLOSE: {
+            /*
+             * Linux i386 compat: modify_ldt is syscall 123.
+             * Detect libc TLS setup shape and emulate enough for %gs selector 0x7.
+             */
+            if ((arg1 == 0u || arg1 == 1u || arg1 == 0x11u) && arg2 != 0u && arg3 > 0u && arg3 <= 128u) {
+                uint32 func = (uint32)arg1;
+                void* user_ptr = (void*)arg2;
+                uint32 bytecount = (uint32)arg3;
+
+                if (func == 0u) {
+                    uint8 zero[128];
+                    memset(zero, 0, sizeof(zero));
+                    if (bytecount > sizeof(zero)) bytecount = sizeof(zero);
+                    if (copyout(user_ptr, zero, (size_t)bytecount) != 0) { regs->eax = (uint32)-1; break; }
+                    regs->eax = (uint32)bytecount;
+                    break;
+                }
+
+                if ((func == 1u || func == 0x11u) && bytecount >= 16u) {
+                    linux_user_desc_t ud;
+                    if (copyin(&ud, user_ptr, sizeof(ud)) != 0) { regs->eax = (uint32)-1; break; }
+
+                    /* Ensure selector 0x7 (LDT index 0, RPL3) is a valid data segment. */
+                    memset(g_linux_compat_ldt, 0, sizeof(g_linux_compat_ldt));
+                    g_linux_compat_ldt[0] = linux_make_data_desc(ud.base_addr, ud.limit ? ud.limit : 0xFFFFFu);
+                    gdt_set_ldt_descriptor((uint32)(uintptr)&g_linux_compat_ldt[0], (uint32)(sizeof(g_linux_compat_ldt) - 1u));
+                    {
+                        uint16 sel = GDT_LDT_SEL;
+                        __asm__ __volatile__("lldt %0" : : "r"(sel));
+                    }
+
+                    regs->eax = 0;
+                    break;
+                }
+
+                regs->eax = (uint32)-1;
+                break;
+            }
+
             if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             regs->eax = (uint32)net_tcp_close();
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_OPEN: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_open();
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_CLOSE: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_close_id((int)arg1);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_QUEUE_COUNT: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_queue_count((int)arg1);
+            break;
+        }
+        case SYSCALL_NET_TCP_GET_SOCKETS: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int out_cap = (int)arg1;
+            void* user_out = (void*)arg3;
+            if (!user_out || out_cap <= 0) { regs->eax = (uint32)-1; break; }
+            if (out_cap > (int)NET_TCP_MAX_SOCKETS) out_cap = (int)NET_TCP_MAX_SOCKETS;
+
+            net_tcp_socket_info infos[NET_TCP_MAX_SOCKETS];
+            uint32 written = net_tcp_get_sockets(infos, (uint32)out_cap);
+            if (written > 0 && copyout(user_out, infos, (size_t)(written * sizeof(infos[0]))) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            regs->eax = written;
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_BIND: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_bind((int)arg1, (uint16)arg2);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_LISTEN: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_listen((int)arg1, (int)arg2);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_ACCEPT: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_accept((int)arg1, (int)arg2);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_CONNECT: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int socket_id = (int)arg1;
+            uint16 dst_port = (uint16)arg2;
+            const void* user_dst = (const void*)arg3;
+            if (!user_dst) { regs->eax = (uint32)-1; break; }
+
+            uint8 dst_ip[4];
+            if (copyin(dst_ip, user_dst, 4) != 0) { regs->eax = (uint32)-1; break; }
+
+            // local_port (auto-assign) and timeout (kernel default) are not
+            // exposed at the syscall boundary, matching the legacy
+            // SYSCALL_NET_TCP_CONNECT convention above.
+            regs->eax = (uint32)net_tcp_socket_connect(socket_id, dst_ip, dst_port, 0, 0);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_SEND: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int socket_id = (int)arg1;
+            uint32 len = (uint32)arg2;
+            const void* user_buf = (const void*)arg3;
+            if (!user_buf) { regs->eax = (uint32)-1; break; }
+            if (len > NET_TCP_MAX_PAYLOAD) { regs->eax = (uint32)-2; break; }
+
+            uint8 buf[NET_TCP_MAX_PAYLOAD];
+            if (len != 0u && copyin(buf, user_buf, (size_t)len) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)net_tcp_socket_send(socket_id, buf, len);
+            break;
+        }
+        case SYSCALL_NET_TCP_SOCKET_RECV: {
+            if (!syscall_ctx_allow(CAP_DEV_NET, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+            int socket_id = (int)arg1;
+            uint32 buflen = (uint32)arg2;
+            void* user_buf = (void*)arg3;
+            if (!user_buf) { regs->eax = (uint32)-1; break; }
+
+            net_tcp_rx_packet pkt;
+            int rc = net_tcp_socket_recv(socket_id, &pkt);
+            if (rc <= 0) { regs->eax = (uint32)rc; break; }
+
+            uint32 copy_len = pkt.payload_len;
+            if (copy_len > buflen) copy_len = buflen;
+            if (copy_len != 0u && copyout(user_buf, pkt.payload, (size_t)copy_len) != 0) { regs->eax = (uint32)-1; break; }
+            regs->eax = (uint32)copy_len;
             break;
         }
         case SYSCALL_FS_CHECK_INTEGRITY: {
@@ -3062,6 +4008,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (!syscall_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             const char* user_path = (const char*)arg1;
             if (!user_path) { regs->eax = (uint32)-1; break; }
+            int mode = (int)arg2;
             char path[128];
             if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
 
@@ -3074,9 +4021,21 @@ uint32 syscall_dispatch(regs_t* regs) {
             char abspath[128];
             resolve_path(path, cwd, abspath, sizeof(abspath));
 
+            if (mode < 1 || mode > 3) mode = 0;
+
             vfs_stat_t st;
-            if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) { regs->eax = (uint32)-1; break; }
-            if (st.size == 0 || st.size > 512 * 1024) { regs->eax = (uint32)-1; break; }
+            if (vfs_stat(g_current_drive, abspath, &st) != 0 || st.type != VFS_NODE_FILE) {
+                int focused = tile_get_focused();
+                if (focused >= 0) tile_clear_background(focused);
+                regs->eax = (uint32)-1;
+                break;
+            }
+            if (st.size == 0 || st.size > 512 * 1024) {
+                int focused = tile_get_focused();
+                if (focused >= 0) tile_clear_background(focused);
+                regs->eax = (uint32)-1;
+                break;
+            }
 
             uint8* buf = (uint8*)malloc(st.size);
             if (!buf) { regs->eax = (uint32)-1; break; }
@@ -3085,13 +4044,35 @@ uint32 syscall_dispatch(regs_t* regs) {
 
             rei_image_t* img = (rei_image_t*)malloc(sizeof(rei_image_t));
             if (!img) { free(buf); regs->eax = (uint32)-1; break; }
-            if (rei_parse_image(buf, br, img) != 0) { free(buf); free(img); regs->eax = (uint32)-1; break; }
+
+            int parse_ok = 0;
+            memset(img, 0, sizeof(*img));
+            if (rei_parse_image(buf, br, img) == 0) {
+                parse_ok = 1;
+            } else {
+                memset(img, 0, sizeof(*img));
+                if (syscall_parse_bmp_image(buf, (size_t)br, img) == 0) {
+                    parse_ok = 1;
+                }
+            }
             free(buf);
+
+            if (!parse_ok) {
+                free(img);
+                int focused = tile_get_focused();
+                if (focused >= 0) tile_clear_background(focused);
+                regs->eax = (uint32)-1;
+                break;
+            }
 
             int focused = tile_get_focused();
             if (focused < 0) { rei_free_image(img); free(img); regs->eax = (uint32)-1; break; }
 
-            regs->eax = (tile_begin_set_background_from_rei(focused, img) == 0) ? 0u : (uint32)-1;
+            if (mode == 0) {
+                regs->eax = (tile_begin_set_background_from_rei(focused, img) == 0) ? 0u : (uint32)-1;
+            } else {
+                regs->eax = (tile_set_background_from_image(focused, img, mode) == 0) ? 0u : (uint32)-1;
+            }
             if (regs->eax != 0u) {
                 rei_free_image(img);
                 free(img);
@@ -3128,6 +4109,144 @@ uint32 syscall_dispatch(regs_t* regs) {
             resolve_path(path, cwd, abspath, sizeof(abspath));
             regs->eax = (vga_system_font_set(g_current_drive, abspath) == 0) ? 0u : (uint32)-1;
             if (regs->eax == 0u) tile_render_once();
+            break;
+        }
+        case SYSCALL_SET_DISPLAY_PROFILE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            int scale_pct = (int)arg1;
+            int aspect_mode = (int)arg2;
+            int persist = (int)arg3;
+            regs->eax = (tiler_set_display_profile(scale_pct, aspect_mode, persist) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_GET_DISPLAY_PROFILE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            syscall_display_profile_t* user_out = (syscall_display_profile_t*)arg1;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+
+            tiler_display_profile_t profile;
+            memset(&profile, 0, sizeof(profile));
+            tiler_get_display_profile(&profile);
+
+            syscall_display_profile_t out;
+            out.fb_w = profile.fb_w;
+            out.fb_h = profile.fb_h;
+            out.workspace_w = profile.workspace_w;
+            out.workspace_h = profile.workspace_h;
+            out.scale_pct = profile.scale_pct;
+            out.aspect_mode = profile.aspect_mode;
+
+            regs->eax = (copyout(user_out, &out, sizeof(out)) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_SET_DISPLAY_MODE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            const syscall_display_mode_set_t* user_in = (const syscall_display_mode_set_t*)arg1;
+            if (!user_in) { regs->eax = (uint32)-1; break; }
+
+            syscall_display_mode_set_t in;
+            if (copyin(&in, user_in, sizeof(in)) != 0) { regs->eax = (uint32)-1; break; }
+
+            regs->eax = (tiler_set_display_mode(in.width, in.height, in.bpp, in.persist) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_GET_DISPLAY_MODE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            syscall_display_mode_t* user_out = (syscall_display_mode_t*)arg1;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+
+            tiler_display_mode_t mode;
+            memset(&mode, 0, sizeof(mode));
+            tiler_get_display_mode(&mode);
+
+            syscall_display_mode_t out;
+            out.width = mode.width;
+            out.height = mode.height;
+            out.bpp = mode.bpp;
+            out.can_switch = mode.can_switch;
+
+            regs->eax = (copyout(user_out, &out, sizeof(out)) == 0) ? 0u : (uint32)-1;
+            break;
+        }
+        case SYSCALL_NOTIFY_POST: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+
+            const char* user_title = (const char*)arg1;
+            const char* user_message = (const char*)arg2;
+            if (!user_message) { regs->eax = (uint32)-1; break; }
+
+            char title_tmp[96];
+            char message_tmp[192];
+            title_tmp[0] = '\0';
+
+            if (user_title) {
+                if (copyin_cstr(title_tmp, sizeof(title_tmp), user_title) != 0) {
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+                trim_trailing_crlf(title_tmp);
+            }
+
+            if (copyin_cstr(message_tmp, sizeof(message_tmp), user_message) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            trim_trailing_crlf(message_tmp);
+
+            uint32 packed = (uint32)arg3;
+            int level = (int)(packed & 0xFFu);
+            uint32 timeout_ms = packed >> 8;
+            if (timeout_ms == 0) timeout_ms = 7000u;
+
+            regs->eax = (tile_notify_post(title_tmp, message_tmp, level, timeout_ms) == 0)
+                ? 0u
+                : (uint32)-1;
+            break;
+        }
+        case SYSCALL_TTY_SET_MODE: {
+            if (!syscall_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (!g_user_task_active || g_user_task_term < 0) { regs->eax = (uint32)-1; break; }
+
+            int term = g_user_task_term;
+            int prev = vterm_stdin_is_raw(term) ? TTY_MODE_RAW : 0;
+            int new_mode = ((int)arg1 & TTY_MODE_RAW) ? TTY_MODE_RAW : 0;
+            vterm_stdin_set_raw(term, (new_mode & TTY_MODE_RAW) ? 1 : 0);
+            regs->eax = (uint32)prev;
+            break;
+        }
+        case SYSCALL_TTY_GET_MODE: {
+            if (!syscall_ctx_allow(CAP_DEV_INPUT, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (!g_user_task_active || g_user_task_term < 0) { regs->eax = (uint32)-1; break; }
+
+            int mode = vterm_stdin_is_raw(g_user_task_term) ? TTY_MODE_RAW : 0;
+            regs->eax = (uint32)mode;
+            break;
+        }
+        case SYSCALL_TTY_SET_WINSIZE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (!g_user_task_active || g_user_task_term < 0) { regs->eax = (uint32)-1; break; }
+
+            uint16 rows = (uint16)((uint32)arg1 & 0xFFFFu);
+            uint16 cols = (uint16)((uint32)arg2 & 0xFFFFu);
+            if (rows == 0 || cols == 0) { regs->eax = (uint32)-1; break; }
+
+            vterm_stdin_set_winsize(g_user_task_term, rows, cols);
+            regs->eax = 0;
+            break;
+        }
+        case SYSCALL_TTY_GET_WINSIZE: {
+            if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
+            if (!g_user_task_active || g_user_task_term < 0) { regs->eax = (uint32)-1; break; }
+
+            void* user_out = (void*)arg1;
+            if (!user_out) { regs->eax = (uint32)-1; break; }
+
+            struct {
+                uint16 rows;
+                uint16 cols;
+            } ws;
+            vterm_stdin_get_winsize(g_user_task_term, &ws.rows, &ws.cols);
+            regs->eax = (copyout(user_out, &ws, sizeof(ws)) == 0) ? 0u : (uint32)-1;
             break;
         }
         case SYSCALL_CHDIR: {
@@ -3188,8 +4307,221 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = 0;
             break;
         }
+        case 192: /* Linux i386 mmap2 */
         case SYSCALL_MMAP: {
-            int read_only = ((int)arg3 != 0) ? 1 : 0;
+            // Check if this is fd-based mmap (standard POSIX) or path-based (legacy EYN-OS)
+            // arg1=addr, arg2=len, arg3=prot, arg4=flags, arg5=fd
+            
+            uint32 addr = (uint32)arg1;
+            uint32 length = (uint32)arg2;
+            int prot = (int)arg3;
+            uint32 flags = (uint32)arg4;
+            int fd = (int)arg5;
+            uint32 offset = 0;
+            if (syscall_num == 192) {
+                /* Linux i386 mmap2 uses EBP as page-based file offset. */
+                offset = regs->ebp << 12;
+            }
+            
+            printf("%c[MMAP] syscall: addr=0x%x len=%u prot=%d flags=0x%x fd=%d\n", 
+                   255, 0, 0, addr, length, prot, flags, fd);
+
+            if (flags & 0x20) {
+                if (!syscall_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) {
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+
+                native_process_t* cur_proc = native_get_current_process();
+                address_space_t* as = NULL;
+                if (cur_proc && cur_proc->address_space) {
+                    as = cur_proc->address_space;
+                } else {
+                    extern address_space_t* vmm_current_as;
+                    if (vmm_current_as) as = vmm_current_as;
+                }
+
+                if (!as) {
+                    printf("%c[MMAP] FAILED: no current process address space\n", 255, 165, 0);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+
+                uint32 aligned_len = (length + 4096u - 1u) & ~(4096u - 1u);
+                uint32 target_addr = addr;
+                if (target_addr == 0) {
+                    target_addr = (g_next_fd_mmap_va + 4095u) & ~4095u;
+                    g_next_fd_mmap_va = target_addr + aligned_len;
+                    if (g_next_fd_mmap_va >= USER_SHARED_END) {
+                        printf("%c[MMAP] FAILED: out of user mmap space\n", 255, 165, 0);
+                        regs->eax = (uint32)-1;
+                        break;
+                    }
+                } else if (target_addr < USER_SHARED_BASE || target_addr >= USER_SHARED_END) {
+                    printf("%c[MMAP] FAILED: target address 0x%x outside user mmap range\n", 255, 165, 0, target_addr);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+
+                uint32 mapped = 0;
+                uint32 pte_flags = PTE_USER;
+                if (prot & 0x2) pte_flags |= PTE_RW;
+
+                for (uint32 va = target_addr; va < target_addr + aligned_len; va += PAGE_SIZE) {
+                    uint32 frame = frame_alloc();
+                    if (frame == 0) {
+                        printf("%c[MMAP] FAILED: out of physical memory\n", 255, 165, 0);
+                        goto _mmap_anon_fail;
+                    }
+
+                    memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+
+                    if (vmm_map_page(as, va, frame, pte_flags) != 0) {
+                        printf("%c[MMAP] FAILED: map_page va=0x%x\n", 255, 165, 0, va);
+                        frame_free(frame);
+                        goto _mmap_anon_fail;
+                    }
+                    mapped += PAGE_SIZE;
+                }
+
+                printf("%c[MMAP] anonymous mmap: mapped %u bytes at 0x%x\n", 255, 0, 0, aligned_len, target_addr);
+                regs->eax = target_addr;
+                break;
+
+                _mmap_anon_fail:
+                for (uint32 undo = target_addr; undo < target_addr + mapped; undo += PAGE_SIZE) {
+                    vmm_unmap_page(as, undo);
+                }
+                regs->eax = (uint32)-1;
+                break;
+            }
+            
+            // If fd >= 0 and flags indicates it's POSIX mmap, handle via fd-based mmap
+            if (fd >= 0 && !(flags & 0x100)) {  // Assume bit 0x100 indicates legacy path-based
+                // Standard POSIX mmap with file descriptor
+                if (!syscall_ctx_allow(CAP_READ_FS | CAP_ALLOC_MEMORY, SCHED_COST_FS)) { 
+                    regs->eax = (uint32)-1; 
+                    break; 
+                }
+
+                native_process_t* cur_proc = native_get_current_process();
+                address_space_t* as = NULL;
+                if (cur_proc && cur_proc->address_space) {
+                    as = cur_proc->address_space;
+                } else {
+                    /* Fallback: if this syscall is coming from a ring3 user task,
+                     * use the current VMM address space (if any). This may be
+                     * the kernel AS during some flows, but using it ensures the
+                     * syscall has a valid address_space to map into. */
+                    extern address_space_t* vmm_current_as;
+                    if (vmm_current_as) {
+                        as = vmm_current_as;
+                    }
+                }
+
+                if (!as) {
+                    printf("%c[MMAP] FAILED: no current process address space\n", 255, 165, 0);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+                
+                uint32 aligned_len = (length + 4096u - 1u) & ~(4096u - 1u);
+                uint32 target_addr = addr;
+                if (target_addr == 0) {
+                    target_addr = (g_next_fd_mmap_va + 4095u) & ~4095u;
+                    g_next_fd_mmap_va = target_addr + aligned_len;
+                    if (g_next_fd_mmap_va >= USER_SHARED_END) {
+                        printf("%c[MMAP] FAILED: out of user mmap space\n", 255, 165, 0);
+                        regs->eax = (uint32)-1;
+                        break;
+                    }
+                } else if (target_addr < USER_SHARED_BASE || target_addr >= USER_SHARED_END) {
+                    printf("%c[MMAP] FAILED: target address 0x%x outside user mmap range\n", 255, 165, 0, target_addr);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+
+                /* Validate the FD and locate its kernel FD entry */
+                if (fd < 0 || fd >= USER_FD_MAX || !g_user_fds[fd].used) {
+                    printf("%c[MMAP] FAILED: bad fd %d\n", 255, 165, 0, fd);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+                user_fd_t* ufd = &g_user_fds[fd];
+                if (ufd->kind != USER_FD_KIND_FILE || ufd->is_dir) {
+                    printf("%c[MMAP] FAILED: fd %d not a regular file\n", 255, 165, 0, fd);
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+
+                /* Ensure we know the file size */
+                uint32 file_size = ufd->size;
+                if (file_size == 0 && ufd->path[0]) {
+                    uint32 tmp_size = 0;
+                    if (vfs_get_file_size(ufd->drive, ufd->path, &tmp_size) == 0) file_size = tmp_size;
+                }
+
+                /* Map each page into the caller's user address space. */
+                uint32 mapped = 0;
+                uint32 pte_flags = PTE_USER;
+                if (prot & 0x2) pte_flags |= PTE_RW;
+
+                for (uint32 va = target_addr; va < target_addr + aligned_len; va += PAGE_SIZE) {
+                    uint32 frame = frame_alloc();
+                    if (frame == 0) {
+                        printf("%c[MMAP] FAILED: out of physical memory\n", 255, 165, 0);
+                        goto _mmap_fd_fail;
+                    }
+
+                    memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+
+                    uint32 file_off = offset + (va - target_addr);
+                    if (file_off < file_size) {
+                        uint32 to_copy = file_size - file_off;
+                        if (to_copy > PAGE_SIZE) to_copy = PAGE_SIZE;
+                        int got = -1;
+                        if (ufd->eynfs_first_block != 0) {
+                            got = eynfs_read_file_fast(ufd->drive,
+                                                       ufd->eynfs_first_block,
+                                                       (uint32)file_size,
+                                                       (void*)(KERNEL_BASE + frame),
+                                                       (size_t)to_copy,
+                                                       (size_t)file_off,
+                                                       &ufd->cur_block,
+                                                       &ufd->cur_block_off);
+                        } else {
+                            got = vfs_read_file_at(ufd->drive, ufd->path, (void*)(KERNEL_BASE + frame), (int)to_copy, file_off);
+                        }
+                        if (got < 0 || (uint32)got != to_copy) {
+                            printf("%c[MMAP] FAILED: read error fd=%d off=%u\n", 255, 165, 0, fd, file_off);
+                            frame_free(frame);
+                            goto _mmap_fd_fail;
+                        }
+                    }
+
+                    if (vmm_map_page(as, va, frame, pte_flags) != 0) {
+                        printf("%c[MMAP] FAILED: map_page va=0x%x\n", 255, 165, 0, va);
+                        frame_free(frame);
+                        goto _mmap_fd_fail;
+                    }
+                    mapped += PAGE_SIZE;
+                }
+
+                printf("%c[MMAP] fd=%d based mmap: mapped %u bytes at 0x%x (file %u)\n", 255, 0, 0, fd, aligned_len, target_addr, file_size);
+
+                regs->eax = target_addr;
+                break;
+
+                _mmap_fd_fail:
+                for (uint32 undo = target_addr; undo < target_addr + mapped; undo += PAGE_SIZE) {
+                    vmm_unmap_page(as, undo);
+                }
+                regs->eax = (uint32)-1;
+                break;
+            }
+            
+            // Legacy path-based mmap (arg1 is actually a path string)
+            int read_only = flags ? 1 : 0;  // Use flags to determine read-only
             uint32 caps = read_only ? (CAP_READ_FS | CAP_ALLOC_MEMORY) : (CAP_READ_FS | CAP_WRITE_FS | CAP_ALLOC_MEMORY);
             if (!syscall_ctx_allow(caps, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
 
@@ -3200,31 +4532,51 @@ uint32 syscall_dispatch(regs_t* regs) {
             char path[128];
             if (copyin_cstr(path, sizeof(path), user_path) != 0) { regs->eax = (uint32)-1; break; }
 
+            printf("%c[MMAP] legacy path-based: path=%s\n", 255, 0, 0, path);
+
             void* mapped_addr = NULL;
             size_t mapped_size = 0;
-            if (eynfs_mmap(path, &mapped_addr, &mapped_size, (uint8_t)read_only) != 0 || !mapped_addr) {
+            int mmap_rc = eynfs_mmap(path, &mapped_addr, &mapped_size, (uint8_t)read_only);
+            printf("%c[MMAP] eynfs_mmap returned: rc=%d addr=%p size=%u\n", 255, 0, 0, mmap_rc, mapped_addr, (unsigned)mapped_size);
+            
+            if (mmap_rc != 0 || !mapped_addr) {
+                printf("%c[MMAP] FAILED: cannot map %s\n", 255, 165, 0, path);
                 regs->eax = (uint32)-1;
                 break;
             }
 
             if (user_out_size && copyout(user_out_size, &mapped_size, sizeof(mapped_size)) != 0) {
                 (void)eynfs_munmap(mapped_addr, mapped_size);
+                printf("%c[MMAP] FAILED: copyout size\n", 255, 165, 0);
                 regs->eax = (uint32)-1;
                 break;
             }
 
-            regs->eax = (uint32)(uintptr_t)mapped_addr;
+            uint32 user_addr = 0;
+            if (syscall_addr_to_u32((uintptr)mapped_addr, &user_addr) != 0) {
+                (void)eynfs_munmap(mapped_addr, mapped_size);
+                printf("%c[MMAP] FAILED: addr_to_u32\n", 255, 165, 0);
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            printf("%c[MMAP] SUCCESS: returning addr 0x%x\n", 255, 0, 0, user_addr);
+            regs->eax = user_addr;
             break;
         }
         case SYSCALL_MUNMAP: {
             if (!syscall_ctx_allow(CAP_ALLOC_MEMORY, SCHED_COST_ALLOC)) { regs->eax = (uint32)-1; break; }
-            void* addr = (void*)(uintptr_t)arg1;
+            uint32 user_addr = 0;
+            if (syscall_addr_to_u32(arg1, &user_addr) != 0) { regs->eax = (uint32)-1; break; }
+            void* addr = (void*)(uintptr)user_addr;
             regs->eax = (eynfs_munmap(addr, 0) == 0) ? 0u : (uint32)-1;
             break;
         }
         case SYSCALL_MSYNC: {
             if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
-            void* addr = (void*)(uintptr_t)arg1;
+            uint32 user_addr = 0;
+            if (syscall_addr_to_u32(arg1, &user_addr) != 0) { regs->eax = (uint32)-1; break; }
+            void* addr = (void*)(uintptr)user_addr;
             regs->eax = (eynfs_msync(addr, 0) == 0) ? 0u : (uint32)-1;
             break;
         }
@@ -3246,7 +4598,10 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (!syscall_ctx_allow(CAP_WRITE_CONSOLE, SCHED_COST_CONSOLE)) { regs->eax = (uint32)-1; break; }
             if ((int)arg3 != 1) { regs->eax = (uint32)-1; break; }
 
-            uint32 addr = (uint32)arg1;
+            uint32 user_addr = 0;
+            if (syscall_addr_to_u32(arg1, &user_addr) != 0) { regs->eax = (uint32)-1; break; }
+
+            uintptr addr = (uintptr)user_addr;
             int mode = (int)arg2;
             if (mode == 1) {
                 *(volatile uint32*)addr = 0x12345678u;
@@ -3320,6 +4675,11 @@ uint32 syscall_dispatch(regs_t* regs) {
                 regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
                 break;
             }
+            if (ufd->kind == USER_FD_KIND_PTY) {
+                int n = user_pty_write(ufd->pty_id, ufd->pty_end, user_buf, len, ufd->nonblock);
+                regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
+                break;
+            }
 
             if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             int n = syscall_write_file_from_fd(ufd, user_buf, len);
@@ -3355,16 +4715,21 @@ uint32 syscall_dispatch(regs_t* regs) {
                 // polling the keyboard directly. The TUI routes input to this buffer.
                 const char* s = NULL;
                 int slen = 0;
+                int term = -1;
+                int raw_mode = 0;
+                int consume_n = -1;
                 
                 if (tile_is_tiling_active() && g_user_task_term >= 0) {
-                    int term = g_user_task_term;  // Cache to avoid race conditions
+                    term = g_user_task_term;  // Cache to avoid race conditions
+                    raw_mode = vterm_stdin_is_raw(term);
                     
                     // Wait for a complete line in the stdin buffer.
                     // This is a busy-wait but the PIT IRQ will feed the buffer
                     // and can also set g_user_interrupt for Ctrl+C.
                     // Enable interrupts so the PIT can fire and process keyboard input.
                     __asm__ __volatile__("sti");
-                    while (!vterm_stdin_ready(term)) {
+                    while ((raw_mode && vterm_stdin_len(term) <= 0) ||
+                           (!raw_mode && !vterm_stdin_ready(term))) {
                         if (g_user_interrupt) {
                             // User pressed Ctrl+C - return error
                             regs->eax = (uint32)-1;
@@ -3399,7 +4764,11 @@ uint32 syscall_dispatch(regs_t* regs) {
                 if (maxlen <= 0) { regs->eax = 0; goto stdin_cleanup; }
 
                 int n = slen;
-                if (n > maxlen - 1) n = maxlen - 1;
+                if (raw_mode) {
+                    if (n > maxlen) n = maxlen;
+                } else {
+                    if (n > maxlen - 1) n = maxlen - 1;
+                }
                 if (n < 0) n = 0;
 
                 char* user_dst = (char*)arg2;
@@ -3410,23 +4779,27 @@ uint32 syscall_dispatch(regs_t* regs) {
                     regs->eax = (uint32)-1;
                     goto stdin_cleanup;
                 }
-                if (copyout(user_dst + n, "\0", 1) != 0) {
-                    if (SYSCALL_DEBUG) {
-                        printf("[stdin] copyout NUL failed\n");
+                if (!raw_mode) {
+                    if (copyout(user_dst + n, "\0", 1) != 0) {
+                        if (SYSCALL_DEBUG) {
+                            printf("[stdin] copyout NUL failed\n");
+                        }
+                        regs->eax = (uint32)-1;
+                        goto stdin_cleanup;
                     }
-                    regs->eax = (uint32)-1;
-                    goto stdin_cleanup;
                 }
 
                 if (SYSCALL_DEBUG) {
                     printf("[stdin] returning %d bytes to user\n", n);
                 }
                 regs->eax = (uint32)n;
+                if (raw_mode) consume_n = n;
                 
             stdin_cleanup:
                 // Clear the stdin buffer after consuming
-                if (tile_is_tiling_active() && g_user_task_term >= 0) {
-                    vterm_stdin_consume(g_user_task_term);
+                if (term >= 0) {
+                    if (consume_n >= 0) vterm_stdin_consume_bytes(term, consume_n);
+                    else vterm_stdin_consume(term);
                 }
             stdin_done:
                 break;
@@ -3437,6 +4810,11 @@ uint32 syscall_dispatch(regs_t* regs) {
 
             if (ufd->kind == USER_FD_KIND_PIPE) {
                 int n = user_pipe_read(ufd->pipe_id, (char*)arg2, maxlen, ufd->nonblock);
+                regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
+                break;
+            }
+            if (ufd->kind == USER_FD_KIND_PTY) {
+                int n = user_pty_read(ufd->pty_id, ufd->pty_end, (char*)arg2, maxlen, ufd->nonblock);
                 regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
                 break;
             }
@@ -3492,6 +4870,8 @@ uint32 syscall_dispatch(regs_t* regs) {
                 ufd->pipe_end = ((open_flags & (OPEN_FLAG_WRONLY | OPEN_FLAG_RDWR)) != 0)
                               ? USER_PIPE_END_WRITE
                               : USER_PIPE_END_READ;
+                ufd->pty_id = -1;
+                ufd->pty_end = -1;
                 ufd->nonblock = ((open_flags & OPEN_FLAG_NONBLOCK) != 0) ? 1 : 0;
                 ufd->is_dir = 0;
                 ufd->size = 0;
@@ -3536,6 +4916,8 @@ uint32 syscall_dispatch(regs_t* regs) {
             ufd->kind = USER_FD_KIND_FILE;
             ufd->pipe_id = -1;
             ufd->pipe_end = -1;
+            ufd->pty_id = -1;
+            ufd->pty_end = -1;
             ufd->drive = drive;
             strncpy(ufd->path, abspath, sizeof(ufd->path) - 1);
             ufd->path[sizeof(ufd->path) - 1] = '\0';
@@ -3668,6 +5050,27 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = 0;
             break;
         }
+        case SYSCALL_PTY_OPEN: {
+            int* user_ptyfd = (int*)arg1;
+            if (!user_ptyfd) { regs->eax = (uint32)-1; break; }
+            int master_fd = -1;
+            int slave_fd = -1;
+            if (syscall_kernel_pty_create(&master_fd, &slave_fd) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            int out[2];
+            out[0] = master_fd;
+            out[1] = slave_fd;
+            if (copyout(user_ptyfd, out, sizeof(out)) != 0) {
+                (void)user_fd_release(master_fd);
+                (void)user_fd_release(slave_fd);
+                regs->eax = (uint32)-1;
+                break;
+            }
+            regs->eax = 0;
+            break;
+        }
         case SYSCALL_MKFIFO: {
             if (!syscall_ctx_allow(CAP_WRITE_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
             const char* user_path = (const char*)arg1;
@@ -3758,6 +5161,21 @@ uint32 syscall_dispatch(regs_t* regs) {
             regs->eax = 0;
             break;
         }
+        case SYSCALL_FD_GET_STDIO: {
+            int* user_stdio = (int*)arg1;
+            if (!user_stdio) { regs->eax = (uint32)-1; break; }
+
+            int out[3];
+            out[0] = g_user_stdio_stdin_fd;
+            out[1] = g_user_stdio_stdout_fd;
+            out[2] = g_user_stdio_stderr_fd;
+            if (copyout(user_stdio, out, sizeof(out)) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            regs->eax = 0;
+            break;
+        }
         case SYSCALL_FD_SET_NONBLOCK: {
             int fd = (int)arg1;
             int enabled = (int)arg2;
@@ -3809,6 +5227,176 @@ uint32 syscall_dispatch(regs_t* regs) {
 
             int pid = user_task_spawn_argv(g_current_drive, abspath, kargc, kargv);
             regs->eax = (pid > 0) ? (uint32)pid : (uint32)-1;
+            break;
+        }
+        case SYSCALL_SPAWN_EX: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+
+            typedef struct {
+                uint32 path;
+                uint32 argv;
+                int32 argc;
+                int32 stdin_fd;
+                int32 stdout_fd;
+                int32 stderr_fd;
+                int32 inherit_mode;
+            } syscall_spawn_ex_req_u32_t;
+
+            const syscall_spawn_ex_req_u32_t* user_req = (const syscall_spawn_ex_req_u32_t*)arg1;
+            if (!user_req) { regs->eax = (uint32)-1; break; }
+
+            syscall_spawn_ex_req_u32_t req;
+            if (copyin(&req, user_req, sizeof(req)) != 0) { regs->eax = (uint32)-1; break; }
+            if (!req.path || req.argc < 0) { regs->eax = (uint32)-1; break; }
+            if (req.argc > 0 && !req.argv) { regs->eax = (uint32)-1; break; }
+
+            if (req.stdin_fd < 0 || req.stdin_fd >= USER_FD_MAX ||
+                req.stdout_fd < 0 || req.stdout_fd >= USER_FD_MAX ||
+                req.stderr_fd < 0 || req.stderr_fd >= USER_FD_MAX) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+            if (req.stdin_fd > 2 && !user_fd_get(req.stdin_fd)) { regs->eax = (uint32)-1; break; }
+            if (req.stdout_fd > 2 && !user_fd_get(req.stdout_fd)) { regs->eax = (uint32)-1; break; }
+            if (req.stderr_fd > 2 && !user_fd_get(req.stderr_fd)) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), (const char*)(uintptr)req.path) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            const int max_args = 16;
+            const int max_arg_len = 64;
+            char arg_buf[16][64];
+            const char* kargv[16];
+            int kargc = 0;
+
+            int argc = (int)req.argc;
+            if (argc > max_args) argc = max_args;
+            const char* const* user_argv = (const char* const*)(uintptr)req.argv;
+            for (int i = 0; i < argc; ++i) {
+                const char* user_arg_ptr = NULL;
+                if (copyin(&user_arg_ptr, user_argv + i, sizeof(user_arg_ptr)) != 0) {
+                    regs->eax = (uint32)-1;
+                    return regs->eax;
+                }
+                if (!user_arg_ptr) continue;
+                if (copyin_cstr(arg_buf[kargc], (size_t)max_arg_len, user_arg_ptr) != 0) {
+                    regs->eax = (uint32)-1;
+                    return regs->eax;
+                }
+                kargv[kargc] = arg_buf[kargc];
+                kargc++;
+            }
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                const char* t = vterm_get_cwd(g_user_task_term);
+                if (t && t[0] == '/') cwd = t;
+            }
+
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            int pid = user_task_spawn_argv_stdio(g_current_drive,
+                                                 abspath,
+                                                 kargc,
+                                                 kargv,
+                                                 (int)req.stdin_fd,
+                                                 (int)req.stdout_fd,
+                                                 (int)req.stderr_fd,
+                                                 req.inherit_mode ? 1 : 0);
+            regs->eax = (pid > 0) ? (uint32)pid : (uint32)-1;
+            break;
+        }
+
+        case SYSCALL_EXECVE: {
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) { regs->eax = (uint32)-1; break; }
+
+            typedef struct {
+                uint32 path;
+                uint32 argv;
+                int32 argc;
+                uint32 envp;
+            } syscall_exec_req_u32_t;
+
+            const syscall_exec_req_u32_t* user_req = (const syscall_exec_req_u32_t*)arg1;
+            if (!user_req) { regs->eax = (uint32)-1; break; }
+
+            syscall_exec_req_u32_t req;
+            if (copyin(&req, user_req, sizeof(req)) != 0) { regs->eax = (uint32)-1; break; }
+            if (!req.path || req.argc < 0) { regs->eax = (uint32)-1; break; }
+
+            char path[128];
+            if (copyin_cstr(path, sizeof(path), (const char*)(uintptr)req.path) != 0) { regs->eax = (uint32)-1; break; }
+
+            const int max_args = 16;
+            const int max_arg_len = 64;
+            char arg_buf[16][64];
+            const char* kargv[16];
+            int kargc = 0;
+
+            int argc = req.argc;
+            if (argc > max_args) argc = max_args;
+            const char* const* user_argv = (const char* const*)(uintptr)req.argv;
+            for (int i = 0; i < argc; ++i) {
+                const char* user_arg_ptr = NULL;
+                if (copyin(&user_arg_ptr, user_argv + i, sizeof(user_arg_ptr)) != 0) {
+                    regs->eax = (uint32)-1;
+                    return regs->eax;
+                }
+                if (!user_arg_ptr) continue;
+                if (copyin_cstr(arg_buf[kargc], (size_t)max_arg_len, user_arg_ptr) != 0) {
+                    regs->eax = (uint32)-1;
+                    return regs->eax;
+                }
+                kargv[kargc] = arg_buf[kargc];
+                kargc++;
+            }
+
+            /* Copy envp if present (NULL-terminated) */
+            const int max_env = 32;
+            const int max_env_len = 128;
+            char env_buf[32][128];
+            const char* kenvp[32];
+            int kenvc = 0;
+            if (req.envp) {
+                const char* const* user_env = (const char* const*)(uintptr)req.envp;
+                for (int i = 0; i < max_env; ++i) {
+                    const char* user_env_ptr = NULL;
+                    if (copyin(&user_env_ptr, user_env + i, sizeof(user_env_ptr)) != 0) {
+                        regs->eax = (uint32)-1;
+                        return regs->eax;
+                    }
+                    if (!user_env_ptr) break;
+                    if (copyin_cstr(env_buf[kenvc], (size_t)max_env_len, user_env_ptr) != 0) {
+                        regs->eax = (uint32)-1;
+                        return regs->eax;
+                    }
+                    kenvp[kenvc] = env_buf[kenvc];
+                    kenvc++;
+                }
+                /* Null-terminate kernel envp array if any */
+                if (kenvc < max_env) kenvp[kenvc] = NULL;
+            } else {
+                kenvc = 0;
+            }
+
+            const char* cwd = "/";
+            if (g_user_task_active) {
+                const char* t = vterm_get_cwd(g_user_task_term);
+                if (t && t[0] == '/') cwd = t;
+            }
+
+            char abspath[128];
+            resolve_path(path, cwd, abspath, sizeof(abspath));
+
+            /* Call into the UELF loader to replace the current image. On success
+             * user_elf_run_argv will enter user mode and not return. On failure
+             * it will return a negative value and we propagate -1 to userland. */
+            int rc = user_elf_run_argv(g_current_drive, abspath, kargc, kargv, (kenvc > 0) ? kenvp : NULL);
+            regs->eax = (rc == 0) ? 0u : (uint32)-1;
             break;
         }
         case SYSCALL_WAITPID: {
@@ -3870,9 +5458,14 @@ uint32 syscall_dispatch(regs_t* regs) {
             user_fd_t* ufd = user_fd_from_cap(&cap, CAP_R_READ, NULL);
             if (!ufd) { regs->eax = (uint32)-1; break; }
 
-            int n = (ufd->kind == USER_FD_KIND_PIPE)
-                ? user_pipe_read(ufd->pipe_id, user_buf, maxlen, ufd->nonblock)
-                : syscall_read_file(ufd, user_buf, maxlen);
+            int n = -1;
+            if (ufd->kind == USER_FD_KIND_PIPE) {
+                n = user_pipe_read(ufd->pipe_id, user_buf, maxlen, ufd->nonblock);
+            } else if (ufd->kind == USER_FD_KIND_PTY) {
+                n = user_pty_read(ufd->pty_id, ufd->pty_end, user_buf, maxlen, ufd->nonblock);
+            } else {
+                n = syscall_read_file(ufd, user_buf, maxlen);
+            }
             regs->eax = (n < 0) ? (uint32)-1 : (uint32)n;
             break;
         }
@@ -3900,9 +5493,14 @@ uint32 syscall_dispatch(regs_t* regs) {
             user_fd_t* ufd = user_fd_from_cap(&cap, CAP_R_WRITE, NULL);
             if (!ufd) { regs->eax = (uint32)-1; break; }
 
-            int written = (ufd->kind == USER_FD_KIND_PIPE)
-                        ? user_pipe_write(ufd->pipe_id, user_buf, len, ufd->nonblock)
-                        : syscall_write_file_from_fd(ufd, user_buf, len);
+            int written = -1;
+            if (ufd->kind == USER_FD_KIND_PIPE) {
+                written = user_pipe_write(ufd->pipe_id, user_buf, len, ufd->nonblock);
+            } else if (ufd->kind == USER_FD_KIND_PTY) {
+                written = user_pty_write(ufd->pty_id, ufd->pty_end, user_buf, len, ufd->nonblock);
+            } else {
+                written = syscall_write_file_from_fd(ufd, user_buf, len);
+            }
             regs->eax = (written < 0) ? (uint32)-1 : (uint32)written;
             break;
         }
@@ -4134,9 +5732,28 @@ uint32 syscall_dispatch(regs_t* regs) {
         }
         case SYSCALL_SLEEP_US: {
             uint32 usec = (uint32)arg1;
-            // Cooperative sleep to allow other tasks (UI/tiler) to run.
-            // Uses a busy-wait fallback if no timer is configured.
-            sched_sleep_us(usec);
+            if (!g_user_task_active) {
+                sched_sleep_us(usec);
+                regs->eax = 0;
+                break;
+            }
+
+            uint32 hz = sched_get_tick_hz();
+            if (hz == 0) hz = 100;
+            uint32 tick_us = 1000000u / hz;
+            if (tick_us == 0) tick_us = 1;
+            uint32 needed_ticks = (usec + tick_us - 1u) / tick_us;
+            uint32 wake_tick = sched_get_tick_count() + needed_ticks;
+
+            user_task_block_current_sleep_until(wake_tick);
+            while (user_task_current_is_blocked()) {
+                watchdog_kick("sleep");
+                __asm__ __volatile__("sti");
+                __asm__ __volatile__("hlt");
+                __asm__ __volatile__("cli");
+                user_task_scheduler_tick();
+            }
+            user_task_unblock_current();
             regs->eax = 0;
             break;
         }
@@ -4191,8 +5808,7 @@ uint32 syscall_dispatch(regs_t* regs) {
                 break;
             }
 
-            int new_win = wm_create_window(e->title, 100 + (handle - 1) * 24,
-                                           60  + (handle - 1) * 24, 700, 480,
+            int new_win = wm_create_window(e->title, -1, -1, 700, 480,
                                            e->status_left);
             if (new_win < 0) {
                 user_gui_free_entry(e);
@@ -4204,7 +5820,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             e->cmd_count = 0;
             e->ev_head = 0;
             e->ev_tail = 0;
-            wm_register_gui_client2(new_win, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)handle);
+            wm_register_gui_client2(new_win, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uintptr)handle);
             wm_register_gui_close_cb(new_win, user_gui_close_cb);
             wm_invalidate_window(new_win);
             regs->eax = (uint32)handle;
@@ -4246,8 +5862,7 @@ uint32 syscall_dispatch(regs_t* regs) {
                 break;
             }
 
-            int cap_win = wm_create_window(e->title, 100 + (handle - 1) * 24,
-                                            60  + (handle - 1) * 24, 700, 480,
+            int cap_win = wm_create_window(e->title, -1, -1, 700, 480,
                                             e->status_left);
             if (cap_win < 0) {
                 user_gui_free_entry(e);
@@ -4259,7 +5874,7 @@ uint32 syscall_dispatch(regs_t* regs) {
             e->cmd_count = 0;
             e->ev_head = 0;
             e->ev_tail = 0;
-            wm_register_gui_client2(cap_win, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uint32)handle);
+            wm_register_gui_client2(cap_win, user_gui_draw_cb, user_gui_key_cb, user_gui_mouse_cb, (void*)(uintptr)handle);
             wm_register_gui_close_cb(cap_win, user_gui_close_cb);
             wm_invalidate_window(cap_win);
 
@@ -4898,26 +6513,38 @@ uint32 syscall_dispatch(regs_t* regs) {
             user_gui_t* e = user_gui_get(handle);
             if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
 
-            int new_font = vga_system_font_acquire();
+            int new_font = 0;
+            int loaded_custom = 0;
             if (user_path) {
                 char path[128];
                 if (copyin_cstr(path, sizeof(path), user_path) == 0) {
                     trim_trailing_crlf(path);
                     if (path[0]) {
+                        loaded_custom = 1;
                         const char* cwd = "/";
                         if (g_user_task_active) cwd = vterm_get_cwd(g_user_task_term);
                         char abspath[128];
                         resolve_path(path, cwd, abspath, sizeof(abspath));
                         uint8 drive = g_current_drive;
                         int h = vga_font_acquire_path(drive, abspath);
-                        if (h > 0) new_font = h;
+                        if (h <= 0) { regs->eax = (uint32)-1; break; }
+                        new_font = h;
                     }
                 }
             }
 
+            if (!loaded_custom) {
+                new_font = vga_system_font_acquire();
+            }
+
+            if (new_font <= 0) { regs->eax = (uint32)-1; break; }
+
             if (e->font_handle != new_font) {
                 if (e->font_handle > 0) vga_font_release(e->font_handle);
                 e->font_handle = new_font;
+            } else {
+                // Avoid leaking refs when acquiring the same handle again.
+                vga_font_release(new_font);
             }
             regs->eax = 0;
             break;
@@ -5001,12 +6628,19 @@ uint32 syscall_dispatch(regs_t* regs) {
             int have = 0;
             if (syscall_num == SYSCALL_GUI_WAIT_EVENT) {
                 // Block until an event arrives.
+                user_task_block_current_gui_wait(handle);
                 while (!(have = user_gui_pop_event(e, &ev))) {
-                    if (g_user_interrupt) { regs->eax = (uint32)-1; goto gui_event_done; }
+                    if (g_user_interrupt) {
+                        user_task_unblock_current();
+                        regs->eax = (uint32)-1;
+                        goto gui_event_done;
+                    }
+                    watchdog_kick("gui-wait");
                     __asm__ __volatile__("sti");
                     __asm__ __volatile__("hlt");
                     __asm__ __volatile__("cli");
                 }
+                user_task_unblock_current();
             } else {
                 have = user_gui_pop_event(e, &ev);
             }
@@ -5226,26 +6860,38 @@ uint32 syscall_dispatch(regs_t* regs) {
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_WRITE, NULL);
             if (!user_gui_active(e)) { regs->eax = (uint32)-1; break; }
 
-            int new_font = vga_system_font_acquire();
+            int new_font = 0;
+            int loaded_custom = 0;
             if (user_path) {
                 char path[128];
                 if (copyin_cstr(path, sizeof(path), user_path) == 0) {
                     trim_trailing_crlf(path);
                     if (path[0]) {
+                        loaded_custom = 1;
                         const char* cwd = "/";
                         if (g_user_task_active) cwd = vterm_get_cwd(g_user_task_term);
                         char abspath[128];
                         resolve_path(path, cwd, abspath, sizeof(abspath));
                         uint8 drive = g_current_drive;
                         int h = vga_font_acquire_path(drive, abspath);
-                        if (h > 0) new_font = h;
+                        if (h <= 0) { regs->eax = (uint32)-1; break; }
+                        new_font = h;
                     }
                 }
             }
 
+            if (!loaded_custom) {
+                new_font = vga_system_font_acquire();
+            }
+
+            if (new_font <= 0) { regs->eax = (uint32)-1; break; }
+
             if (e->font_handle != new_font) {
                 if (e->font_handle > 0) vga_font_release(e->font_handle);
                 e->font_handle = new_font;
+            } else {
+                // Avoid leaking refs when acquiring the same handle again.
+                vga_font_release(new_font);
             }
             regs->eax = 0;
             break;
@@ -5321,18 +6967,27 @@ uint32 syscall_dispatch(regs_t* regs) {
             if (syscall_cap_copyin(user_cap_ptr, &cap) != 0) { regs->eax = (uint32)-1; break; }
             user_gui_t* e = user_gui_from_cap(&cap, CAP_R_READ, NULL);
             if (!e) { regs->eax = (uint32)-1; break; }
+            int gui_handle = user_gui_index_from_ptr(e);
+            if (gui_handle < 0) { regs->eax = (uint32)-1; break; }
 
             user_gui_flush_pending_frame(e);
 
             user_gui_event_t ev;
             int have = 0;
             if (syscall_num == SYSCALL_CAP_GUI_WAIT_EVENT) {
+                user_task_block_current_gui_wait(gui_handle);
                 while (!(have = user_gui_pop_event(e, &ev))) {
-                    if (g_user_interrupt) { regs->eax = (uint32)-1; goto cap_gui_event_done; }
+                    if (g_user_interrupt) {
+                        user_task_unblock_current();
+                        regs->eax = (uint32)-1;
+                        goto cap_gui_event_done;
+                    }
+                    watchdog_kick("gui-wait-cap");
                     __asm__ __volatile__("sti");
                     __asm__ __volatile__("hlt");
                     __asm__ __volatile__("cli");
                 }
+                user_task_unblock_current();
             } else {
                 have = user_gui_pop_event(e, &ev);
             }
@@ -5372,6 +7027,28 @@ uint32 syscall_dispatch(regs_t* regs) {
                 syscall_reset_user_stdio_fds();
             }
             regs->eax = 0;
+            break;
+        }
+        case SYSCALL_KILL: {
+            // args: (int pid, int sig)
+            int pid = (int)arg1;
+            int sig = (int)arg2;
+            if (user_task_queue_signal(pid, sig) == 0) {
+                regs->eax = 0;
+            } else {
+                regs->eax = (uint32)-1;
+            }
+            break;
+        }
+        case SYSCALL_SIGNAL: {
+            // args: (int sig, void* handler)
+            int sig = (int)arg1;
+            void* handler = (void*)(uintptr)arg2;
+            if (user_task_set_handler_current(sig, (uintptr)handler) == 0) {
+                regs->eax = 0;
+            } else {
+                regs->eax = (uint32)-1;
+            }
             break;
         }
         case SYSCALL_GETKEY: {
@@ -5565,20 +7242,303 @@ uint32 syscall_dispatch(regs_t* regs) {
                 offset += chunk;
                 count++;
             }
-
+            
             regs->eax = (uint32)count;
             break;
         }
 
+        case SYSCALL_GET_SYSINFO: {
+            /*
+             * SYSCALL_GET_SYSINFO (152): Get system information
+             * args: (eyn_sysinfo_t* info)
+             * returns: 0 on success, -1 on failure
+             *
+             * Retrieves OS version, kernel version, and shell name.
+             */
+            if (!syscall_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            typedef struct {
+                char os_version[64];
+                char kernel_version[32];
+                char shell[64];
+            } sysinfo_u32_t;
+
+            sysinfo_u32_t* user_info = (sysinfo_u32_t*)arg1;
+            if (!user_info) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            sysinfo_u32_t info;
+            if (!g_os_version || !g_kernel_version) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            /* Copy OS version */
+            strncpy((char*)info.os_version, g_os_version, sizeof(info.os_version) - 1);
+            info.os_version[sizeof(info.os_version) - 1] = '\0';
+
+            /* Copy kernel version */
+            strncpy((char*)info.kernel_version, g_kernel_version, sizeof(info.kernel_version) - 1);
+            info.kernel_version[sizeof(info.kernel_version) - 1] = '\0';
+
+            /* Try to get shell from environment or use default */
+            const char* shell_env = NULL;
+            /* TODO: Get from environment; for now use hardcoded default */
+            const char* default_shell = "kernel";
+            strncpy((char*)info.shell, default_shell, sizeof(info.shell) - 1);
+            info.shell[sizeof(info.shell) - 1] = '\0';
+
+            /* Copy result back to user space */
+            if (copyout(user_info, &info, sizeof(info)) != 0) {
+                regs->eax = (uint32)-1;
+                break;
+            }
+
+            regs->eax = 0;
+            break;
+        }
+
+        case SYSCALL_SIGRETURN: {
+            if (user_task_sigreturn_current(regs) == 0) {
+                regs->eax = 0;
+            } else {
+                regs->eax = (uint32)-1;
+            }
+            break;
+        }
+
+        /* Linux i386 compat: set_thread_area (243).
+         * Minimal implementation: accept the call and return a valid selector.
+         * Do NOT install a new LDT; rely on the user LDT that's already set up
+         * by segdom_init during UELF loading. This prevents clobbering existing
+         * user selectors (0x0B CS, 0x13 DS).
+         * Return entry_number=2 to indicate selector 0x13 (DS from LDT[2]).
+         */
+        case 243: {
+            linux_user_desc_t ud;
+            linux_user_desc_t* user_desc = (linux_user_desc_t*)arg1;
+            if (linux_proc && !linux_proc->linux_compat_mode) { regs->eax = (uint32)-1; break; }
+            if (!user_desc) {
+                regs->eax = (uint32)-22; /* EINVAL */
+                break;
+            }
+            if (copyin(&ud, user_desc, sizeof(ud)) != 0) {
+                regs->eax = (uint32)-14; /* EFAULT */
+                break;
+            }
+
+            /* Linux allows -1 for "allocate me an entry".
+             * We expose a single TLS entry (GDT entry 7) and accept common
+             * user requests for 6/7/8 by mapping them to that slot. */
+            if (ud.entry_number == 0xFFFFFFFFu ||
+                ud.entry_number == 6u ||
+                ud.entry_number == 7u ||
+                ud.entry_number == 8u ||
+                ud.entry_number == GDT_TLS_ENTRY) {
+                ud.entry_number = GDT_TLS_ENTRY;
+            } else {
+                /* Only support our single TLS slot */
+                regs->eax = (uint32)-22; /* EINVAL */
+                break;
+            }
+
+            /* Populate the TLS GDT descriptor with the user-supplied base/limit. */
+            uint32 tls_limit = ud.limit ? ud.limit : 0xFFFFF;
+            gdt_set_tls_descriptor(ud.base_addr, tls_limit);
+            g_user_segdom_gs = GDT_TLS_SEL;
+
+            /* Write back the assigned entry_number so caller can compute gs selector. */
+            if (copyout(user_desc, &ud, sizeof(ud)) != 0) {
+                regs->eax = (uint32)-14; /* EFAULT */
+                break;
+            }
+
+            printf("[TLS] set_thread_area: base=0x%08X limit=0x%08X entry=%u sel=0x%X\n",
+                   (unsigned)ud.base_addr, (unsigned)tls_limit,
+                   (unsigned)ud.entry_number, (unsigned)GDT_TLS_SEL);
+            regs->eax = 0;
+            break;
+        }
+
+        /* Linux i386 compat: get_thread_area (244). */
+        case 244: {
+            linux_user_desc_t ud;
+            linux_user_desc_t* user_desc = (linux_user_desc_t*)arg1;
+            if (!user_desc) {
+                regs->eax = (uint32)-22; /* EINVAL */
+                break;
+            }
+            if (copyin(&ud, user_desc, sizeof(ud)) != 0) {
+                regs->eax = (uint32)-14; /* EFAULT */
+                break;
+            }
+            ud.entry_number = GDT_TLS_ENTRY;
+            if (copyout(user_desc, &ud, sizeof(ud)) != 0) {
+                regs->eax = (uint32)-14; /* EFAULT */
+                break;
+            }
+            regs->eax = 0;
+            break;
+        }
+
+        /* Linux i386 compat: set_tid_address (258).
+         * Return current pid/tid; if caller supplied a pointer, store it.
+         */
+        case 258: {
+            uint32* user_tidptr = (uint32*)arg1;
+            uint32 tid = 1;
+            if (user_tidptr) {
+                if (copyout(user_tidptr, &tid, sizeof(tid)) != 0) {
+                    regs->eax = (uint32)-1;
+                    break;
+                }
+            }
+            regs->eax = tid;
+            break;
+        }
+
+        /* Linux i386 compat: exit_group (252) */
+        case 252: {
+            user_task_notify_exit((int)arg1);
+            syscall_reset_user_guis();
+            g_user_task_active = 0;
+            g_user_task_term = -1;
+            g_user_interrupt = 0;
+            g_abort_to_shell = 1;
+            if (!g_user_fd_inherit_mode) {
+                syscall_reset_user_fds();
+            }
+            syscall_reset_user_streams();
+            if (!g_user_fd_inherit_mode) {
+                syscall_reset_user_stdio_fds();
+            }
+            regs->eax = 0;
+            break;
+        }
+
+        /* Linux i386: 32-bit UID/GID getters (199-202).
+         * getuid32/getgid32/geteuid32/getegid32 — return a fixed UID/GID of 0 (root).
+         * Programs use these during startup for permission checks; returning 0 is safe.
+         * NOTE: 200=SYSCALL_KILL, 201=SYSCALL_SIGRETURN, 202=SYSCALL_SIGNAL already exist;
+         * only 199 (getuid32) needs a new case here. */
+        case 199: /* getuid32  */
+            regs->eax = 0;
+            break;
+
+        /* Linux i386: rt_sigaction (174) — register signal handler.
+         * args: signum, *act, *oldact, sigsetsize
+         * Stub: zero out oldact if provided and return success.
+         * Real signal delivery is not implemented; most programs just need this
+         * to succeed during startup (SIG_DFL / SIG_IGN registrations). */
+        case 174: {
+            uint32* oldact = (uint32*)arg2;
+            if (oldact) {
+                /* struct sigaction on i386 is ≥16 bytes; zero the handler + mask */
+                uint32 zero = 0;
+                for (int i = 0; i < 4; i++)
+                    copyout(oldact + i, &zero, sizeof(zero));
+            }
+            regs->eax = 0;
+            break;
+        }
+
+        /* Linux i386: rt_sigprocmask (175) — change signal mask.
+         * args: how, *set, *oldset, sigsetsize
+         * Stub: zero out oldset if provided and return success. */
+        case 175: {
+            uint32* oldset = (uint32*)arg2;
+            if (oldset) {
+                uint32 zero = 0;
+                /* sigset_t is 8 bytes on i386 */
+                copyout(oldset,     &zero, sizeof(zero));
+                copyout(oldset + 1, &zero, sizeof(zero));
+            }
+            regs->eax = 0;
+            break;
+        }
+
+        /* Linux i386: set_robust_list (311)
+         * Single-threaded compat mode: accept registration. */
+        case 311:
+            regs->eax = 0;
+            break;
+
+        /* Linux i386/newer runtimes: rseq (386)
+         * Return ENOSYS so libc falls back to non-rseq paths. */
+        case 386:
+            regs->eax = (uint32)-38; /* -ENOSYS */
+            break;
+
+        /* Linux i386: epoll_create (254) */
+        case 254:
+        case 211: { /* legacy compat */
+            if (!linux_proc || !linux_proc->linux_compat_mode) { regs->eax = (uint32)-1; break; }
+            uint32 regs_arr[8] = { 254, arg2, arg3, arg1, 0, 0, 0, 0 };
+            int ret = linux_syscall_dispatch(linux_proc, regs_arr);
+            regs->eax = (uint32)ret;
+            break;
+        }
+
+        /* Linux i386: epoll_ctl (255) */
+        case 255:
+        case 212: { /* legacy compat */
+            if (!linux_proc || !linux_proc->linux_compat_mode) { regs->eax = (uint32)-1; break; }
+            uint32 regs_arr[8] = { 255, arg2, arg3, arg1, 0, 0, arg4, arg5 };
+            int ret = linux_syscall_dispatch(linux_proc, regs_arr);
+            regs->eax = (uint32)ret;
+            break;
+        }
+
+        /* Linux i386: epoll_wait (256) */
+        case 256:
+        case 213: { /* legacy compat */
+            if (!linux_proc || !linux_proc->linux_compat_mode) { regs->eax = (uint32)-1; break; }
+            uint32 regs_arr[8] = { 256, arg2, arg3, arg1, 0, 0, arg4, arg5 };
+            int ret = linux_syscall_dispatch(linux_proc, regs_arr);
+            regs->eax = (uint32)ret;
+            break;
+        }
+
         default: {
-            printf("%c[SYSCALL] Unknown syscall: %d\n", 255, 0, 0, syscall_num);
-            regs->eax = (uint32)-1;
+            /* Route Linux-compat syscalls broadly; modern i386 uses numbers >300 too. */
+            if (syscall_num > 0 && syscall_num < 1024) {
+                if (linux_proc && linux_proc->linux_compat_mode) {
+                    printf("[ROUTING] syscall %d routed to Linux dispatcher\n", syscall_num);
+                    /* Build register array for linux_syscall_dispatch: [eax, ecx, edx, ebx, esp, ebp, esi, edi] */
+                    uint32 regs_arr[8] = { syscall_num, arg2, arg3, arg1, 0, regs->ebp, arg4, arg5 };
+                    int ret = linux_syscall_dispatch(linux_proc, regs_arr);
+                    regs->eax = (uint32)ret;
+                    break;
+                }
+            }
+            
+            printf("[SYSCALL] Unknown syscall: %d\n", syscall_num);
+            regs->eax = (uint32)-38; /* -ENOSYS */
             break;
         }
     }
 
     (void)user_task_try_resume_from_syscall(regs);
     return regs->eax;
+}
+
+uint32 syscall_dispatch(regs_t* regs) {
+    if (!regs) {
+        return (uint32)-1;
+    }
+
+    return syscall_dispatch_core(regs,
+                                 regs->eax,
+                                 (uintptr)regs->ebx,
+                                 (uintptr)regs->ecx,
+                                 (uintptr)regs->edx,
+                                 (uintptr)regs->esi,
+                                 (uintptr)regs->edi);
 }
 
 

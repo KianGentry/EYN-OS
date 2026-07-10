@@ -175,6 +175,7 @@ Spawn a user program with argv.
 Notes:
 - The spawn/wait ABI is stable and intended for concurrent task scheduling.
 - Current implementation executes spawned tasks through the existing single-user-task runtime; API compatibility is provided now so userland and shell pipeline code do not need to change when full concurrency lands.
+- Scheduler policy uses a 3-level MLFQ queue model internally; new tasks start at the highest queue and can be demoted by CPU-heavy behavior.
 
 #### Wait for spawned PID (syscall 132)
 Wait for a previously spawned PID.
@@ -186,6 +187,9 @@ Wait for a previously spawned PID.
 
 **Returns:**
 - EAX: `pid` when reaped, `0` for `WNOHANG` with no completion, or `-1` on error
+
+Notes:
+- Blocking waitpid calls now mark the calling task blocked until the target PID exits, instead of polling in a tight userspace-visible loop.
 
 #### Get directory entries (syscall 7)
 Read directory entries from an open directory fd.
@@ -259,6 +263,10 @@ Cooperatively yields and sleeps for at least the specified duration.
 
 **Arguments:**
 - EBX: Microseconds to sleep
+
+Notes:
+- Sleep now transitions the current task into a blocked sleep state and wakes it from scheduler tick deadlines.
+- Wake timing is tick-granular and follows the active PIT frequency (`sched_get_tick_hz`).
 
 #### GUI continuous redraw (syscall 23)
 Enables or disables continuous redraw for a GUI tile.
@@ -501,6 +509,79 @@ Draw a single character using a specific loaded font id.
 
 **Returns:**
 - EAX: 0 on success, -1 on failure
+
+#### Set display profile (syscall 140)
+Set the tiling manager workspace scale and aspect profile.
+
+This updates the logical desktop/workspace resolution, relayouts tiles, and can optionally persist the profile to `/config/ui.cfg`.
+It does not change the physical hardware mode.
+
+**Arguments:**
+- EBX: `scale_pct` (clamped to `50..100`)
+- ECX: `aspect_mode`
+    - `0=native`, `1=4:3`, `2=16:10`, `3=16:9`, `4=21:9`, `5=1:1`
+- EDX: `persist` (`0` apply only, non-zero apply and save)
+
+**Returns:**
+- EAX: 0 on success, -1 on error
+
+#### Get display profile (syscall 141)
+Get the current compositor display profile and framebuffer dimensions.
+
+**Arguments:**
+- EBX: pointer to output struct
+
+```c
+typedef struct {
+        int fb_w, fb_h;
+        int workspace_w, workspace_h;
+        int scale_pct;
+        int aspect_mode;
+} eyn_display_profile_t;
+```
+
+**Returns:**
+- EAX: 0 on success, -1 on error
+
+#### Set hardware display mode (syscall 142)
+Switch the physical framebuffer mode at runtime (for example `1024x768x32`) and optionally persist the preference.
+
+Notes:
+- Requires Bochs/QEMU VBE runtime mode support.
+- On unsupported hardware, returns `-1` and keeps the current mode.
+
+**Arguments:**
+- EBX: pointer to input struct
+
+```c
+typedef struct {
+    int width;
+    int height;
+    int bpp;     // 16, 24, or 32
+    int persist; // 0=apply only, non-zero=apply and save
+} eyn_display_mode_set_t;
+```
+
+**Returns:**
+- EAX: 0 on success, -1 on error/unsupported
+
+#### Get hardware display mode (syscall 143)
+Get the current physical framebuffer mode and whether runtime switching is available.
+
+**Arguments:**
+- EBX: pointer to output struct
+
+```c
+typedef struct {
+    int width;
+    int height;
+    int bpp;
+    int can_switch; // 1 if runtime mode switching is available
+} eyn_display_mode_t;
+```
+
+**Returns:**
+- EAX: 0 on success, -1 on error
 
 ## Capability-based GUI syscalls (28–46)
 

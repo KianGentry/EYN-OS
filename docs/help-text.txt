@@ -39,7 +39,7 @@ Network Commands:
   netcfg          - Network configuration command.
   netstat         - Show network status.
   pciscan         - Scan PCI devices.
-  ping            - Send ICMP echo requests.
+  ping            - Send ICMP echo requests (IPv4 or hostname).
 
 Memory Commands:
 ---------------
@@ -62,13 +62,14 @@ GUI/Window Commands:
   setfont         - Set runtime system font (.hex/.otf/.ttf).
   stats           - Open the stats GUI.
   theme           - Open the theme editor.
+  title           - Run the title command.
   view            - Dispatch a file to a view backend from /.view.
+  win_test        - Open compositor window test.
 
 Development Commands:
 --------------------
   assertfail      - Trigger an assertion failure (ASSERT).
   crashlog        - Inspect and clear crashlog records.
-  error           - Display command error status.
   hexdump         - Hex dump file bytes.
   log             - Enable or disable shell logging.
   panic           - Trigger a kernel panic for diagnostics.
@@ -80,29 +81,54 @@ Development Commands:
 Utility Commands:
 ----------------
   alias           - Create or remove command aliases.
+  breakout        - Arcade brick-breaker with paddle controls.
   calc            - Integer calculator supporting + - * /.
+  cat             - Print a file to stdout.
   diskmgr         - Manage logical drives from userland.
-  download        - Download a file over HTTP/1.1 (GET only) with DNS support.
+  download        - Download a file over HTTP/1.1 or HTTPS/TLS (GET only) with DNS support.
+  drivelabel      - Set or list logical drive labels.
+  drives          - List logical drives and partitions.
   echo            - Print arguments to stdout.
   edit            - Graphical text editor.
+  extract         - Extract a TAR or TAR.GZ archive into a directory.
+  eynfetch        - Display system information with ASCII art logo.
   fdisk           - Run the fdisk command.
   files           - Graphical file explorer.
   fontpreview     - Preview an OTF/TTF font in multiple sizes.
   format          - Run the format command.
   gui_demo        - Run the gui_demo command.
   hello           - Run the hello command.
+  hello_c         - Print Hello World.
   history         - Show or clear command history.
+  install         - Install, update, remove, and search packages.
   installer       - EYN-OS graphical installer.
   jobs            - List background jobs.
+  jsonparse       - Parse and normalize JSON files.
+  ldso            - Minimal ELF dynamic loader for EYN-OS.
+  ldso_debug      - Run the ldso_debug command.
   list            - List directory entries with terminal icons.
   metadata        - Show metadata for a file or directory.
+  notify          - Show a graphical notification popup.
   pipe            - Run a command pipeline from userspace command launcher.
+  ptyspawn        - Spawn a child process on a PTY slave and relay its output.
   random          - Generate random numbers.
   search          - Search for text in filenames and file contents.
+  setinstalldrive - Set install binary lookup drive.
+  settings        - Open system settings (video + customization).
+  sha256          - Compute SHA-256 digests for files or strings.
+  snake           - Classic snake game with keyboard controls.
   sort            - Sort strings alphabetically.
   spam            - Spam 'EYN-OS' to stdout 100 times.
+  ssh             - SSH client with password auth and interactive shell relay.
+  tetris          - Play classic falling-block puzzle game.
   tiling          - Launch the tiling manager.
+  toybox          - Run the toybox command.
   view_backend_bmp - Run the view_backend_bmp command.
+  view_backend_builtin - Open an REI, BMP image, REIV video, REIS audio, or WAV audio viewer.
   view_backend_rei - Run the view_backend_rei command.
+  view_backend_reis - Play a REIS audio file in a dedicated backend.
+  view_backend_reiv - Play a REIV video file in a dedicated backend.
   xeyes           - X11 xeyes - eyes that follow the mouse pointer.
+  xeyes_local     - Run the xeyes_local command.
+  zsnes_1_51      - Run the zsnes_1_51 command.
 

@@ -5,6 +5,8 @@
 extern int errno;
 
 #define ENOENT  2
+#define EINTR   4
+#define EAGAIN  11
 #define EINVAL  22
 #define ENOMEM  12
 #define ENOSYS  38

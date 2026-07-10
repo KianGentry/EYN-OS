@@ -14,17 +14,23 @@
 #include <context.h>
 #include <misc/sched.h>
 #include <watchdog.h>
+#include <mm/user_access.h>
 
 // Defined in src/boot/kernel.asm; this is the top of the kernel stack.
 extern uint32 stack_space;
 
 volatile uint16 g_user_segdom_cs = GDT_USER_CS;
 volatile uint16 g_user_segdom_ds = GDT_USER_DS;
+volatile uint16 g_user_segdom_gs = GDT_USER_DS;
+#if !defined(EYNOS_ARCH_AMD64)
 static segdom_t g_user_segdom;
+#endif
 
 // PID bookkeeping for spawned tasks crossing non-local abort-to-kernel flow.
 static volatile int g_user_task_pending_pid = 0;
 static volatile int g_user_task_running_pid = 0;
+static uint32 g_user_task_runtime_generation;
+
 
 static int user_elf_ctx_allow(uint32 caps, uint32 cost) {
     command_context_t* ctx = current_command_context;
@@ -36,6 +42,11 @@ static int user_elf_ctx_allow(uint32 caps, uint32 cost) {
     }
     return 1;
 }
+
+static inline void* user_elf_kphys_alias_ptr(uint32 phys_addr) {
+    return (void*)((uintptr)KERNEL_BASE + (uintptr)phys_addr);
+}
+
 // Minimal ELF32 structures for parsing 32-bit little-endian ELF files
 typedef struct {
     unsigned char e_ident[16];
@@ -81,7 +92,10 @@ typedef struct {
 #define ELFDATA2LSB 1
 #define EM_386 3
 
+#define ET_DYN 3
+
 #define PT_LOAD 1
+#define PT_INTERP 3
 
 /*
  * ABI-INVARIANT: Maximum ELF file size the loader will read into kernel heap.
@@ -118,15 +132,75 @@ typedef struct {
  */
 #define USER_ELF_INITIAL_STACK_PAGES 8u  // 32KB
 
+#if defined(EYNOS_ARCH_AMD64)
+#define USER_ELF_AMD64_STACK_TOP 0x02000000u
+#endif
+
 static inline uint32 align_down(uint32 v, uint32 a) { return v & ~(a - 1); }
 static inline uint32 align_up(uint32 v, uint32 a) { return (v + a - 1) & ~(a - 1); }
+
+static void user_elf_resolve_interp_path(char* out,
+                                         uint32 out_size,
+                                         const char* prog_abspath,
+                                         const char* interp_path) {
+    if (!out || out_size == 0) return;
+    out[0] = '\0';
+    if (!interp_path || !interp_path[0]) return;
+
+    if (interp_path[0] == '/') {
+        safe_strcpy(out, interp_path, out_size);
+        return;
+    }
+
+    if (!prog_abspath || prog_abspath[0] != '/') {
+        safe_strcpy(out, interp_path, out_size);
+        return;
+    }
+
+    const char* slash = strrchr(prog_abspath, '/');
+    uint32 prefix_len = 1;
+    if (slash) {
+        uintptr diff = (uintptr)(slash - prog_abspath);
+        if (diff < 0xFFFFFFFFu) {
+            prefix_len = (uint32)diff + 1u;
+        }
+    }
+    if (prefix_len >= out_size) prefix_len = out_size - 1u;
+    memcpy(out, prog_abspath, prefix_len);
+    out[prefix_len] = '\0';
+
+    const char* rel = interp_path;
+    if (rel[0] == '.' && rel[1] == '/') rel += 2;
+
+    uint32 idx = (uint32)strlen(out);
+    while (*rel && idx + 1u < out_size) {
+        out[idx++] = *rel++;
+    }
+    out[idx] = '\0';
+}
+
+static inline void* user_elf_user_ptr(uint32 address) {
+    return (void*)(uintptr)address;
+}
+
+static inline uint32 user_elf_ptr_to_u32(const void* pointer) {
+    uintptr raw = (uintptr)pointer;
+    uint32 narrowed = (uint32)raw;
+    if ((uintptr)narrowed != raw) {
+        return 0;
+    }
+    return narrowed;
+}
 
 // Bounds for argv copying to user stack. Keep small for low-memory configs.
 #define USER_ELF_MAX_ARGC 32
 #define USER_ELF_MAX_ARG_BYTES 2048
 
-static uint32 user_stack_build_argv(uint32 user_stack_top, const char* prog_abspath,
-                                   int argc, const char* const* argv) {
+static uint32 user_stack_build_argv(uint32 user_stack_top,
+                                   uint32 user_stack_floor,
+                                   const char* prog_abspath,
+                                   int argc, const char* const* argv,
+                                   const char* const* envp) {
     // Build a SysV-like initial stack:
     //   argc
     //   argv[0..argc-1]
@@ -149,9 +223,15 @@ static uint32 user_stack_build_argv(uint32 user_stack_top, const char* prog_absp
 
     uint32 sp = user_stack_top;
     uint32 argv_ptrs[USER_ELF_MAX_ARGC];
+    uint32 env_ptrs[USER_ELF_MAX_ARGC];
     uint32 total_bytes = 0;
+    int envc = 0;
 
-    // Copy strings top-down.
+    if (envp) {
+        for (int i = 0; i < USER_ELF_MAX_ARGC && envp[i]; ++i) envc++;
+    }
+
+    // Copy strings top-down (argv then envp).
     for (int i = local_argc - 1; i >= 0; i--) {
         const char* s = local_argv[i];
         uint32 len = 0;
@@ -162,35 +242,149 @@ static uint32 user_stack_build_argv(uint32 user_stack_top, const char* prog_absp
         if (total_bytes > USER_ELF_MAX_ARG_BYTES) return 0;
 
         sp -= len;
-        if (sp < USER_STACK_BASE) return 0;
-        memcpy((void*)sp, s, len);
+        if (sp < user_stack_floor) return 0;
+        memcpy(user_elf_user_ptr(sp), s, len);
         argv_ptrs[i] = sp;
+    }
+
+    // Copy env strings after argv strings.
+    if (envp) {
+        for (int i = envc - 1; i >= 0; --i) {
+            const char* s = envp[i];
+            uint32 len = 0;
+            while (s[len]) len++;
+            len += 1;
+            total_bytes += len;
+            if (total_bytes > USER_ELF_MAX_ARG_BYTES) return 0;
+            sp -= len;
+            if (sp < user_stack_floor) return 0;
+            memcpy(user_elf_user_ptr(sp), s, len);
+            env_ptrs[i] = sp;
+        }
     }
 
     // Align for pointer pushes.
     sp = align_down(sp, 4);
 
-    // Push argv NULL terminator.
-    sp -= 4;
-    if (sp < USER_STACK_BASE) return 0;
-    *(uint32*)sp = 0;
+        /* Linux SysV i386 ABI initial stack layout (reading upward from ESP):
+         *   argc
+         *   argv[0] .. argv[argc-1]  NULL
+         *   envp[0] .. envp[envc-1]  NULL
+         *   AT_NULL pair (two zero dwords) to terminate auxiliary vector
+         *   [string data above]
+         *
+         * Build downward, push in reverse reading order:
+         *   AT_NULL pair, envp NULL + ptrs, argv NULL + ptrs, argc.
+         */
 
-    // Push argv pointers.
-    for (int i = local_argc - 1; i >= 0; i--) {
-        sp -= 4;
-        if (sp < USER_STACK_BASE) return 0;
-        *(uint32*)sp = argv_ptrs[i];
+        /* AT_NULL auxiliary vector terminator (type=0, val=0). */
+        sp -= 4; if (sp < user_stack_floor) return 0;
+        *(uint32*)user_elf_user_ptr(sp) = 0; /* auxv value */
+        sp -= 4; if (sp < user_stack_floor) return 0;
+        *(uint32*)user_elf_user_ptr(sp) = 0; /* auxv type = AT_NULL */
+
+        /* envp NULL terminator then envp pointers (highest index first). */
+        sp -= 4; if (sp < user_stack_floor) return 0;
+        *(uint32*)user_elf_user_ptr(sp) = 0;
+        for (int i = envc - 1; i >= 0; --i) {
+            sp -= 4; if (sp < user_stack_floor) return 0;
+            *(uint32*)user_elf_user_ptr(sp) = env_ptrs[i];
+        }
+
+        /* argv NULL terminator then argv pointers (highest index first). */
+        sp -= 4; if (sp < user_stack_floor) return 0;
+        *(uint32*)user_elf_user_ptr(sp) = 0;
+        for (int i = local_argc - 1; i >= 0; i--) {
+            sp -= 4; if (sp < user_stack_floor) return 0;
+            *(uint32*)user_elf_user_ptr(sp) = argv_ptrs[i];
+        }
+
+        /* argc. */
+        sp -= 4; if (sp < user_stack_floor) return 0;
+        *(uint32*)user_elf_user_ptr(sp) = (uint32)local_argc;
+
+        return sp;
     }
 
-    // Push argc.
-    sp -= 4;
-    if (sp < USER_STACK_BASE) return 0;
-    *(uint32*)sp = (uint32)local_argc;
+/* Task management structures and state (moved before user_elf_run_argv for use in prepopulation) */
+typedef struct {
+    uint32 code_base;
+    uint32 code_pages;
+    uint32 stack_page;
+} user_task_runtime_t;
 
-    return sp;
-}
+#define USER_TASK_MAX_SPAWN_ARGC 16
 
-int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv) {
+typedef struct {
+    uint8 drive;
+    int argc;
+    char* path;
+    const char* argv[USER_TASK_MAX_SPAWN_ARGC];
+    char* arg_storage[USER_TASK_MAX_SPAWN_ARGC];
+} user_task_image_t;
+
+typedef enum {
+    USER_TASK_STATE_UNUSED = 0,
+    USER_TASK_STATE_RUNNABLE = 1,
+    USER_TASK_STATE_RUNNING = 2,
+    USER_TASK_STATE_BLOCKED = 3,
+    USER_TASK_STATE_ZOMBIE = 4,
+} user_task_state_t;
+
+typedef enum {
+    USER_TASK_BLOCK_NONE = 0,
+    USER_TASK_BLOCK_SLEEP = 1,
+    USER_TASK_BLOCK_WAITPID = 2,
+    USER_TASK_BLOCK_GUI_EVENT = 3,
+} user_task_block_reason_t;
+
+typedef struct {
+    int used;
+    int pid;
+    int parent_pid;
+    int status;
+    user_task_state_t state;
+    int wait_target_pid;
+    int wait_gui_handle;
+    uint32 wake_tick;
+    uint8 block_reason;
+    uint8 mlfq_level;
+    uint8 in_runq;
+    uint16 _pad0;
+    int fd_inherit_mode;
+    int stdin_fd;
+    int stdout_fd;
+    int stderr_fd;
+    int runq_next;
+    int origin_vterm;  // Track which vterm spawned this task (for I/O routing)
+    
+    uint32 mlfq_slice_left;
+    user_task_runtime_t runtime;
+    user_task_image_t* image;
+    // Signal delivery state
+    uint32_t sig_pending;
+    uint32_t sig_mask;
+    uintptr_t sig_handler[32];
+    regs_t sig_saved_frame;
+    uint8_t sig_saved_present;
+
+    int has_syscall_frame;
+    uint32 syscall_frame_generation;
+    regs_t last_syscall_frame;
+} user_task_slot_t;
+
+#if 0
+// prototype placeholder moved below (keep for historical reference)
+#endif
+
+static void user_task_handle_pending(user_task_slot_t* slot);
+
+#define USER_TASK_MAX 16
+
+static user_task_slot_t g_user_tasks[USER_TASK_MAX];
+static user_task_slot_t* g_user_task_active_slot = NULL;
+
+int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* const* argv, const char* const* envp) {
     if (!abspath || !abspath[0]) return -1;
 
     if (!user_elf_ctx_allow(CAP_READ_FS, SCHED_COST_FS)) return -1;
@@ -254,6 +448,39 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
         printf("%cError: ELF program headers out of range.\n", 255, 0, 0);
         free(file);
         return -1;
+    }
+
+    char interp_path[256];
+    interp_path[0] = '\0';
+    {
+        Elf32_Phdr* ph = (Elf32_Phdr*)(file + eh->e_phoff);
+        for (uint16 i = 0; i < eh->e_phnum; ++i) {
+            if (ph->p_type == PT_INTERP && ph->p_offset + ph->p_filesz <= (uint32)n) {
+                uint32 interp_len = ph->p_filesz;
+                if (interp_len >= sizeof(interp_path)) interp_len = sizeof(interp_path) - 1;
+                memcpy(interp_path, file + ph->p_offset, interp_len);
+                interp_path[interp_len] = '\0';
+                break;
+            }
+            ph = (Elf32_Phdr*)((char*)ph + eh->e_phentsize);
+        }
+    }
+
+    if (interp_path[0]) {
+        char interp_abspath[256];
+        user_elf_resolve_interp_path(interp_abspath, sizeof(interp_abspath), abspath, interp_path);
+        const char* interp_argv[USER_ELF_MAX_ARGC];
+        int interp_argc = 0;
+        interp_argv[interp_argc++] = abspath;
+        for (int i = 0; i < argc && interp_argc < USER_ELF_MAX_ARGC; ++i) {
+            if (argv && argv[i]) interp_argv[interp_argc++] = argv[i];
+        }
+        free(file);
+        return user_elf_run_argv(drive,
+                                 interp_abspath[0] ? interp_abspath : interp_path,
+                                 interp_argc - 1,
+                                 interp_argv,
+                                 NULL);
     }
 
     // Compute a single contiguous mapping range that covers all PT_LOAD segments.
@@ -334,7 +561,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 
     g_user_interrupt = 0;
     g_user_task_active = 1;
-    g_user_task_term = tile_is_tiling_active() ? tile_get_focused() : -1;
+    g_user_task_term = tile_is_tiling_active() ? tile_get_focused_term() : -1;
     if (g_user_task_term < 0) g_user_task_term = 0;
     g_user_task_ui_dirty = 1;
 
@@ -381,8 +608,13 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 
     // Map user stack (initial N pages; can grow further on page faults).
     const uint32 user_stack_pages = USER_ELF_INITIAL_STACK_PAGES;
-    const uint32 user_stack_page = USER_STACK_TOP - user_stack_pages * PAGE_SIZE;
-    const uint32 user_stack_top = USER_STACK_TOP - 0x10;
+#if defined(EYNOS_ARCH_AMD64)
+    const uint32 user_stack_limit = USER_ELF_AMD64_STACK_TOP;
+#else
+    const uint32 user_stack_limit = USER_STACK_TOP;
+#endif
+    const uint32 user_stack_page = user_stack_limit - user_stack_pages * PAGE_SIZE;
+    const uint32 user_stack_top = user_stack_limit - 0x10;
 
     // Enable VMM stack growth for the current address space.
     vmm_kernel_as.stack_bottom = user_stack_page;
@@ -399,7 +631,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
             return -1;
         }
 
-        memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+        memset(user_elf_kphys_alias_ptr(frame), 0, PAGE_SIZE);
 
         if (vmm_map_page(&vmm_kernel_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
             printf("%cError: failed to map user stack.\n", 255, 0, 0);
@@ -447,7 +679,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
             }
 
             /* Zero via kernel mapping so we don't touch user VAs unnecessarily. */
-            memset((void*)(KERNEL_BASE + frame), 0, PAGE_SIZE);
+            memset(user_elf_kphys_alias_ptr(frame), 0, PAGE_SIZE);
 
             if (vmm_map_page(&vmm_kernel_as, va, frame, PTE_PRESENT | PTE_USER | PTE_RW) != 0) {
                 printf("%cError: failed to map ELF segment page.\n", 255, 0, 0);
@@ -463,7 +695,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
 
         /* Copy file-backed bytes into the now-present mappings. */
         if (ph->p_filesz) {
-            memcpy((void*)ph->p_vaddr, file + ph->p_offset, ph->p_filesz);
+            memcpy(user_elf_user_ptr(ph->p_vaddr), file + ph->p_offset, ph->p_filesz);
         }
     }
 
@@ -480,7 +712,7 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
     free(file);
 
     // Build initial user stack with argv.
-    uint32 user_esp = user_stack_build_argv(user_stack_top, abspath, argc, argv);
+    uint32 user_esp = user_stack_build_argv(user_stack_top, user_stack_page, abspath, argc, argv, envp);
     if (user_esp == 0) {
         printf("%cError: argv too large.\n", 255, 0, 0);
         user_task_cleanup_mappings();
@@ -505,83 +737,247 @@ int user_elf_run_argv(uint8 drive, const char* abspath, int argc, const char* co
         }
     }
 
+#if defined(EYNOS_ARCH_AMD64)
+    g_user_segdom_cs = GDT_USER_CS;
+    g_user_segdom_ds = GDT_USER_DS;
+    g_user_segdom_gs = GDT_USER_DS;
+#else
     uint32 seg_base = 0;
     uint32 seg_limit = USER_STACK_TOP;
     segdom_init(&g_user_segdom, seg_base, seg_limit);
     g_user_segdom_cs = g_user_segdom.user_cs;
     g_user_segdom_ds = g_user_segdom.user_ds;
+    g_user_segdom_gs = g_user_segdom.user_ds;
     segdom_load(&g_user_segdom);
+#endif
 
     // Commit pending spawn PID (if any) so SYSCALL_EXIT/abort can report
     // completion to waitpid slot tracking.
     g_user_task_running_pid = g_user_task_pending_pid;
     g_user_task_pending_pid = 0;
+    g_user_task_runtime_generation++;
+    if (g_user_task_runtime_generation == 0) g_user_task_runtime_generation = 1;
+
+    /* Prepopulate the active task's resume frame so IRQ-time preemption can
+     * switch to it even before it has executed a syscall. This creates an
+     * initial `last_syscall_frame` representing the ELF entrypoint and
+     * initial user stack so other tasks (or the IRQ preemptor) can resume
+     * this slot via the existing resume path.
+     */
+    if (g_user_task_active_slot) {
+        regs_t init_regs;
+        memset(&init_regs, 0, sizeof(init_regs));
+        init_regs.eip = entry;
+        init_regs.esp = user_esp;
+        init_regs.useresp = user_esp;
+        init_regs.cs = g_user_segdom_cs;
+        init_regs.ss = g_user_segdom_ds;
+        init_regs.eflags = 0x202u; /* IF set */
+        g_user_task_active_slot->last_syscall_frame = init_regs;
+        g_user_task_active_slot->has_syscall_frame = 1;
+        g_user_task_active_slot->syscall_frame_generation = g_user_task_runtime_generation;
+    }
 
     // Enter ring3 at ELF entry.
     // printf("%c[elfrun] entering user mode: %s (entry=0x%X)\n", 0, 255, 0, abspath, (unsigned)entry);
-    tss_set_kernel_stack((uint32)&stack_space);
+    uint32 kernel_stack_u32 = user_elf_ptr_to_u32(&stack_space);
+    if (kernel_stack_u32 == 0) {
+        printf("%cError: kernel stack pointer exceeds 32-bit TSS ABI.\n", 255, 0, 0);
+        user_task_cleanup_mappings();
+        return -1;
+    }
+    tss_set_kernel_stack(kernel_stack_u32);
+#if defined(EYNOS_ARCH_AMD64)
+    enter_user_mode(entry, user_esp);
+#else
     enter_user_mode_segdom(entry, user_esp, g_user_segdom_cs, g_user_segdom_ds);
+#endif
 
     return 0;
 }
 
 int user_elf_run(uint8 drive, const char* abspath) {
-    return user_elf_run_argv(drive, abspath, 0, NULL);
+    return user_elf_run_argv(drive, abspath, 0, NULL, NULL);
 }
 
-typedef struct {
-    uint32 code_base;
-    uint32 code_pages;
-    uint32 stack_page;
-} user_task_runtime_t;
-
-#define USER_TASK_MAX_SPAWN_ARGC 16
-
-typedef struct {
-    uint8 drive;
-    int argc;
-    char* path;
-    const char* argv[USER_TASK_MAX_SPAWN_ARGC];
-    char* arg_storage[USER_TASK_MAX_SPAWN_ARGC];
-} user_task_image_t;
-
-typedef enum {
-    USER_TASK_STATE_UNUSED = 0,
-    USER_TASK_STATE_RUNNABLE = 1,
-    USER_TASK_STATE_RUNNING = 2,
-    USER_TASK_STATE_BLOCKED = 3,
-    USER_TASK_STATE_ZOMBIE = 4,
-} user_task_state_t;
-
-typedef struct {
-    int used;
-    int pid;
-    int status;
-    user_task_state_t state;
-    int wait_target_pid;
-    user_task_runtime_t runtime;
-    user_task_image_t* image;
-    int has_syscall_frame;
-    regs_t last_syscall_frame;
-} user_task_slot_t;
-
-/*
- * ABI-INVARIANT: Maximum tracked spawned user tasks.
- *
- * Why: Bounds static kernel state for task lifecycle bookkeeping.
- * Invariant: PIDs are tracked in a fixed slot table; waitpid relies on this.
- * Breakage if changed:
- *   - Increasing grows .bss linearly.
- *   - Decreasing reduces number of concurrent tracked tasks.
- * ABI-sensitive: Yes (spawn failure behavior under load).
- * Security-critical: Yes (resource exhaustion boundary).
- */
-#define USER_TASK_MAX 16
-
-static user_task_slot_t g_user_tasks[USER_TASK_MAX];
 static int g_user_task_next_pid = 1;
-static user_task_slot_t* g_user_task_active_slot = NULL;
 static volatile int g_user_task_schedule_request = 0;
+static uint32 g_user_task_runtime_generation = 1;
+
+typedef struct {
+    int head;
+    int tail;
+} user_task_runq_t;
+
+static user_task_runq_t g_user_task_runq[SCHED_MLFQ_LEVELS];
+static int g_user_task_runq_initialized = 0;
+static uint32 g_user_task_last_boost_tick = 0;
+
+static inline uint32 user_task_level_quantum_ticks(uint32 level) {
+    uint32 q = sched_mlfq_level_quantum_ticks(level);
+    if (q == 0) q = 1;
+    return q;
+}
+
+static void user_task_runq_bootstrap(void) {
+    if (!sched_mlfq_is_enabled()) return;
+    if (g_user_task_runq_initialized) return;
+
+    for (uint32 i = 0; i < SCHED_MLFQ_LEVELS; ++i) {
+        g_user_task_runq[i].head = -1;
+        g_user_task_runq[i].tail = -1;
+    }
+
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        g_user_tasks[i].runq_next = -1;
+        g_user_tasks[i].in_runq = 0;
+        if (g_user_tasks[i].used && g_user_tasks[i].state == USER_TASK_STATE_RUNNABLE) {
+            g_user_tasks[i].mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
+            g_user_tasks[i].mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
+        }
+    }
+
+    g_user_task_last_boost_tick = sched_get_tick_count();
+    g_user_task_runq_initialized = 1;
+}
+
+static void user_task_runq_enqueue(user_task_slot_t* slot) {
+    if (!slot || !sched_mlfq_is_enabled()) return;
+    if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) return;
+    user_task_runq_bootstrap();
+    if (slot->in_runq) return;
+
+    uint32 level = slot->mlfq_level;
+    if (level >= SCHED_MLFQ_LEVELS) level = SCHED_MLFQ_LEVEL_HIGH;
+
+    int idx = (int)(slot - g_user_tasks);
+    if (idx < 0 || idx >= USER_TASK_MAX) return;
+
+    user_task_runq_t* q = &g_user_task_runq[level];
+    slot->runq_next = -1;
+    if (q->tail >= 0) {
+        g_user_tasks[q->tail].runq_next = idx;
+        q->tail = idx;
+    } else {
+        q->head = idx;
+        q->tail = idx;
+    }
+    slot->in_runq = 1;
+}
+
+static void user_task_runq_remove(user_task_slot_t* slot) {
+    if (!slot || !sched_mlfq_is_enabled()) return;
+    if (!slot->in_runq) return;
+    user_task_runq_bootstrap();
+
+    int idx = (int)(slot - g_user_tasks);
+    if (idx < 0 || idx >= USER_TASK_MAX) return;
+
+    for (uint32 level = 0; level < SCHED_MLFQ_LEVELS; ++level) {
+        user_task_runq_t* q = &g_user_task_runq[level];
+        int prev = -1;
+        int cur = q->head;
+        uint32 scan_ctr = 0;
+        while (cur >= 0) {
+            if ((scan_ctr++ & 0x1Fu) == 0u) watchdog_kick("user-task-runq");
+            int next = g_user_tasks[cur].runq_next;
+            if (cur == idx) {
+                if (prev >= 0) {
+                    g_user_tasks[prev].runq_next = next;
+                } else {
+                    q->head = next;
+                }
+                if (q->tail == cur) {
+                    q->tail = prev;
+                }
+                slot->in_runq = 0;
+                slot->runq_next = -1;
+                return;
+            }
+            prev = cur;
+            cur = next;
+        }
+    }
+
+    slot->in_runq = 0;
+    slot->runq_next = -1;
+}
+
+static user_task_slot_t* user_task_runq_pop_highest(void) {
+    if (!sched_mlfq_is_enabled()) return NULL;
+    user_task_runq_bootstrap();
+
+    for (int level = (int)SCHED_MLFQ_LEVELS - 1; level >= 0; --level) {
+        user_task_runq_t* q = &g_user_task_runq[(uint32)level];
+        int idx = q->head;
+        if (idx < 0) continue;
+
+        user_task_slot_t* slot = &g_user_tasks[idx];
+        q->head = slot->runq_next;
+        if (q->head < 0) q->tail = -1;
+
+        slot->runq_next = -1;
+        slot->in_runq = 0;
+        return slot;
+    }
+    return NULL;
+}
+
+static void user_task_runq_rebuild(void) {
+    if (!sched_mlfq_is_enabled()) return;
+    user_task_runq_bootstrap();
+
+    for (uint32 i = 0; i < SCHED_MLFQ_LEVELS; ++i) {
+        g_user_task_runq[i].head = -1;
+        g_user_task_runq[i].tail = -1;
+    }
+
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        g_user_tasks[i].runq_next = -1;
+        g_user_tasks[i].in_runq = 0;
+    }
+
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) continue;
+        user_task_runq_enqueue(slot);
+    }
+}
+
+static void user_task_mlfq_boost_if_due(void) {
+    if (!sched_mlfq_is_enabled()) return;
+    user_task_runq_bootstrap();
+
+    uint32 interval = sched_mlfq_boost_interval_ticks();
+    if (interval == 0) return;
+
+    uint32 now = sched_get_tick_count();
+    if ((uint32)(now - g_user_task_last_boost_tick) < interval) return;
+
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used) continue;
+        if (slot->state != USER_TASK_STATE_RUNNABLE && slot->state != USER_TASK_STATE_RUNNING) continue;
+        slot->mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
+        slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
+    }
+
+    user_task_runq_rebuild();
+    g_user_task_last_boost_tick = now;
+}
+
+static void user_task_mlfq_account_preempt(user_task_slot_t* slot) {
+    if (!slot || !sched_mlfq_is_enabled()) return;
+    if (slot->mlfq_slice_left > 0) {
+        slot->mlfq_slice_left--;
+    }
+    if (slot->mlfq_slice_left == 0) {
+        if (slot->mlfq_level > SCHED_MLFQ_LEVEL_LOW) {
+            slot->mlfq_level--;
+        }
+        slot->mlfq_slice_left = user_task_level_quantum_ticks(slot->mlfq_level);
+    }
+}
 
 static user_task_image_t* user_task_image_build(uint8 drive,
                                                 const char* abspath,
@@ -632,18 +1028,47 @@ static void user_task_image_free(user_task_image_t* image) {
     free(image);
 }
 
+static void user_task_capture_stdio_state(user_task_slot_t* slot) {
+    if (!slot) return;
+    slot->fd_inherit_mode = syscall_get_user_fd_inherit_mode();
+    syscall_get_user_stdio_fds(&slot->stdin_fd, &slot->stdout_fd, &slot->stderr_fd);
+}
+
+static void user_task_apply_stdio_state(const user_task_slot_t* slot) {
+    if (!slot) return;
+    syscall_set_user_fd_inherit_mode(slot->fd_inherit_mode ? 1 : 0);
+    syscall_set_user_stdio_fds(slot->stdin_fd, slot->stdout_fd, slot->stderr_fd);
+}
+
 static int user_task_launch_slot(user_task_slot_t* slot) {
     if (!slot || !slot->image) return -1;
 
+    if (sched_mlfq_is_enabled()) {
+        user_task_runq_remove(slot);
+        if (slot->mlfq_slice_left == 0) {
+            slot->mlfq_slice_left = user_task_level_quantum_ticks(slot->mlfq_level);
+        }
+    }
+
     slot->state = USER_TASK_STATE_RUNNING;
     slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->wake_tick = 0;
+    slot->block_reason = USER_TASK_BLOCK_NONE;
+    slot->has_syscall_frame = 0;
+    slot->syscall_frame_generation = 0;
     g_user_task_active_slot = slot;
     g_user_task_pending_pid = slot->pid;
+    // Route output to the vterm that originally spawned this task
+    g_user_task_term = slot->origin_vterm;
+    user_task_apply_stdio_state(slot);
 
+    watchdog_kick("user-task-launch");
     int rc = user_elf_run_argv(slot->image->drive,
                                slot->image->path,
                                slot->image->argc,
-                               slot->image->argv);
+                               slot->image->argv,
+                               NULL);
 
     // Returning here means load failed before entering ring3.
     g_user_task_active_slot = NULL;
@@ -700,6 +1125,376 @@ static user_task_slot_t* user_task_alloc_slot(void) {
     return NULL;
 }
 
+static user_task_slot_t* user_task_current_slot(void) {
+    int pid = (int)g_user_task_running_pid;
+    if (pid <= 0) return NULL;
+    return user_task_find_slot_by_pid(pid);
+}
+
+void user_task_scheduler_tick(void) {
+    uint32 now = sched_get_tick_count();
+    int current_pid = (int)g_user_task_running_pid;
+
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used || slot->state != USER_TASK_STATE_BLOCKED) continue;
+        if (slot->block_reason != USER_TASK_BLOCK_SLEEP) continue;
+        if ((int32)(now - slot->wake_tick) < 0) continue;
+
+        slot->wake_tick = 0;
+        slot->block_reason = USER_TASK_BLOCK_NONE;
+        if (slot->pid == current_pid) {
+            slot->state = USER_TASK_STATE_RUNNING;
+        } else {
+            slot->state = USER_TASK_STATE_RUNNABLE;
+            user_task_runq_enqueue(slot);
+            user_task_request_schedule();
+        }
+    }
+}
+
+void user_task_block_current_sleep_until(uint32 wake_tick) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (!slot) return;
+    slot->state = USER_TASK_STATE_BLOCKED;
+    slot->wake_tick = wake_tick;
+    slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->block_reason = USER_TASK_BLOCK_SLEEP;
+    user_task_runq_remove(slot);
+    user_task_request_schedule();
+}
+
+void user_task_block_current_waitpid(int target_pid) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (!slot) return;
+    slot->state = USER_TASK_STATE_BLOCKED;
+    slot->wake_tick = 0;
+    slot->wait_target_pid = target_pid;
+    slot->wait_gui_handle = -1;
+    slot->block_reason = USER_TASK_BLOCK_WAITPID;
+    user_task_runq_remove(slot);
+    user_task_request_schedule();
+}
+
+void user_task_block_current_gui_wait(int gui_handle) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (!slot) return;
+    slot->state = USER_TASK_STATE_BLOCKED;
+    slot->wake_tick = 0;
+    slot->wait_target_pid = 0;
+    slot->wait_gui_handle = gui_handle;
+    slot->block_reason = USER_TASK_BLOCK_GUI_EVENT;
+    user_task_runq_remove(slot);
+    user_task_request_schedule();
+}
+
+void user_task_unblock_current(void) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (!slot) return;
+    if (slot->state == USER_TASK_STATE_BLOCKED) {
+        slot->state = USER_TASK_STATE_RUNNING;
+    }
+    slot->wake_tick = 0;
+    slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->block_reason = USER_TASK_BLOCK_NONE;
+}
+
+int user_task_current_is_blocked(void) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (!slot) return 0;
+    return slot->state == USER_TASK_STATE_BLOCKED ? 1 : 0;
+}
+
+void user_task_wake_waiters_for_pid(int pid) {
+    int current_pid = (int)g_user_task_running_pid;
+    uint32 scan_ctr = 0;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        if ((scan_ctr++ & 0x1Fu) == 0u) watchdog_kick("user-task-wake");
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used || slot->state != USER_TASK_STATE_BLOCKED) continue;
+        if (slot->block_reason != USER_TASK_BLOCK_WAITPID) continue;
+        if (slot->wait_target_pid != pid) continue;
+
+        slot->wait_target_pid = 0;
+        slot->wait_gui_handle = -1;
+        slot->wake_tick = 0;
+        slot->block_reason = USER_TASK_BLOCK_NONE;
+        if (slot->pid == current_pid) {
+            slot->state = USER_TASK_STATE_RUNNING;
+        } else {
+            slot->state = USER_TASK_STATE_RUNNABLE;
+            user_task_runq_enqueue(slot);
+        }
+        user_task_request_schedule();
+    }
+}
+
+void user_task_wake_gui_waiters(int gui_handle) {
+    int current_pid = (int)g_user_task_running_pid;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used || slot->state != USER_TASK_STATE_BLOCKED) continue;
+        if (slot->block_reason != USER_TASK_BLOCK_GUI_EVENT) continue;
+        if (slot->wait_gui_handle != gui_handle) continue;
+
+        slot->wait_target_pid = 0;
+        slot->wait_gui_handle = -1;
+        slot->wake_tick = 0;
+        slot->block_reason = USER_TASK_BLOCK_NONE;
+        if (slot->pid == current_pid) {
+            slot->state = USER_TASK_STATE_RUNNING;
+        } else {
+            slot->state = USER_TASK_STATE_RUNNABLE;
+            user_task_runq_enqueue(slot);
+        }
+        user_task_request_schedule();
+    }
+}
+
+static int user_task_runtime_matches_live(const user_task_runtime_t* rt);
+
+#if defined(EYNOS_ARCH_AMD64)
+typedef struct user_task_irq_frame64_t {
+    uint64 rax;
+    uint64 rcx;
+    uint64 rdx;
+    uint64 rbx;
+    uint64 rbp;
+    uint64 rsi;
+    uint64 rdi;
+    uint64 r8;
+    uint64 r9;
+    uint64 r10;
+    uint64 r11;
+    uint64 r12;
+    uint64 r13;
+    uint64 r14;
+    uint64 r15;
+    uint64 rip;
+    uint64 cs;
+    uint64 rflags;
+    uint64 user_rsp;
+    uint64 user_ss;
+} user_task_irq_frame64_t;
+
+static void user_task_regs_from_irq_frame(const user_task_irq_frame64_t* irqf, regs_t* out) {
+    if (!irqf || !out) return;
+    memset(out, 0, sizeof(*out));
+    out->edi = (uint32)irqf->rdi;
+    out->esi = (uint32)irqf->rsi;
+    out->ebp = (uint32)irqf->rbp;
+    out->esp = (uint32)irqf->user_rsp;
+    out->ebx = (uint32)irqf->rbx;
+    out->edx = (uint32)irqf->rdx;
+    out->ecx = (uint32)irqf->rcx;
+    out->eax = (uint32)irqf->rax;
+    out->eip = (uint32)irqf->rip;
+    out->cs = (uint32)irqf->cs;
+    out->eflags = (uint32)irqf->rflags;
+    out->useresp = (uint32)irqf->user_rsp;
+    out->ss = (uint32)irqf->user_ss;
+}
+
+static void user_task_regs_to_irq_frame(user_task_irq_frame64_t* irqf, const regs_t* regs) {
+    if (!irqf || !regs) return;
+    irqf->rdi = (uint64)(uint32)regs->edi;
+    irqf->rsi = (uint64)(uint32)regs->esi;
+    irqf->rbp = (uint64)(uint32)regs->ebp;
+    irqf->rbx = (uint64)(uint32)regs->ebx;
+    irqf->rdx = (uint64)(uint32)regs->edx;
+    irqf->rcx = (uint64)(uint32)regs->ecx;
+    irqf->rax = (uint64)(uint32)regs->eax;
+    irqf->rip = (uint64)(uint32)regs->eip;
+    irqf->cs = (uint64)(uint32)regs->cs;
+    irqf->rflags = (uint64)(uint32)regs->eflags;
+    irqf->user_rsp = (uint64)(uint32)regs->useresp;
+    irqf->user_ss = (uint64)(uint32)regs->ss;
+}
+#else
+typedef struct user_task_irq_frame32_t {
+    uint32 edi;
+    uint32 esi;
+    uint32 ebp;
+    uint32 esp;
+    uint32 ebx;
+    uint32 edx;
+    uint32 ecx;
+    uint32 eax;
+    uint32 eip;
+    uint32 cs;
+    uint32 eflags;
+    uint32 useresp;
+    uint32 ss;
+} user_task_irq_frame32_t;
+
+static void user_task_regs_from_irq_frame(const user_task_irq_frame32_t* irqf, regs_t* out) {
+    if (!irqf || !out) return;
+    memset(out, 0, sizeof(*out));
+    out->edi = irqf->edi;
+    out->esi = irqf->esi;
+    out->ebp = irqf->ebp;
+    out->esp = irqf->esp;
+    out->ebx = irqf->ebx;
+    out->edx = irqf->edx;
+    out->ecx = irqf->ecx;
+    out->eax = irqf->eax;
+    out->eip = irqf->eip;
+    out->cs = irqf->cs;
+    out->eflags = irqf->eflags;
+    out->useresp = irqf->useresp;
+    out->ss = irqf->ss;
+}
+
+static void user_task_regs_to_irq_frame(user_task_irq_frame32_t* irqf, const regs_t* regs) {
+    if (!irqf || !regs) return;
+    irqf->edi = regs->edi;
+    irqf->esi = regs->esi;
+    irqf->ebp = regs->ebp;
+    irqf->esp = regs->esp;
+    irqf->ebx = regs->ebx;
+    irqf->edx = regs->edx;
+    irqf->ecx = regs->ecx;
+    irqf->eax = regs->eax;
+    irqf->eip = regs->eip;
+    irqf->cs = regs->cs;
+    irqf->eflags = regs->eflags;
+    irqf->useresp = regs->useresp;
+    irqf->ss = regs->ss;
+}
+#endif
+
+int user_task_try_preempt_from_irq(void* frame) {
+    if (!sched_mlfq_irq_preempt_enabled()) return 0;
+    if (!g_user_task_active) return 0;
+
+    if (sched_mlfq_is_enabled()) {
+        user_task_runq_bootstrap();
+        user_task_mlfq_boost_if_due();
+    }
+
+    int current_pid = (int)g_user_task_running_pid;
+    user_task_slot_t* current = user_task_find_slot_by_pid(current_pid);
+    if (!current) return 0;
+
+    if (sched_mlfq_is_enabled()) {
+        uint32 slice_before = current->mlfq_slice_left;
+        user_task_mlfq_account_preempt(current);
+        if (slice_before == 1) {
+            user_task_request_schedule();
+        }
+    }
+
+    if (!g_user_task_schedule_request) return 0;
+
+#if defined(EYNOS_ARCH_AMD64)
+    if (!frame) return 0;
+    if ((((const user_task_irq_frame64_t*)frame)->cs & 3u) != 3u) return 0;
+
+    user_task_slot_t* target = NULL;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used) continue;
+        if (slot->pid == current_pid) continue;
+        if (slot->state != USER_TASK_STATE_RUNNABLE) continue;
+        if (!slot->has_syscall_frame) continue;
+        if (slot->syscall_frame_generation != g_user_task_runtime_generation) continue;
+        if (!user_task_runtime_matches_live(&slot->runtime)) continue;
+        if (!target) {
+            target = slot;
+            continue;
+        }
+        if (sched_mlfq_is_enabled() && slot->mlfq_level > target->mlfq_level) {
+            target = slot;
+        }
+    }
+
+    if (!target) return 0;
+
+    regs_t live_regs;
+    user_task_regs_from_irq_frame((const user_task_irq_frame64_t*)frame, &live_regs);
+    user_task_capture_stdio_state(current);
+    current->last_syscall_frame = live_regs;
+    current->has_syscall_frame = 1;
+    current->syscall_frame_generation = g_user_task_runtime_generation;
+
+    if (sched_mlfq_is_enabled()) {
+        current->state = USER_TASK_STATE_RUNNABLE;
+        user_task_runq_enqueue(current);
+        user_task_runq_remove(target);
+        if (target->mlfq_slice_left == 0) {
+            target->mlfq_slice_left = user_task_level_quantum_ticks(target->mlfq_level);
+        }
+    } else {
+        current->state = USER_TASK_STATE_RUNNABLE;
+    }
+
+    user_task_regs_to_irq_frame((user_task_irq_frame64_t*)frame, &target->last_syscall_frame);
+    user_task_apply_stdio_state(target);
+    target->state = USER_TASK_STATE_RUNNING;
+    g_user_task_active_slot = target;
+    g_user_task_running_pid = target->pid;
+    // Route output to the vterm that originally spawned this task
+    g_user_task_term = target->origin_vterm;
+    g_user_task_schedule_request = 0;
+    return 1;
+#else
+    if (!frame) return 0;
+    if ((((const user_task_irq_frame32_t*)frame)->cs & 3u) != 3u) return 0;
+
+    user_task_slot_t* target = NULL;
+    for (int i = 0; i < USER_TASK_MAX; ++i) {
+        user_task_slot_t* slot = &g_user_tasks[i];
+        if (!slot->used) continue;
+        if (slot->pid == current_pid) continue;
+        if (slot->state != USER_TASK_STATE_RUNNABLE) continue;
+        if (!slot->has_syscall_frame) continue;
+        if (slot->syscall_frame_generation != g_user_task_runtime_generation) continue;
+        if (!user_task_runtime_matches_live(&slot->runtime)) continue;
+        if (!target) {
+            target = slot;
+            continue;
+        }
+        if (sched_mlfq_is_enabled() && slot->mlfq_level > target->mlfq_level) {
+            target = slot;
+        }
+    }
+
+    if (!target) return 0;
+
+    regs_t live_regs;
+    user_task_regs_from_irq_frame((const user_task_irq_frame32_t*)frame, &live_regs);
+    user_task_capture_stdio_state(current);
+    current->last_syscall_frame = live_regs;
+    current->has_syscall_frame = 1;
+    current->syscall_frame_generation = g_user_task_runtime_generation;
+
+    if (sched_mlfq_is_enabled()) {
+        current->state = USER_TASK_STATE_RUNNABLE;
+        user_task_runq_enqueue(current);
+        user_task_runq_remove(target);
+        if (target->mlfq_slice_left == 0) {
+            target->mlfq_slice_left = user_task_level_quantum_ticks(target->mlfq_level);
+        }
+    } else {
+        current->state = USER_TASK_STATE_RUNNABLE;
+    }
+
+    // Deliver any pending signals for the target before switching.
+    user_task_handle_pending(target);
+    user_task_regs_to_irq_frame((user_task_irq_frame32_t*)frame, &target->last_syscall_frame);
+    user_task_apply_stdio_state(target);
+    target->state = USER_TASK_STATE_RUNNING;
+    g_user_task_active_slot = target;
+    g_user_task_running_pid = target->pid;
+    // Route output to the vterm that originally spawned this task
+    g_user_task_term = target->origin_vterm;
+    g_user_task_schedule_request = 0;
+    return 1;
+#endif
+}
+
 static int user_task_runtime_matches_live(const user_task_runtime_t* rt) {
     if (!rt) return 0;
     return (rt->code_base == g_user_code_base &&
@@ -712,6 +1507,11 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
     if (!g_user_task_schedule_request) return 0;
     if (!g_user_task_active) return 0;
 
+    if (sched_mlfq_is_enabled()) {
+        user_task_runq_bootstrap();
+        user_task_mlfq_boost_if_due();
+    }
+
     int current_pid = (int)g_user_task_running_pid;
     user_task_slot_t* current = user_task_find_slot_by_pid(current_pid);
     if (!current) return 0;
@@ -723,21 +1523,44 @@ int user_task_try_resume_from_syscall(regs_t* regs) {
         if (slot->pid == current_pid) continue;
         if (slot->state != USER_TASK_STATE_RUNNABLE) continue;
         if (!slot->has_syscall_frame) continue;
+        if (slot->syscall_frame_generation != g_user_task_runtime_generation) continue;
         if (!user_task_runtime_matches_live(&slot->runtime)) continue;
-        target = slot;
-        break;
+        if (!target) {
+            target = slot;
+            continue;
+        }
+        if (sched_mlfq_is_enabled() && slot->mlfq_level > target->mlfq_level) {
+            target = slot;
+        }
     }
 
     if (!target) return 0;
 
+    user_task_capture_stdio_state(current);
     current->last_syscall_frame = *regs;
     current->has_syscall_frame = 1;
-    current->state = USER_TASK_STATE_RUNNABLE;
+    current->syscall_frame_generation = g_user_task_runtime_generation;
+    if (sched_mlfq_is_enabled()) {
+        user_task_mlfq_account_preempt(current);
+        current->state = USER_TASK_STATE_RUNNABLE;
+        user_task_runq_enqueue(current);
+        user_task_runq_remove(target);
+        if (target->mlfq_slice_left == 0) {
+            target->mlfq_slice_left = user_task_level_quantum_ticks(target->mlfq_level);
+        }
+    } else {
+        current->state = USER_TASK_STATE_RUNNABLE;
+    }
 
+    // Deliver any pending signals for the target before switching.
+    user_task_handle_pending(target);
     *regs = target->last_syscall_frame;
+    user_task_apply_stdio_state(target);
     target->state = USER_TASK_STATE_RUNNING;
     g_user_task_active_slot = target;
     g_user_task_running_pid = target->pid;
+    // Route output to the vterm that originally spawned this task
+    g_user_task_term = target->origin_vterm;
     g_user_task_schedule_request = 0;
     return 1;
 }
@@ -752,10 +1575,25 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
     memset(slot, 0, sizeof(*slot));
     slot->used = 1;
     slot->pid = g_user_task_next_pid++;
+    slot->parent_pid = (int)g_user_task_running_pid;
     slot->image = image;
     slot->state = USER_TASK_STATE_RUNNABLE;
     slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->wake_tick = 0;
+    slot->block_reason = USER_TASK_BLOCK_NONE;
+    slot->mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
+    slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
+    slot->in_runq = 0;
+    slot->runq_next = -1;
+    slot->origin_vterm = g_user_task_term;  // Capture which vterm spawned this task
+    user_task_capture_stdio_state(slot);
     if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
+
+    if (sched_mlfq_is_enabled()) {
+        user_task_runq_bootstrap();
+        user_task_runq_enqueue(slot);
+    }
 
     /*
      * Scheduler handoff model:
@@ -764,8 +1602,67 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
      *   launch it when the current task exits.
      */
     if (!g_user_task_active) {
-        if (user_task_launch_slot(slot) != 0) {
-            return slot->pid;
+        if (sched_mlfq_is_enabled()) {
+            (void)user_task_continue_or_schedule();
+        } else {
+            if (user_task_launch_slot(slot) != 0) {
+                return slot->pid;
+            }
+        }
+    } else {
+        user_task_request_schedule();
+    }
+
+    return slot->pid;
+}
+
+int user_task_spawn_argv_stdio(uint8 drive,
+                               const char* abspath,
+                               int argc,
+                               const char* const* argv,
+                               int stdin_fd,
+                               int stdout_fd,
+                               int stderr_fd,
+                               int inherit_mode) {
+    user_task_slot_t* slot = user_task_alloc_slot();
+    if (!slot) return -1;
+
+    user_task_image_t* image = user_task_image_build(drive, abspath, argc, argv);
+    if (!image) return -1;
+
+    memset(slot, 0, sizeof(*slot));
+    slot->used = 1;
+    slot->pid = g_user_task_next_pid++;
+    slot->parent_pid = (int)g_user_task_running_pid;
+    slot->image = image;
+    slot->state = USER_TASK_STATE_RUNNABLE;
+    slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->wake_tick = 0;
+    slot->block_reason = USER_TASK_BLOCK_NONE;
+    slot->mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
+    slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
+    slot->in_runq = 0;
+    slot->runq_next = -1;
+    slot->origin_vterm = g_user_task_term;  // Capture which vterm spawned this task
+    slot->fd_inherit_mode = inherit_mode ? 1 : 0;
+    slot->stdin_fd = stdin_fd;
+    slot->stdout_fd = stdout_fd;
+    slot->stderr_fd = stderr_fd;
+    if (g_user_task_next_pid <= 0) g_user_task_next_pid = 1;
+
+    if (sched_mlfq_is_enabled()) {
+        user_task_runq_bootstrap();
+        user_task_runq_enqueue(slot);
+    }
+
+    if (!g_user_task_active) {
+        if (sched_mlfq_is_enabled()) {
+            (void)user_task_continue_or_schedule();
+        } else {
+            if (user_task_launch_slot(slot) != 0) {
+                return slot->pid;
+            }
         }
     } else {
         user_task_request_schedule();
@@ -775,8 +1672,27 @@ int user_task_spawn_argv(uint8 drive, const char* abspath, int argc, const char*
 }
 
 int user_task_continue_or_schedule(void) {
+    if (sched_mlfq_is_enabled()) {
+        user_task_runq_bootstrap();
+        user_task_mlfq_boost_if_due();
+
+        for (;;) {
+            watchdog_kick("user-task-sched");
+            user_task_slot_t* slot = user_task_runq_pop_highest();
+            if (!slot) break;
+            if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) continue;
+            if (slot->mlfq_slice_left == 0) {
+                slot->mlfq_slice_left = user_task_level_quantum_ticks(slot->mlfq_level);
+            }
+            (void)user_task_launch_slot(slot);
+            return 1;
+        }
+        return 0;
+    }
+
     // Prefer runnable queued tasks over UI fallback.
     for (int i = 0; i < USER_TASK_MAX; ++i) {
+        if ((i & 0x1Fu) == 0u) watchdog_kick("user-task-sched");
         user_task_slot_t* slot = &g_user_tasks[i];
         if (!slot->used || slot->state != USER_TASK_STATE_RUNNABLE) continue;
         (void)user_task_launch_slot(slot);
@@ -806,20 +1722,175 @@ void user_task_capture_syscall_frame(const regs_t* regs) {
 
     slot->last_syscall_frame = *regs;
     slot->has_syscall_frame = 1;
+    slot->syscall_frame_generation = g_user_task_runtime_generation;
+}
+
+static int user_task_signal_is_terminating(int sig) {
+    // Linux-like defaults for common user signals in this first cut.
+    return (sig == 2  ||  // SIGINT
+            sig == 3  ||  // SIGQUIT
+            sig == 6  ||  // SIGABRT
+            sig == 9  ||  // SIGKILL (uncatchable)
+            sig == 11 ||  // SIGSEGV
+            sig == 13 ||  // SIGPIPE
+            sig == 14 ||  // SIGALRM
+            sig == 15);   // SIGTERM
+}
+
+static void user_task_terminate_slot(user_task_slot_t* slot, int sig) {
+    if (!slot) return;
+    if (slot->state == USER_TASK_STATE_ZOMBIE) return;
+
+    watchdog_kick("user-task-term");
+
+    if (slot->pid == (int)g_user_task_running_pid) {
+        user_task_notify_exit(-sig);
+        return;
+    }
+
+    user_task_runq_remove(slot);
+    slot->state = USER_TASK_STATE_ZOMBIE;
+    slot->status = -sig;
+    watchdog_kick("user-task-term");
+    user_task_wake_waiters_for_pid(slot->pid);
+    /* Deliver SIGCHLD to parent if present */
+    if (slot->parent_pid > 0) {
+        user_task_slot_t* parent = user_task_find_slot_by_pid(slot->parent_pid);
+        if (parent) {
+            parent->sig_pending |= (1u << 17); /* SIGCHLD */
+            /* Wake parent if blocked */
+            if (parent->state == USER_TASK_STATE_BLOCKED) {
+                if (parent->pid == (int)g_user_task_running_pid) parent->state = USER_TASK_STATE_RUNNING;
+                else parent->state = USER_TASK_STATE_RUNNABLE;
+                user_task_runq_enqueue(parent);
+            }
+            user_task_request_schedule();
+        }
+    }
+    user_task_request_schedule();
+}
+
+// Deliver any pending signals for a slot by modifying its saved resume frame.
+// If a handler is installed for the signal, arrange to invoke it in user
+// context and store the prior frame in sig_saved_frame so `sigreturn`
+// can restore it.
+static void user_task_handle_pending(user_task_slot_t* slot) {
+    if (!slot) return;
+    uint32_t pending = slot->sig_pending & ~slot->sig_mask;
+    if (!pending) return;
+
+    int sig = -1;
+    for (int i = 1; i < 32; ++i) {
+        if (pending & (1u << i)) { sig = i; break; }
+    }
+    if (sig < 0) return;
+
+    slot->sig_pending &= ~(1u << sig);
+
+    // SIGKILL is uncatchable.
+    if (sig == 9) {
+        user_task_terminate_slot(slot, sig);
+        return;
+    }
+
+    // Handler present?
+    if (slot->sig_handler[sig]) {
+        regs_t newregs = slot->last_syscall_frame;
+        uint32_t useresp = newregs.esp;
+        useresp = (useresp - 4) & ~3u;
+        int sigval = sig;
+        if (copyout((void*)(uintptr)useresp, &sigval, sizeof(sigval)) == 0) {
+            newregs.esp = useresp;
+            newregs.eip = (uint32)slot->sig_handler[sig];
+            slot->sig_saved_frame = slot->last_syscall_frame;
+            slot->sig_saved_present = 1;
+            slot->last_syscall_frame = newregs;
+            slot->has_syscall_frame = 1;
+        } else {
+            // If we can't copy to user stack, fall back to default action below.
+            ;
+        }
+        return;
+    }
+
+    // Apply default disposition when no handler is installed.
+    if (user_task_signal_is_terminating(sig)) {
+        user_task_terminate_slot(slot, sig);
+    }
+}
+
+// Queue a signal for a UELF task by PID. Returns 0 on success, -1 on error.
+int user_task_queue_signal(int pid, int sig) {
+    if (pid <= 0 || sig <= 0 || sig >= 32) return -1;
+    user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
+    if (!slot) return -1;
+
+    // Default terminating signals should affect every process immediately,
+    // even if it is blocked and never reaches a resume hook.
+    if (slot->sig_handler[sig] == 0 && user_task_signal_is_terminating(sig)) {
+        user_task_terminate_slot(slot, sig);
+        return 0;
+    }
+
+    slot->sig_pending |= (1u << sig);
+    // If target is currently running, interrupt usermode to make kernel
+    // deliver the signal soon.
+    if (slot->pid == (int)g_user_task_running_pid) {
+        g_user_interrupt = 1;
+    }
+    // If task isn't running but is runnable, request schedule so delivery
+    // happens before it next resumes.
+    if (slot->state == USER_TASK_STATE_RUNNABLE) user_task_request_schedule();
+    return 0;
+}
+
+int user_task_set_handler_current(int sig, uintptr handler) {
+    if (sig <= 0 || sig >= 32) return -1;
+    if (sig == 9) return -1; // SIGKILL cannot be caught.
+    int pid = (int)g_user_task_running_pid;
+    if (pid <= 0) return -1;
+    user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
+    if (!slot) return -1;
+    slot->sig_handler[sig] = handler;
+    return 0;
+}
+
+int user_task_sigreturn_current(regs_t* regs) {
+    int pid = (int)g_user_task_running_pid;
+    if (pid <= 0) return -1;
+    user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
+    if (!slot) return -1;
+    if (!slot->sig_saved_present) return -1;
+    if (regs) *regs = slot->sig_saved_frame;
+    slot->sig_saved_present = 0;
+    return 0;
+}
+
+int user_task_signal_current(int sig) {
+    int pid = (int)g_user_task_running_pid;
+    if (pid <= 0) return -1;
+    return user_task_queue_signal(pid, sig);
 }
 
 void user_task_notify_exit(int status) {
+    watchdog_kick("user-task-exit");
     int pid = (int)g_user_task_running_pid;
     if (pid > 0) {
         user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
         if (slot) {
+            user_task_runq_remove(slot);
             slot->state = USER_TASK_STATE_ZOMBIE;
             slot->status = status;
         }
+        watchdog_kick("user-task-exit");
+        user_task_wake_waiters_for_pid(pid);
     }
     g_user_task_active_slot = NULL;
     g_user_task_running_pid = 0;
     g_user_task_pending_pid = 0;
+    g_user_task_active = 0;
+    g_user_task_term = -1;
+    watchdog_kick("user-task-exit");
     user_task_request_schedule();
 }
 
@@ -827,14 +1898,36 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     user_task_slot_t* slot = user_task_find_slot_by_pid(pid);
     if (!slot) return -1;
 
+    if (slot->state != USER_TASK_STATE_ZOMBIE && !(flags & USER_TASK_WAIT_NOHANG)) {
+        user_task_block_current_waitpid(pid);
+    }
+
     while (slot->state != USER_TASK_STATE_ZOMBIE) {
-        if (flags & USER_TASK_WAIT_NOHANG) return 0;
+        // If any runnable user task exists, execute it now. This allows
+        // parent tasks blocked in waitpid() to make progress on spawned
+        // children even though only one ring3 task runs at a time.
+        if (user_task_continue_or_schedule()) {
+            slot = user_task_find_slot_by_pid(pid);
+            if (!slot) return -1;
+            continue;
+        }
+
+        if (flags & USER_TASK_WAIT_NOHANG) {
+            user_task_unblock_current();
+            return 0;
+        }
         watchdog_kick("waitpid");
         __asm__ __volatile__("sti");
         __asm__ __volatile__("hlt");
+
+        slot = user_task_find_slot_by_pid(pid);
+        if (!slot) return -1;
     }
 
+    user_task_unblock_current();
+
     if (out_status) *out_status = slot->status;
+    user_task_runq_remove(slot);
     user_task_image_free(slot->image);
     slot->image = NULL;
     slot->used = 0;
@@ -842,7 +1935,26 @@ int user_task_waitpid(int pid, int* out_status, int flags) {
     slot->state = USER_TASK_STATE_UNUSED;
     slot->status = 0;
     slot->wait_target_pid = 0;
+    slot->wait_gui_handle = -1;
+    slot->wake_tick = 0;
+    slot->block_reason = USER_TASK_BLOCK_NONE;
+    slot->mlfq_level = SCHED_MLFQ_LEVEL_HIGH;
+    slot->mlfq_slice_left = user_task_level_quantum_ticks(SCHED_MLFQ_LEVEL_HIGH);
+    slot->in_runq = 0;
+    slot->runq_next = -1;
+    slot->fd_inherit_mode = 0;
+    slot->stdin_fd = 0;
+    slot->stdout_fd = 1;
+    slot->stderr_fd = 2;
     slot->has_syscall_frame = 0;
+    slot->syscall_frame_generation = 0;
     user_task_request_schedule();
     return pid;
+}
+
+int user_task_get_output_vterm(void) {
+    user_task_slot_t* slot = user_task_current_slot();
+    if (slot && slot->origin_vterm >= 0) return slot->origin_vterm;
+    if (g_user_task_term >= 0) return g_user_task_term;
+    return -1;
 }

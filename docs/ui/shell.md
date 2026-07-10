@@ -255,6 +255,16 @@ Show version information.
 ver             # Display EYN-OS version
 ```
 
+#### `schedstat`
+Print scheduler internals for debugging.
+
+- Shows tick/timeslice settings, configured MLFQ queue quanta, queue depths, and MLFQ accounting counters.
+- Useful while diagnosing fairness, wakeup latency, and unexpected demotion/boost behavior.
+
+```bash
+schedstat       # Print scheduler debug snapshot
+```
+
 #### `setfont <file.hex|file.otf|file.ttf>` / `setfont builtin`
 Switch the **system font** at runtime.
 

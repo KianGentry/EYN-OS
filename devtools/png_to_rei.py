@@ -208,7 +208,7 @@ def convert_media_to_reiv(input_file, output_file, max_w=REIV_MAX_WIDTH, max_h=R
                 prev_frame = frame
             else:
                 # Interframe: XOR delta vs previous, then bytewise PackBits RLE.
-                # This tends to compress well even for “noisy” video due to temporal redundancy.
+                # This tends to compress well even for "noisy" video due to temporal redundancy.
                 delta = bytes((a ^ b) for a, b in zip(prev_frame, frame))
                 compressed8 = _encode_rle(delta, 1)
                 # Only take delta+RLE8 if it is materially smaller than raw delta.

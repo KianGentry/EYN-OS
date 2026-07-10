@@ -15,6 +15,9 @@ static uint8_t g_heap[USERLAND_HEAP_SIZE];
 static size_t g_heap_used = 0;
 static uint32_t g_rand_state = 1u;
 static int g_rand_seeded = 0;
+char** environ = NULL;
+static int g_libc_argc = 0;
+static char** g_libc_argv = NULL;
 
 static uint32_t mix32(uint32_t x) {
     x ^= x >> 16;
@@ -98,8 +101,24 @@ int atexit(void (*fn)(void)) {
     return 0;
 }
 
+void _eyn_libc_init(int argc, char** argv, char** envp) {
+    g_libc_argc = argc;
+    g_libc_argv = argv;
+    environ = envp;
+    (void)g_libc_argc;
+    (void)g_libc_argv;
+}
+
 char* getenv(const char* name) {
-    (void)name;
+    if (!name || !environ) return NULL;
+
+    size_t name_len = strlen(name);
+    for (int i = 0; environ[i]; ++i) {
+        char* entry = environ[i];
+        if (strncmp(entry, name, name_len) == 0 && entry[name_len] == '=') {
+            return entry + name_len + 1;
+        }
+    }
     return NULL;
 }
 

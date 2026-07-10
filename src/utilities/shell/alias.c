@@ -11,7 +11,7 @@
 #define ALIAS_CFG_PATH "/config/aliases.cfg"
 
 #define ALIAS_MAX_COUNT 32
-#define ALIAS_MAX_NAME  32
+#define ALIAS_MAX_NAME  64
 #define ALIAS_MAX_TMPL  200
 #define ALIAS_FILE_MAX  4096
 
@@ -44,6 +44,10 @@ static uint8 alias_cfg_drive(void) {
     return g_current_drive;
 }
 
+static int is_alias_ws(char c) {
+    return (c == ' ' || c == '\t' || c == '\r' || c == '\n');
+}
+
 static int is_name_char(char c) {
     if (c >= 'a' && c <= 'z') return 1;
     if (c >= 'A' && c <= 'Z') return 1;
@@ -52,13 +56,39 @@ static int is_name_char(char c) {
     return 0;
 }
 
-static int alias_name_valid(const char *name) {
-    if (!name || !name[0]) return 0;
-    for (int i = 0; name[i]; i++) {
-        if (i >= (ALIAS_MAX_NAME - 1)) return 0;
-        if (!is_name_char(name[i])) return 0;
+static int alias_normalize_key(const char *in, char *out, int out_cap) {
+    if (!in || !out || out_cap <= 1) return -1;
+
+    int pos = 0;
+    int saw_word = 0;
+    int pending_space = 0;
+    int i = 0;
+
+    // Skip leading whitespace.
+    while (in[i] && is_alias_ws(in[i])) i++;
+
+    while (in[i]) {
+        char c = in[i++];
+        if (is_alias_ws(c)) {
+            pending_space = 1;
+            continue;
+        }
+
+        if (!is_name_char(c)) return -1;
+
+        if (pending_space && saw_word) {
+            if (pos + 1 >= out_cap) return -1;
+            out[pos++] = ' ';
+        }
+
+        if (pos + 1 >= out_cap) return -1;
+        out[pos++] = c;
+        saw_word = 1;
+        pending_space = 0;
     }
-    return 1;
+
+    out[pos] = '\0';
+    return saw_word ? 0 : -1;
 }
 
 static alias_entry_t *alias_find_mut(const char *name) {
@@ -75,7 +105,12 @@ int shell_alias_exists(const char *name) {
         (void)shell_alias_define("__lazy_load_guard__", "");
         // define() above will return error; but triggers load via helper.
     }
-    return alias_find_mut(name) != NULL;
+
+    char norm[ALIAS_MAX_NAME];
+    if (alias_normalize_key(name, norm, sizeof(norm)) != 0)
+        return 0;
+
+    return alias_find_mut(norm) != NULL;
 }
 
 static void alias_clear_all(void) {
@@ -101,12 +136,102 @@ static char *trim_left(char *s) {
     return s;
 }
 
+static int alias_match_prefix_len(const char *input, const char *key) {
+    if (!input || !key || !key[0]) return 0;
+
+    int ii = 0;
+    int ki = 0;
+    while (key[ki]) {
+        if (is_alias_ws(key[ki])) {
+            if (!is_alias_ws(input[ii])) return 0;
+            while (key[ki] && is_alias_ws(key[ki])) ki++;
+            while (input[ii] && is_alias_ws(input[ii])) ii++;
+            continue;
+        }
+        if (input[ii] != key[ki]) return 0;
+        ii++;
+        ki++;
+    }
+
+    if (input[ii] && !is_alias_ws(input[ii])) return 0;
+    return ii;
+}
+
 static int contains_meta_chars(const char *s) {
     // Keep aliases simple and safe: no pipeline/redirection/control operators.
     for (int i = 0; s[i]; i++) {
         if (s[i] == '|' || s[i] == '<' || s[i] == '>' || s[i] == '&')
             return 1;
     }
+    return 0;
+}
+
+static int alias_parse_config_line(char *line,
+                                   char *name_out,
+                                   int name_out_cap,
+                                   char *tmpl_out,
+                                   int tmpl_out_cap) {
+    if (!line || !name_out || !tmpl_out || name_out_cap <= 1 || tmpl_out_cap <= 1)
+        return -1;
+
+    line = trim_left(line);
+    trim_right(line);
+    if (!line[0] || line[0] == '#')
+        return -1;
+
+    char *name_src = NULL;
+    char *tmpl_src = NULL;
+
+    if (line[0] == '"') {
+        // New format: "multi word key" <template>
+        char *q = line + 1;
+        while (*q && *q != '"') q++;
+        if (*q != '"') return -1;
+        *q = '\0';
+        name_src = line + 1;
+        tmpl_src = trim_left(q + 1);
+        if (tmpl_src[0] == '=') tmpl_src = trim_left(tmpl_src + 1);
+    } else {
+        // Preferred unquoted separator for phrase aliases: key = template
+        char *sep = NULL;
+        for (char *c = line; *c; ++c) {
+            if (*c != '=') continue;
+            int left_ws = (c > line) && is_alias_ws(c[-1]);
+            int right_ws = is_alias_ws(c[1]);
+            if (left_ws && right_ws) {
+                sep = c;
+                break;
+            }
+        }
+
+        if (sep) {
+            *sep = '\0';
+            name_src = trim_left(line);
+            trim_right(name_src);
+            tmpl_src = trim_left(sep + 1);
+        } else {
+            // Legacy format: name template (single-word name)
+            char *sp = line;
+            while (*sp && !is_alias_ws(*sp)) sp++;
+            if (!*sp) return -1;
+            *sp = '\0';
+            name_src = line;
+            tmpl_src = trim_left(sp + 1);
+        }
+    }
+
+    if (!name_src || !tmpl_src) return -1;
+
+    trim_right(name_src);
+    trim_right(tmpl_src);
+
+    if (alias_normalize_key(name_src, name_out, name_out_cap) != 0)
+        return -1;
+
+    if (!tmpl_src[0]) return -1;
+    if ((int)strlen(tmpl_src) >= tmpl_out_cap) return -1;
+
+    strcpy(tmpl_out, tmpl_src);
     return 0;
 }
 
@@ -144,27 +269,11 @@ static void alias_load_if_needed(void) {
         while (*p && *p != '\n') p++;
         if (*p == '\n') { *p = '\0'; p++; }
 
-        line = trim_left(line);
-        trim_right(line);
-        if (!line[0])
-            continue;
-        if (line[0] == '#')
+        char name[ALIAS_MAX_NAME];
+        char tmpl[ALIAS_MAX_TMPL];
+        if (alias_parse_config_line(line, name, sizeof(name), tmpl, sizeof(tmpl)) != 0)
             continue;
 
-        // name is first token, rest is template
-        char *sp = line;
-        while (*sp && *sp != ' ' && *sp != '\t') sp++;
-        if (!*sp)
-            continue;
-        *sp = '\0';
-        char *name = line;
-        char *tmpl = trim_left(sp + 1);
-        trim_right(tmpl);
-
-        if (!alias_name_valid(name))
-            continue;
-        if (!tmpl[0])
-            continue;
         if (contains_meta_chars(tmpl))
             continue;
         if (alias_find_mut(name) != NULL)
@@ -192,11 +301,29 @@ static int alias_save(void) {
     for (int i = 0; i < g_alias_count; i++) {
         const char *name = g_aliases[i].name;
         const char *tmpl = g_aliases[i].tmpl;
+
+        int quote_name = 0;
+        for (int j = 0; name[j]; ++j) {
+            if (is_alias_ws(name[j])) {
+                quote_name = 1;
+                break;
+            }
+        }
+
         int need = (int)strlen(name) + 1 + (int)strlen(tmpl) + 1;
+        if (quote_name) need += 2;
         if (pos + need >= (ALIAS_FILE_MAX - 1))
             break;
+
+        if (quote_name)
+            out[pos++] = '"';
+
         strcpy(out + pos, name);
         pos += (int)strlen(name);
+
+        if (quote_name)
+            out[pos++] = '"';
+
         out[pos++] = ' ';
         strcpy(out + pos, tmpl);
         pos += (int)strlen(tmpl);
@@ -211,11 +338,13 @@ static int alias_save(void) {
 int shell_alias_define(const char *name, const char *template_cmd) {
     alias_load_if_needed();
 
+    char norm_name[ALIAS_MAX_NAME];
+
     // internal lazy-load guard call
     if (name && strcmp(name, "__lazy_load_guard__") == 0)
         return -1;
 
-    if (!alias_name_valid(name))
+    if (alias_normalize_key(name, norm_name, sizeof(norm_name)) != 0)
         return -1;
     if (!template_cmd || !template_cmd[0])
         return -1;
@@ -225,13 +354,13 @@ int shell_alias_define(const char *name, const char *template_cmd) {
     if (contains_meta_chars(template_cmd))
         return -1;
 
-    if (alias_find_mut(name) != NULL)
+    if (alias_find_mut(norm_name) != NULL)
         return -3;
 
     if (g_alias_count >= ALIAS_MAX_COUNT)
         return -4;
 
-    strncpy(g_aliases[g_alias_count].name, name, ALIAS_MAX_NAME - 1);
+    strncpy(g_aliases[g_alias_count].name, norm_name, ALIAS_MAX_NAME - 1);
     strncpy(g_aliases[g_alias_count].tmpl, template_cmd, ALIAS_MAX_TMPL - 1);
     g_alias_count++;
 
@@ -241,11 +370,13 @@ int shell_alias_define(const char *name, const char *template_cmd) {
 int shell_alias_remove(const char *name) {
     alias_load_if_needed();
 
-    if (!alias_name_valid(name))
+    char norm_name[ALIAS_MAX_NAME];
+
+    if (alias_normalize_key(name, norm_name, sizeof(norm_name)) != 0)
         return -1;
 
     for (int i = 0; i < g_alias_count; i++) {
-        if (strcmp(g_aliases[i].name, name) == 0) {
+        if (strcmp(g_aliases[i].name, norm_name) == 0) {
             // compact
             for (int j = i; j < g_alias_count - 1; j++)
                 g_aliases[j] = g_aliases[j + 1];
@@ -290,24 +421,25 @@ int shell_alias_expand_line(const char *input, char *out, int out_size) {
     if (!input || !out || out_size <= 0)
         return -1;
 
-    // Extract command name
-    char name[ALIAS_MAX_NAME] = {0};
-    int i = 0;
-    while (input[i] && input[i] != ' ' && input[i] != '\t' && i < (ALIAS_MAX_NAME - 1)) {
-        name[i] = input[i];
-        i++;
-    }
-    name[i] = '\0';
-
-    if (!name[0])
+    const char *line = input;
+    while (*line == ' ' || *line == '\t') line++;
+    if (!line[0])
         return 0;
 
-    alias_entry_t *ent = alias_find_mut(name);
+    alias_entry_t *ent = NULL;
+    int match_len = 0;
+    for (int ai = 0; ai < g_alias_count; ++ai) {
+        int ml = alias_match_prefix_len(line, g_aliases[ai].name);
+        if (ml > match_len) {
+            match_len = ml;
+            ent = &g_aliases[ai];
+        }
+    }
     if (!ent)
         return 0;
 
-    // Collect invocation args (tokens after name)
-    const char *p = input + i;
+    // Collect invocation args (tokens after matched key)
+    const char *p = line + match_len;
     while (*p == ' ' || *p == '\t') p++;
 
     const char *args[16] = {0};

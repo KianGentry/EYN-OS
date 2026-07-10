@@ -9,6 +9,11 @@
 //   alias <name> <command template>
 //   alias remove <name>
 //
+// Name may be a multi-word phrase. Config supports:
+//   "multi word name" <command template>
+//   multi word name = <command template>
+//   (legacy) singleword <command template>
+//
 // Template supports placeholders:
 //   [arg1], [arg2], ... replaced by positional args to the alias invocation.
 //

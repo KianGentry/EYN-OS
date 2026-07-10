@@ -17,5 +17,9 @@
 #define O_NONBLOCK 0x0800  /* non-blocking I/O for supported endpoints */
 #define O_BINARY  0x0000   /* no-op on EYN-OS (all I/O is binary) */
 
+#define F_GETFL   3
+#define F_SETFL   4
+
 int open(const char* path, int flags, ...);   /* varargs: optional mode_t mode */
 int creat(const char* path, int mode);
+int fcntl(int fd, int cmd, ...);

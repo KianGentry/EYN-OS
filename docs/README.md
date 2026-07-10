@@ -76,6 +76,7 @@ Welcome to the EYN-OS documentation! This directory contains comprehensive docum
 3. **For Debugging**: See [Quick Debug Reference](QUICK-DEBUG.md) and [Stop Codes](stop-codes.md)
 4. **For Networking**: See [Networking Overview](network/README.md) and [Quick Reference](quick-reference.md#networking-commands)
 5. **For Filesystem Work**: See [EYNFS](filesystems/eynfs.md) and [Command Reference](command-reference.md#filesystem-commands)
+6. **For Building**: Run `make docker-build` from the repository root; optionally run `make menuconfig` first if you need to adjust the final ISO configuration
 
 ## Contributing to Documentation
 

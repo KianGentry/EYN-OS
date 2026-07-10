@@ -5,7 +5,7 @@ EYN-OS includes a lightweight watchdog to detect UI or kernel stalls and trigger
 ## Overview
 
 - Driven by the scheduler tick (IRQ0)
-- Times out if no component “kicks” it within the configured number of ticks
+- Times out if no component "kicks" it within the configured number of ticks
 - On expiry, raises a panic with a clear message and last activity source
 
 Typical integrations kick the watchdog from long-running loops in the shell, tiling/window manager, and other subsystems.
@@ -34,7 +34,7 @@ const char* watchdog_get_last_source(void);
 ```
 
 Notes:
-- The timeout is specified in “ticks.” See `sched_get_tick_hz()` for the tick frequency.
+- The timeout is specified in "ticks." See `sched_get_tick_hz()` for the tick frequency.
 - The implementation rescales the timeout if the scheduler tick rate changes at runtime.
 - Passing a short source string to `watchdog_kick()` helps identify which loop last made progress.
 

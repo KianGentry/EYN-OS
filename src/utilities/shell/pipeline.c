@@ -53,6 +53,8 @@ typedef struct {
 
 static pipeline_runtime_t g_pipeline_rt = {0};
 
+static void pipeline_restore_stdio_defaults(void);
+
 extern uint8 g_current_drive;
 
 static int pipeline_ctx_allow(uint32 caps, uint32 cost) {
@@ -743,6 +745,14 @@ int execute_background_command(command_t* cmd) {
     
     // Execute through unified shell path (binaries-only resolution).
     handle_shell_command(cmd_str);
+
+    /* Background launches must not leave fd inheritance or stdio remapping
+     * armed for the next foreground command. The child task captures whatever
+     * state it needs at spawn time; the shell should always return to its
+     * default stdio configuration after dispatch.
+     */
+    pipeline_restore_stdio_defaults();
+    syscall_reset_user_fds();
     
     // Add to background process list (simulated PID)
     int simulated_pid = add_background_process(12345, cmd_str); // Simulated PID
@@ -828,13 +838,16 @@ static int pipeline_try_spawn_user_program(command_t* cmd, const char* extra_arg
 
     char target[128];
     vfs_stat_t st;
+    uint8 exec_drive = shell_get_binary_lookup_drive();
+    const char* base = shell_get_binary_lookup_base();
+    if (!base || !base[0]) base = "/binaries";
 
-    int n = snprintf(target, sizeof(target), "/binaries/%s", cmd->name);
+    int n = snprintf(target, sizeof(target), "%s/%s", base, cmd->name);
     if (n <= 0 || n >= (int)sizeof(target)) return 0;
-    if (vfs_stat(g_current_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) {
-        n = snprintf(target, sizeof(target), "/binaries/%s.uelf", cmd->name);
+    if (vfs_stat(exec_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) {
+        n = snprintf(target, sizeof(target), "%s/%s.uelf", base, cmd->name);
         if (n <= 0 || n >= (int)sizeof(target)) return 0;
-        if (vfs_stat(g_current_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) return 0;
+        if (vfs_stat(exec_drive, target, &st) != 0 || st.type != VFS_NODE_FILE) return 0;
     }
 
     const char* argv[32];
@@ -846,7 +859,7 @@ static int pipeline_try_spawn_user_program(command_t* cmd, const char* extra_arg
         argv[argc++] = extra_arg;
     }
 
-    int pid = user_task_spawn_argv(g_current_drive, target, argc, argv);
+    int pid = user_task_spawn_argv(exec_drive, target, argc, argv);
     if (pid <= 0) return 0;
     (void)user_task_waitpid(pid, NULL, 0);
     return 1;

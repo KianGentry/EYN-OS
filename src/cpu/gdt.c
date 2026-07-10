@@ -47,7 +47,7 @@ typedef struct {
     uint16 iomap_base;
 } __attribute__((packed)) tss_entry_t;
 
-static gdt_entry_t gdt_entries[7];
+static gdt_entry_t gdt_entries[8];
 static gdt_ptr_t gdt_ptr;
 static tss_entry_t g_tss;
 
@@ -95,7 +95,7 @@ void tss_set_kernel_stack(uint32 esp0) {
 }
 
 void gdt_init(void) {
-    gdt_ptr.limit = (uint16)(sizeof(gdt_entry_t) * 7 - 1);
+    gdt_ptr.limit = (uint16)(sizeof(gdt_entry_t) * 8 - 1);
     gdt_ptr.base = (uint32)&gdt_entries;
 
     /* 0: null */
@@ -117,6 +117,9 @@ void gdt_init(void) {
     /* 6: LDT (initialized empty; updated by gdt_set_ldt_descriptor) */
     gdt_set_gate(6, 0, 0, 0, 0);
 
+    /* 7: User TLS (initially null; populated by set_thread_area syscall) */
+    gdt_set_gate(7, 0, 0, 0, 0);
+
     gdt_flush((uint32)&gdt_ptr);
     tss_flush(GDT_TSS_SEL);
 }
@@ -124,4 +127,14 @@ void gdt_init(void) {
 void gdt_set_ldt_descriptor(uint32 base, uint32 limit) {
     /* 0x82 = present, DPL=0, system, type=2 (LDT) */
     gdt_set_gate(6, base, limit, 0x82, 0x00);
+}
+
+void gdt_set_tls_descriptor(uint32 base, uint32 limit) {
+    /* 0xF2 = present, DPL=3, S=1 (non-system), data read/write */
+    uint8 gran = 0x40; /* byte granularity */
+    if (limit > 0xFFFFFu) {
+        limit = (limit >> 12);
+        gran = 0xC0; /* 4K granularity, 32-bit */
+    }
+    gdt_set_gate(7, base, limit, 0xF2, gran);
 }
